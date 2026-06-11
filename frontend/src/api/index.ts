@@ -1,0 +1,62 @@
+const API_BASE = '/api'
+
+export interface AnalyzeResponse {
+  job_id: string
+  status: string
+  message: string
+}
+
+export interface JobStatusResponse {
+  job_id: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  message?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface JobResultResponse {
+  job_id: string
+  status: string
+  summary: {
+    requirement_count: number
+    difference_count: number
+  }
+  outputs: {
+    requirements_docx: boolean
+    difference_report_docx: boolean
+  }
+}
+
+export async function analyzeFiles(
+  eoicdWordFile: File,
+  eoicdExcelFiles: File[],
+  softwareRequirementFile: File
+): Promise<AnalyzeResponse> {
+  const formData = new FormData()
+  formData.append('eoicd_word_file', eoicdWordFile)
+  eoicdExcelFiles.forEach((f) => formData.append('eoicd_excel_files', f))
+  formData.append('software_requirement_file', softwareRequirementFile)
+
+  const res = await fetch(`${API_BASE}/eoicd/analyze`, {
+    method: 'POST',
+    body: formData,
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getJobStatus(jobId: string): Promise<JobStatusResponse> {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getJobResult(jobId: string): Promise<JobResultResponse> {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}/result`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export function getDownloadUrl(jobId: string, type: 'requirements' | 'difference-report'): string {
+  return `${API_BASE}/jobs/${jobId}/outputs/${type}`
+}

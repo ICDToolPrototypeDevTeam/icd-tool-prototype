@@ -1,5 +1,46 @@
+# Environment files
+
 .env
+.env.*
+!.env.example
+
+# Python virtual environments
+
 .venv/
-__pycache__/
-*.pyc
+venv/
+env/
+
+# Python cache
+
+**pycache**/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node dependencies and build outputs
+
+node_modules/
+frontend/node_modules/
+dist/
+build/
+frontend/dist/
+frontend/build/
+
+# Runtime output files
+
+backend/output/
+backend/app/output/*
+!backend/app/output/.gitkeep
+
+# Superpowers / local process memory
+
+.remember/
+
+# OS / editor files
+
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
