@@ -222,3 +222,71 @@ verified
 #### 验证结果
 
 已验证通过。任务正常完成，下载接口返回 200，输出文件已生成。
+
+---
+
+### BUG-20260612-001：Docker Compose 环境下前端 Vite proxy 404
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-06-12
+
+#### 关联 Issue / PR
+
+- Issue #4
+
+#### 问题现象
+
+使用 Docker Compose 启动前后端服务后，前端点击"提交分析"按钮，浏览器返回 `404 Not Found`。Chrome F12 Network 显示：
+- 请求网址：`http://localhost:3000/api/eoicd/analyze`
+- 状态代码：404
+
+#### 复现方式
+
+1. `docker-compose up --build`
+2. 浏览器访问 `http://localhost:3000`
+3. 上传文件并点击"提交分析"
+4. 浏览器返回 404
+
+#### 影响范围
+
+Docker Compose 环境下前端无法调用后端 API，端到端流程中断。
+
+#### 原因分析
+
+端口 3000 被**两个进程**同时监听：
+
+| 进程 | PID | 地址 | 说明 |
+|---|---|---|---|
+| Docker 容器（Vite） | 29672 | `0.0.0.0:3000` | 正常 |
+| 本地 Node 进程（旧的 Vite dev server） | 25996 | `[::1]:3000` | 未关闭 |
+
+浏览器优先走 IPv6 `[::1]:3000`，连接到本地旧进程（PID 25996），该进程不是 Vite 开发服务器，返回 404。而 Docker 容器监听在 `0.0.0.0:3000`，浏览器 IPv4 连接正常，但 IPv6 被旧进程截获。
+
+#### 修复方案
+
+1. 杀掉占用 `[::1]:3000` 的本地 Node 进程：`taskkill /PID 25996 /F`
+2. 以后每次启动 Docker Compose 前，确认没有其他 Node 进程占用 3000 端口
+3. vite.config.ts 的 proxy 配置本身正确（`target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000'`），Docker 中设置为 `http://host.docker.internal:8000`
+
+#### 修改文件
+
+1. `frontend/vite.config.ts`（proxy target 配置）
+2. `docker-compose.yml`（VITE_PROXY_TARGET 环境变量）
+3. `frontend/Dockerfile`（简化，仅保留基础镜像）
+
+#### 验证方式
+
+1. `docker-compose down`
+2. 确认无本地 node 进程占用 3000 端口：`netstat -ano | grep ":3000"`
+3. `docker-compose up --build`
+4. `curl http://localhost:3000/api/health` 返回 HTML（Vite 页面，非 404）
+5. 前端上传文件，任务状态变为 `completed`，下载链接可用
+
+#### 验证结果
+
+已验证通过。杀掉 PID 25996 后，端到端流程正常：任务 `pending` → `running` → `completed`，结果摘要显示需求条目数 3、差异条目数 2，两个 docx 下载链接可用。

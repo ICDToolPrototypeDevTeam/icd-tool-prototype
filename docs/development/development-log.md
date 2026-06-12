@@ -169,3 +169,57 @@
 2. 实现真实多智能体生成逻辑（crew/）；
 3. 实现真实评分算法（scoring/）；
 4. 实现真实 DOCX 内容生成（docx/）；
+
+### 2026-06-12 Issue #4：建立 ICD 工具端到端原型
+
+#### 任务目标
+
+在 Issue #3 最小可运行工程基础上，填充端到端原型能力，形成 ICD 工具端到端原型骨架。重点是打通数据流链路，各模块以结构化 stub 形式实现。
+
+#### 完成内容
+
+1. 扩增 `models.py` 数据模型（UnifiedInputPackage、ParsedEoICD、EoICDCandidate、AgentScoreResult、ScoredCandidate、DifferenceItem、PipelineResult 等）；
+2. 实现 `parsers/` 模块：返回结构化 EoICD 信息和软件高层需求信息，构建统一分析输入包；
+3. 实现 `prompts/` 文本资产：3 个 Markdown prompt 模板；
+4. 实现 `skills/` 文本资产：3 个 Markdown skill 规则；
+5. 实现 `crew/` 三类智能体 stub：候选生成（两份）、候选打分（互评）、差异比对（5条固定差异项）；
+6. 实现 `scoring/` 模块：融合 crew 评分和 Python 规则评分，决策最佳候选；
+7. 实现 `docx/` 模块：生成含结构化表格的 Word 文档（模拟 ICD 场景）；
+8. 更新 `pipeline.py` 串联完整数据流；
+9. 更新 CHANGELOG.md。
+
+#### 修改文件
+
+1. `backend/app/models.py`（扩增数据模型）
+2. `backend/app/parsers/placeholder.py` → `__init__.py` + `eoicd_parser.py` + `software_req_parser.py`
+3. `backend/app/crew/placeholder.py` → `__init__.py` + `candidate_generator.py` + `candidate_reviewer.py` + `difference_analyzer.py`
+4. `backend/app/prompts/placeholder.py` → `__init__.py` + 3 个 `.md` 文件
+5. `backend/app/skills/placeholder.py` → `__init__.py` + 3 个 `.md` 文件
+6. `backend/app/scoring/placeholder.py` → `__init__.py` + `scorer.py`
+7. `backend/app/docx/placeholder.py` → `__init__.py` + `generator.py`
+8. `backend/app/pipeline.py`（更新数据流串联）
+9. `CHANGELOG.md`
+
+#### 验证方式
+
+1. 后端启动：`cd backend && uvicorn app.main:app --reload --port 8000`
+2. 前端启动：`cd frontend && npm run dev`
+3. 端到端测试：POST /api/eoicd/analyze → GET /api/jobs/{job_id} → GET /api/jobs/{job_id}/result → 下载两个 docx
+
+#### 验证结果
+
+已验证通过（Docker Compose 环境）。任务状态流转正常：pending → running → completed。需求条目数 3，差异条目数 2，两个 docx 下载链接可用。验证过程中发现 BUG-20260612-001（端口 3000 被本地 Node 进程占用），已修复并记录到 `debug-log.md`。
+
+#### 遗留问题
+
+1. 各模块 stub 内容为固定数据，不支持真实 LLM 调用；
+2. parsers/ 不实现真实 Word/Excel 解析；
+3. crew/ 不实现真实 CrewAI 编排；
+4. Docker 启动前需确认无其他 Node 进程占用 3000 端口。
+
+#### 下一步建议
+
+1. 实现真实 EoICD Word/Excel 解析逻辑；
+2. 引入 CrewAI 编排真实多智能体流程；
+3. 接入 LLM 实现真实生成和评分能力；
+4. 实现真实差异分析内容。

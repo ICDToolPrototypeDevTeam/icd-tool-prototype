@@ -1,4 +1,5 @@
-const API_BASE = '/api'
+// Docker 环境使用 localhost:8000，本地开发使用 /api（走 Vite proxy）
+const API_BASE = import.meta.env.VITE_API_BASE || '/api'
 
 export interface AnalyzeResponse {
   job_id: string
