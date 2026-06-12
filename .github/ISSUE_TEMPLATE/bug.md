@@ -1,3 +1,11 @@
+---
+name: Bug
+about: 问题、异常或缺陷修复
+title: "[Bug] "
+labels: bug
+assignees: ""
+---
+
 ## 问题现象
 
 *
