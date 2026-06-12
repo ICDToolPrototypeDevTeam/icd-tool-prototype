@@ -28,6 +28,10 @@ build/
 frontend/dist/
 frontend/build/
 
+# Vite cache
+.vite/
+frontend/.vite/
+
 # Runtime output files
 
 backend/output/
