@@ -4,6 +4,9 @@
 .env.*
 !.env.example
 
+# Claude local settings
+.claude/settings.local.json
+
 # Python virtual environments
 
 .venv/
