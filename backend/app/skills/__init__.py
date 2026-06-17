@@ -2,13 +2,16 @@
 skills/ 模块统一入口。
 
 提供 load_skill 函数，加载 skill Markdown 文本资产。
+文本内容使用 lru_cache 缓存，避免重复 IO。
 """
 
+from functools import lru_cache
 from pathlib import Path
 
 SKILLS_DIR = Path(__file__).parent
 
 
+@lru_cache(maxsize=32)
 def load_skill(name: str) -> str:
     """
     加载指定名称的 skill 文本资产。

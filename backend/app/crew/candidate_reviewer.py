@@ -1,46 +1,53 @@
 """
-候选结果打分多智能体 stub（crew/candidate_reviewer.py）。
+crew/candidate_reviewer.py —— scoring crew pipeline 入口。
 
-当前版本不实现真实 CrewAI 编排逻辑，仅返回固定评分结果。
+对单个 EoICD chunk 的 MiniMax 候选和 DeepSeek 候选调用 build_scoring_crew，
+返回每个 agent 的评分结果（list[ChunkAgentScoreResult]）。
 """
 
-from app.models import AgentScoreResult, EoICDCandidate, UnifiedInputPackage
-from app.prompts import load_prompt
-from app.skills import load_skill
+from __future__ import annotations
+
+from app.crew.crews import build_scoring_crew
+from app.models import ChunkAgentScoreResult, ChunkCandidate, EoICDChunk, ScoringEntry
 
 
-def review_candidates(
-    candidates: list[EoICDCandidate],
-    unified_package: UnifiedInputPackage,
-) -> list[AgentScoreResult]:
-    """
-    对两份候选结果进行打分/互评。
+def review_for_chunk(
+    chunk: EoICDChunk,
+    minimax_cand: ChunkCandidate,
+    deepseek_cand: ChunkCandidate,
+) -> list[ChunkAgentScoreResult]:
+    """对单个 chunk 的两份候选调用 scoring crew，返回 agent 评分列表。
+
+    每个 scoring agent 输出 2 条评分（同时评 MiniMax / DeepSeek 候选）；
+    两个 agent 共返回 4 条评分。Python 端只取与 candidate_id 对应的部分
+    传给后续 scoring 融合。
 
     Args:
-        candidates: 候选结果列表（两份）
-        unified_package: 统一分析输入包
+        chunk: 单个 EoICD chunk
+        minimax_cand: MiniMax generation 候选
+        deepseek_cand: DeepSeek generation 候选
 
     Returns:
-        每份候选的 AgentScoreResult 列表
+        ChunkAgentScoreResult 列表（来自两个 scoring agent 的输出）
     """
-    # 加载 prompt 和 skill（stub 加载，实际不使用 LLM）
-    _ = load_prompt("scoring_prompt")
-    _ = load_skill("scoring_skill")
+    crew = build_scoring_crew(chunk, minimax_cand, deepseek_cand)
+    result = crew.kickoff()
 
-    # Stub 固定评分：
-    # 候选1：完整性高（接口级独立条目），但略冗余
-    # 候选2：可读性好，但部分细节有遗漏
-    results = [
-        AgentScoreResult(
-            candidate_id="candidate-1",
-            score=82.0,
-            reasoning="接口级条目化完整覆盖所有信号，追溯性强，但部分描述略显冗余。",
-        ),
-        AgentScoreResult(
-            candidate_id="candidate-2",
-            score=78.0,
-            reasoning="功能级条目化表述简洁，可读性好，但合并描述导致部分细节信息丢失。",
-        ),
-    ]
+    agent_scores: list[ChunkAgentScoreResult] = []
+    for t in result.tasks_output:
+        if t.pydantic is None:
+            raise RuntimeError(
+                f"Scoring Task 未返回 Pydantic 输出：{t.description[:80]!r}"
+            )
+        for entry in t.pydantic.scores:
+            agent_scores.append(
+                ChunkAgentScoreResult(
+                    candidate_id=entry.candidate_id,
+                    chunk_id=chunk.chunk_id,
+                    score=entry.score,
+                    reasoning=entry.reasoning,
+                    recommended_is_best=entry.recommended_is_best,
+                )
+            )
 
-    return results
+    return agent_scores

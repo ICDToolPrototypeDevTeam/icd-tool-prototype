@@ -223,3 +223,91 @@
 2. 引入 CrewAI 编排真实多智能体流程；
 3. 接入 LLM 实现真实生成和评分能力；
 4. 实现真实差异分析内容。
+
+### 2026-06-16 Issue #5：CrewAI-based chunk-level 多智能体条目化生成、评分择优与对比流程
+
+#### 任务目标
+
+在 Issue #4 端到端原型基础上，引入 CrewAI 框架，实现基于 chunk 的多智能体条目化生成、评分择优与对比流程。本 Issue 真实引入 CrewAI Agent/Task/Crew 编排，默认以 `USE_MOCK_LLM=1` 跑通端到端，真实 MiniMax/DeepSeek 调用通过环境变量配置。
+
+#### 完成内容
+
+1. 数据模型扩展：`EoICDChunk / ChunkCandidate / ChunkAgentScoreResult / ChunkPythonScoreResult / BestChunkResult / ModelRequirementResult / MergedRequirementResult / ComparisonReportResult / GenerationOutput / ScoringOutput / ComparisonOutput`。
+2. Parser 升级：`UnifiedInputPackage.eoicd` → `eoicd_chunks: List[EoICDChunk]`，默认 1 个 `chunk-001`。
+3. 新增 `llm/` 模块：`factory.py`（env 驱动 + mock fallback）、`prompt_loader.py`（Python 端拼上下文，不修改 prompts/skills 文本）、`mock_llm.py`（继承 `crewai.BaseLLM`）。
+4. 新增 `crew/{agents,tasks,crews}.py`：5 Agent + 5 Task + 3 Crew。
+5. 新增 `merge/` 模块：跨 chunk 合并 + 按模型合并。
+6. `scoring/` 升级为 chunk 内 Python 硬规则评分（4 维 25×4）+ agent × 0.6 + python × 0.4 融合。
+7. `docx/` 改为 4 份输出：MiniMax / DeepSeek / 最优（额外落 EoICD条目化需求.docx）/ 差异报告。
+8. `pipeline.py` 改为 `for chunk in eoicd_chunks` 循环。
+9. `main.py` 新增 2 个下载接口：`minimax-requirements` / `deepseek-requirements`。
+10. 前端 `api/index.ts` 扩展 `outputs` 字段 + `getDownloadUrl` 2 个新类型；`JobStatus.tsx` 增 2 个下载链接，分组展示。
+11. `requirements.txt` 新增 `crewai>=1.0`、`pydantic>=2.11,<3`、隐式 `starlette<0.37,>=0.36.3`。
+12. 新增 `backend/.env.example`（仅占位，无真实 Key）；`docker-compose.yml` 新增 22 个环境变量占位。
+13. `CHANGELOG.md` 新增 Unreleased 2026-06-16 条目。
+
+#### 修改文件
+
+1. `backend/app/models.py`（数据模型扩增）
+2. `backend/app/parsers/eoicd_parser.py`（chunk 列表）
+3. `backend/app/parsers/__init__.py`（装配 eoicd_chunks）
+4. `backend/app/prompts/__init__.py`（lru_cache）
+5. `backend/app/skills/__init__.py`（lru_cache）
+6. `backend/app/pipeline.py`（chunk-level 串联）
+7. `backend/app/scoring/{__init__,scorer}.py`（Python 硬规则 + chunk 内择优）
+8. `backend/app/docx/{__init__,generator}.py`（4 份 docx 生成）
+9. `backend/app/main.py`（新增 2 个下载接口 + result 字段）
+10. `backend/app/crew/candidate_generator.py`（接 generation crew）
+11. `backend/app/crew/candidate_reviewer.py`（接 scoring crew）
+12. `backend/app/crew/difference_analyzer.py`（接 comparison crew）
+13. `backend/app/crew/__init__.py`（统一导出新签名）
+14. `frontend/src/api/index.ts`（outputs 扩展 + getDownloadUrl 增 2 type）
+15. `frontend/src/components/JobStatus.tsx`（增加 2 个下载链接，分组展示）
+16. `backend/requirements.txt`（新增 crewai + pydantic 范围）
+17. `docker-compose.yml`（新增 22 个环境变量占位）
+18. `CHANGELOG.md`
+19. `docs/architecture/api.md`（新增 2 个下载接口）
+20. `docs/architecture/current-architecture.md`（模块表 + 流程图）
+21. `docs/development/development-log.md`（本条）
+
+#### 新增文件
+
+1. `backend/app/llm/__init__.py`
+2. `backend/app/llm/factory.py`
+3. `backend/app/llm/prompt_loader.py`
+4. `backend/app/llm/mock_llm.py`
+5. `backend/app/crew/agents.py`
+6. `backend/app/crew/tasks.py`
+7. `backend/app/crew/crews.py`
+8. `backend/app/merge/__init__.py`
+9. `backend/app/merge/merger.py`
+10. `backend/.env.example`
+
+#### 验证方式
+
+1. `cd backend && pip install -r requirements.txt`
+2. `USE_MOCK_LLM=1 uvicorn app.main:app --host 127.0.0.1 --port 8765`
+3. `curl http://127.0.0.1:8765/api/health` → `{"status":"ok"}`
+4. `curl -X POST http://127.0.0.1:8765/api/eoicd/analyze -F ...` 创建任务
+5. `curl http://127.0.0.1:8765/api/jobs/{id}` 轮询状态
+6. `curl http://127.0.0.1:8765/api/jobs/{id}/result` 查结果
+7. 4 个下载路径全部 200：`/outputs/requirements`、`/outputs/minimax-requirements`、`/outputs/deepseek-requirements`、`/outputs/difference-report`
+8. `cd frontend && npm install && npm run build`
+
+#### 验证结果
+
+已验证通过（mock 模式）。任务状态流转 pending → running → completed。`requirement_count=5`、`difference_count=5`、4 份 docx 全部生成（MiniMax条目化需求/DeepSeek条目化需求/最优条目化需求/EoICD条目化需求/EoICD与软件高层需求差异报告），4 个下载接口全部 HTTP 200。`npm run build` 通过。
+
+#### 遗留问题
+
+1. 真实 MiniMax / DeepSeek API 接入未在本 Issue 端到端验证（`USE_MOCK_LLM=1` 走通，真实 Provider 由后续 Issue 处理）；
+2. prompts / skills 内容质量不在本 Issue 范围；
+3. 100-200 页 EoICD 自动切分不在本 Issue 范围；
+4. 跨 chunk 冲突消解、追溯矩阵、最终编号规则不在本 Issue 范围。
+
+#### 下一步建议
+
+1. 真实 MiniMax / DeepSeek 接入端到端验证（含 LLM Provider 兼容性调优）；
+2. 实现真实 Word/Excel parser（取代当前 stub）；
+3. 实现按章节/接口/表格的 EoICD 自动切分（替换单 chunk 默认）；
+4. 完善跨 chunk 冲突消解和追溯矩阵。

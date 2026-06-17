@@ -25,6 +25,8 @@ export interface JobResultResponse {
   outputs: {
     requirements_docx: boolean
     difference_report_docx: boolean
+    minimax_docx?: boolean
+    deepseek_docx?: boolean
   }
 }
 
@@ -58,6 +60,13 @@ export async function getJobResult(jobId: string): Promise<JobResultResponse> {
   return res.json()
 }
 
-export function getDownloadUrl(jobId: string, type: 'requirements' | 'difference-report'): string {
+export function getDownloadUrl(
+  jobId: string,
+  type:
+    | 'requirements'
+    | 'difference-report'
+    | 'minimax-requirements'
+    | 'deepseek-requirements',
+): string {
   return `${API_BASE}/jobs/${jobId}/outputs/${type}`
 }

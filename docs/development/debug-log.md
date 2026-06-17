@@ -290,3 +290,228 @@ Docker Compose 环境下前端无法调用后端 API，端到端流程中断。
 #### 验证结果
 
 已验证通过。杀掉 PID 25996 后，端到端流程正常：任务 `pending` → `running` → `completed`，结果摘要显示需求条目数 3、差异条目数 2，两个 docx 下载链接可用。
+
+### BUG-20260617-001：Docker Compose 启动时 `.env` 文件缺失导致启动失败
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-06-17
+
+#### 关联 Issue / PR
+
+- Issue #5
+
+#### 问题现象
+
+执行 `docker compose up --build` 时报错：
+
+```
+env file C:\Users\wdtjx\Desktop\icd-tool-prototype\backend\.env not found:
+GetFileAttributesEx ...: The system cannot find the file specified.
+```
+
+#### 复现方式
+
+1. 在项目根目录执行 `docker compose up --build`
+2. 启动过程中抛出 `.env not found` 错误，容器未启动
+
+#### 影响范围
+
+Docker Compose 启动流程；Issue #5 提交前的阻塞性 bug。
+
+#### 原因分析
+
+`docker-compose.yml` 中 `env_file: ./backend/.env` 强制要求 `.env` 文件存在；但项目规则规定 `.env` 不入 Git，由用户本地创建（仅 `backend/.env.example` 作为占位）。本 Issue 引入 24 个真实 Provider 环境变量（MINIMAX_*/DEEPSEEK_*），用户可能还没填本地 `.env`，必须让 `.env` 可选。
+
+#### 修复方案
+
+把 `env_file: ./backend/.env` 改为 Docker Compose v2.24+ 支持的 optional 形式：
+
+```yaml
+env_file:
+  - path: ./backend/.env
+    required: false
+```
+
+`environment` 段已用 `${VAR:-default}` 形式给所有变量留好兜底，因此缺 `.env` 不会导致任何变量未定义。
+
+#### 修改文件
+
+1. `docker-compose.yml`
+
+#### 验证方式
+
+1. 故意不创建 `backend/.env`，执行 `docker compose up --build`
+2. 容器应正常启动，`backend-1` 日志显示 `Uvicorn running on http://0.0.0.0:8000`
+3. `GET /api/health` 返回 `{"status":"ok"}`
+4. `USE_MOCK_LLM=1` 环境下端到端可 completed，4 个下载接口 200
+
+#### 验证结果
+
+已验证通过。删除 `backend/.env`（如果存在）后 `docker compose up --build` 直接成功；当前 Docker Compose 版本 v5.1.4 支持 `required: false` 语法。
+
+#### 遗留问题
+
+如未来 Docker Compose 降级到 < v2.24，需回退为 `env_file: ./backend/.env` 并要求用户本地创建 `.env`，或全部使用 `environment` 占位。
+
+---
+
+### BUG-20260617-002：Docker Compose 构建失败：uvicorn 版本与 crewai 间接依赖 mcp 冲突
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-06-17
+
+#### 关联 Issue / PR
+
+- Issue #5
+
+#### 问题现象
+
+`docker compose up --build` 后端镜像构建阶段失败：
+
+```
+ERROR: Cannot install crewai, uvicorn==0.27.1 and uvicorn[standard]==0.27.1
+because these package versions have conflicting dependencies.
+
+The conflict is caused by:
+  - The user requested uvicorn==0.27.1
+  - uvicorn[standard] 0.27.1 depends on uvicorn 0.27.1
+  - chromadb 1.1.0 depends on uvicorn>=0.18.3
+  - mcp 1.16.0+ depends on uvicorn>=0.31.1; sys_platform != "emscripten"
+
+ERROR: ResolutionImpossible
+```
+
+#### 复现方式
+
+1. 还原 `backend/requirements.txt` 中 `uvicorn[standard]==0.27.1`
+2. `docker compose up --build`（全新环境，无 cache）
+3. 后端镜像构建在 `pip install` 阶段失败，容器未启动
+
+#### 影响范围
+
+Docker Compose 启动；Issue #5 端到端 Docker 验证阻塞性 bug。本地 `uvicorn app.main:app` 不受影响（本地 mcp 旧版与 uvicorn 0.27.1 共存绕开了冲突）。
+
+#### 原因分析
+
+- `backend/requirements.txt` Issue #3 锁定 `uvicorn[standard]==0.27.1`；
+- Issue #5 引入 `crewai>=1.0`，其间接依赖 `mcp>=1.16.0` 强制要求 `uvicorn>=0.31.1`；
+- pip 解析器无法调和，抛出 `ResolutionImpossible`；
+- 本地 `uvicorn` 直接启动能跑通，是因为本地已经装过 `mcp` 旧版 + `uvicorn 0.27.1` 形成的"既成"环境绕开了冲突；Docker 是全新环境，必须解决所有传递依赖。
+
+#### 修复方案
+
+按最小修改原则，**仅**把 `uvicorn` 范围放宽为 `>=0.31.1,<0.37`（与 `starlette<0.37,>=0.36.3` 兼容）：
+
+```diff
+- uvicorn[standard]==0.27.1
++ uvicorn[standard]>=0.31.1,<0.37
+```
+
+不修改 FastAPI / Starlette / CrewAI 任何版本。
+
+#### 修改文件
+
+1. `backend/requirements.txt`
+
+#### 验证方式
+
+1. `docker compose up --build` 重新构建
+2. 后端镜像构建成功（pip 解析出 uvicorn 0.36.1）
+3. 容器启动，`Uvicorn running on http://0.0.0.0:8000`
+4. 端到端 4 个下载接口 200
+
+#### 验证结果
+
+已验证通过。`docker compose up --build` 构建成功，镜像缓存后 `docker compose up` 启动 2 秒内完成；端到端 5 个 API 全部 200，4 份 docx 在主机端可见。
+
+#### 遗留问题
+
+- 未来若 crewai 升级到 2.x，uvicorn / starlette 范围可能需要再次调整；
+- sse-starlette 3.4.4 仍要 starlette>=0.49.1，与 fastapi 0.109.2 软冲突；当前通过锁定 starlette 0.36.3 绕过，未见运行期影响。
+
+---
+
+### BUG-20260617-003：Docker volume 路径不匹配，容器内输出文件不持久化到主机
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-06-17
+
+#### 关联 Issue / PR
+
+- Issue #5
+
+#### 问题现象
+
+`docker compose up --build` 启动后，后端容器内 `POST /api/eoicd/analyze` 创建任务并生成 4 份 docx，下载接口全部 HTTP 200；但主机端 `backend/app/output/{job_id}/` 下**看不到**任何文件。`docker exec` 进容器发现 docx 实际写到 `/app/app/output/{job_id}/`，而非 docker-compose.yml 中 volume 挂载的 `/app/output`。
+
+#### 复现方式
+
+1. `docker compose up --build`
+2. `POST /api/eoicd/analyze` 上传样例文件
+3. `GET /api/jobs/{id}/outputs/requirements` 返回 200 + 正确 docx
+4. 检查主机端 `backend/app/output/{job_id}/` → 不存在该 job 目录
+5. `docker exec icd-tool-prototype-backend-1 ls /app/output` → 没有该 job 目录
+6. `docker exec icd-tool-prototype-backend-1 ls /app/app/output` → 该 job 目录存在
+
+#### 影响范围
+
+- Docker 部署下，所有任务生成的 docx / 上传的输入文件**仅存在于容器内**，容器重启即丢失；
+- 端到端演示体验受损（用户找不到产物文件）；
+- 实际功能正常（API + 下载都 200），所以**未**阻塞前两次 Issue #5 验证，但属于显著缺陷。
+
+#### 原因分析
+
+- `backend/app/main.py` 通过 `TASK_DIR = Path(__file__).parent / 'output'` 计算输出目录。在容器内 `__file__ = /app/app/main.py`，因此 `TASK_DIR = /app/app/output`；
+- `docker-compose.yml` 原 volume 挂载 `./backend/app/output:/app/output`，把主机目录挂到了容器内**错误的位置** `/app/output`；
+- 容器内 `main.py` 写到 `/app/app/output/...`（容器层），volume 不会拦截，导致文件不持久化到主机；
+- 此 bug 早在 Issue #4 引入 docker-compose.yml 时就存在，Issue #5 之前没暴露是因为本地 uvicorn 测试时 `Path(__file__).parent = backend/app`，`backend/app/output` 与代码计算路径一致，未出现差异。
+
+#### 修复方案
+
+按最小修改原则，**仅**把 volume 挂载目标改为 `/app/app/output`：
+
+```diff
+volumes:
+- - ./backend/app/output:/app/output
++ - ./backend/app/output:/app/app/output
+```
+
+不修改 `main.py` 路径计算逻辑（保持与 Issue #4 一致，避免扩大修改面）。
+
+#### 修改文件
+
+1. `docker-compose.yml`
+
+#### 验证方式
+
+1. `docker compose up --build` 重新启动
+2. `POST /api/eoicd/analyze` 创建任务
+3. `GET /api/jobs/{id}/outputs/{requirements,minimax-requirements,deepseek-requirements,difference-report}` 4 个接口全部 200
+4. 检查主机端 `backend/app/output/{job_id}/` → **应能看到** 4 份 docx + 上传文件
+5. `docker compose down` 销毁容器，再次 `docker compose up`
+6. 重新创建新任务 → 新 docx 仍出现在主机 `backend/app/output/{新job_id}/`
+
+#### 验证结果
+
+已验证通过。任务 `642da9c0-b656-4af1-b748-be693e07f800` 生成的 4 份 docx 在主机端 `backend/app/output/642da9c0-.../` 可见，文件大小与 API content-length 一致（37632 / 37696 / 37806 / 38146 字节）。`docker compose down` 销毁容器后主机文件仍保留（volume 不会随容器销毁而删除）。
+
+#### 遗留问题
+
+- `main.py` 仍使用 `Path(__file__).parent / 'output'` 这种"隐式相对路径"约定，对打包/部署路径敏感；后续如做正式镜像（PyInstaller / wheel）需考虑改为显式配置项；本 Issue 不处理。
+- 容器销毁**不会**删除主机端 output 目录（这是预期行为，但若希望"任务完成即清理"需另外加 cleanup 逻辑）。
+
