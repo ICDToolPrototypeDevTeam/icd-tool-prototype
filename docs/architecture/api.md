@@ -18,14 +18,16 @@ API 设计应遵守以下原则：
 
 当前规划的核心接口如下：
 
-| 接口                                             | 方法     | 说明               |
-| ---------------------------------------------- | ------ | ---------------- |
-| `/api/health`                                  | `GET`  | 后端健康检查           |
-| `/api/eoicd/analyze`                           | `POST` | 上传输入文件并创建分析任务    |
-| `/api/jobs/{job_id}`                           | `GET`  | 查询任务状态           |
-| `/api/jobs/{job_id}/result`                    | `GET`  | 查询任务处理结果摘要       |
-| `/api/jobs/{job_id}/outputs/requirements`      | `GET`  | 下载 EoICD 条目化需求文档 |
-| `/api/jobs/{job_id}/outputs/difference-report` | `GET`  | 下载差异报告文档         |
+| 接口                                             | 方法     | 说明                              |
+| ---------------------------------------------- | ------ | ------------------------------- |
+| `/api/health`                                  | `GET`  | 后端健康检查                          |
+| `/api/eoicd/analyze`                           | `POST` | 上传输入文件并创建分析任务                   |
+| `/api/jobs/{job_id}`                           | `GET`  | 查询任务状态                          |
+| `/api/jobs/{job_id}/result`                    | `GET`  | 查询任务处理结果摘要                      |
+| `/api/jobs/{job_id}/outputs/requirements`      | `GET`  | 下载"最优 EoICD 条目化需求"（语义见 §7）      |
+| `/api/jobs/{job_id}/outputs/minimax-requirements` | `GET`  | 下载 MiniMax 条目化需求文档            |
+| `/api/jobs/{job_id}/outputs/deepseek-requirements` | `GET`  | 下载 DeepSeek 条目化需求文档           |
+| `/api/jobs/{job_id}/outputs/difference-report` | `GET`  | 下载差异报告文档                        |
 
 ## 3. 健康检查接口
 
@@ -174,7 +176,7 @@ GET /api/jobs/{job_id}/outputs/requirements
 
 ### 7.2 接口用途
 
-用于下载任务生成的 EoICD 条目化需求文档。
+用于下载任务生成的条目化需求文档。
 
 ### 7.3 输出文件
 
@@ -186,7 +188,25 @@ EoICD条目化需求.docx
 
 ### 7.4 说明
 
-如果任务尚未完成或文件不存在，接口应返回明确错误信息。
+- 物理文件 `EoICD条目化需求.docx` 的内容**与"最优条目化需求"相同**（同一份 docx 落两份文件名）。
+- 本接口保留向后兼容，**不**强制前端切换文案。
+- 如果任务尚未完成或文件不存在，接口应返回明确错误信息。
+
+## 7.5 下载 MiniMax 条目化需求文档接口
+
+```text
+GET /api/jobs/{job_id}/outputs/minimax-requirements
+```
+
+预期下载文件名：`MiniMax条目化需求.docx`。该文件是 MiniMax generation agent 在所有 chunk 上的全量候选合并。
+
+## 7.6 下载 DeepSeek 条目化需求文档接口
+
+```text
+GET /api/jobs/{job_id}/outputs/deepseek-requirements
+```
+
+预期下载文件名：`DeepSeek条目化需求.docx`。该文件是 DeepSeek generation agent 在所有 chunk 上的全量候选合并。
 
 ## 8. 下载差异报告接口
 

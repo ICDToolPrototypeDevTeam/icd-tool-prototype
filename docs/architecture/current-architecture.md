@@ -81,15 +81,17 @@ FastAPI 后端
 | 模块             | 职责                            |
 | -------------- | ----------------------------- |
 | `main.py`      | FastAPI 应用入口，负责路由注册、请求接收和响应返回 |
-| `models.py`    | Pydantic 数据模型定义               |
+| `models.py`    | Pydantic 数据模型定义（含 chunk-level 模型） |
 | `job_manager.py` | 内存任务状态管理（Job 创建、状态更新、结果存储） |
-| `pipeline.py`  | 主业务流程编排，负责串联解析、生成、评分、差异比对和输出文档生成流程 |
-| `parsers/`     | Word、Excel 等输入文件解析            |
-| `crew/`        | CrewAI 多智能体编排，包括条目化需求生成、候选结果评分和差异比对任务调度 |
-| `prompts/`     | Prompt 模板，包括条目化生成、评分和差异比对所需上下文模板 |
-| `skills/`      | 任务 Skill，包括 EoICD 条目化、候选评分和高层需求差异比对相关 Skill |
-| `scoring/`     | Python 硬规则评分和最终评分逻辑           |
-| `docx/`        | Word 输出文档生成，包括条目化需求文档和差异报告文档 |
+| `pipeline.py`  | 主业务流程编排，按 `for chunk in eoicd_chunks` 串联解析、生成、评分、差异比对和输出文档生成 |
+| `parsers/`     | Word、Excel 等输入文件解析，输出 `List[EoICDChunk]` |
+| `crew/`        | CrewAI 多智能体编排；含 `agents.py / tasks.py / crews.py`（5 Agent + 5 Task + 3 Crew）和 3 个 pipeline 入口文件 |
+| `llm/`         | LLM Provider 抽象层：`factory.py`（env 驱动 + mock fallback）、`prompt_loader.py`（Python 端上下文拼接，不修改 prompts/skills 文本）、`mock_llm.py`（继承 `crewai.BaseLLM`） |
+| `merge/`       | 跨 chunk 合并：所有 chunk 最佳 → MergedRequirementResult；按模型 → ModelRequirementResult |
+| `prompts/`     | Prompt Markdown 文本资产（lru_cache 缓存） |
+| `skills/`      | Skill Markdown 文本资产（lru_cache 缓存） |
+| `scoring/`     | Python 硬规则评分（4 维 25×4=100）+ agent × 0.6 + python × 0.4 融合 |
+| `docx/`        | Word 输出文档生成：MiniMax / DeepSeek / 最优 / 差异报告 |
 | `output/`      | 运行时生成的输出文件存放目录                |
 
 ## 6. 前端模块划分
@@ -107,7 +109,7 @@ FastAPI 后端
 
 ## 7. 主流程数据流
 
-后端主流程由 `pipeline.py` 统一编排。
+后端主流程由 `pipeline.py` 统一编排，按 chunk-level 循环组织。
 
 建议数据流如下：
 
@@ -116,19 +118,32 @@ FastAPI 后端
     ↓
 保存任务输入文件
     ↓
-parsers/ 解析输入文件
+parsers/ 解析输入文件 → UnifiedInputPackage
+   ├─ EoICD → List[EoICDChunk]（本 Issue 默认 1 个 chunk-001）
+   └─ 软件高层需求 → ParsedSoftwareRequirements
     ↓
-构建统一分析输入包
+for chunk in unified_package.eoicd_chunks:
+    crew/ generation crew (M MiniMax + DeepSeek)
+       └─ ChunkCandidate × 2
+    crew/ scoring crew (M MiniMax + DeepSeek)
+       └─ ChunkAgentScoreResult × 4
+    scoring/ chunk 内择优
+       └─ BestChunkResult
     ↓
-crew/ 生成多个 EoICD 条目化需求候选结果
+merge/ 跨 chunk 合并
+   ├─ merge_best_chunks → MergedRequirementResult
+   ├─ merge_model_candidates('MiniMax')  → ModelRequirementResult
+   └─ merge_model_candidates('DeepSeek') → ModelRequirementResult
     ↓
-scoring/ 对候选结果进行综合评分
+crew/ comparison crew (仅 DeepSeek)
+   └─ List[DifferenceItem]
     ↓
-选择最佳条目化需求
-    ↓
-执行差异比对
-    ↓
-docx/ 生成输出文档
+docx/ 生成 4 份 Word + 1 份辅助
+   ├─ MiniMax条目化需求.docx
+   ├─ DeepSeek条目化需求.docx
+   ├─ 最优条目化需求.docx
+   ├─ EoICD条目化需求.docx（旧 requirements 接口复用）
+   └─ EoICD与软件高层需求差异报告.docx
     ↓
 更新任务状态和输出文件路径
 ```
@@ -138,6 +153,7 @@ docx/ 生成输出文档
 ```text
 输入文件只在解析阶段处理一次。
 后续生成、评分和差异比对流程应复用解析后的结构化数据。
+下游 crew / scoring / merge / docx 全部按 List[EoICDChunk] 编写，便于后续 parser 升级为多 chunk。
 ```
 
 ## 8. 模块边界约束

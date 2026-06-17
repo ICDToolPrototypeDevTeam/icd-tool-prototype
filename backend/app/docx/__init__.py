@@ -1,14 +1,23 @@
 """
 docx/ 模块统一入口。
 
-提供两个文档生成函数：
-- generate_requirement_docx：生成 EoICD 条目化需求文档
-- generate_difference_report_docx：生成差异报告文档
+提供：
+- generate_minimax_docx(minimax_merged, job_dir)
+- generate_deepseek_docx(deepseek_merged, job_dir)
+- generate_best_docx(merged, job_dir)（同时落"最优条目化需求.docx"和"EoICD条目化需求.docx"）
+- generate_difference_report_docx(differences, job_dir)
 """
 
-from pathlib import Path
+from app.docx.generator import (
+    generate_best_docx,
+    generate_deepseek_docx,
+    generate_difference_report_docx,
+    generate_minimax_docx,
+)
 
-from app.models import DifferenceItem, EoICDCandidate
-from app.docx.generator import generate_requirement_docx, generate_difference_report_docx
-
-__all__ = ["generate_requirement_docx", "generate_difference_report_docx"]
+__all__ = [
+    "generate_minimax_docx",
+    "generate_deepseek_docx",
+    "generate_best_docx",
+    "generate_difference_report_docx",
+]

@@ -106,6 +106,8 @@ def get_job_result(job_id: str):
         outputs=JobOutputs(
             requirements_docx=result.get('requirements_docx', False),
             difference_report_docx=result.get('difference_report_docx', False),
+            minimax_docx=result.get('minimax_docx', False),
+            deepseek_docx=result.get('deepseek_docx', False),
         ),
     )
 
@@ -119,9 +121,30 @@ def _output_path(job_id: str, filename: str) -> Path:
 
 @app.get('/api/jobs/{job_id}/outputs/requirements')
 def download_requirements(job_id: str):
+    """下载"最优条目化需求"（物理文件 EoICD条目化需求.docx，语义重映射为最优）。"""
     return FileResponse(
         _output_path(job_id, 'EoICD条目化需求.docx'),
         filename='EoICD条目化需求.docx',
+        media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    )
+
+
+@app.get('/api/jobs/{job_id}/outputs/minimax-requirements')
+def download_minimax_requirements(job_id: str):
+    """下载 MiniMax 条目化需求。"""
+    return FileResponse(
+        _output_path(job_id, 'MiniMax条目化需求.docx'),
+        filename='MiniMax条目化需求.docx',
+        media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    )
+
+
+@app.get('/api/jobs/{job_id}/outputs/deepseek-requirements')
+def download_deepseek_requirements(job_id: str):
+    """下载 DeepSeek 条目化需求。"""
+    return FileResponse(
+        _output_path(job_id, 'DeepSeek条目化需求.docx'),
+        filename='DeepSeek条目化需求.docx',
         media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     )
 

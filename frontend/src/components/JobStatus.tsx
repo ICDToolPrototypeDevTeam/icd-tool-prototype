@@ -48,12 +48,30 @@ export default function JobStatus({ jobId }: Props) {
           <p>差异条目数: {result.summary.difference_count}</p>
 
           <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            <a href={getDownloadUrl(jobId, 'requirements')} download>
-              下载 EoICD条目化需求.docx
-            </a>
-            <a href={getDownloadUrl(jobId, 'difference-report')} download>
-              下载 EoICD与软件高层需求差异报告.docx
-            </a>
+            <div>
+              <h4>各模型候选</h4>
+              <a href={getDownloadUrl(jobId, 'minimax-requirements')} download>
+                下载 MiniMax条目化需求.docx
+              </a>
+              <br />
+              <a href={getDownloadUrl(jobId, 'deepseek-requirements')} download>
+                下载 DeepSeek条目化需求.docx
+              </a>
+            </div>
+
+            <div>
+              <h4>最优</h4>
+              <a href={getDownloadUrl(jobId, 'requirements')} download>
+                下载 EoICD条目化需求.docx（最优）
+              </a>
+            </div>
+
+            <div>
+              <h4>差异报告</h4>
+              <a href={getDownloadUrl(jobId, 'difference-report')} download>
+                下载 EoICD与软件高层需求差异报告.docx
+              </a>
+            </div>
           </div>
         </div>
       )}
