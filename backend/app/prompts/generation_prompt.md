@@ -12,7 +12,7 @@
 
 ## 输出要求
 
-请生成 **2 份** EoICD 条目化需求候选结果。每份候选应包含：
+请生成 **1 份** EoICD 条目化需求候选结果，包含：
 
 ### 1. 条目化需求条目列表
 每个条目应包含：
@@ -35,21 +35,22 @@
 
 ## 格式要求
 
-输出应为 JSON 格式，包含两个候选结果数组：
+输出应为单个 JSON 对象，**不要**输出数组或嵌套包装：
 ```json
 {
-  "candidates": [
+  "candidate_id": "candidate-1",
+  "chunk_id": "chunk-001",
+  "model_name": "{model_name}",
+  "entries": [
     {
-      "candidate_id": "candidate-1",
-      "entries": [...],
-      "summary": "..."
-    },
-    {
-      "candidate_id": "candidate-2",
-      "entries": [...],
-      "summary": "..."
+      "entry_id": "REQ-001",
+      "description": "系统应...",
+      "interface_name": "...",
+      "signal_name": "...",
+      "source": "..."
     }
-  ]
+  ],
+  "summary": "..."
 }
 ```
 
