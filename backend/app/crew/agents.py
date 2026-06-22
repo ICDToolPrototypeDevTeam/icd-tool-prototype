@@ -47,7 +47,10 @@ def build_minimax_generation_agent() -> Agent:
         role="EoICD 条目化需求生成专家（MiniMax）",
         goal="基于当前 EoICD chunk 生成结构化、可追溯的条目化需求候选结果",
         backstory=build_agent_context("generation_skill"),
-        llm=_llm_with_role(get_minimax_llm(), "minimax_generation"),
+        llm=_llm_with_role(
+            get_minimax_llm(overrides={"timeout": 300, "max_tokens": 16384}),
+            "minimax_generation",
+        ),
         **_common_agent_kwargs(),
     )
 
@@ -58,7 +61,10 @@ def build_deepseek_generation_agent() -> Agent:
         role="EoICD 条目化需求生成专家（DeepSeek）",
         goal="基于当前 EoICD chunk 生成结构化、可追溯的条目化需求候选结果",
         backstory=build_agent_context("generation_skill"),
-        llm=_llm_with_role(get_deepseek_llm(), "deepseek_generation"),
+        llm=_llm_with_role(
+            get_deepseek_llm(overrides={"timeout": 300, "max_tokens": 16384}),
+            "deepseek_generation",
+        ),
         **_common_agent_kwargs(),
     )
 
@@ -69,7 +75,10 @@ def build_minimax_scoring_agent() -> Agent:
         role="EoICD 条目化需求质量评估专家（MiniMax）",
         goal="对同一 chunk 的两份候选结果进行客观评分，给出推荐",
         backstory=build_agent_context("scoring_skill"),
-        llm=_llm_with_role(get_minimax_llm(), "minimax_scoring"),
+        llm=_llm_with_role(
+            get_minimax_llm(overrides={"timeout": 120, "max_tokens": 4096}),
+            "minimax_scoring",
+        ),
         **_common_agent_kwargs(),
     )
 
@@ -80,7 +89,10 @@ def build_deepseek_scoring_agent() -> Agent:
         role="EoICD 条目化需求质量评估专家（DeepSeek）",
         goal="对同一 chunk 的两份候选结果进行客观评分，给出推荐",
         backstory=build_agent_context("scoring_skill"),
-        llm=_llm_with_role(get_deepseek_llm(), "deepseek_scoring"),
+        llm=_llm_with_role(
+            get_deepseek_llm(overrides={"timeout": 120, "max_tokens": 4096}),
+            "deepseek_scoring",
+        ),
         **_common_agent_kwargs(),
     )
 
@@ -91,6 +103,9 @@ def build_deepseek_comparison_agent() -> Agent:
         role="EoICD 与软件高层需求差异分析专家（DeepSeek）",
         goal="识别最终最优 EoICD 条目化需求与软件高层需求之间的差异项",
         backstory=build_agent_context("comparison_skill"),
-        llm=_llm_with_role(get_deepseek_llm(), "deepseek_comparison"),
+        llm=_llm_with_role(
+            get_deepseek_llm(overrides={"timeout": 180, "max_tokens": 8192}),
+            "deepseek_comparison",
+        ),
         **_common_agent_kwargs(),
     )

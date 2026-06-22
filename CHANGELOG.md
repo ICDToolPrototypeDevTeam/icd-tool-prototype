@@ -64,6 +64,29 @@
 - `requirements.txt` `uvicorn[standard]==0.27.1` 改为 `uvicorn[standard]>=0.31.1,<0.37`，解决 crewai 间接依赖 mcp>=1.16 要求 uvicorn>=0.31.1 导致的 `ResolutionImpossible`（详见 `debug-log.md` BUG-20260617-002）。
 - `docker-compose.yml` volume 路径从 `./backend/app/output:/app/output` 改为 `./backend/app/output:/app/app/output`，对齐 `main.py` 实际写入路径（详见 `debug-log.md` BUG-20260617-003）。
 
+## [Unreleased] - 2026-06-22
+
+### Added
+
+- 引入真实 LLM 后端（Issue #16）：MiniMax M2.7 和 DeepSeek 通过统一的 `provider=openai` 路径接入 CrewAI，`USE_MOCK_LLM=0` 时调用真实 API。
+- `backend/app/llm/factory.py` 新增两个 monkey-patch，解决 CrewAI 与 MiniMax/DeepSeek 的结构化输出兼容：
+  - `_patch_crewai_completion_for_unsupported_models()`：MiniMax `<think>` 清洗 + `response_format=json_object` 替代不兼容的 `json_schema`。
+  - `_patch_crewai_instructor_for_unsupported_models()`：TOOLS mode 下对 MiniMax 间歇性 tool_calls 缺失做 content → tool_call fallback。
+- `_provider_creds` 字典 + `_litellm_with_fallback` 按模型名动态注入 API Key/Base URL，避免多模型共用 `OPENAI_API_KEY` 环境变量冲突。
+- `get_minimax_llm()` / `get_deepseek_llm()` 新增 `overrides` 参数，Agent 工厂可按角色注入 timeout / max_tokens。
+- 5 个 Agent 按职责设定 timeout/max_tokens：generation 300s/16384、scoring 120s/4096、comparison 180s/8192。
+
+### Changed
+
+- `DEEPSEEK_PROVIDER` 统一为 `openai`，与 MiniMax 走相同的 `LLM` → `InternalInstructor` → TOOLS mode 结构化输出路径。
+- `docker-compose.yml` 移除 22 个模型相关环境变量内联声明，全部通过 `env_file: ./backend/.env` 注入，简化维护。
+- `backend/Dockerfile` 新增 litellm 安装步骤。
+
+### Fixed
+
+- `generation_prompt.md` 修正："生成 2 份候选结果" → "生成 1 份"，wrapper `candidates` 数组 → 单个 `ChunkCandidate` 对象，与 Pydantic schema 对齐，避免 MiniMax 输出多 JSON 拼接导致解析失败。
+- `_litellm_with_fallback` 和 `_handle_completion` 的 JSON 解析改用 `JSONDecoder.raw_decode()` 防御多 JSON 拼接场景。
+
 ## [Unreleased] - 2026-06-12
 
 ### Changed
