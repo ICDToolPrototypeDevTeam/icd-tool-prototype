@@ -60,6 +60,23 @@ class ParsedEoICDInterface(BaseModel):
     description: Optional[str] = None
 
 
+class EoICDExcelSheet(BaseModel):
+    """EoICD Excel 附件单个 Sheet 的解析结果"""
+    sheet_name: str = ""
+    bus_type: str = ""  # "A664" / "A825" / "A429" / "Analog" / "Discrete"
+    publisher_headers: list[str] = []
+    subscriber_headers: list[str] = []
+    publisher_rows: list[dict] = []
+    subscriber_rows: list[dict] = []
+    hierarchy_chain: list[str] = []  # Publisher 侧实体层级链
+
+
+class ParsedEoICDExcel(BaseModel):
+    """EoICD Excel 附件整体解析结果"""
+    source_files: list[str] = []
+    sheets: list[EoICDExcelSheet] = []
+
+
 class EoICDChunk(BaseModel):
     """解析后的 EoICD chunk 单元。
 
@@ -72,9 +89,10 @@ class EoICDChunk(BaseModel):
     source_section: str = ""  # 来源章节描述
     source_page_range: str = ""  # 来源页码范围或等效信息
     content: str = ""  # chunk 文本内容（结构化或半结构化）
-    tables: list[dict] = []  # 结构化表格信息（如 Excel sheet 列表）
+    tables: list[dict] = []  # 结构化表格信息（Word 内嵌表格）
     interfaces: list[ParsedEoICDInterface] = []  # 解析得到的接口列表
     context_summary: str = ""  # chunk 的简要摘要，便于模型快速理解
+    excel_data: Optional[ParsedEoICDExcel] = None  # Excel 附件解析结果
 
 
 class ParsedEoICD(BaseModel):
@@ -100,6 +118,7 @@ class UnifiedInputPackage(BaseModel):
     eoicd_chunks: list[EoICDChunk] = []  # 当前阶段默认 1 个 chunk-001
     software_requirements: ParsedSoftwareRequirements
     job_id: str = ""
+    eoicd_excel: Optional[ParsedEoICDExcel] = None  # EoICD Excel 附件解析结果
 
 
 # ============================================================================

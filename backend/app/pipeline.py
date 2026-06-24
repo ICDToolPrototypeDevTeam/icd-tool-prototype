@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from app.crew import (
     analyze_differences,
@@ -36,7 +37,7 @@ from app.scoring import select_best_for_chunk
 
 def run_pipeline(
     job,
-    eoicd_word_path: Path,
+    eoicd_word_path: Optional[Path],
     eoicd_excel_paths: list[Path],
     sw_req_path: Path,
     job_dir: Path,

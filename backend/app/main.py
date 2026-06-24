@@ -39,7 +39,7 @@ def health():
 
 @app.post('/api/eoicd/analyze', response_model=AnalyzeResponse)
 async def analyze(
-    eoicd_word_file: UploadFile = File(...),
+    eoicd_word_file: Optional[UploadFile] = File(None),
     eoicd_excel_files: list[UploadFile] = File(default=[]),
     software_requirement_file: UploadFile = File(...),
 ):
@@ -48,11 +48,13 @@ async def analyze(
     job_dir.mkdir(exist_ok=True)
 
     # 保存上传文件
-    eoicd_word_path = job_dir / eoicd_word_file.filename
+    eoicd_word_path = None
+    if eoicd_word_file is not None:
+        eoicd_word_path = job_dir / eoicd_word_file.filename
+        with eoicd_word_path.open('wb') as f:
+            f.write(await eoicd_word_file.read())
     sw_req_path = job_dir / software_requirement_file.filename
     excel_paths = []
-    with eoicd_word_path.open('wb') as f:
-        f.write(await eoicd_word_file.read())
     with sw_req_path.open('wb') as f:
         f.write(await software_requirement_file.read())
     for ef in eoicd_excel_files:

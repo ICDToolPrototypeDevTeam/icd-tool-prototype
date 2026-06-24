@@ -1,0 +1,20 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual env
+.venv/
+venv/
+
+# Git
+.git/
+.gitignore
+
+# Env (already loaded via docker-compose env_file)
+.env
+.env.*
+
+# Tests / temp
+*.tmp
+*.log
