@@ -190,7 +190,7 @@ _instructor_patched = False
 
 
 def _patch_crewai_instructor_for_unsupported_models() -> None:
-    """Monkey-patch CrewAI InternalInstructor 以兼容 MiniMax M2.7。
+    """Monkey-patch CrewAI InternalInstructor 以兼容 MiniMax M2.7/DeepSeek V4。
 
     CrewAI 的 LLM._handle_non_streaming_response 在 is_litellm=True 且
     response_model 存在时使用 InternalInstructor，其默认 TOOLS mode 发送
@@ -202,9 +202,13 @@ def _patch_crewai_instructor_for_unsupported_models() -> None:
     而非 message.tool_calls（finish_reason=tool_calls）。
     当 schema 含 $defs 嵌套引用时几乎必现。
 
-    本 patch 保持 TOOLS mode（API 级约束更可靠），但在 litellm 响应层
-    增加 fallback：当 tool_calls 为空但 content 含合法 JSON 时，
-    自动提取并包装为 fake tool_call，让 instructor 正常校验。
+    DeepSeek V4（deepseek-v4-flash/v4-pro）默认 thinking mode，
+    直接拒绝 tool_choice → litellm.BadRequestError。
+    本 patch 对 V4 模型注入 thinking=disabled 关闭推理，
+    恢复 TOOLS mode 兼容性。
+
+    对 MiniMax / 旧版 DeepSeek：TOOLS mode + content fallback 兜底，
+    当 tool_calls 为空但 content 含合法 JSON 时自动提取包装。
     """
     global _instructor_patched
     if _instructor_patched:
@@ -244,6 +248,11 @@ def _patch_crewai_instructor_for_unsupported_models() -> None:
                         if "api_base" not in kwargs:
                             kwargs["api_base"] = creds.get("api_base", "")
                         break
+                # DeepSeek V4 默认 thinking mode → 不支持 tool_choice
+                # 传 thinking=disabled 关闭推理模式，恢复 TOOLS 兼容性
+                if "deepseek-v4" in mdl or "deepseek_v4" in mdl:
+                    kwargs.setdefault("extra_body", {})
+                    kwargs["extra_body"]["thinking"] = {"type": "disabled"}
                 resp = _original_litellm(**kwargs)
                 choice = resp.choices[0]
                 msg = choice.message
@@ -299,7 +308,20 @@ def _patch_crewai_instructor_for_unsupported_models() -> None:
                 msg.tool_calls = [fake_tc]
                 return resp
 
-            self._client = _instructor.from_litellm(_litellm_with_fallback, mode=Mode.TOOLS)
+            # 将 LLM 的 max_tokens 传入 instructor client 作为默认值。
+            # InternalInstructor.to_pydantic() 仅传 model/response_model/messages，
+            # 不会显式传 max_tokens，导致 instructor 使用内置默认 4096。
+            # 这里注入真实 max_tokens 后，instructor.handle_kwargs 会在每次
+            # create() 调用时自动合并该值。
+            _instructor_kwargs: dict[str, Any] = {}
+            if llm is not None and not isinstance(llm, str) and hasattr(llm, "max_tokens"):
+                _mt = llm.max_tokens
+                if _mt is not None:
+                    _instructor_kwargs["max_tokens"] = _mt
+
+            self._client = _instructor.from_litellm(
+                _litellm_with_fallback, mode=Mode.TOOLS, **_instructor_kwargs
+            )
 
     InternalInstructor.__init__ = _patched_init
     _instructor_patched = True

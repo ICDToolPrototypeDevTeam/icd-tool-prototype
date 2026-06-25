@@ -23,7 +23,6 @@ from app.models import (
     ScoringOutput,
 )
 
-
 def build_minimax_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
     """generation Task：MiniMax 对单个 chunk 生成候选。"""
     return Task(
@@ -34,6 +33,7 @@ def build_minimax_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
             chunk_content=chunk.content,
             interfaces=chunk.interfaces,
             context_summary=chunk.context_summary,
+            excel_data=chunk.excel_data,
             model_name="MiniMax",
         ),
         expected_output=(
@@ -55,6 +55,7 @@ def build_deepseek_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
             chunk_content=chunk.content,
             interfaces=chunk.interfaces,
             context_summary=chunk.context_summary,
+            excel_data=chunk.excel_data,
             model_name="DeepSeek",
         ),
         expected_output=(
