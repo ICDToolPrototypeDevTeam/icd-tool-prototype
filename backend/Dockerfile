@@ -2,8 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Use Aliyun mirrors for faster downloads in China
-RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources
+# Use Tsinghua mirrors for faster downloads in China
+RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' /etc/apt/sources.list.d/debian.sources
 
 # LibreOffice for .doc -> .docx conversion
 # Uses BuildKit cache mount to avoid re-downloading package lists on rebuilds
@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 COPY requirements.txt .
 # BuildKit cache mount preserves pip downloads across rebuilds
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com \
+    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple/ --trusted-host pypi.tuna.tsinghua.edu.cn \
     -r requirements.txt
 
 COPY . .

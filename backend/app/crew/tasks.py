@@ -28,12 +28,13 @@ def build_minimax_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
     return Task(
         description=build_task_context(
             "generation_prompt",
+            candidate_id="candidate-1",
             chunk_id=chunk.chunk_id,
             chunk_title=chunk.chunk_title,
             chunk_content=chunk.content,
             interfaces=chunk.interfaces,
             context_summary=chunk.context_summary,
-            excel_data=chunk.excel_data,
+            excel_data=chunk.tables,
             model_name="MiniMax",
         ),
         expected_output=(
@@ -50,12 +51,13 @@ def build_deepseek_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
     return Task(
         description=build_task_context(
             "generation_prompt",
+            candidate_id="candidate-2",
             chunk_id=chunk.chunk_id,
             chunk_title=chunk.chunk_title,
             chunk_content=chunk.content,
             interfaces=chunk.interfaces,
             context_summary=chunk.context_summary,
-            excel_data=chunk.excel_data,
+            excel_data=chunk.tables,
             model_name="DeepSeek",
         ),
         expected_output=(

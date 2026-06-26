@@ -15,6 +15,7 @@
 - `interfaces`：解析后的接口列表（接口名称、方向、信号名、数据类型、传输周期等）
 - `excel_data`：EoICD Excel 附件解析结果（PubSub 嵌套层级数据，已预处理为结构化行）
 - `context_summary`：chunk 的简要摘要
+- `candidate_id`：当前候选编号（candidate-1 或 candidate-2）
 - `model_name`：当前模型名称（MiniMax 或 DeepSeek）
 
 ## 处理优先级
@@ -47,7 +48,7 @@
 
 ```json
 {
-  "candidate_id": "candidate-1",
+  "candidate_id": "{candidate_id}",
   "chunk_id": "chunk-001",
   "model_name": "{model_name}",
   "entries": [
