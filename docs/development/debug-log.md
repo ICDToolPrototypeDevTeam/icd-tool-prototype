@@ -515,3 +515,198 @@ volumes:
 - `main.py` 仍使用 `Path(__file__).parent / 'output'` 这种"隐式相对路径"约定，对打包/部署路径敏感；后续如做正式镜像（PyInstaller / wheel）需考虑改为显式配置项；本 Issue 不处理。
 - 容器销毁**不会**删除主机端 output 目录（这是预期行为，但若希望"任务完成即清理"需另外加 cleanup 逻辑）。
 
+---
+
+### BUG-20260622-001：CrewAI Process.sequential 上下文污染导致双模型 scoring 输出完全一致
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-06-22
+
+#### 关联 Issue / PR
+
+- Issue #16
+
+#### 问题现象
+
+真实 MiniMax / DeepSeek 跑 scoring 阶段时，两个模型对同一 chunk 的 2 份候选的评分结果（score 值、recommended_is_best 标记、评语）完全一致，看不出任何区分度。无论在 Agent 定义中如何调整角色描述和 temperature，输出始终相同。
+
+#### 复现方式
+
+1. `USE_MOCK_LLM=0` 启动后端
+2. 上传样例文件创建任务
+3. 查看 scoring 输出：MiniMax 和 DeepSeek 的 `ChunkAgentScoreResult` 完全一致
+
+#### 影响范围
+
+Scoring 阶段失去多模型交叉验证意义；评分择优结果不可信。
+
+#### 原因分析
+
+CrewAI 的 `Process.sequential` 模式下，前序 Task 的 raw output 会被自动注入到后续 Task 的上下文中（即使未显式设置 `context` 参数）。scoring crew 中 4 个 scoring Task 顺序执行，第一个 Task 的输出（含完整评分 JSON）被注入第二个 Task，第二个被注入第三个……导致后续模型直接复读前序输出。
+
+#### 修复方案
+
+在所有 generation 和 scoring Task builder 中显式设置 `context=None`，阻止 CrewAI 自动将前序 Task 的 raw output 注入后续 Task 上下文。
+
+#### 修改文件
+
+1. `backend/app/crew/tasks.py`
+
+#### 验证方式
+
+1. 重新运行 scoring 流程，检查双模型评分结果是否有明显区分度
+2. 确认不同模型的 score 值和 recommended_is_best 不再完全相同
+
+#### 验证结果
+
+已验证通过。`context=None` 后双模型 scoring 输出有明显区分度。
+
+---
+
+### BUG-20260622-002：多模型共用 OPENAI_API_KEY 导致凭证冲突
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-06-22
+
+#### 关联 Issue / PR
+
+- Issue #16
+
+#### 问题现象
+
+同时配置 MiniMax 和 DeepSeek 后，其中一个模型的 API 调用返回认证错误或路由到错误的 Base URL。
+
+#### 复现方式
+
+1. 在 `.env` 中同时配置 `MINIMAX_API_KEY`、`MINIMAX_BASE_URL`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`
+2. 由于 litellm 默认读取 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 环境变量，两个模型共用同一组凭证导致冲突
+
+#### 影响范围
+
+真实 LLM 模式下，MiniMax 和 DeepSeek 无法同时正常工作。
+
+#### 原因分析
+
+LiteLLM 默认从 `OPENAI_API_KEY` / `OPENAI_BASE_URL` 环境变量读取凭证。两个模型配置不同的 API Key 和 Base URL 时，无法通过单一环境变量区分。
+
+#### 修复方案
+
+实现 `_provider_creds` 字典 + `_litellm_with_fallback` 函数：按模型名动态匹配凭证，在每次 API 调用时注入正确的 api_key 和 api_base，不依赖全局 `OPENAI_API_KEY` 环境变量。
+
+#### 修改文件
+
+1. `backend/app/llm/factory.py`
+
+#### 验证结果
+
+已验证通过。双模型各自使用正确的 API Key 和 Base URL，不再冲突。
+
+---
+
+### BUG-20260627-002：DeepSeek TOOLS mode 禁用 thinking 导致 scoring 质量下降
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-06-27
+
+#### 关联 Issue / PR
+
+- Issue #17-18-19
+
+#### 问题现象
+
+DeepSeek 在 TOOLS mode 下 `thinking=disabled`（CrewAI/Instructor 强制要求），导致 scoring 等复杂推理任务质量下降，评分结果缺乏区分度和合理理由。
+
+#### 复现方式
+
+1. DeepSeek TOOLS mode 下运行 scoring
+2. 观察评分结果：分数分布集中、评语泛泛、缺乏横向对比理由
+
+#### 影响范围
+
+DeepSeek scoring 质量和可信度。
+
+#### 原因分析
+
+CrewAI 的 TOOLS mode 规范要求 `thinking=disabled`（否则 tool_calls 可能被 `<think>` 标签干扰）。但 DeepSeek V4 的 scoring 等复杂推理任务需要 thinking 能力才能产出有区分度的评分。
+
+#### 修复方案
+
+将 DeepSeek 路径从 `Mode.TOOLS` + `thinking=disabled` 切换为 `Mode.MD_JSON` + thinking 保留。新增 `extract_json_from_codeblock()` 函数，从 DeepSeek 的 markdown 代码块输出中自动跳过 `<think>` 标签提取 JSON，恢复 thinking 能力的同时确保结构化输出正确。
+
+#### 修改文件
+
+1. `backend/app/llm/factory.py`
+
+#### 验证方式
+
+1. DeepSeek MD_JSON 模式下运行 scoring
+2. 检查评分结果是否有明显区分度
+3. 确认 JSON 解析正确（markdown 代码块 → Pydantic 对象）
+
+#### 验证结果
+
+已验证通过。DeepSeek MD_JSON + thinking 模式下 scoring 质量明显恢复，JSON 解析正确。
+
+---
+
+### BUG-20260629-001：Excel 数据在 chunk → task → prompt 链路中字段错位
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-06-29
+
+#### 关联 Issue / PR
+
+- Issue #17-18-19 后续清理
+
+#### 问题现象
+
+`tasks.py` 中 generation task 构建时传入 `excel_data=chunk.tables`，但 `chunk.tables` 的语义是 Word 内嵌表格。Word+Excel 路径下 LLM 收到的是 Word 表格而非 Excel 数据；Excel-only 路径下碰巧正确（因为 `tables` 被误填了 `build_nested_sheets()` 的输出）。
+
+同时 `chunk.excel_data`（类型为 `ParsedEoICDExcel`）虽然被 parser 赋值，但 tasks.py 从未读取，属于死字段。
+
+#### 原因分析
+
+`_excel_to_chunk()` 中把 `build_nested_sheets()` 结果放入 `tables` 字段（`list[dict]`），原始 `ParsedEoICDExcel` 放入 `excel_data`。tasks.py 读取 `chunk.tables` 当 Excel 数据传，恰好绕过了 `excel_data` 字段。两个字段语义和赋值都错位了。
+
+#### 修复方案
+
+1. `EoICDChunk.excel_data` 类型从 `Optional[ParsedEoICDExcel]` 改为 `list[dict]`，直接存 `build_nested_sheets()` 输出
+2. `_excel_to_chunk()`: `tables=[]`，`excel_data=build_nested_sheets(parsed_excel)`
+3. `parse_inputs()` Word+Excel 路径: `build_nested_sheets(eoicd_excel)` 替代原始 `ParsedEoICDExcel`
+4. `tasks.py`: `excel_data=chunk.tables` → `excel_data=chunk.excel_data`
+
+#### 修改文件
+
+1. `backend/app/models.py`
+2. `backend/app/parsers/__init__.py`
+3. `backend/app/crew/tasks.py`
+
+#### 验证方式
+
+1. 容器内验证 `EoICDChunk.excel_data` 类型为 `list[dict]`
+2. Excel-only 路径下 generation prompt 收到的 excel_data 为三层嵌套结构
+
+#### 验证结果
+
+代码验证已通过。实际 Excel 上传测试待进行。
+

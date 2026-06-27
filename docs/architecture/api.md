@@ -192,7 +192,7 @@ EoICD条目化需求.docx
 - 本接口保留向后兼容，**不**强制前端切换文案。
 - 如果任务尚未完成或文件不存在，接口应返回明确错误信息。
 
-## 7.5 下载 MiniMax 条目化需求文档接口
+### 7.5 下载 MiniMax 条目化需求文档接口
 
 ```text
 GET /api/jobs/{job_id}/outputs/minimax-requirements
@@ -200,7 +200,7 @@ GET /api/jobs/{job_id}/outputs/minimax-requirements
 
 预期下载文件名：`MiniMax条目化需求.docx`。该文件是 MiniMax generation agent 在所有 chunk 上的全量候选合并。
 
-## 7.6 下载 DeepSeek 条目化需求文档接口
+### 7.6 下载 DeepSeek 条目化需求文档接口
 
 ```text
 GET /api/jobs/{job_id}/outputs/deepseek-requirements

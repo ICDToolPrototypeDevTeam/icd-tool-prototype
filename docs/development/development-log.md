@@ -311,3 +311,175 @@
 2. 实现真实 Word/Excel parser（取代当前 stub）；
 3. 实现按章节/接口/表格的 EoICD 自动切分（替换单 chunk 默认）；
 4. 完善跨 chunk 冲突消解和追溯矩阵。
+
+### 2026-06-22 Issue #16：接入真实 LLM 后端（MiniMax M2.7 + DeepSeek）
+
+#### 任务目标
+
+在 Issue #5 的 CrewAI 多智能体框架基础上，接入 MiniMax M2.7 和 DeepSeek 两个真实 LLM Provider，替换 mock 模式。解决两个模型与 CrewAI 的兼容性问题，确保结构化输出和评分流程在真实 LLM 下正常运作。
+
+#### 完成内容
+
+1. 实现 `backend/app/llm/factory.py` 真实 LLM 接入：MiniMax M2.7 和 DeepSeek 统一通过 `provider=openai` 路径接入 CrewAI。
+2. 新增两个 monkey-patch 解决 CrewAI 与 MiniMax/DeepSeek 的结构化输出兼容：
+   - `_patch_crewai_completion_for_unsupported_models()`：MiniMax `<think>` 标签清洗 + `response_format=json_object` 替代不兼容的 `json_schema`。
+   - `_patch_crewai_instructor_for_unsupported_models()`：TOOLS mode 下对 MiniMax 间歇性 tool_calls 缺失做 content → tool_call fallback。
+3. 实现 `_provider_creds` 字典 + `_litellm_with_fallback` 按模型名动态注入 API Key/Base URL，避免多模型共用 `OPENAI_API_KEY` 环境变量冲突。
+4. `get_minimax_llm()` / `get_deepseek_llm()` 新增 `overrides` 参数，Agent 工厂可按角色注入 timeout / max_tokens：
+   - generation: 300s / 16384
+   - scoring: 120s / 4096
+   - comparison: 180s / 8192
+5. `DEEPSEEK_PROVIDER` 统一为 `openai`，与 MiniMax 走相同的 `LLM` → `InternalInstructor` → TOOLS mode 结构化输出路径。
+6. `docker-compose.yml` 移除 22 个模型相关环境变量内联声明，全部通过 `env_file: ./backend/.env` 注入。
+7. `backend/Dockerfile` 新增 litellm 安装步骤。
+8. `generation_prompt.md` 修正："生成 2 份候选结果" → "生成 1 份"，与 Pydantic schema 对齐。
+9. `_litellm_with_fallback` 和 `_handle_completion` 的 JSON 解析改用 `JSONDecoder.raw_decode()` 防御多 JSON 拼接场景。
+
+#### 修改文件
+
+1. `backend/app/llm/factory.py`（真实 LLM + monkey-patch + litellm credential routing）
+2. `backend/app/crew/agents.py`（按角色注入 timeout/max_tokens overrides）
+3. `backend/Dockerfile`（新增 litellm 安装）
+4. `docker-compose.yml`（移除 22 个环境变量内联声明）
+5. `backend/app/prompts/generation_prompt.md`（candidates 数组 → 单个 ChunkCandidate）
+6. `CHANGELOG.md`
+
+#### 验证方式
+
+1. 配置 `backend/.env` 中真实 MiniMax/DeepSeek API Key 和 Base URL
+2. `USE_MOCK_LLM=0` 启动后端：`uvicorn app.main:app --host 127.0.0.1 --port 8765`
+3. `POST /api/eoicd/analyze` 上传样例文件
+4. 任务完整跑通：生成 → 评分 → 择优 → 差异比对 → DOCX 输出
+5. 4 个下载接口全部 200
+
+#### 验证结果
+
+已验证通过。真实 MiniMax M2.7 和 DeepSeek 双模型端到端流程完整跑通，结构化输出正常，评分结果合理区分度。
+
+#### 遗留问题
+
+1. CrewAI Process.sequential 上下文污染导致 MiniMax/DeepSeek scoring 输出完全一致，需后续修复；
+2. DeepSeek TOOLS mode 下 thinking 被禁用，scoring 质量下降，需探索 MD_JSON 替代方案。
+
+#### 下一步建议
+
+1. 实现 EoICD 真实 Word/Excel parser（替换当前 stub）；
+2. 修复 CrewAI 上下文污染问题；
+3. DeepSeek 切换 MD_JSON 模式恢复 thinking。
+
+### 2026-06-27 Issue #17-18-19：EoICD 真实文件输入 Parser + Generation Skill/Prompt 重写 + Score Skill/Prompt 重写
+
+#### 任务目标
+
+实现 EoICD 真实 Word/Excel 文件解析，重写 generation 和 scoring 的 skill/prompt 文本资产以适配 PubSub 树状层级数据，修复真实 LLM 场景下的关键 Bug（上下文污染、DeepSeek scoring 空返回等），确保端到端流程在真实文件输入下稳定跑通。
+
+#### 完成内容
+
+1. 新增 `eoicd_word_parser.py`：真实 EoICD Word 文档解析（python-docx），提取接口说明和数据定义。
+2. 新增 `eoicd_excel_parser.py`：PubSub Excel 表格解析（openpyxl），提取 Publisher/Subscriber 行数据。
+3. `parsers/__init__.py` 新增 `build_nested_sheets()`：将 PubSub Excel 的平铺行数据转换为三层嵌套结构（Sheet → rows → hierarchy），供 LLM 端直接消费。
+4. `generation_skill.md` 大幅扩展（20 行 → 220+ 行）：包含 8 条规则（层级信号名拼接、排除清单、属性中文名映射含英文原名、描述模板、单位自动追加、去重、空值跳过、叶节点属性参考），适配 PubSub 树状层级数据。
+5. `generation_prompt.md` 重写：明确 PubSub2IRD 处理路径（excel_data 优先），定义 IRD 格式 entry_id 和双模式字段规范（PubSub / 接口模式）。
+6. `scoring_skill.md` 重写：扩展 4 维评分细则（完整性/一致性/可追溯性/可读性），强制评分区分度和 `recommended_is_best` 唯一推荐。
+7. `scoring_prompt.md` 重写：移除 stub 描述，明确 chunk 级候选互评要求和横向对比规则。
+8. DeepSeek V4 路径切换为 `Mode.MD_JSON` + thinking 保留：新增 `extract_json_from_codeblock()` 自动跳过 `<think>` 标签提取 JSON，恢复 scoring 等复杂推理任务质量。
+9. 修复 CrewAI 上下文污染：所有 generation 和 scoring Task builder 设置 `context=None`，阻止 Process.sequential 自动将前序 Task 的 raw output 注入后续 Task 上下文。
+10. 修复多模型凭证冲突：`_litellm_with_fallback` 按模型名动态匹配 `_provider_creds` 注入 api_key/api_base。
+11. `_excel_to_chunk()` 聚合策略：所有 Excel Sheet → 单个 `EoICDChunk`（`excel-chunk-001`），`tables` 字段使用 `build_nested_sheets()` 的嵌套结构。
+12. LLM max_tokens 注入 instructor client，避免 instructor 使用内置默认 4096 截断长输出。
+
+#### 修改文件
+
+1. `backend/app/parsers/__init__.py`（装配 + `build_nested_sheets`）
+2. `backend/app/parsers/eoicd_word_parser.py`（替换 stub，真实 Word 解析）
+3. `backend/app/parsers/eoicd_excel_parser.py`（替换 stub，真实 PubSub Excel 解析）
+4. `backend/app/llm/factory.py`（DeepSeek MD_JSON + cred 路由修复）
+5. `backend/app/crew/tasks.py`（generation/scoring Task 设 `context=None`）
+6. `backend/app/crew/agents.py`（LLM max_tokens 注入 instructor）
+7. `backend/app/prompts/generation_prompt.md`（重写）
+8. `backend/app/prompts/scoring_prompt.md`（重写）
+9. `backend/app/skills/generation_skill.md`（大幅扩展）
+10. `backend/app/skills/scoring_skill.md`（重写）
+11. `CHANGELOG.md`
+
+#### 新增文件
+
+1. `backend/app/parsers/eoicd_word_parser.py`
+2. `backend/app/parsers/eoicd_excel_parser.py`
+
+#### 验证方式
+
+1. `USE_MOCK_LLM=0` 启动后端：`uvicorn app.main:app --host 127.0.0.1 --port 8765`
+2. 上传真实 EoICD Word 文件 + PubSub Excel 附件 + 软件高层需求文件
+3. 任务完整跑通：Word/Excel 解析 → 生成 → 评分 → 择优 → 差异比对 → DOCX 输出
+4. 4 个下载接口全部 200
+5. 检查 DeepSeek scoring 不再返回空（MD_JSON 模式生效）
+6. 检查双模型 scoring 输出有明显区分度（context=None 生效）
+
+#### 验证结果
+
+已验证通过。真实 EoICD Word + PubSub Excel 输入文件端到端流程完整跑通。DeepSeek MD_JSON 模式 scoring 输出正常、不再为空；双模型 scoring 结果有明显区分度。
+
+#### 遗留问题
+
+1. 100-200 页 EoICD 自动切分（多 chunk）不在本 Issue 范围；
+2. 跨 chunk 冲突消解和追溯矩阵不在本 Issue 范围；
+3. comparison_prompt.md / comparison_skill.md 尚未从 stub 升级为真实差异比对规则；
+4. PubSub 多层嵌套（超过 3 层）的边界情况未充分测试。
+
+#### 下一步建议
+
+1. 实现 EoICD 按章节/接口自动切分（多 chunk）；
+2. 重写 comparison prompt/skill 为真实差异比对规则；
+3. 实现跨 chunk 合并冲突消解和最终编号规则。
+
+### 2026-06-29 代码死代码清理与 Excel 数据流修复
+
+#### 任务目标
+
+排查并清理 backend 中的死代码分支，修复 Excel 数据在 EoICDChunk → tasks → LLM prompt 链路中的字段错位问题。
+
+#### 完成内容
+
+1. 删除 `_flatten_schema_defs()` 函数（32 行）及 MiniMax 分支中的 `$defs` 展平调用点。该函数基于错误归因添加，空 tool_call arguments 实际是 DeepSeek 的问题。
+2. 删除 `is_minimax` 分支中的死代码：`if "deepseek-v4" in mdl: thinking=disabled` — 该条件在 MiniMax 分支下永不为真。
+3. 修复 Excel 数据流：
+   - `EoICDChunk.excel_data` 类型 `Optional[ParsedEoICDExcel]` → `list[dict]`
+   - `_excel_to_chunk()`: `tables=[]`，`excel_data=build_nested_sheets(parsed_excel)`
+   - `parse_inputs()` Word+Excel 路径: `build_nested_sheets(eoicd_excel)` 替代原始 `ParsedEoICDExcel`
+   - `tasks.py`: `excel_data=chunk.tables` → `excel_data=chunk.excel_data`
+4. 修正 factory.py 中 3 处注释，移除 `$defs 展平` 表述。
+5. 更新 CHANGELOG、development-log、debug-log，清理错误归因条目。
+
+#### 修改文件
+
+1. `backend/app/llm/factory.py`（删除 `_flatten_schema_defs` + 死代码分支 + 注释修正）
+2. `backend/app/models.py`（`excel_data` 类型变更）
+3. `backend/app/parsers/__init__.py`（`_excel_to_chunk` + `parse_inputs` 数据流修正）
+4. `backend/app/crew/tasks.py`（`excel_data=chunk.tables` → `chunk.excel_data`）
+5. `CHANGELOG.md`
+6. `README.md`
+7. `docs/project/scope.md`
+8. `docs/architecture/api.md`
+9. `docs/development/development-log.md`
+10. `docs/development/debug-log.md`
+
+#### 验证方式
+
+1. Docker 容器重建后验证代码生效：`_flatten_schema_defs` 无法导入、`excel_data` 类型为 `list[dict]`
+2. Excel-only 上传路径下 generation prompt 收到的 `excel_data` 为 `build_nested_sheets()` 三层嵌套结构
+
+#### 验证结果
+
+代码验证已通过。数据流格式验证待实际 Excel 上传测试确认。
+
+#### 遗留问题
+
+1. Excel 数据流修改后的端到端 LLM 生成效果待实际测试验证；
+2. 其他死代码（未使用的 models/functions/imports）待后续清理。
+
+#### 下一步建议
+
+1. 上传真实 Excel 文件验证 generation prompt 中 `excel_data` 格式化效果；
+2. 清理 models.py 中未使用的旧版模型；
+3. 清理各文件中未使用的 import。

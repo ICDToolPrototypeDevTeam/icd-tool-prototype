@@ -34,7 +34,7 @@ def build_minimax_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
             chunk_content=chunk.content,
             interfaces=chunk.interfaces,
             context_summary=chunk.context_summary,
-            excel_data=chunk.tables,
+            excel_data=chunk.excel_data,
             model_name="MiniMax",
         ),
         expected_output=(
@@ -58,7 +58,7 @@ def build_deepseek_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
             chunk_content=chunk.content,
             interfaces=chunk.interfaces,
             context_summary=chunk.context_summary,
-            excel_data=chunk.tables,
+            excel_data=chunk.excel_data,
             model_name="DeepSeek",
         ),
         expected_output=(

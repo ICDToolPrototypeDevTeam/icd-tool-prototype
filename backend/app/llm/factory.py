@@ -231,8 +231,8 @@ def _patch_crewai_instructor_for_unsupported_models() -> None:
     tool_calls 获取结构化输出。
 
     MiniMax M2.7:
-      - Mode.TOOLS + thinking=disabled + $defs 展平 + content fallback
-      - tool_calls 间歇性失败 → content fallback 自动提取 JSON 包装为 tool_call
+      - Mode.TOOLS + thinking=disabled + content fallback
+      - tool_calls 缺失时 content fallback 自动提取 JSON 包装为 tool_call
 
     DeepSeek V4:
       - Mode.MD_JSON（不设 tool_choice / response_format，保留 thinking）
@@ -281,18 +281,6 @@ def _patch_crewai_instructor_for_unsupported_models() -> None:
                         kwargs["api_base"] = creds.get("api_base", "")
                     break
 
-            if is_minimax:
-                # MiniMax: V4 模型注入 thinking=disabled 恢复 TOOLS 兼容性
-                if "deepseek-v4" in mdl or "deepseek_v4" in mdl:
-                    kwargs.setdefault("extra_body", {})
-                    kwargs["extra_body"]["thinking"] = {"type": "disabled"}
-                # 展平 tool schema 中的 $defs 嵌套引用
-                if "tools" in kwargs:
-                    for tool in kwargs["tools"]:
-                        func = tool.get("function", {})
-                        params = func.get("parameters", {})
-                        if params and "$defs" in params:
-                            func["parameters"] = _flatten_schema_defs(params)
 
             resp = _original_litellm(**kwargs)
 
@@ -408,7 +396,7 @@ def _build_real_llm(cfg: dict[str, Any], prefix: str) -> Any:
     # MiniMax M2.7 <think> 混入 content → json_object + 清洗
     _patch_crewai_completion_for_unsupported_models()
     # Patch 2) InternalInstructor：
-    # MiniMax: Mode.TOOLS + thinking=disabled + $defs 展平 + content fallback
+    # MiniMax: Mode.TOOLS + thinking=disabled + content fallback
     # DeepSeek: Mode.MD_JSON + 保留 thinking + extract_json_from_codeblock
     _patch_crewai_instructor_for_unsupported_models()
 

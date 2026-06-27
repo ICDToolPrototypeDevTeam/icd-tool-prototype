@@ -134,10 +134,10 @@ def _excel_to_chunk(parsed_excel: ParsedEoICDExcel) -> EoICDChunk:
         source_section="Excel附件解析",
         source_page_range="",
         content="\n".join(lines),
-        tables=build_nested_sheets(parsed_excel),
+        tables=[],
         interfaces=[],
         context_summary=context_summary,
-        excel_data=parsed_excel,
+        excel_data=build_nested_sheets(parsed_excel),
     )
 
 
@@ -168,7 +168,7 @@ def parse_inputs(
         eoicd_chunks = parse_eoicd_word(eoicd_word_path)
         # 将 Excel 数据附加到第一个 chunk
         if eoicd_chunks and eoicd_excel:
-            eoicd_chunks[0].excel_data = eoicd_excel
+            eoicd_chunks[0].excel_data = build_nested_sheets(eoicd_excel)
     elif eoicd_excel is not None and eoicd_excel.sheets:
         # Excel-only 路径：从全部 Excel sheet 构建一个 chunk
         eoicd_chunks = [_excel_to_chunk(eoicd_excel)]

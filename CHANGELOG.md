@@ -98,14 +98,13 @@
 - **scoring_skill.md 重写**：扩展 4 维评分细则（完整性/一致性/可追溯性/可读性），强制评分区分度和 `recommended_is_best` 唯一推荐。
 - **scoring_prompt.md 重写**：移除 stub 描述，明确 chunk 级候选互评要求和横向对比规则，新增 scoring 输出关键提醒。
 - **DeepSeek V4 Mode.MD_JSON 支持**：DeepSeek 路径切换为 `Mode.MD_JSON` + thinking 保留，`extract_json_from_codeblock()` 自动跳过 `<think>` 标签提取 JSON，恢复 scoring 等复杂推理任务质量。
-- **MiniMax $defs 展平**：新增 `_flatten_schema_defs()`，递归解析 JSON Schema 中 `$ref` → `$defs` 嵌套引用，解决 MiniMax M2.7 TOOLS mode 下 tool_call arguments 间歇性返回空 `{}`。
 - **generation_skill.md 规则 8·叶节点属性参考**：明确 DP/RP 叶节点常见属性列表，中间层级元数据（IDAL、XsdVersion、CANMessageProtocolType 等）不应生成需求条目，抑制模型输出非需求性属性。
 
 ### Changed
 
 - DeepSeek 路径从 `Mode.TOOLS` + `thinking=disabled` 切换到 `Mode.MD_JSON` + thinking 保留。
-- MiniMax TOOLS mode fallback：`thinking=disabled` 仅针对 V4 系列模型注入，旧版不受影响；content → tool_call fallback 在 tool_calls 为空时自动提取 JSON 包装。
-- `_excel_to_chunk()` 聚合策略：所有 Excel Sheet → 单个 EoICDChunk（`excel-chunk-001`），`tables` 字段使用 `build_nested_sheets()` 的嵌套结构。
+- MiniMax TOOLS mode fallback：content → tool_call fallback 在 tool_calls 缺失时自动提取 JSON 包装。
+- `_excel_to_chunk()` 聚合策略：所有 Excel Sheet → 单个 EoICDChunk（`excel-chunk-001`），`excel_data` 字段使用 `build_nested_sheets()` 的嵌套结构。
 - `_build_real_llm()` 默认 `provider=openai`，MiniMax/DeepSeek 统一走 LLM → InternalInstructor 路径。
 - LLM max_tokens 注入 instructor client，避免 instructor 使用内置默认 4096 截断长输出。
 
@@ -113,4 +112,16 @@
 
 - **CrewAI 上下文污染修复**：所有 generation 和 scoring Task builder 设置 `context=None`，阻止 Process.sequential 自动将前序 Task 的 raw output 注入后续 Task 上下文，消除 MiniMax/DeepSeek scoring 输出完全一致的 bug。
 - **多模型凭证冲突修复**：`_litellm_with_fallback` 按模型名动态匹配 `_provider_creds` 注入 api_key/api_base，避免多模型共用 `OPENAI_API_KEY`/`OPENAI_BASE_URL` 环境变量冲突。
+
+### 2026-06-29 代码清理与数据流修复
+
+#### Removed
+
+- 删除 `_flatten_schema_defs()` 函数及调用点（MiniMax $defs 展平逻辑）。该函数基于错误的归因添加：空 tool_call arguments 实际是 DeepSeek TOOLS mode 的问题，已通过切换 MD_JSON 解决，与 MiniMax $defs 无关。
+- 删除 MiniMax 分支中的死代码：`if "deepseek-v4" in mdl: thinking=disabled` — 该条件在 `is_minimax=True` 分支下永不为真，从未实际执行。
+
+#### Fixed
+
+- **Excel 数据流修复**：`EoICDChunk.excel_data` 类型从 `Optional[ParsedEoICDExcel]` 改为 `list[dict]`，直接存储 `build_nested_sheets()` 的嵌套结构；`tables` 字段回归只存 Word 内嵌表格。修复了 tasks.py 中 `excel_data=chunk.tables`（将 Word 表格误传为 Excel 数据）的 bug。
+- **文档清理**：CHANGELOG、development-log、debug-log 中移除所有基于错误归因的 MiniMax $defs 展平/空 tool_call 相关描述。
 

@@ -92,7 +92,7 @@ class EoICDChunk(BaseModel):
     tables: list[dict] = []  # 结构化表格信息（Word 内嵌表格）
     interfaces: list[ParsedEoICDInterface] = []  # 解析得到的接口列表
     context_summary: str = ""  # chunk 的简要摘要，便于模型快速理解
-    excel_data: Optional[ParsedEoICDExcel] = None  # Excel 附件解析结果
+    excel_data: list[dict] = []  # Excel 附件解析结果（build_nested_sheets 嵌套结构）
 
 
 class ParsedEoICD(BaseModel):
