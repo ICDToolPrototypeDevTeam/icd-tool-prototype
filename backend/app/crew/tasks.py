@@ -43,6 +43,7 @@ def build_minimax_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
         ),
         agent=agent,
         output_pydantic=ChunkCandidate,
+        context=None,
     )
 
 
@@ -66,6 +67,7 @@ def build_deepseek_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
         ),
         agent=agent,
         output_pydantic=ChunkCandidate,
+        context=None,
     )
 
 
@@ -90,6 +92,7 @@ def build_minimax_scoring_task(
         ),
         agent=agent,
         output_pydantic=ScoringOutput,
+        context=None,
     )
 
 
@@ -114,6 +117,7 @@ def build_deepseek_scoring_task(
         ),
         agent=agent,
         output_pydantic=ScoringOutput,
+        context=None,
     )
 
 

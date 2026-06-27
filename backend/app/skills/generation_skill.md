@@ -99,7 +99,7 @@ Software.Name . LogicalPort.Name . Message.Name . DS.Name . DP.Name
 
 ### 规则 3 · 属性中文名映射（强制）
 
-**每条 description 中的属性名必须翻译为中文。** 完整映射表：
+**每条 description 中的属性名必须翻译为中文，且中文名称后需附带对应的英文原名。** 完整映射表：
 
 | 英文属性 | 中文属性名 |
 |----------|-----------|
@@ -150,15 +150,15 @@ Software.Name . LogicalPort.Name . Message.Name . DS.Name . DP.Name
 每条需求描述严格使用以下模板：
 
 ```
-{信号名称}的{中文属性名}应为{属性值}{单位}
+{信号名称}的{带英文原名的中文属性名}应为{属性值}{单位}
 ```
 
 示例：
-- `HF_RPDU_UP_1A的硬件应为L_RPDU_A`
-- `HF_RPDU_UP_1A的刷新周期应为100ms`
-- `HF_RPDU_UP_1A.Tx_STAT_RPDU25的消息大小应为588Bytes`
-- `HF_RPDU_UP_1A.Tx_STAT_RPDU25.R25.DS1的FSF字节偏移应为4Bytes`
-- `HF_EMPC_EPS.EMPC_OMS_Cnfg的刷新周期应为88ms`
+- `HF_RPDU_UP_1A的硬件（Hardware）应为L_RPDU_A`
+- `HF_RPDU_UP_1A的刷新周期（RefreshPeriod）应为100ms`
+- `HF_RPDU_UP_1A.Tx_STAT_RPDU25的消息大小（MessageSize）应为588Bytes`
+- `HF_RPDU_UP_1A.Tx_STAT_RPDU25.R25.DS1的FSF字节偏移（ByteOffsetFSF）应为4Bytes`
+- `HF_EMPC_EPS.EMPC_OMS_Cnfg的刷新周期（RefreshPeriod）应为88ms`
 
 ### 规则 5 · 单位自动追加
 
@@ -180,6 +180,20 @@ Software.Name . LogicalPort.Name . Message.Name . DS.Name . DP.Name
 
 属性值为空字符串、None 或仅含空白字符时，跳过该属性，不生成需求条目。
 
+### 规则 8 · 叶节点属性参考
+
+需求条目应**优先从叶节点层（DP / RP）提取属性**。中间层级（Software、LogicalPort、Message、DS、A429Word 等）的属性（如 IDAL、XsdVersion、Direction、CANMessageProtocolType、MessageID、Physical 等）属于层级元数据，通常不应生成需求条目。
+
+以下为各侧叶节点常见属性列表（依总线类型而异，以实际数据中出现的属性为准）：
+
+**DP（Publisher 侧）常见属性**：
+`Name`, `Guid`, `FullName`, `DataFormatType`, `ParameterSize`, `Units`, `BitOffsetWithinDS`, `BitOffsetWithinMsg`, `LsbRes`, `Multiplier`, `PublishedLatency`, `TransmissionIntervalMinimum`, `Label`, `SDIExpected`, `SSM`, `FullScaleRngMax`, `FullScaleRngMin`, `FuncRngMax`, `FuncRngMin`, `CodedSet`, `OneState`, `ZeroState`, `OHMSAttribute`, `DataAvailability`, `DataIntegrity`, `SysLatencyWCLimit`, `ChangeAuthority`, `Notes`
+
+**RP（Subscriber 侧）常见属性**：
+`Name`, `Guid`, `FullName`, `DataAvailability`, `DataIntegrity`, `BitOffsetWithinMsg`, `DataFormatType`, `Label`, `LsbRes`, `Multiplier`, `ParameterSize`, `SDIExpected`, `SSM`, `SysLatencyWCLimit`, `Units`, `PublishedLatency`, `CodedSet`, `RDCULabel`
+
+其中已列入规则 2 排除清单的属性不生成条目；未在排除清单中的属性结合规则 3~5 生成需求条目。
+
 ---
 
 ## 四、输出字段规范
@@ -189,7 +203,7 @@ Software.Name . LogicalPort.Name . Message.Name . DS.Name . DP.Name
 | 字段 | PubSub 模式值 |
 |------|-------------|
 | `entry_id` | `IRD-{总线类型}-{层级缩写前6字符}-{4位全局序号}` |
-| `description` | `{信号名称}的{中文属性名}应为{属性值}{单位}` |
+| `description` | `{信号名称}的{带英文原名的中文属性名}应为{属性值}{单位}` |
 | `interface_name` | `DP / {总线类型}` 或 `RP / {总线类型}` |
 | `signal_name` | 拼接后的完整信号名称 |
 | `source` | `Publisher Table / {Sheet名}` 或 `Subscriber Table / {Sheet名}` |
@@ -208,7 +222,7 @@ Software.Name . LogicalPort.Name . Message.Name . DS.Name . DP.Name
 
 1. 每个需求只描述一个独立属性
 2. 属性名**必须**使用中文（规则 3），禁止输出英文属性名
-3. 描述格式**必须**为 `{信号名称}的{中文属性名}应为{属性值}{单位}`（规则 4）
+3. 描述格式**必须**为 `{信号名称}的{带英文原名的中文属性名}应为{属性值}{单位}`（规则 4）
 4. 属性值为空时跳过（规则 7）
 5. 同一信号的需求条目应尽量连续排列
 6. 严格去重（规则 6）
