@@ -48,7 +48,7 @@ def build_minimax_generation_agent() -> Agent:
         goal="基于当前 EoICD chunk 生成结构化、可追溯的条目化需求候选结果",
         backstory=build_agent_context("generation_skill"),
         llm=_llm_with_role(
-            get_minimax_llm(overrides={"timeout": 300, "max_tokens": 16384}),
+            get_minimax_llm(overrides={"timeout": 300, "max_tokens": 65536}),
             "minimax_generation",
         ),
         **_common_agent_kwargs(),
@@ -62,7 +62,7 @@ def build_deepseek_generation_agent() -> Agent:
         goal="基于当前 EoICD chunk 生成结构化、可追溯的条目化需求候选结果",
         backstory=build_agent_context("generation_skill"),
         llm=_llm_with_role(
-            get_deepseek_llm(overrides={"timeout": 300, "max_tokens": 16384}),
+            get_deepseek_llm(overrides={"timeout": 300, "max_tokens": 65536}),
             "deepseek_generation",
         ),
         **_common_agent_kwargs(),

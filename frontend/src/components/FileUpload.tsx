@@ -14,8 +14,8 @@ export default function FileUpload({ onJobCreated }: Props) {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!eoicdWord || !swReq) {
-      setError('请至少上传 EoICD Word 文件和软件高层需求文件')
+    if ((!eoicdWord && eoicdExcels.length === 0) || !swReq) {
+      setError('请至少上传 EoICD Word 文件或 EoICD Excel 附件，以及软件高层需求文件')
       return
     }
     setLoading(true)
@@ -33,7 +33,7 @@ export default function FileUpload({ onJobCreated }: Props) {
   return (
     <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
       <div>
-        <label>EoICD Word 主文件 (*)：</label>
+        <label>EoICD Word 主文件：</label>
         <input
           type="file"
           accept=".docx"

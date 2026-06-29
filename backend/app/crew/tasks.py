@@ -23,17 +23,18 @@ from app.models import (
     ScoringOutput,
 )
 
-
 def build_minimax_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
     """generation Task：MiniMax 对单个 chunk 生成候选。"""
     return Task(
         description=build_task_context(
             "generation_prompt",
+            candidate_id="candidate-1",
             chunk_id=chunk.chunk_id,
             chunk_title=chunk.chunk_title,
             chunk_content=chunk.content,
             interfaces=chunk.interfaces,
             context_summary=chunk.context_summary,
+            excel_data=chunk.excel_data,
             model_name="MiniMax",
         ),
         expected_output=(
@@ -42,6 +43,7 @@ def build_minimax_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
         ),
         agent=agent,
         output_pydantic=ChunkCandidate,
+        context=None,
     )
 
 
@@ -50,11 +52,13 @@ def build_deepseek_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
     return Task(
         description=build_task_context(
             "generation_prompt",
+            candidate_id="candidate-2",
             chunk_id=chunk.chunk_id,
             chunk_title=chunk.chunk_title,
             chunk_content=chunk.content,
             interfaces=chunk.interfaces,
             context_summary=chunk.context_summary,
+            excel_data=chunk.excel_data,
             model_name="DeepSeek",
         ),
         expected_output=(
@@ -63,6 +67,7 @@ def build_deepseek_generation_task(agent: Agent, chunk: EoICDChunk) -> Task:
         ),
         agent=agent,
         output_pydantic=ChunkCandidate,
+        context=None,
     )
 
 
@@ -87,6 +92,7 @@ def build_minimax_scoring_task(
         ),
         agent=agent,
         output_pydantic=ScoringOutput,
+        context=None,
     )
 
 
@@ -111,6 +117,7 @@ def build_deepseek_scoring_task(
         ),
         agent=agent,
         output_pydantic=ScoringOutput,
+        context=None,
     )
 
 

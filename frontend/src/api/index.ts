@@ -31,12 +31,14 @@ export interface JobResultResponse {
 }
 
 export async function analyzeFiles(
-  eoicdWordFile: File,
+  eoicdWordFile: File | null,
   eoicdExcelFiles: File[],
   softwareRequirementFile: File
 ): Promise<AnalyzeResponse> {
   const formData = new FormData()
-  formData.append('eoicd_word_file', eoicdWordFile)
+  if (eoicdWordFile) {
+    formData.append('eoicd_word_file', eoicdWordFile)
+  }
   eoicdExcelFiles.forEach((f) => formData.append('eoicd_excel_files', f))
   formData.append('software_requirement_file', softwareRequirementFile)
 

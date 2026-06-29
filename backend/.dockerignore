@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual env
+.venv/
+venv/
+
+# Git
+.git/
+.gitignore
+
+# Env (already loaded via docker-compose env_file)
+.env
+.env.*
+
+# Output / runtime files (generated at runtime, don't belong in the image)
+app/output/
+*.tmp
+*.log
+__pycache__/
