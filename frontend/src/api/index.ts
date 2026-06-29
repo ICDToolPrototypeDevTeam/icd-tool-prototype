@@ -1,4 +1,5 @@
-// Docker 环境使用 localhost:8000，本地开发使用 /api（走 Vite proxy）
+import mammoth from 'mammoth'
+
 const API_BASE = import.meta.env.VITE_API_BASE || '/api'
 
 export interface AnalyzeResponse {
@@ -15,19 +16,23 @@ export interface JobStatusResponse {
   updated_at: string
 }
 
+export interface JobResultSummary {
+  requirement_count: number
+  difference_count: number
+}
+
+export interface JobOutputs {
+  requirements_docx: boolean
+  difference_report_docx: boolean
+  minimax_docx: boolean
+  deepseek_docx: boolean
+}
+
 export interface JobResultResponse {
   job_id: string
   status: string
-  summary: {
-    requirement_count: number
-    difference_count: number
-  }
-  outputs: {
-    requirements_docx: boolean
-    difference_report_docx: boolean
-    minimax_docx?: boolean
-    deepseek_docx?: boolean
-  }
+  summary: JobResultSummary
+  outputs: JobOutputs
 }
 
 export async function analyzeFiles(
@@ -62,13 +67,24 @@ export async function getJobResult(jobId: string): Promise<JobResultResponse> {
   return res.json()
 }
 
-export function getDownloadUrl(
-  jobId: string,
-  type:
-    | 'requirements'
-    | 'difference-report'
-    | 'minimax-requirements'
-    | 'deepseek-requirements',
-): string {
+export type DownloadType =
+  | 'requirements'
+  | 'difference-report'
+  | 'minimax-requirements'
+  | 'deepseek-requirements'
+
+export function getDownloadUrl(jobId: string, type: DownloadType): string {
   return `${API_BASE}/jobs/${jobId}/outputs/${type}`
+}
+
+export async function getPreviewHtml(
+  jobId: string,
+  type: 'requirements' | 'difference-report'
+): Promise<string> {
+  const url = getDownloadUrl(jobId, type)
+  const res = await fetch(url)
+  if (!res.ok) throw new Error('Failed to fetch preview')
+  const buf = await res.arrayBuffer()
+  const result = await mammoth.convertToHtml({ arrayBuffer: buf })
+  return result.value
 }

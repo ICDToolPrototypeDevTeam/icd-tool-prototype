@@ -51,7 +51,7 @@ def run_pipeline(
     5. docx → 4 份 Word
     6. 更新 job.result
     """
-    job.update(JobStatus.RUNNING, "任务正在处理")
+    job.update(JobStatus.RUNNING, "建立处理任务，当前正在解析输入")
 
     try:
         # 1. 解析输入
@@ -66,6 +66,7 @@ def run_pipeline(
             raise RuntimeError("UnifiedInputPackage.eoicd_chunks 为空")
 
         # 2. chunk-level 循环：生成 / 评分 / 择优
+        job.update(JobStatus.RUNNING, "AI正在进行结果生成、评分、择优")
         best_results = []
         minimax_candidates: list[ChunkCandidate] = []
         deepseek_candidates: list[ChunkCandidate] = []
@@ -84,6 +85,7 @@ def run_pipeline(
         deepseek_merged = merge_model_candidates(deepseek_candidates, model_name="DeepSeek")
 
         # 4. 差异比对（DeepSeek comparison）
+        job.update(JobStatus.RUNNING, "AI正在检查需求一致性")
         differences = analyze_differences(merged_best, unified_package.software_requirements)
 
         # 5. 生成 4 份 docx
@@ -106,8 +108,6 @@ def run_pipeline(
             requirements_docx_path=str(job_dir / "EoICD条目化需求.docx"),
             difference_report_docx_path=str(diff_path),
         )
-
-        from app.models import DifferenceItem  # 局部避免循环
 
         job.result = {
             "requirement_count": len(merged_best.entries),

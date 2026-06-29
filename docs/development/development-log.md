@@ -483,3 +483,65 @@
 1. 上传真实 Excel 文件验证 generation prompt 中 `excel_data` 格式化效果；
 2. 清理 models.py 中未使用的旧版模型；
 3. 清理各文件中未使用的 import。
+
+### 2026-06-29 Issue #30：前端 UI 重设计
+
+#### 任务目标
+
+参照 icd_demo v1.0 的视觉风格，完整重设计 ICD 工具原型 Ver2.0 前端，保持后端 API 不变。
+
+#### 完成内容
+
+1. 建立蓝色主题设计令牌系统（--primary: #0066cc），统一 CSS Variables
+2. 实现 3 步工作流步骤条（上传文件 → 智能处理 → 查看结果），含 active/completed 状态动画
+3. 重写 FileUpload 组件：三区文件上传（EoICD Word / Excel 附件 / 软件高层需求），文件列表管理
+4. 新增 FilePreview 组件：Word（mammoth）和 Excel（xlsx）客户端实时预览
+5. 新增 ProcessingView 组件：旋转动画 + 后端 pipeline 进度消息实时轮询显示
+6. 新增 ResultView 组件：最优条目化需求和差异分析报告双卡预览 + 4 个输出文档下载
+7. 完整 Header（logo + 在线状态）和 Footer（公司信息）布局
+8. 响应式适配（900px 断点）
+9. 后端 pipeline.py 增加 3 阶段进度更新：解析输入 → 生成评分择优 → 检查需求一致性
+10. 前端通过 `getPreviewHtml()` 获取 DOCX 并用 mammoth 转 HTML 实现结果预览
+
+#### 修改文件
+
+1. `frontend/index.html`（更新标题）
+2. `frontend/src/main.tsx`（添加 CSS import）
+3. `frontend/src/App.tsx`（完整重写，状态机 + 工作流 + Header/Footer）
+4. `frontend/src/api/index.ts`（增强类型，新增 getPreviewHtml）
+5. `frontend/src/components/FileUpload.tsx`（重写，三区文件上传）
+6. `frontend/package.json`（新增 xlsx、mammoth 依赖）
+7. `backend/app/pipeline.py`（3 阶段进度更新）
+8. `docs/architecture/current-architecture.md`（前端模块划分更新）
+9. `docs/development/development-log.md`（本条记录）
+
+#### 新增文件
+
+1. `frontend/src/index.css`（完整样式表）
+2. `frontend/src/types.ts`（UI 类型定义）
+3. `frontend/src/vite-env.d.ts`（Vite 类型声明）
+4. `frontend/src/components/FilePreview.tsx`（Word/Excel 预览）
+5. `frontend/src/components/ProcessingView.tsx`（处理状态动画）
+6. `frontend/src/components/ResultView.tsx`（结果预览与下载）
+
+#### 验证方式
+
+1. `cd frontend && npm install` 依赖安装
+2. `cd frontend && npx tsc --noEmit` TypeScript 类型检查
+3. `cd frontend && npm run build` Vite 生产构建
+4. `cd frontend && npm run dev` 开发服务启动验证
+
+#### 验证结果
+
+所有验证通过。TypeScript 零错误，Vite build 成功（464 modules），dev server 正常启动。
+
+#### 遗留问题
+
+1. xlsx + mammoth 导致 bundle 体积偏大（~990KB），后续可考虑代码分割
+2. 前端需配合启动的后端进行端到端验证
+
+#### 下一步建议
+
+1. 配合真实后端进行端到端上传→处理→结果下载验证
+2. 考虑 lazy import 优化 xlsx/mammoth 包体积
+3. 替换 logo1.png / logo2.jpg 为实际 logo 文件

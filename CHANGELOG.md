@@ -125,3 +125,21 @@
 - **Excel 数据流修复**：`EoICDChunk.excel_data` 类型从 `Optional[ParsedEoICDExcel]` 改为 `list[dict]`，直接存储 `build_nested_sheets()` 的嵌套结构；`tables` 字段回归只存 Word 内嵌表格。修复了 tasks.py 中 `excel_data=chunk.tables`（将 Word 表格误传为 Excel 数据）的 bug。
 - **文档清理**：CHANGELOG、development-log、debug-log 中移除所有基于错误归因的 MiniMax $defs 展平/空 tool_call 相关描述。
 
+## [Unreleased] - 2026-06-29
+
+### Changed
+
+- **前端 UI 完整重设计**：参照 icd_demo v1.0 视觉风格，统一蓝色主题（#0066cc），实现 3 步工作流步骤条（上传文件 → 智能处理 → 查看结果），卡片式布局，Header/Footer 完整框架。
+- 文件上传页改为三区布局（EoICD Word / Excel 附件 / 软件高层需求），支持文件列表管理与移除。
+- 新增 Word（mammoth）和 Excel（xlsx）客户端实时文件预览。
+- 处理中页面新增 3 阶段进度同步：后端 pipeline 实时推送进度文字（解析输入 → 生成评分择优 → 检查需求一致性），前端轮询显示。
+- 结果页新增最优条目化需求和差异分析报告双卡 DOCX 预览，保留全部 4 个输出文档下载入口。
+- 新增全局 CSS 设计令牌系统（CSS Variables），响应式适配（900px 断点）。
+
+### Added
+
+- 前端新增依赖：`xlsx`（Excel 预览）、`mammoth`（Word 预览）。
+- 前端新增组件：`FilePreview.tsx`、`ProcessingView.tsx`、`ResultView.tsx`。
+- 前端新增 `index.css` 全局样式表、`types.ts` UI 类型定义。
+- 后端 `pipeline.py` 新增 3 阶段 `job.update` 进度消息。
+
