@@ -61,3 +61,7 @@ ICD_Skill_md/
 Thumbs.db
 .vscode/
 .idea/
+
+# Test input folder
+
+test-input/

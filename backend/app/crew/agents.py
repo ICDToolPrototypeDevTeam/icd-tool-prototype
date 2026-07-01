@@ -104,7 +104,7 @@ def build_deepseek_comparison_agent() -> Agent:
         goal="识别最终最优 EoICD 条目化需求与软件高层需求之间的差异项",
         backstory=build_agent_context("comparison_skill"),
         llm=_llm_with_role(
-            get_deepseek_llm(overrides={"timeout": 180, "max_tokens": 8192}),
+            get_deepseek_llm(overrides={"timeout": 180, "max_tokens": 28192}),
             "deepseek_comparison",
         ),
         **_common_agent_kwargs(),

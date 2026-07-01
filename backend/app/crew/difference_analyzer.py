@@ -29,8 +29,10 @@ def analyze_differences(
             differences.append(
                 DifferenceItem(
                     difference_id=entry.difference_id,
+                    difference_requirement_id=entry.difference_requirement_id,
+                    difference_eoicd_entry_id=entry.difference_eoicd_entry_id,
                     difference_type=entry.difference_type,
-                    requirement_text=entry.requirement_text,
+                    eoicd_requirement_text=entry.eoicd_requirement_text,
                     software_requirement_text=entry.software_requirement_text,
                     description=entry.description,
                     suggested_action=entry.suggested_action,

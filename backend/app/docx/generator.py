@@ -185,6 +185,46 @@ def generate_best_docx(
 # ---------------------------------------------------------------------------
 
 
+def _format_diff_location(diff: DifferenceItem) -> str:
+    """把 SRS ID 和 EoICD ID 格式化为"关联定位"展示文本。
+
+    缺失/冗余场景下只有一侧，空字符串会被过滤掉。
+    """
+    parts = []
+    if diff.difference_requirement_id:
+        parts.append(f"SRS: {diff.difference_requirement_id}")
+    if diff.difference_eoicd_entry_id:
+        parts.append(f"EoICD: {diff.difference_eoicd_entry_id}")
+    return "\n".join(parts) if parts else "（无关联定位）"
+
+
+def _render_description(doc: Document, description: str) -> None:
+    """渲染 description 字段：按 \\n 拆行，"属性 XX:" / "整体XX:" 前缀加粗。
+
+    容错：
+    - description 为空 → 直接返回
+    - 无 \\n → 整段作为一行渲染（兼容老格式）
+    - 不识别的前缀 → 不加粗，整段作为普通段落
+    """
+    if not description:
+        return
+    for line in description.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        p = doc.add_paragraph()
+        colon_idx = line.find(":")
+        prefix = line[: colon_idx + 1] if colon_idx > 0 else None
+        rest = line[colon_idx + 1 :] if colon_idx > 0 else line
+        if prefix and (prefix.startswith("属性 ") or prefix.startswith("整体")):
+            run = p.add_run(prefix)
+            run.bold = True
+            if rest:
+                p.add_run(rest)
+        else:
+            p.add_run(line)
+
+
 def generate_difference_report_docx(
     differences: list[DifferenceItem],
     job_dir: Path,
@@ -197,12 +237,12 @@ def generate_difference_report_docx(
         [f"差异项总数: {len(differences)}"],
     )
 
-    # 汇总表
+    # 汇总表（5 列：差异编号 / 关联定位 / 差异类型 / 差异描述 / 建议处理方式）
     doc.add_heading("差异汇总", level=2)
     if differences:
-        summary_table = doc.add_table(rows=1, cols=4)
+        summary_table = doc.add_table(rows=1, cols=5)
         summary_table.style = "Light Grid Accent 1"
-        headers = ["差异编号", "差异类型", "差异描述", "建议处理方式"]
+        headers = ["差异编号", "关联定位", "差异类型", "差异描述", "建议处理方式"]
         for i, h in enumerate(headers):
             cell = summary_table.rows[0].cells[i]
             cell.text = h
@@ -212,10 +252,11 @@ def generate_difference_report_docx(
 
         for diff in differences:
             row = summary_table.add_row().cells
-            row[0].text = diff.difference_id
-            row[1].text = diff.difference_type
-            row[2].text = diff.description
-            row[3].text = diff.suggested_action
+            row[0].text = diff.difference_id or "—"
+            row[1].text = _format_diff_location(diff)
+            row[2].text = diff.difference_type
+            row[3].text = diff.description
+            row[4].text = diff.suggested_action
             for c in row:
                 for p in c.paragraphs:
                     for r in p.runs:
@@ -227,16 +268,28 @@ def generate_difference_report_docx(
     # 详情
     doc.add_heading("差异详情", level=2)
     for diff in differences:
-        doc.add_heading(f"{diff.difference_id} - {diff.difference_type}", level=3)
+        diff_id_display = diff.difference_id or "—"
+        doc.add_heading(f"{diff_id_display} - {diff.difference_type}", level=3)
+
+        # 关联定位
+        p = doc.add_paragraph()
+        p.add_run("关联定位:").bold = True
+        if diff.difference_requirement_id:
+            doc.add_paragraph(f"  SRS 需求 ID: {diff.difference_requirement_id}")
+        if diff.difference_eoicd_entry_id:
+            doc.add_paragraph(f"  EoICD 条目 ID: {diff.difference_eoicd_entry_id}")
+        if not diff.difference_requirement_id and not diff.difference_eoicd_entry_id:
+            doc.add_paragraph("  （无关联定位）")
+
         p = doc.add_paragraph()
         p.add_run("EoICD 条目化需求: ").bold = True
-        p.add_run(diff.requirement_text or "（无）")
+        p.add_run(diff.eoicd_requirement_text or "（无）")
         p = doc.add_paragraph()
         p.add_run("软件高层需求: ").bold = True
         p.add_run(diff.software_requirement_text or "（无）")
         p = doc.add_paragraph()
         p.add_run("差异描述: ").bold = True
-        p.add_run(diff.description)
+        _render_description(doc, diff.description)
         p = doc.add_paragraph()
         p.add_run("建议处理方式: ").bold = True
         p.add_run(diff.suggested_action)

@@ -102,10 +102,30 @@ class ParsedEoICD(BaseModel):
 
 
 class ParsedSoftwareRequirement(BaseModel):
-    """解析后的软件高层需求条目"""
+    """解析后的软件高层需求条目。
+
+    来源：SRS 文档中"软件需求"章节下的每个需求表格。
+    每个表格对应一条需求，固定 7 个字段：
+    - 需求 id
+    - 需求中文
+    - 对象类型（"requirement" 或 "comment"）
+    - 是否衍生
+    - 基本原理（rationale）
+    - 验证方法
+    - 实现方法（"manual_coding" 或 "model_based"）
+
+    解析行为约定：
+    - 单元格为空或 "N/A" → 空字符串 / False
+    - requirement_id 或 requirement_text 任一为空 → 跳过该条
+    """
     requirement_id: str
     requirement_text: str
-    source_file: str = ""
+    object_type: str = ""             # "requirement" 或 "comment"
+    is_derived: bool = False
+    rationale: str = ""               # 基本原理
+    verification_method: str = ""     # 验证方法（自由文本）
+    implementation_method: str = ""   # "manual_coding" 或 "model_based"
+    source_file: str = ""             # 源文件路径
 
 
 class ParsedSoftwareRequirements(BaseModel):
@@ -204,11 +224,20 @@ class ScoringOutput(BaseModel):
 
 
 class DifferenceEntry(BaseModel):
-    """comparison Task 单条差异输出"""
-    difference_id: str
+    """comparison Task 单条差异输出。
+
+    字段约定：
+    - difference_id：差异序号，LLM 生成（"1", "2", "3"...），仅用于显示排序
+    - difference_requirement_id：关联 SRS 端 requirement_id（如 "FSF21000101_HLR_225"）
+    - difference_eoicd_entry_id：关联 EoICD 端 entry_id（如 "REQ-001"）
+    - 缺失/冗余场景下，关联不到的那一侧填空字符串
+    """
+    difference_id: str  # 序号（"1", "2"...）
+    difference_requirement_id: str = ""  # SRS id（缺失时为空）
+    difference_eoicd_entry_id: str = ""  # EoICD entry id（冗余时为空）
     difference_type: str  # 缺失/不一致/冗余/需确认
-    requirement_text: str = ""
-    software_requirement_text: str = ""
+    eoicd_requirement_text: str = ""  # EoICD 条目化需求原文
+    software_requirement_text: str = ""  # SRS 原文
     description: str = ""
     suggested_action: str = ""
 
@@ -281,11 +310,13 @@ class ScoredCandidate(BaseModel):
 
 
 class DifferenceItem(BaseModel):
-    """差异比对结果条目"""
-    difference_id: str  # 如 "diff-1"
-    difference_type: str  # 如 "缺失", "不一致", "需确认"
-    requirement_text: str = ""  # EoICD 条目化需求原文
-    software_requirement_text: str = ""  # 软件高层需求原文
+    """差异比对结果条目（docx 渲染层使用，字段与 DifferenceEntry 对齐）。"""
+    difference_id: str = ""  # 序号（"1", "2"...），LLM 可能漏填，缺省空字符串
+    difference_requirement_id: str = ""  # SRS id
+    difference_eoicd_entry_id: str = ""  # EoICD entry id
+    difference_type: str = ""  # 缺失/不一致/冗余/需确认
+    eoicd_requirement_text: str = ""  # EoICD 条目化需求原文
+    software_requirement_text: str = ""  # SRS 原文
     description: str = ""  # 差异描述
     suggested_action: str = ""  # 建议处理方式
 
