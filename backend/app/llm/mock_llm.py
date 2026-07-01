@@ -153,43 +153,91 @@ def _comparison_mock_data() -> dict[str, Any]:
     return {
         "differences": [
             {
-                "difference_id": "diff-1",
+                "difference_id": "1",
+                "difference_requirement_id": "SRS-003",
+                "difference_eoicd_entry_id": "REQ-003",
                 "difference_type": "缺失",
-                "requirement_text": "chunk-001@REQ-003：系统应每100ms采集并报告车速信号（VehicleSpeed）。",
+                "eoicd_requirement_text": "系统应每100ms采集并报告车速信号（VehicleSpeed），数据类型为uint16。",
                 "software_requirement_text": "SRS-003：车速信息应每100ms更新一次，供车身稳定系统使用。",
-                "description": "EoICD 条目化需求描述了接口定义和传输周期，但软件高层需求未明确信号名称和数据类型。",
-                "suggested_action": "建议在软件高层需求中补充信号名称和数据类型定义，保持与 EoICD 一致。",
+                "description": (
+                    "属性 SignalName: SWHLR=(无) IRD=VehicleSpeed 仅IRD定义 - SWHLR 未明确信号名\n"
+                    "属性 DataType: SWHLR=(无) IRD=uint16 仅IRD定义 - SWHLR 未明确数据类型\n"
+                    "属性 UpdatePeriod: SWHLR=100ms IRD=100ms 一致 - 传输周期双方一致\n"
+                    "属性 Consumer: SWHLR=车身稳定系统 IRD=(无) 仅SWHLR描述 - SWHLR 标了使用方\n"
+                    "整体判定: 缺失\n"
+                    "整体分析: EoICD 详细描述了 VehicleSpeed 信号的接口定义和数据类型，但 SWHLR 仅泛泛提到车速信息\n"
+                    "整体建议: 在 SWHLR 中补充 VehicleSpeed 信号的名称、数据类型及传输周期定义"
+                ),
+                "suggested_action": "建议在软件高层需求 SRS-003 中补充信号名称 VehicleSpeed、数据类型 uint16 等具体定义。",
             },
             {
-                "difference_id": "diff-2",
+                "difference_id": "2",
+                "difference_requirement_id": "SRS-004",
+                "difference_eoicd_entry_id": "REQ-004",
                 "difference_type": "不一致",
-                "requirement_text": "chunk-001@REQ-004：系统应接收制动踏板位置信号，精度不低于8位。",
+                "eoicd_requirement_text": "系统应接收制动踏板位置信号，精度不低于8位。",
                 "software_requirement_text": "SRS-004：制动系统应接收制动踏板位置信号，信号精度不低于8位。",
-                "description": "两者精度要求一致，但 EoICD 强调了系统侧接收，软件需求强调了制动系统侧处理，视角不同。",
-                "suggested_action": "建议统一需求描述视角，明确信号流向和职责边界。",
+                "description": (
+                    "属性 SignalName: SWHLR=制动踏板位置信号 IRD=制动踏板位置信号 一致 - 信号名一致\n"
+                    "属性 Precision: SWHLR=不低于8位 IRD=不低于8位 一致 - 精度要求一致\n"
+                    "属性 Receiver: SWHLR=制动系统 IRD=系统 不一致 - 接收方视角不同（系统级 vs 子系统级）\n"
+                    "属性 DataType: SWHLR=(无) IRD=(无) 仅IRD定义 - 双方都未明确\n"
+                    "整体判定: 不一致\n"
+                    "整体分析: 双方对精度要求一致，但接收方描述视角不同——EoICD 用系统级抽象，SWHLR 明确到制动系统\n"
+                    "整体建议: 统一需求描述视角，建议 SWHLR 与 EoICD 对齐或明确层级关系"
+                ),
+                "suggested_action": "建议统一需求描述视角，明确信号接收方是系统级还是子系统级。",
             },
             {
-                "difference_id": "diff-3",
+                "difference_id": "3",
+                "difference_requirement_id": "SRS-005",
+                "difference_eoicd_entry_id": "REQ-005",
                 "difference_type": "需确认",
-                "requirement_text": "chunk-001@REQ-005：系统应接收目标挡位指令，挡位信号数据类型为uint8。",
+                "eoicd_requirement_text": "系统应接收目标挡位指令，挡位信号数据类型为uint8。",
                 "software_requirement_text": "SRS-005：换挡策略由整车控制器决定，TCU应接收目标挡位指令并执行。",
-                "description": "EoICD 定义了 uint8 数据类型，但软件需求未明确数据类型；两者对挡位控制策略描述一致。",
-                "suggested_action": "建议在软件高层需求中补充挡位信号数据类型定义，与 EoICD 保持一致。",
+                "description": (
+                    "属性 SignalName: SWHLR=目标挡位指令 IRD=目标挡位指令 一致 - 信号名一致\n"
+                    "属性 DataType: SWHLR=(无) IRD=uint8 不一致 - EoICD 明确 uint8，SWHLR 未明确\n"
+                    "属性 Strategy: SWHLR=由整车控制器决定 IRD=(无) 仅SWHLR描述 - SWHLR 补充了控制策略\n"
+                    "属性 Executor: SWHLR=TCU IRD=(无) 仅SWHLR描述 - SWHLR 明确执行方\n"
+                    "属性 Receiver: SWHLR=TCU IRD=系统 待确认 - 接收方在 SWHLR 是 TCU、在 EoICD 是系统，需澄清\n"
+                    "整体判定: 需确认\n"
+                    "整体分析: 双方对信号功能描述一致，但 SWHLR 未明确数据类型，接收方层级表述不一致\n"
+                    "整体建议: 建议 SWHLR 补充数据类型定义，并与 EoICD 确认接收方层级"
+                ),
+                "suggested_action": "建议在 SWHLR 中补充挡位信号数据类型 uint8 定义，并与需求方确认接收方层级。",
             },
             {
-                "difference_id": "diff-4",
+                "difference_id": "4",
+                "difference_requirement_id": "SRS-006",
+                "difference_eoicd_entry_id": "",
                 "difference_type": "冗余",
-                "requirement_text": "",
+                "eoicd_requirement_text": "",
                 "software_requirement_text": "SRS-006：变速箱应监控油温，油温信号应每1s更新一次。",
-                "description": "软件高层需求中包含油温监控要求，但 EoICD 中未定义相关接口和信号。",
-                "suggested_action": "建议补充 EoICD 接口定义，或说明油温监控为新增需求且尚未完成接口定义。",
+                "description": (
+                    "属性 SignalName: SWHLR=变速箱油温 IRD=(无) 仅SWHLR描述 - SWHLR 提出新需求\n"
+                    "属性 UpdatePeriod: SWHLR=1s IRD=(无) 仅SWHLR描述 - SWHLR 提出新需求\n"
+                    "属性 Interface: SWHLR=(无) IRD=(无) 仅IRD定义 - EoICD 未定义油温接口\n"
+                    "整体判定: 冗余\n"
+                    "整体分析: SWHLR 提出变速箱油温监控需求，但 EoICD 中未定义任何油温相关接口或信号\n"
+                    "整体建议: 补充 EoICD 中油温信号接口定义，或说明该需求暂不在 ICD 范围内"
+                ),
+                "suggested_action": "建议补充 EoICD 接口定义覆盖油温信号，或说明该需求为新增且尚未完成接口定义。",
             },
             {
-                "difference_id": "diff-5",
+                "difference_id": "5",
+                "difference_requirement_id": "SRS-007",
+                "difference_eoicd_entry_id": "",
                 "difference_type": "缺失",
-                "requirement_text": "",
+                "eoicd_requirement_text": "",
                 "software_requirement_text": "SRS-007：故障诊断应支持ISO 14229标准。",
-                "description": "软件高层需求要求支持ISO 14229诊断标准，但 EoICD 中未定义相关诊断接口和服务。",
+                "description": (
+                    "属性 Protocol: SWHLR=ISO 14229 IRD=(无) 仅SWHLR描述 - SWHLR 提出新协议\n"
+                    "属性 DiagnosticService: SWHLR=(无明确) IRD=(无) 仅IRD定义 - 双方均未定义诊断服务接口\n"
+                    "整体判定: 缺失\n"
+                    "整体分析: SWHLR 要求支持 ISO 14229 诊断标准，但 EoICD 中未定义任何诊断协议或服务接口\n"
+                    "整体建议: 在 EoICD 中补充诊断相关接口（UDS 服务、诊断请求/响应消息定义），或在 SWHLR 中明确暂不包含诊断能力"
+                ),
                 "suggested_action": "建议在 EoICD 中补充诊断相关接口定义，或在软件需求中明确暂不包含诊断能力。",
             },
         ],

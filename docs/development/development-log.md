@@ -545,3 +545,63 @@
 1. 配合真实后端进行端到端上传→处理→结果下载验证
 2. 考虑 lazy import 优化 xlsx/mammoth 包体积
 3. 替换 logo1.png / logo2.jpg 为实际 logo 文件
+
+### 2026-07-01：真实 SRS Parser + 差异比对输出结构升级
+
+#### 任务目标
+
+实现真实软件高层需求 Word 文档解析（替换硬编码 stub），升级差异比对输出的 schema 与 docx 渲染，使真实 LLM 能产出可追溯到具体 `requirement_id` 和 `entry_id` 的高质量差异报告。
+
+#### 完成内容
+
+1. **真实 SRS 解析器**：`parsers/software_req_parser.py` 全部重写，基于 python-docx 解析 8 行 × 2 列的需求表格。映射规则：`对象类型`（需求 → requirement / 注释 → comment）、`是否衍生`（是 → True / 其他 → False）、`实现方法`（手工编码 → manual_coding / 基于模型 → model_based）；空单元格和 "NA"/"N/A" 视为空字符串；缺失 `requirement_id` / `requirement_text` 时跳过该条 + warn log。Table[0] 缩略语表（3×3）按形状过滤。
+
+2. **数据模型扩展与重构**：
+   - `ParsedSoftwareRequirement` 从 3 字段扩展为 8 字段（新增 `object_type`、`is_derived`、`rationale`、`verification_method`、`implementation_method`、`source_file`）。
+   - `DifferenceEntry` 和 `DifferenceItem` 拆 `difference_id` 为 `difference_requirement_id`（关联 SRS 端）和 `difference_eoicd_entry_id`（关联 EoICD 端），并把 `requirement_text` 改名为 `eoicd_requirement_text` 以消除两边歧义。
+
+3. **结构化 description 格式**：约定每条 diff 的 `description` 字段为多属性对比结构化文本（每行 `属性 <名>: SWHLR=<值> IRD=<值> <判定> - <分析>` + 末尾 3 行 `整体判定 / 整体分析 / 整体建议`），5 种判定值（一致 / 不一致 / 仅IRD定义 / 仅SWHLR描述 / 待确认）与 `difference_type` 取值映射。同步更新 `prompts/comparison_prompt.md` 和 `skills/comparison_skill.md`。
+
+4. **docx 渲染升级**：
+   - 汇总表 4 列 → 5 列（差异编号 / 关联定位 / 差异类型 / 差异描述 / 建议处理方式）。
+   - 详情区新增"关联定位" block（分行列出 SRS ID 和 EoICD 条目 ID）。
+   - 新增 `_render_description()` 函数，按 `\n` 拆行渲染，并对"属性 XX:" / "整体XX:" 前缀加粗。
+
+5. **`crew/tasks.py` 与 `mock_llm.py` 同步**：
+   - `expected_output` 字段名同步新 schema。
+   - `_comparison_mock_data()` 5 条 mock diff 全部改写为新 schema 字段 + 结构化 description 文本。
+
+#### 修改文件
+
+1. `backend/app/parsers/software_req_parser.py`（stub → 真实解析，全部重写）
+2. `backend/app/models.py`（`ParsedSoftwareRequirement` 扩字段；`DifferenceEntry` + `DifferenceItem` 拆分 ID + 字段改名）
+3. `backend/app/crew/difference_analyzer.py`（字段搬运同步新 schema）
+4. `backend/app/crew/tasks.py`（`expected_output` 字段名同步）
+5. `backend/app/docx/generator.py`（汇总表 5 列 + 关联定位详情 block + `_render_description` 函数）
+6. `backend/app/prompts/comparison_prompt.md`（清 stub + description 结构化格式章节）
+7. `backend/app/skills/comparison_skill.md`（重写 Step 5 为 JSON 输出 + description 结构化格式）
+8. `backend/app/llm/mock_llm.py`（5 条 mock diff 改写）
+9. `CHANGELOG.md`（新增 Unreleased 2026-07-01 条目）
+10. `docs/development/development-log.md`（本条）
+
+#### 验证方式
+
+1. 静态校验：调用 `parse_software_requirement()` dump 32 条 `ParsedSoftwareRequirement`，校验 8 字段全部存在且映射正确（对象类型全部为 `requirement`、实现方法全部为 `manual_coding`、ID 范围 `FSF21000101_HLR_225` ~ `FSF21000101_HLR_3573`）。
+2. docx 渲染静态校验：构造 3 条 `DifferenceItem`（覆盖缺失 / 冗余 / 不一致 3 类场景），调用 `generate_difference_report_docx`，验证汇总表 5 列、详情区"关联定位"block 正确显示、description 按 `\n` 拆行渲染、前缀加粗。
+3. 端到端验证：`USE_MOCK_LLM=0` 上传 Test_AMS + 真实 SRS，完整跑通 pipeline。两次成功跑通：job `a2137d03`（47 reqs / 8 diffs / 7min27s）、job `c7e21cca`（37 reqs / 9 diffs / ~4min）。
+
+#### 验证结果
+
+已验证通过。真实 LLM 严格按 description 结构化格式输出，每条 diff 平均 5-10 个属性判定（如 `Label / Direction / DataFormatType / BitRange / Units / Period` 等），关联 ID 精确（`FSF21000101_HLR_378 ↔ REQ-041` 等真实案例）。docx 详情区每行属性单独成段且前缀加粗，可读性显著提升。
+
+#### 遗留问题
+
+1. **`deepseek_comparison` agent 偶发 max_tokens 截断**：description 结构化后 LLM 输出变长，存在触发 `max_tokens=8192` 上限导致 `IncompleteOutputException` 任务失败的情况。job `d1e870b8` 第一次跑因此失败，重试后通过。**未修改 `agents.py` 配置**，留待后续根据实际输出长度评估调整或加 description 行数约束。
+2. **Docker for Windows 文件名编码乱码**：`backend/app/output/<job_id>/` 目录下用户上传的中文文件名因 Docker NTFS 卷挂载的 UTF-8/latin-1 编码错位而出现 mojibake（不影响 pipeline 行为，path 通过 Python 内部传递）。**经用户确认 deferred**，不修复。
+3. 真实测试样本仅 1 份（空气管理系统 SRS），未覆盖多文档、多章节、多级标题等边界情况。
+
+#### 下一步建议
+
+1. 评估并调整 `deepseek_comparison` agent 的 `max_tokens` 配置（或在 prompt 中加入 description 行数上限约束）以消除偶发失败。
+2. 收集更多真实 SRS 样例（含 `object_type=comment`、`implementation_method=model_based` 等边界值）补全 parser 验证。
+3. 跨 chunk 冲突消解和追溯矩阵仍未实现，后续 Issue 处理。

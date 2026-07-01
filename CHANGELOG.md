@@ -143,3 +143,23 @@
 - 前端新增 `index.css` 全局样式表、`types.ts` UI 类型定义。
 - 后端 `pipeline.py` 新增 3 阶段 `job.update` 进度消息。
 
+## [Unreleased] - 2026-07-01
+
+### Added
+
+- **真实 SRS Parser 实现**：`backend/app/parsers/software_req_parser.py` 从硬编码 stub 改为基于 python-docx 的真实解析。从"软件需求"章节下的 8 行 × 2 列需求表格中提取字段，按文档约定映射（对象类型 `需求 → requirement`、`注释 → comment`；实现方法 `手工编码 → manual_coding`、`基于模型 → model_based`），并跳过 Table[0] 缩略语表（3×3）。处理空单元格和 "NA"/"N/A" 标记，`requirement_id` 或 `requirement_text` 为空时跳过该条 + warn log。
+- **`ParsedSoftwareRequirement` 数据模型扩展**：从 3 字段扩展为 8 字段，新增 `object_type`（"requirement" / "comment"）、`is_derived`（bool）、`rationale`、`verification_method`、`implementation_method`（"manual_coding" / "model_based"）、`source_file`。
+- **差异比对输出结构升级**：`DifferenceEntry` 和 `DifferenceItem` 拆 `difference_id` 为两个关联 ID（`difference_requirement_id` 关联 SRS 端 `requirement_id`、`difference_eoicd_entry_id` 关联 EoICD 端 `entry_id`），并把 `requirement_text` 改名为 `eoicd_requirement_text` 以消除歧义。
+- **结构化 description 格式**：每条差异的 `description` 字段约定为多属性对比的结构化文本，每行一条 `属性 <名>: SWHLR=<值> IRD=<值> <判定> - <分析>`，末尾追加 `整体判定 / 整体分析 / 整体建议` 三行。判定值 5 种：`一致` / `不一致` / `仅IRD定义` / `仅SWHLR描述` / `待确认`，由 `difference_type` 取值映射。
+- **差异报告 docx 渲染升级**：汇总表从 4 列扩展为 5 列（差异编号 / 关联定位 / 差异类型 / 差异描述 / 建议处理方式），详情区新增"关联定位"block（分行列出 SRS ID 和 EoICD 条目 ID）。新增 `_render_description()` 函数按 `\n` 拆行渲染 description，并对"属性 XX:" / "整体XX:" 前缀加粗。
+- **comparison_prompt.md 与 comparison_skill.md 同步更新**：清除原"stub"提示，明确两边均为真实解析后的结构化数据；新增 description 结构化格式章节与判定值映射表。
+
+### Changed
+
+- `crew/difference_analyzer.py` 字段搬运更新，对齐新 schema。
+- `crew/tasks.py` `expected_output` 字段名同步（`requirement_text` → `eoicd_requirement_text`，新增两个关联 ID 字段名）。
+- `llm/mock_llm.py` `_comparison_mock_data()` 5 条 mock diff 改写为新 schema 字段 + 结构化 description 文本（供 mock 模式演示）。
+
+### Known Issues
+
+- 真实 LLM 模式下 `deepseek_comparison` agent 在 description 结构化后输出变长，存在偶发 `max_tokens` 上限触发 `IncompleteOutputException` 的情况，导致任务失败。当前未修改 `agents.py` 的 `max_tokens=8192` 配置，建议后续根据实际输出长度评估调整，或在 prompt 中限制 description 行数上限。

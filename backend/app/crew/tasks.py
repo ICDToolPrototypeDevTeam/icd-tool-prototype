@@ -137,8 +137,9 @@ def build_deepseek_comparison_task(
             ),
         ),
         expected_output=(
-            "JSON 对象：包含 differences[]，每条含 difference_id / difference_type / "
-            "requirement_text / software_requirement_text / description / suggested_action。"
+            "JSON 对象：包含 differences[]，每条含 difference_id / "
+            "difference_requirement_id / difference_eoicd_entry_id / difference_type / "
+            "eoicd_requirement_text / software_requirement_text / description / suggested_action。"
         ),
         agent=agent,
         output_pydantic=ComparisonOutput,
