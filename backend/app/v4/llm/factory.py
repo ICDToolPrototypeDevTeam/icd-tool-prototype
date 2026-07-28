@@ -53,8 +53,22 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
             model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         )
 
-    # Phase 2-3 scaffolding: minimax and qwen return mock for now
-    if provider in ("minimax", "qwen"):
+    if provider == "qwen":
+        from app.v4.llm.qwen_client import QwenClient
+        api_key = os.getenv("QWEN_API_KEY", "")
+        if not api_key:
+            raise ValueError(
+                "QWEN_API_KEY not set. Check your .env file "
+                "or set USE_MOCK_LLM=1 for offline development."
+            )
+        return QwenClient(
+            api_key=api_key,
+            base_url=os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            model=os.getenv("QWEN_MODEL", "qwen-plus"),
+        )
+
+    # minimax stays as mock for now (Phase 3 scaffolding)
+    if provider == "minimax":
         from app.v4.llm.mock_llm import MockLLMClient
         return MockLLMClient()
 
