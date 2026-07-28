@@ -6,7 +6,7 @@ services:
     ports:
       - '8000:8000'
     volumes:
-      - ./backend/app/output:/app/app/output
+      - ./backend/output:/app/output
     env_file:
       - path: ./backend/.env
         required: false

@@ -163,3 +163,49 @@
 ### Known Issues
 
 - 真实 LLM 模式下 `deepseek_comparison` agent 在 description 结构化后输出变长，存在偶发 `max_tokens` 上限触发 `IncompleteOutputException` 的情况，导致任务失败。当前未修改 `agents.py` 的 `max_tokens=8192` 配置，建议后续根据实际输出长度评估调整，或在 prompt 中限制 description 行数上限。
+
+## [Unreleased] - 2026-07-28：V4.0 后端工程化集成（Issue A 落地）
+
+### Added
+
+- **V4.0 后端工程化集成**：把 `_v4_backend_raw/backend/app/` 整体迁入 `backend/app/v4/`，新增 `/api/v4` FastAPI 路由命名空间，V3 与 V4 双版本共存。
+- 新增 5 个 V4 FastAPI 端点（`/api/v4/*` 前缀）：
+  - `POST /api/v4/coverage-analysis`：multipart 接收 `hlr_word_file` + `eoicd_publisher_file` / `eoicd_subscriber_file` + 可选 `traceability_files` + `use_mock_llm` / `judge_providers` / `enable_traceability_prefilter`，同步返回 V4JobId。
+  - `GET /api/v4/jobs/{job_id}`：返回 `V4JobStatusResponse`（含 `stage` / `stage_index` / `case_index` / `mock_models`）。
+  - `GET /api/v4/jobs/{job_id}/result`：返回 `V4JobResultResponse`（含 `summary` / `outputs` / `mock_models` / `errors`）。
+  - `GET /api/v4/jobs/{job_id}/outputs/{eoicd-xlsx|consensus-docx|consistency/{model}}`：3 类对外下载。
+  - `GET /api/v4/health`：V4 健康检查。
+- 新增 V4 Pydantic schemas：`V4AnalyzeResponse` / `V4JobStatusResponse` / `V4JobOutputs` / `V4JobResultSummary` / `V4JobResultResponse`（位于 `backend/app/api/v4/schemas.py`），与 V3 响应 schema 互不污染。
+- 新增 V4 runner 工具（`backend/app/api/v4/runner.py`）：`run_v4_pipeline_thread()` 后台线程包装，env 保存/恢复（修正 #2：进入线程前 `os.environ.get` 备份，退出时 `try/finally` 恢复），落盘后反读 `multi_judge_results.json` 派生 `mock_models`（D5 规则：`mock_models = [p for p in actual_providers if p in {"minimax","qwen"}]`）。
+- 新增 ADR-001：`docs/decisions/ADR-001-V4后端接入策略.md`（D1-V4 作为后续主线；D2-V3 旧 API 暂留；D3-`/api/v4` 独立命名空间；D4-V4 业务逻辑保护；D5-mock_models 显式标识；D6-`consistency/{model}` 扩展点；D7-JSON 不暴露）。
+- 新增追溯表预筛选能力（V4 `enable_traceability_prefilter=true`）：`backend/app/v4/traceability/trace_parser.py` 在主名匹配失败时 `glob(*.xlsx)` 排序兜底（解决 MSYS bash 中文文件名编码降级场景）。
+
+### Changed
+
+- **V4 路径布局（按 Issue A 决定）**：
+  - V3 任务目录：`backend/output/v3/{job_id}/`（平铺，input + output 不分）。
+  - V4 任务目录：`backend/output/v4/{job_id}/input/` + `backend/output/v4/{job_id}/output/`（分两层）。
+  - 此前 V4 临时目录 `backend/app/output/` 已删除，所有输出迁到 `backend/output/` 根下。
+- **V3 与 V4 共享 JobManager**：`backend/app/job_manager.py` 给 `Job` 加 `kind: Literal["v3","v4"]` 字段（默认 "v3"），V4 路由显式传 `kind="v4"`；V3/V4 路由跨版本查询返回 404 + 友好提示。
+- **V3 旧 V3 router（机械拆分）**：原 `backend/app/main.py` 拆分到 `backend/app/api/v3/router.py`（173 行），其中 `/api/jobs/{job_id}` 与 `/api/jobs/{job_id}/result` 加 `job.kind != "v3"` 跨版本 404 检查；其他路由 URL、字段、后台线程逻辑、文件保存、下载 helper 全部保持原状。`backend/app/main.py` 改为 33 行的 thin shell（CORS + V3 router 装载，预留 V4 router 装载位）。
+- **V4 router 路径表达式统一 4 层**：`coverage.py:job_dir` / `outputs.py:root` / `jobs.py:base_outputs_dir` 都从 `parent.parent.parent` 升级为 `parent.parent.parent.parent`，与 V3 共享 `backend/output/` 根目录对齐。
+- **V4 路由层 V4 路径计算都用 4 层**（不再走 3 层）；3 处都用 `Path(__file__).resolve().parent.parent.parent.parent / 'output' / 'v4' / {job_id} [/output]` 模式。
+- **`backend/.env.example` 收尾**：删去之前为 V4 加的 `_V4` 后缀占位段（`DEEPSEEK_API_KEY_V4` / `DEEPSEEK_BASE_URL_V4` 等），恢复 39 行 V3-only 模板。V4 直接读 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `JUDGE_PROVIDERS` / `USE_MOCK_LLM`。
+- **`backend/requirements.txt` 增 3 项 V4 依赖**：`python-dotenv>=1.0.0`、`requests>=2.31.0`、`pyyaml>=6.0`。
+- **`docker-compose.yml` volume 路径调整**：`. / backend/app/output:/app/app/output` → `./backend/output:/app/output`，与 V3/V4 共享根目录。
+- **`backend/app/v4/config.py` 环境加载路径**：`_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"`（原 `_v4_backend_raw/backend/.env`）改为 `parent.parent.parent / ".env"`（`backend/.env`）。
+
+### Fixed
+
+- **V4 DeepSeek URL 双 `/v1` 拼写 bug**：`backend/app/v4/llm/deepseek_client.py:34` 和 `backend/app/v4/matching/hlr_labeler.py:51` 各自拼 `f"{base_url.rstrip('/')}/v1/chat/completions"`，与 `.env` 里 `DEEPSEEK_BASE_URL=https://api.deepseek.com/v1`（带 `/v1` 后缀）叠加成 `/v1/v1/chat/completions`，DeepSeek 报 404。修复：两处都加 `if base.endswith('/v1'): base = base[:-3]` 幂等保护。
+- **V4 trace_parser 硬编码中文文件名 brittleness**：`backend/app/v4/traceability/trace_parser.py:115,170` 直接 `trace_dir / "单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx"` 等中文字符串，与 `enable_traceability_prefilter=true` 路径上 MSYS bash 编码降级冲突。修复：抽 `_discover_trace_files(trace_dir)` 工具函数，**先按主名精确匹配 → 失败则 `trace_dir.glob("*.xlsx")` 排序兜底**，并保证 Table 1 / Table 2 不会命中同一文件。
+- **V4 outputs.py / coverage.py path 4 层 Bug（Issue A 期间发现）**：`parent.parent.parent.parent`（4 层）导致容器内落点 `/app/output/v4/...` 落到了 volume mount 之外。修到 3 层（`parent.parent.parent`），与 V3 router 一致。
+- **V4 `parent.parent.parent.parent` / `parent.parent.parent` 4 vs 3 层 Bug（Issue A 期间发现）**：`jobs.py:70` 和 `outputs.py:32` 仍在 3 层，与 coverage.py 写盘 4 层错位，导致 `/result.outputs` 全部 false / 5 类下载 404。修到 4 层，对齐 coverage.py。
+- **V4 `hlr_labeler` 直接 `requests.post`**：原 `_call_label_api` 独立拼 URL / Authorization 头 / retry 循环，不走 `get_llm()` factory，与 `comparison/*.py` 的 3 处调用方式分裂。修复：`_call_label_api` 改用 `get_llm("deepseek").chat(messages=..., max_retries=0)`，外层 retry 仅兜 JSON 解析错误；`label_hlrs` 去掉 `api_key/base_url/model` 参数，全部由 factory 从 env 读。V4 内部 `import requests` 从 2 处（deepseek_client.py + hlr_labeler.py）收敛为 1 处（deepseek_client.py 抽象层）。
+
+### Notes
+
+- 本次 Issue A 是 V4 后端工程化集成的"包装层"工作，V4 业务逻辑零修改（除 bug 1 / bug 2 两处修复外）。Issue A 期间两次对 V4 内部模块（deepseek_client.py、hlr_labeler.py、trace_parser.py）的修改按用户授权"特权"实施，未建立 ADR-002。
+- 本期 V4 仅暴露 3 类对外下载（`eoicd-xlsx` / `consensus-docx` / `consistency/{model}`）；4 类内部 JSON（`multi_judge_results.json` / `consensus_results.json` / `reverse_matches.json` / `reverse_report.json` 等）按 D7 不暴露给 API。
+- `/api/v4/jobs/{id}/result.outputs.eoicd_xlsx` 等 5 个布尔字段在 V4 落盘成功后均为 true，由 `runner.derive_outputs()` 反读盘与 SSoT 一致。
+- V4 业务内部 import `requests` 仅 1 处（`backend/app/v4/llm/deepseek_client.py`）；其余 4 处 LLM 调用（`comparison/{semantic_judge,multi_judge,review_agent}.py` + `matching/hlr_labeler.py`）均走 `get_llm("deepseek").chat()` 工厂。

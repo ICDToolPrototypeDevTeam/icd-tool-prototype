@@ -1,0 +1,27 @@
+# -*- coding: utf-8 -*-
+"""V4.0 FastAPI Router 聚合。
+
+ADR-001 Issue A：
+- 顶层装载：`app.include_router(router, prefix='/api/v4')`；
+- 包含 health（可选）+ coverage + jobs + outputs 共 5 个对外路由；
+- 不与 V3 router 共享业务模块；V3/V4 通过 `job.kind` 在 jobs.py 内做分发。
+"""
+from __future__ import annotations
+
+from fastapi import APIRouter
+
+from app.api.v4 import coverage, jobs, outputs
+
+
+router = APIRouter()
+
+
+@router.get('/health')
+def v4_health():
+    """V4 专用健康检查；返回 V4 入口可达性。"""
+    return {'status': 'ok', 'api_version': 'v4'}
+
+
+router.include_router(coverage.router)
+router.include_router(jobs.router)
+router.include_router(outputs.router)
