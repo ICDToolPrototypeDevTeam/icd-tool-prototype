@@ -605,3 +605,58 @@
 1. 评估并调整 `deepseek_comparison` agent 的 `max_tokens` 配置（或在 prompt 中加入 description 行数上限约束）以消除偶发失败。
 2. 收集更多真实 SRS 样例（含 `object_type=comment`、`implementation_method=model_based` 等边界值）补全 parser 验证。
 3. 跨 chunk 冲突消解和追溯矩阵仍未实现，后续 Issue 处理。
+
+### 2026-07-28 Issue A：V4.0 后端工程化集成
+
+#### 任务目标
+
+把 `_v4_backend_raw/backend/app/` 整体迁入正式 `backend/app/v4/`，新增 `/api/v4` FastAPI 路由命名空间，V3 与 V4 双版本共存。V3 旧 API 保持不变。
+
+#### 完成内容
+
+1. **V3 router 机械拆分**：原 `backend/app/main.py` 拆分到 `backend/app/api/v3/router.py`（173 行），其中 `/api/jobs/{job_id}` 与 `/api/jobs/{job_id}/result` 加 `job.kind != "v3"` 跨版本 404 检查；其他路由 URL、字段、后台线程逻辑、文件保存、下载 helper 全部保持原状。
+2. **V4 子包搬运**：`_v4_backend_raw/backend/app/` 全部迁移到 `backend/app/v4/`，含 6 个子目录（`comparison/`、`doc_generators/`、`llm/`、`matching/`、`parsers/`、`prompts/`、`traceability/`）+ 5 个顶层 .py（`cli.py` / `config.py` / `models.py` / `pipeline.py` / `synonyms.yaml`）。V4 内部 import 按白名单机械改写为 `from app.v4.X`。
+3. **V4 FastAPI 路由子包**：新增 `backend/app/api/v4/{__init__,router,schemas,runner,coverage,jobs,outputs}.py`，5 个端点（POST coverage-analysis / GET status / GET result / 3 类下载 / health），均不与 V3 路由交叉。
+4. **共享 JobManager + cross-version 404**：`backend/app/job_manager.py` 给 `Job` 加 `kind: Literal["v3","v4"]` 字段（默认 "v3"），V4 路由显式传 `kind="v4"`；V3/V4 路由跨版本查询返回 404 + 友好提示（`use /api/v4/jobs/... instead`）。
+5. **V4 路径布局调整**：V3 → `backend/output/v3/{job_id}/`（平铺）；V4 → `backend/output/v4/{job_id}/input/` + `backend/output/v4/{job_id}/output/`（分层）。`docker-compose.yml` volume mount 改为 `./backend/output:/app/output`。
+6. **V4 路由路径 4 层修复**：`coverage.py:job_dir` / `outputs.py:root` / `jobs.py:base_outputs_dir` 都改为 `parent.parent.parent.parent`（4 层），与 V3 router 一致。
+7. **V4 config.py env load 路径调整**：`backend/app/v4/config.py` 中 `_ENV_PATH` 改为 `parent.parent.parent.parent / ".env"`，即 `backend/.env`。
+8. **`.env.example` 收尾**：删除之前 V4 `_V4` 后缀占位段（实际 V4 代码读无后缀变量名），恢复 39 行 V3-only 模板。
+9. **`requirements.txt` 增 3 项 V4 依赖**：`python-dotenv>=1.0.0` / `requests>=2.31.0` / `pyyaml>=6.0`。
+10. **修复 V4 业务 bug**：
+    - `deepseek_client.py:34` 与 `hlr_labeler.py:51` URL 双 `/v1/chat/completions` 拼写（DeepSeek 404）—— 加 `if base.endswith('/v1'): base = base[:-3]` 幂等保护。
+    - `trace_parser.py:115,170` 硬编码中文文件名（MSYS bash 编码降级时）—— 抽 `_discover_trace_files()` 工具函数，主名匹配失败时 `trace_dir.glob("*.xlsx")` 排序兜底，Table 1 / Table 2 不命中同一文件。
+    - `hlr_labeler._call_label_api` 改用 `get_llm("deepseek").chat()`，去掉 `api_key/base_url/model` 参数。V4 内 `import requests` 从 2 处收敛为 1 处（仅 `deepseek_client.py`）。
+11. **新建 ADR-001**：`docs/decisions/ADR-001-V4后端接入策略.md`（D1-V4 主线；D2-V3 旧 API 暂留；D3-`/api/v4` 命名空间；D4-V4 业务逻辑保护；D5-mock_models 显式标识；D6-`consistency/{model}` 扩展点；D7-JSON 不暴露）。
+
+#### 修改文件
+
+1. `backend/app/main.py`（替换为 33 行 thin shell：CORS + V3 router 装载）
+2. `backend/app/job_manager.py`（加 `kind` 字段 + `create_job(kind=...)` 参数）
+3. `backend/app/api/__init__.py`、`backend/app/api/v3/__init__.py`（新增空）
+4. `backend/app/api/v3/router.py`（从原 main.py 机械拆分；加 2 处跨版本 404 检查）
+5. `backend/app/v4/`（整棵子包：6 子目录 + 5 顶层 .py + 1 .yaml；所有 import 改写；`main.py` → `cli.py` 重命名；`config.py` env load 路径调整；3 处 path 4 层修复；2 处 URL bug 修复；`hlr_labeler._call_label_api` 改走 factory）
+6. `backend/.env.example`（删除 V4 占位段，恢复 39 行 V3-only）
+7. `backend/requirements.txt`（+3 行 V4 依赖）
+8. `docker-compose.yml`（volume mount 路径调整）
+9. `docs/decisions/ADR-001-V4后端接入策略.md`（新建）
+
+#### 验证方式
+
+1. `cd backend && python -c "from app.main import app; print(len(app.routes))"` → 12 (V3 8 + V4 7 - docs 共享 3)
+2. `cd backend && uvicorn app.main:app --port 8000`
+3. `curl http://127.0.0.1:8000/api/v4/coverage-analysis` POST 5 文件 → 200 + job_id
+4. `curl http://127.0.0.1:8000/api/v4/jobs/{id}/result` → outputs 全 true + mock_models
+5. 5 类下载 curl → 200 + 文件 magic 正确
+6. 跨版本 404 + 参数校验 + JSON 不暴露（13 项 acceptance）
+7. `docker compose build backend && docker compose up -d backend`（同步骤在容器内复跑）
+8. `docker compose exec backend` 内 `ls -la /app/output/v4/{id}/{input,output}/`
+
+#### 验证结果
+
+- 8 项 V3 旧路由（GET /api/health、POST /api/eoicd/analyze、GET /api/jobs/{id}、GET /api/jobs/{id}/result、4 个 /outputs/）全部存活。
+- 7 项 V4 新路由（POST /api/v4/coverage-analysis、GET /api/v4/health、GET /api/v4/jobs/{id}、GET /api/v4/jobs/{id}/result、3 个 /outputs/）全部 200。
+- 跨版本 /result 路由：V3 → V4 job 返 404 + `use /api/v4/...`；V4 → V3 job 返 404 + 同样。
+- 参数校验：consistency/openai → 400；judge_providers=claude → 422。
+- JSON 不暴露：multi-judge-json / reverse-report-json → 404。
+- 5 文件 + trace 预筛选走通：1 HLR 1/16 拿到真 `bus=['Analog'] devices=['光耦传感器']`；11 blocks_matched；5 类 docx + 7 类中间 JSON 全部落盘。

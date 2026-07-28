@@ -1,0 +1,146 @@
+# -*- coding: utf-8 -*-
+# synonyms.yaml — Alias/normalization mappings for candidate recall
+#
+# Structure: canonical_term → [list of aliases]
+# Used by alias_matcher.py (via config.load_synonyms()) to normalize
+# EoICD and HLR terms before matching.
+#
+# Categories:
+#   - Bus type aliases (A429, A664, A825, Analog, Discrete)
+#   - Device / component name aliases
+#   - Signal / field name aliases (Label, SDI, SSM, Parity, ...)
+#   - General terminology aliases (units, common abbreviations)
+
+# ── Bus type aliases ──────────────────────────────────────────────────
+A429:
+  - ARINC429
+  - ARINC 429
+  - arinc429
+  - Arinc429
+  - ARINC429总线
+  - A429总线
+
+A825:
+  - CAN
+  - CANBus
+  - CAN总线
+  - CAN2.0
+  - CAN2
+  - CANbus
+
+A664:
+  - AFDX
+  - afdx
+  - AFDX总线
+  - A664总线
+  - ARINC664
+
+Analog:
+  - 模拟量
+  - 模拟信号
+  - ANALOG
+  - 模拟
+
+Discrete:
+  - 离散量
+  - 离散信号
+  - 开关量
+  - DISCRETE
+  - 离散
+
+# ── Device / component aliases ────────────────────────────────────────
+FAN:
+  - 风扇
+  - 风扇控制
+
+ADC:
+  - 模数转换
+  - ADCINA
+  - 模数转换器
+  - A/D转换
+
+APU:
+  - 气源
+  - APU
+  - 辅助动力装置
+
+FCM:
+  - 飞行控制
+  - 飞控计算机
+  - Fly Control Module
+  - Flight Control Module
+
+FCU:
+  - 风扇控制单元
+  - Fan Control Unit
+
+PDU:
+  - 电源分配单元
+  - Power Distribution Unit
+  - 配电组件
+
+RPDU:
+  - 远程配电单元
+  - Remote Power Distribution Unit
+
+EMPC:
+  - 电源管理
+  - Power Management
+  - 电源管理控制器
+
+IRD:
+  - 接口需求文档
+  - Interface Requirement Document
+  - 接口需求
+
+# ── Signal / field aliases ────────────────────────────────────────────
+Label:
+  - LABEL
+  - 标号
+  - 标签
+  - 标识符
+  - label
+
+SDI:
+  - 源目标标识符
+  - SDI
+  - 源/目标标识符
+  - Source Destination Identifier
+
+SSM:
+  - 符号状态矩阵
+  - Sign Status Matrix
+  - SIGNSTATUS
+  - 符号/状态矩阵
+  - Sign/Status Matrix
+
+PARITY:
+  - Parity
+  - 奇偶校验
+  - 奇偶校验位
+  - parity
+
+WordMarker:
+  - Word_Label
+  - WordLabel
+  - 字标记
+  - 字标识
+  - Word Label
+
+# ── General terminology aliases ───────────────────────────────────────
+bit:
+  - 位
+  - BIT
+  - bits
+  - Bits
+  - 比特
+
+byte:
+  - 字节
+  - BYTE
+  - bytes
+  - Bytes
+
+# Removed overly generic terms (ms, 秒, Hz, 周期, 超时, 刷新, 发送间隔, 延迟, 消息大小)
+# that caused universal false-positive matching in the old alias matcher.
+# These are now handled via ATTR_CATEGORY_MAP + SIGNAL_LEAF_ALIASES in config.py.
