@@ -96,20 +96,29 @@ def _call_review_api(
     ]
 
     for attempt in range(max_retries + 1):
-        temperature = 0.1 if attempt == 0 else 0.1 + attempt * 0.1
         try:
-            response = llm.chat(messages=messages, temperature=temperature)
+            response = llm.chat(messages=messages, temperature=0.1, max_tokens=4096)
             from app.v4.comparison.semantic_judge import _extract_json
             content = _extract_json(response["content"])
             data = json.loads(content)
+            consistent, divergent = _derive_consensus_details(data, model_results)
+            agreement = data.get("agreement_level", "split")
+            star = int(data.get("star_rating", 1))
+            # 3★/2★ → 取多数一致的 coverage_status；1★/split → 待确认
+            if agreement in ("full", "majority") and star >= 2:
+                final_status = _majority_status(model_results, consistent)
+            else:
+                final_status = "待确认"
             return ConsensusResult(
                 case_id=case_id,
                 model_results=model_results,
-                agreement_level=data.get("agreement_level", "split"),
-                star_rating=int(data.get("star_rating", 1)),
-                final_coverage_status=data.get("final_coverage_status", "needs_review"),
+                agreement_level=agreement,
+                star_rating=star,
+                final_coverage_status=final_status,
                 final_analysis=data.get("final_analysis", ""),
                 confidence=float(data.get("confidence", 0.5)),
+                consistent_agents=consistent,
+                divergent_agents=divergent,
             )
         except (json.JSONDecodeError, KeyError, IndexError, ValueError):
             if attempt < max_retries:
@@ -125,10 +134,60 @@ def _call_review_api(
         model_results=model_results,
         agreement_level="split",
         star_rating=1,
-        final_coverage_status="needs_review",
+        final_coverage_status="待确认",
         final_analysis="Review API error after retries",
         confidence=0.0,
+        consistent_agents=[],
+        divergent_agents=[],
     )
+
+
+def _majority_status(
+    judgments: dict[str, dict],
+    consistent_agents: list[str],
+) -> str:
+    """Return the coverage_status that the majority of agents agree on."""
+    from collections import Counter
+    if consistent_agents:
+        for name in consistent_agents:
+            if name in judgments:
+                status = judgments[name].get("coverage_status", "")
+                if status:
+                    return status
+    statuses = [j.get("coverage_status", "") for j in judgments.values()]
+    counts = Counter([s for s in statuses if s])
+    return counts.most_common(1)[0][0] if counts else "needs_review"
+
+
+def _derive_consensus_details(
+    data: dict,
+    judgments: dict[str, dict],
+) -> tuple[list[str], list[str]]:
+    """Derive consistent/divergent agents from LLM response or majority vote.
+
+    Prefers explicit fields from LLM; falls back to majority voting on coverage_status.
+    """
+    consistent = list(data.get("consistent_agents", []))
+    divergent = list(data.get("divergent_agents", []))
+
+    if not consistent and not divergent:
+        # Fallback: majority vote by coverage_status
+        from collections import Counter
+        statuses = [
+            j.get("coverage_status", "") for j in judgments.values()
+        ]
+        counts = Counter(statuses)
+        majority_status = counts.most_common(1)[0][0] if counts else ""
+        for provider, j in judgments.items():
+            if j.get("coverage_status", "") == majority_status:
+                consistent.append(provider)
+            else:
+                divergent.append(provider)
+
+    return consistent, divergent
+
+
+_STATUS_CN = {"covered": "已覆盖", "inconsistent": "不一致", "needs_review": "待确认", "待确认": "待确认"}
 
 
 def _build_summary(results: list[ConsensusResult]) -> dict:
@@ -140,7 +199,8 @@ def _build_summary(results: list[ConsensusResult]) -> dict:
     for r in results:
         star_dist[str(r.star_rating)] = star_dist.get(str(r.star_rating), 0) + 1
         agreement_dist[r.agreement_level] = agreement_dist.get(r.agreement_level, 0) + 1
-        status_dist[r.final_coverage_status] = status_dist.get(r.final_coverage_status, 0) + 1
+        cn = _STATUS_CN.get(r.final_coverage_status, r.final_coverage_status)
+        status_dist[cn] = status_dist.get(cn, 0) + 1
 
     avg_stars = (
         sum(r.star_rating for r in results) / len(results)

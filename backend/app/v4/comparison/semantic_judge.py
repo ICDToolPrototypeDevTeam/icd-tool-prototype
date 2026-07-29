@@ -171,6 +171,9 @@ def _call_judge_api(
 
 def _extract_json(text: str) -> str:
     """Extract JSON object from text, with basic repair for truncated responses."""
+    # Strip MiniMax/DeepSeek <think> reasoning blocks
+    import re
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
     text = text.strip()
     # Remove markdown fences
     if text.startswith("```"):
@@ -254,7 +257,6 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
     # ── HLR (implementation to check) ──
     parts.append("## 软件高层需求 (HLR) — 待检查的软件实现")
     parts.append(f"- ID: {hlr.get('hlr_id', 'N/A')}")
-    parts.append(f"- 信号类别: {hlr.get('signal_category', 'N/A')}")
     parts.append(f"- 内容: {hlr.get('content', 'N/A')}")
     hlr_rationale = hlr.get('rationale', '')
     if hlr_rationale:
@@ -270,7 +272,6 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
         parts.append("- ⚠ 此匹配置信度较低（部分维度命中或分数偏低），请谨慎判断")
         parts.append("- 若 HLR 内容与 ICD 信号块确实无关（如仅提及 Label 号但无具体信号描述），标记为 needs_review")
         parts.append("- 若能确认 ICD 要求已在 HLR 中落实或不一致，正常判断即可")
-    parts.append(f"- 信号类别: {evidence.get('signal_category', 'N/A')}")
     parts.append(f"- HLR Labels: {evidence.get('hlr_labels', [])}")
     parts.append(f"- 匹配 Block 数: {evidence.get('matched_block_count', 0)}")
 
@@ -358,9 +359,8 @@ def _call_reverse_judge_api(
     ]
 
     for attempt in range(max_retries + 1):
-        temperature = 0.1 if attempt == 0 else 0.1 + attempt * 0.1
         try:
-            response = llm.chat(messages=messages, temperature=temperature)
+            response = llm.chat(messages=messages, temperature=0.1, max_tokens=4096)
             content = _extract_json(response["content"])
             data = json.loads(content)
             return ReverseJudgmentResult(
