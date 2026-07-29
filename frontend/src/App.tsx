@@ -1,28 +1,61 @@
 import { useState, useEffect } from 'react'
-import FileUpload from './components/FileUpload'
+import V4FileUpload from './components/V4FileUpload'
 import ProcessingView from './components/ProcessingView'
-import ResultView from './components/ResultView'
-import { analyzeFiles, getJobStatus, getJobResult } from './api'
-import type { PageState, FileItem, ResultData } from './types'
+import V4ResultView from './components/V4ResultView'
+import {
+  analyzeFilesV4,
+  getJobStatusV4,
+  getJobResultV4,
+  checkV4Health,
+} from './api'
+import type { PageState, FileItem, V4JobResultResponse } from './types'
 
 export default function App() {
   const [pageState, setPageState] = useState<PageState>('upload')
   const [progress, setProgress] = useState('已提交，等待开始')
-  const [resultData, setResultData] = useState<ResultData | null>(null)
+  const [v4ResultData, setV4ResultData] = useState<V4JobResultResponse | null>(null)
   const [isOnline, setIsOnline] = useState(true)
+  const [v4Online, setV4Online] = useState(true)
 
-  // File state
-  const [eoicdWordFile, setEoicdWordFile] = useState<FileItem | null>(null)
-  const [eoicdExcelFiles, setEoicdExcelFiles] = useState<FileItem[]>([])
-  const [swReqFile, setSwReqFile] = useState<FileItem | null>(null)
-  const [selectedPreviewFile, setSelectedPreviewFile] = useState<FileItem | null>(null)
+  // V4 stage progress
+  const [v4Stage, setV4Stage] = useState('')
+  const [v4StageIndex, setV4StageIndex] = useState(0)
+  const [v4StageTotal, setV4StageTotal] = useState(0)
+  const [v4CaseIndex, setV4CaseIndex] = useState(0)
+  const [v4CaseTotal, setV4CaseTotal] = useState(0)
 
-  // Health check
+  // V4 file state
+  const [v4HlrWordFile, setV4HlrWordFile] = useState<FileItem | null>(null)
+  const [v4PublisherFile, setV4PublisherFile] = useState<FileItem | null>(null)
+  const [v4SubscriberFile, setV4SubscriberFile] = useState<FileItem | null>(null)
+  const [v4TraceabilityFiles, setV4TraceabilityFiles] = useState<FileItem[]>([])
+  const [v4SelectedPreviewFile, setV4SelectedPreviewFile] = useState<FileItem | null>(null)
+
+  // Health checks
   useEffect(() => {
     fetch('/api/health')
       .then((r) => r.ok && setIsOnline(true))
       .catch(() => setIsOnline(false))
+    checkV4Health()
+      .then((ok) => setV4Online(ok))
+      .catch(() => setV4Online(false))
   }, [])
+
+  function resetAllState() {
+    setPageState('upload')
+    setProgress('已提交，等待开始')
+    setV4ResultData(null)
+    setV4Stage('')
+    setV4StageIndex(0)
+    setV4StageTotal(0)
+    setV4CaseIndex(0)
+    setV4CaseTotal(0)
+    setV4HlrWordFile(null)
+    setV4PublisherFile(null)
+    setV4SubscriberFile(null)
+    setV4TraceabilityFiles([])
+    setV4SelectedPreviewFile(null)
+  }
 
   // Workflow step classes
   function getStepClass(step: number): string {
@@ -35,49 +68,65 @@ export default function App() {
     return ''
   }
 
-  function handleStart() {
-    if ((!eoicdWordFile && eoicdExcelFiles.length === 0) || !swReqFile) {
-      alert('请至少上传一个 EoICD 文件（Word 或 Excel）和软件高层需求文件')
+  // ===== V4 handlers =====
+  function handleV4Start() {
+    if (!v4HlrWordFile) {
+      alert('请上传 HLR Word 文件')
       return
     }
+    if (!v4PublisherFile && !v4SubscriberFile) {
+      alert('请至少上传 Publisher Excel 或 Subscriber Excel')
+      return
+    }
+
     setPageState('processing')
     setProgress('已提交，等待开始')
+    setV4Stage('')
+    setV4StageIndex(0)
+    setV4StageTotal(0)
+    setV4CaseIndex(0)
+    setV4CaseTotal(0)
 
-    const wordFile = eoicdWordFile?.file || null
-    const excelFiles = eoicdExcelFiles.map((f) => f.file).filter((f): f is File => f !== undefined)
-    const swFile = swReqFile.file!
+    const formData = new FormData()
+    if (v4HlrWordFile.file) formData.append('hlr_word_file', v4HlrWordFile.file)
+    if (v4PublisherFile?.file) formData.append('eoicd_publisher_file', v4PublisherFile.file)
+    if (v4SubscriberFile?.file) formData.append('eoicd_subscriber_file', v4SubscriberFile.file)
 
-    analyzeFiles(wordFile, excelFiles, swFile)
-      .then((res) => {
-        pollStatus(res.job_id)
+    if (v4TraceabilityFiles.length > 0) {
+      v4TraceabilityFiles.forEach((f) => {
+        if (f.file) formData.append('traceability_files', f.file)
       })
+      formData.append('enable_traceability_prefilter', 'true')
+    }
+
+    analyzeFilesV4(formData)
+      .then((res) => pollV4Status(res.job_id))
       .catch((err) => {
         console.error(err)
         setPageState('error')
       })
   }
 
-  function pollStatus(id: string) {
+  function pollV4Status(id: string) {
     const maxRetries = 600
     let retries = 0
 
     const check = async () => {
       try {
-        const status = await getJobStatus(id)
-        if (status.message) {
-          setProgress(status.message)
-        }
+        const status = await getJobStatusV4(id)
+        if (status.message) setProgress(status.message)
+        if (status.stage) setV4Stage(status.stage)
+        if (status.stage_index !== undefined) setV4StageIndex(status.stage_index)
+        if (status.stage_total !== undefined) setV4StageTotal(status.stage_total)
+        if (status.case_index !== undefined) setV4CaseIndex(status.case_index)
+        if (status.case_total !== undefined) setV4CaseTotal(status.case_total)
 
         if (status.status === 'completed') {
           try {
-            const result = await getJobResult(id)
-            setResultData({
-              job_id: id,
-              summary: result.summary,
-              outputs: result.outputs,
-            })
+            const result = await getJobResultV4(id)
+            setV4ResultData(result)
           } catch (e) {
-            console.error('Failed to fetch results:', e)
+            console.error('Failed to fetch V4 results:', e)
           }
           setPageState('success')
         } else if (status.status === 'failed') {
@@ -97,19 +146,15 @@ export default function App() {
         }
       }
     }
-
     check()
   }
 
+  // ===== Shared =====
   function handleNewTask() {
-    setResultData(null)
-    setProgress('已提交，等待开始')
-    setEoicdWordFile(null)
-    setEoicdExcelFiles([])
-    setSwReqFile(null)
-    setSelectedPreviewFile(null)
-    setPageState('upload')
+    resetAllState()
   }
+
+  const v4JobId = v4ResultData?.job_id || ''
 
   return (
     <div className="app">
@@ -123,8 +168,8 @@ export default function App() {
           </div>
         </div>
         <div className="header__status">
-          <div className={`status-dot ${!isOnline ? 'status-dot--offline' : ''}`} />
-          <span>{isOnline ? '在线服务' : '服务离线'}</span>
+          <div className={`status-dot ${(!isOnline || !v4Online) ? 'status-dot--offline' : ''}`} />
+          <span>{!isOnline ? '服务离线' : !v4Online ? 'V4 服务不可用' : '在线服务'}</span>
         </div>
       </header>
 
@@ -148,45 +193,55 @@ export default function App() {
           </div>
         </div>
 
-        {/* Page Content */}
+        {!v4Online && pageState === 'upload' && (
+          <div className="error-state" style={{ marginBottom: 24 }}>
+            <div className="error-icon">🔌</div>
+            <h3 className="error-title">V4 后端服务不可用</h3>
+            <p className="error-message">请确认后端已启动并支持 /api/v4</p>
+          </div>
+        )}
+
         {pageState === 'upload' && (
           <>
-            <FileUpload
-              eoicdWordFile={eoicdWordFile}
-              eoicdExcelFiles={eoicdExcelFiles}
-              swReqFile={swReqFile}
-              selectedPreviewFile={selectedPreviewFile}
-              onEoicdWordChange={(f) => {
-                setEoicdWordFile(f)
-                if (f) setSelectedPreviewFile(f)
+            <V4FileUpload
+              hlrWordFile={v4HlrWordFile}
+              eoicdPublisherFile={v4PublisherFile}
+              eoicdSubscriberFile={v4SubscriberFile}
+              traceabilityFiles={v4TraceabilityFiles}
+              selectedPreviewFile={v4SelectedPreviewFile}
+              onHlrWordChange={(f) => { setV4HlrWordFile(f); if (f) setV4SelectedPreviewFile(f) }}
+              onEoicdPublisherChange={(f) => { setV4PublisherFile(f); if (f) setV4SelectedPreviewFile(f) }}
+              onEoicdSubscriberChange={(f) => { setV4SubscriberFile(f); if (f) setV4SelectedPreviewFile(f) }}
+              onTraceabilityChange={(files) => {
+                setV4TraceabilityFiles(files)
+                if (files.length > 0) setV4SelectedPreviewFile(files[files.length - 1])
               }}
-              onEoicdExcelsChange={(files) => {
-                setEoicdExcelFiles(files)
-              }}
-              onSwReqChange={(f) => {
-                setSwReqFile(f)
-                if (f) setSelectedPreviewFile(f)
-              }}
-              onPreviewSelect={setSelectedPreviewFile}
+              onPreviewSelect={setV4SelectedPreviewFile}
             />
             <div className="action-bar">
-              <button
-                className="btn btn--secondary btn--large"
-                onClick={handleNewTask}
-              >
-                ↻ 清空全部
+              <button className="btn btn--secondary btn--large" onClick={handleNewTask}>
+                清空全部
               </button>
-              <button className="btn btn--primary btn--large" onClick={handleStart}>
-                ▶ 开始处理
+              <button className="btn btn--primary btn--large" onClick={handleV4Start}>
+                开始处理
               </button>
             </div>
           </>
         )}
 
-        {pageState === 'processing' && <ProcessingView progress={progress} />}
+        {pageState === 'processing' && (
+          <ProcessingView
+            progress={progress}
+            stage={v4Stage}
+            stageIndex={v4StageIndex}
+            stageTotal={v4StageTotal}
+            caseIndex={v4CaseIndex}
+            caseTotal={v4CaseTotal}
+          />
+        )}
 
-        {pageState === 'success' && resultData && (
-          <ResultView data={resultData} onNewTask={handleNewTask} />
+        {pageState === 'success' && v4ResultData && (
+          <V4ResultView data={v4ResultData} jobId={v4JobId} onNewTask={handleNewTask} />
         )}
 
         {pageState === 'error' && (
