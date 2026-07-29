@@ -86,8 +86,6 @@ def generate_consensus_report(
             "case_id": cid,
             "hlr_id": mr.get("hlr_id", ""),
             "hlr_content": mr.get("hlr_content", ""),
-            "signal_category": mr.get("signal_category", ""),
-            "match_type": mr.get("match_type", ""),
             "matched_profile_keys": mr.get("matched_profile_keys", []),
             "agreement_level": cr.get("agreement_level", ""),
             "star_rating": cr.get("star_rating", 0),
@@ -108,13 +106,11 @@ def generate_consensus_report(
                 "case_id": f"NOMATCH-{len(no_match_entries) + 1:04d}",
                 "hlr_id": mr.get("hlr_id", ""),
                 "hlr_content": mr.get("hlr_content", ""),
-                "signal_category": mr.get("signal_category", ""),
-                "match_type": "无匹配",
                 "matched_profile_keys": [],
                 "agreement_level": "",
                 "star_rating": 0,
                 "final_coverage_status": "无匹配",
-                "final_analysis": mr.get("summary", "匹配层未找到对应EoICD信号"),
+                "final_analysis": "匹配层未找到对应EoICD信号",
                 "confidence": 0,
                 "model_results": {},
                 "is_no_match": True,
@@ -149,12 +145,6 @@ def generate_consensus_report(
         f"3 个裁判模型（DeepSeek / MiniMax / Qwen）并行独立裁判，",
         f"1 个 Review Agent 综合复核并给出星级评价。",
     ]
-    if match_stats:
-        overview_parts.append(
-            f"匹配结果：{match_stats.get('hlr_已匹配', 0)} 条已匹配、"
-            f"{match_stats.get('hlr_待确定', 0)} 条待确定、"
-            f"{match_stats.get('hlr_无匹配', 0)} 条无匹配。"
-        )
     doc.add_paragraph("".join(overview_parts))
 
     # ── Summary tables ──
@@ -165,35 +155,24 @@ def generate_consensus_report(
     st.style = "Table Grid"
     _style_header_row(st, ["判定结果", "数量"])
 
-    status_labels = {
-        "covered": "已覆盖 (covered)",
-        "partial": "部分覆盖 (partial)",
-        "inconsistent": "不一致 (inconsistent)",
-        "missing": "缺失 (missing)",
-        "needs_review": "需确认 (needs_review)",
-    }
-    for key, label in status_labels.items():
-        count = status_dist.get(key, 0)
+    # AI 裁判结果（仅共识判定）
+    judged_categories = [
+        ("已覆盖", RGBColor(0x00, 0x80, 0x00)),
+        ("不一致", RGBColor(0xCC, 0x33, 0x00)),
+        ("待确认", RGBColor(0xCC, 0x55, 0x00)),
+    ]
+    judged_total = 0
+    for label, color in judged_categories:
+        count = status_dist.get(label, 0)
         if count > 0:
             row = st.add_row()
-            _set_cell_font(row.cells[0], label)
+            _set_cell_font(row.cells[0], label, bold=True, color=color)
             _set_cell_font(row.cells[1], str(count))
-
-    # Pending entries from match
-    pending_uncertain = sum(1 for m in match_results if m.get("match_type") == "待确定")
-    pending_none = sum(1 for m in match_results if m.get("match_type") == "无匹配")
-    if pending_uncertain:
-        row = st.add_row()
-        _set_cell_font(row.cells[0], "待确定 (pending)")
-        _set_cell_font(row.cells[1], str(pending_uncertain), color=RGBColor(0xCC, 0x55, 0x00))
-    if pending_none:
-        row = st.add_row()
-        _set_cell_font(row.cells[0], "无匹配 (no match)")
-        _set_cell_font(row.cells[1], str(pending_none), color=RGBColor(0x99, 0x33, 0xCC))
+            judged_total += count
 
     row = st.add_row()
     _set_cell_font(row.cells[0], "合计", bold=True)
-    _set_cell_font(row.cells[1], str(total_hlr), bold=True)
+    _set_cell_font(row.cells[1], str(judged_total), bold=True)
 
     for row_obj in st.rows:
         row_obj.cells[0].width = Cm(6.0)
@@ -259,19 +238,24 @@ def generate_consensus_report(
     doc.add_paragraph(f"共 {len(merged_all)} 条记录"
                       f"（{judged_count} 条已裁判 + {no_match_count} 条无匹配）")
 
-    headers = ["序号", "HLR ID", "信号类别", "判定", "匹配类型",
-               "ICD Block", "分析摘要", "共识", "星级"]
+    headers = ["序号", "HLR ID", "判定", "ICD Block",
+               "分析摘要", "共识", "星级"]
     table = doc.add_table(rows=1, cols=len(headers))
     table.style = "Table Grid"
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     _style_header_row(table, headers)
 
+    status_labels = {
+        "covered": "已覆盖",
+        "inconsistent": "不一致",
+        "needs_review": "待确认",
+        "无匹配": "无匹配",
+        "待确认": "待确认",
+    }
     status_colors = {
-        "covered": RGBColor(0x00, 0x80, 0x00),
-        "partial": RGBColor(0x00, 0x66, 0xCC),
-        "inconsistent": RGBColor(0xCC, 0x33, 0x00),
-        "missing": RGBColor(0xCC, 0x00, 0x00),
-        "needs_review": RGBColor(0xCC, 0x55, 0x00),
+        "已覆盖": RGBColor(0x00, 0x80, 0x00),
+        "不一致": RGBColor(0xCC, 0x33, 0x00),
+        "待确认": RGBColor(0xCC, 0x55, 0x00),
         "无匹配": RGBColor(0x99, 0x33, 0xCC),
     }
     agreement_colors = {
@@ -287,6 +271,8 @@ def generate_consensus_report(
         stars = m["star_rating"]
         is_nm = m["is_no_match"]
 
+        status_cn = status_labels.get(status, status)
+
         blocks_str = ", ".join(m["matched_profile_keys"][:5]) if m["matched_profile_keys"] else "—"
         if len(m["matched_profile_keys"]) > 5:
             blocks_str += f" ... (+{len(m['matched_profile_keys']) - 5})"
@@ -295,21 +281,19 @@ def generate_consensus_report(
 
         _set_cell_font(row.cells[0], str(i))
         _set_cell_font(row.cells[1], m["hlr_id"])
-        _set_cell_font(row.cells[2], m["signal_category"])
-        _set_cell_font(row.cells[3], status, bold=True, color=status_colors.get(status))
-        _set_cell_font(row.cells[4], m["match_type"])
-        _set_cell_font(row.cells[5], blocks_str, size=7)
-        _set_cell_font(row.cells[6], m["final_analysis"], size=8)
+        _set_cell_font(row.cells[2], status_cn, bold=True, color=status_colors.get(status_cn))
+        _set_cell_font(row.cells[3], blocks_str, size=7)
+        _set_cell_font(row.cells[4], m["final_analysis"], size=8)
         if is_nm:
-            _set_cell_font(row.cells[7], "—")
-            _set_cell_font(row.cells[8], "—")
+            _set_cell_font(row.cells[5], "—")
+            _set_cell_font(row.cells[6], "—")
         else:
-            _set_cell_font(row.cells[7], agreement_label, color=agreement_colors.get(agreement))
-            _set_cell_font(row.cells[8], _star_str(stars), bold=True, size=10,
+            _set_cell_font(row.cells[5], agreement_label, color=agreement_colors.get(agreement))
+            _set_cell_font(row.cells[6], _star_str(stars), bold=True, size=10,
                            color=RGBColor(0xCC, 0x88, 0x00))
 
     # Column widths
-    col_widths = [0.8, 2.5, 1.3, 1.5, 1.3, 5.0, 8.0, 1.5, 1.5]
+    col_widths = [0.8, 2.5, 1.5, 5.5, 9.0, 1.5, 1.5]
     for row_obj in table.rows:
         for i, w in enumerate(col_widths):
             row_obj.cells[i].width = Cm(w)

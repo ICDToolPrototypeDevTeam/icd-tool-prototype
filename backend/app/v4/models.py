@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Pydantic models for EoICD and HLR requirement outputs."""
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import Any
 
@@ -283,6 +285,20 @@ class ReverseCase(BaseModel):
 # ============================================================
 
 
+class AgentJudgment(BaseModel):
+    """单个对比 agent 的输出。替代现有 MultiJudgeResult.judgments 中的裸 dict。"""
+
+    agent_name: str = ""           # "deepseek" | "minimax" | "qwen"
+    coverage_status: str = ""      # covered|partial|missing|inconsistent|needs_review|error
+    difference_type: str = ""
+    missing_points: list[str] = Field(default_factory=list)
+    inconsistent_points: list[str] = Field(default_factory=list)
+    analysis: str = ""
+    suggested_action: str = ""
+    confidence: float = 0.0
+    raw_response: str = ""
+
+
 class MultiJudgeResult(BaseModel):
     """One case judged by multiple providers."""
 
@@ -311,6 +327,8 @@ class ConsensusResult(BaseModel):
     final_coverage_status: str = ""
     final_analysis: str = ""
     confidence: float = 0.0
+    consistent_agents: list[str] = Field(default_factory=list)
+    divergent_agents: list[str] = Field(default_factory=list)
 
 
 class ConsensusOutput(BaseModel):
