@@ -25,7 +25,7 @@ SYSTEM_PROMPT = """你是一个航空/车辆接口控制文档（ICD）的领域
 }
 
 字段说明：
-- bus_types: 从 A429/A664(含AFDX)/A825(含CAN)/Analog(模拟量)/Discrete(离散量) 中选择，可多选。未明确提到总线名称但涉及通信的，根据上下文推断。
+- bus_types: 从 A429, A664, A825, Analog, Discrete 中选择（可多选）。其中 CAN 总线统一归为 A825，AFDX 统一归为 A664，ARINC429 统一归为 A429。未明确提到总线名称但涉及通信的，根据上下文推断后使用上述标准名称。
 - labels: 提取 A429 Label 标识，如 "L32", "L34"。不要编造不存在的 Label。
 - devices: 提取设备/组件/子系统，如 "风扇", "RFAN", "FCM", "ADC"。设备名称保持原文形式，中文原文保留中文，英文保留英文。
 - signal_keywords: 提取信号/参数/数据项关键词语，中英文都可以。如 "速度", "SPEED", "RPM", "温度", "状态"。

@@ -878,6 +878,118 @@ body {
   opacity: 0.4;
 }
 
+/* ========== Stat Cards (V4 result summary) ========== */
+.stat-cards {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-bottom: 20px;
+}
+
+.stat-card {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px 20px;
+  text-align: center;
+  min-width: 90px;
+  flex: 1;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.2s ease;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+}
+
+.stat-card__icon {
+  display: block;
+  margin: 0 auto 6px;
+}
+
+.stat-card__value {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.stat-card__label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+/* ========== Star Distribution Bar ========== */
+.star-section {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px 20px;
+  box-shadow: var(--shadow-sm);
+  margin-bottom: 8px;
+}
+
+.star-section__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.star-section__rating {
+  font-size: 14px;
+}
+
+.star-section__rating strong {
+  color: var(--primary);
+  font-size: 18px;
+}
+
+.star-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.star-bar__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.star-bar__label {
+  font-size: 13px;
+  color: var(--warning);
+  min-width: 50px;
+  letter-spacing: 2px;
+}
+
+.star-bar__track {
+  flex: 1;
+  height: 10px;
+  background: #e5e7eb;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.star-bar__fill {
+  height: 100%;
+  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+  border-radius: 5px;
+  transition: width 0.5s ease;
+  min-width: 4px;
+}
+
+.star-bar__count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 24px;
+  text-align: right;
+}
+
 /* ========== Responsive ========== */
 @media (max-width: 900px) {
   .header {
@@ -909,4 +1021,45 @@ body {
   .downloads-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* ========== Version Tabs ========== */
+.version-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 24px;
+  background: white;
+  border-radius: var(--radius-md);
+  padding: 4px;
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border);
+}
+
+.version-tab {
+  flex: 1;
+  padding: 12px 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: calc(var(--radius-md) - 4px);
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+.version-tab:hover {
+  color: var(--primary);
+  background: rgba(0, 102, 204, 0.04);
+}
+
+.version-tab--active {
+  background: var(--primary);
+  color: white;
+}
+
+.version-tab--active:hover {
+  background: var(--primary-dark);
+  color: white;
 }

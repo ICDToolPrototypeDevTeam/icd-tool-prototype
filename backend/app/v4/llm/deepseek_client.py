@@ -24,7 +24,7 @@ class DeepSeekClient:
         self,
         messages: list[dict],
         temperature: float = 0.1,
-        max_tokens: int = 1024,
+        max_tokens: int = 4096,
         timeout: int = 60,
         max_retries: int = 2,
     ) -> ChatResponse:
@@ -60,6 +60,14 @@ class DeepSeekClient:
                 body = resp.json()
                 content = body["choices"][0]["message"]["content"]
                 usage = body.get("usage", {})
+                finish_reason = body["choices"][0].get("finish_reason", "")
+                if finish_reason == "length":
+                    import sys
+                    print(
+                        f"  [deepseek] WARNING: response truncated (finish_reason=length, "
+                        f"completion_tokens={usage.get('completion_tokens', '?')})",
+                        file=sys.stderr,
+                    )
                 return ChatResponse(content=content, usage=usage)
             except requests.RequestException as e:
                 last_error = e
