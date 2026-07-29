@@ -333,9 +333,9 @@ def run_reverse_pipeline(
 
     # Step 1: Parse
     print("=" * 50)
-    print("Step 1/3: Parsing input files")
+    print("Step 1/6: Parsing input files")
     print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 1/3: Parsing input files")
+    job.update(JobStatus.RUNNING, "Step 1/6: Parsing input files")
 
     if eoicd_json and eoicd_json.exists():
         import json
@@ -360,24 +360,24 @@ def run_reverse_pipeline(
     eoicd_json_path = output_dir / "eoicd_requirements.json"
     generate_eoicd_excel(eoicd_json_path, output_dir / "EoICD条目化清单.xlsx")
 
-    # Step 1.5: HLR labeling
+    # Step 2: HLR labeling
     print()
     print("=" * 50)
-    print("Step 1.5/3: HLR AI labeling")
+    print("Step 2/6: HLR AI labeling")
     print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 1.5/3: HLR AI labeling")
+    job.update(JobStatus.RUNNING, "Step 2/6: HLR AI labeling")
     labels_cache = output_dir / "hlr_labels.json"
     hlr_labels = label_hlrs(hlr_out.requirements, cache_path=labels_cache)
     hlr_labels = enrich_all_labels(hlr_out.requirements, hlr_labels)
     print(f"  HLRs labeled: {len(hlr_labels)}")
 
-    # Step 2: Reverse match
+    # Step 3: Reverse match
     print()
     print("=" * 50)
     if trace_dir:
-        print(f"Step 2/4: Traceability-filtered reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")
+        print(f"Step 3/6: Traceability-filtered reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")
         print("=" * 50)
-        job.update(JobStatus.RUNNING, "Step 2/4: Traceability-filtered reverse matching")
+        job.update(JobStatus.RUNNING, "Step 3/6: Traceability-filtered reverse matching")
         match_result = _match_reverse_with_trace(
             hlr_out.requirements,
             hlr_labels,
@@ -385,9 +385,9 @@ def run_reverse_pipeline(
             trace_dir,
         )
     else:
-        print(f"Step 2/3: Reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")
+        print(f"Step 3/6: Reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")
         print("=" * 50)
-        job.update(JobStatus.RUNNING, "Step 2/3: Reverse matching")
+        job.update(JobStatus.RUNNING, "Step 3/6: Reverse matching")
         match_result = match_reverse(
             hlr_out.requirements,
             hlr_labels,
@@ -409,12 +409,12 @@ def run_reverse_pipeline(
 
     cases = build_reverse_cases(match_result, block_index)
 
-    # Step 3: Multi-agent judging
+    # Step 4: Multi-agent judging
     print()
     print("=" * 50)
-    print(f"Step 3/5: Multi-agent judging ({len(cases)} cases, providers={JUDGE_PROVIDERS})")
+    print(f"Step 4/6: Multi-agent judging ({len(cases)} cases, providers={JUDGE_PROVIDERS})")
     print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 3/5: Multi-agent judging")
+    job.update(JobStatus.RUNNING, "Step 4/6: Multi-agent judging")
     multi_out = judge_with_panel(cases, providers=JUDGE_PROVIDERS)
     multi_path = output_dir / "multi_judge_results.json"
     multi_path.write_text(
@@ -423,12 +423,12 @@ def run_reverse_pipeline(
     )
     print(f"  Output: {multi_path}")
 
-    # Step 4: Review agent consensus
+    # Step 5: Review agent consensus
     print()
     print("=" * 50)
-    print(f"Step 4/5: Review agent consensus ({len(multi_out.results)} cases)")
+    print(f"Step 5/6: Review agent consensus ({len(multi_out.results)} cases)")
     print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 4/5: Review agent consensus")
+    job.update(JobStatus.RUNNING, "Step 5/6: Review agent consensus")
     consensus_out = review_judgments(multi_out.results)
     consensus_path = output_dir / "consensus_results.json"
     consensus_path.write_text(
@@ -438,12 +438,12 @@ def run_reverse_pipeline(
     print(f"  Output: {consensus_path}")
     print(f"  Summary: {consensus_out.summary}")
 
-    # Step 5: Report
+    # Step 6: Report
     print()
     print("=" * 50)
-    print("Step 5/5: Generating report")
+    print("Step 6/6: Generating report")
     print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 5/5: Generating report")
+    job.update(JobStatus.RUNNING, "Step 6/6: Generating report")
     report = generate_consensus_reverse_report(
         consensus_out,
         match_output=match_result,

@@ -44,6 +44,7 @@ backend/app/output/*
 # Superpowers / local process memory
 
 .remember/
+docs/superpowers/
 
 # Local test documents and skill references
 
@@ -65,3 +66,8 @@ Thumbs.db
 # Test input folder
 
 test-input/
+input_doc_file/
+
+# Issue draft files
+
+issues_file/

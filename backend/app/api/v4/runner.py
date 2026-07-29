@@ -46,13 +46,13 @@ MOCK_ONLY_PROVIDERS = {"minimax", "qwen"}
 def _parse_progress(message: Optional[str]) -> dict:
     """从 pipeline 写到 job.message 的字符串中解析 stage / case index。
 
-    V4 pipeline.py 输出格式（已 grep 验证）：
-      - "Step 1/3: Parsing input files"
-      - "Step 1.5/3: HLR AI labeling"
-      - "Step 2/3: Reverse matching (16 HLR → 122674 EoICD)"
-      - "Step 3/5: Multi-agent judging (13 cases, providers=['deepseek', 'minimax', 'qwen'])"
-      - "Step 4/5: Review agent consensus (13 cases)"
-      - "Step 5/5: Generating report"
+    V4 pipeline.py 输出格式（统一 6 步）：
+      - "Step 1/6: Parsing input files"
+      - "Step 2/6: HLR AI labeling"
+      - "Step 3/6: Reverse matching ..."
+      - "Step 4/6: Multi-agent judging ..."
+      - "Step 5/6: Review agent consensus ..."
+      - "Step 6/6: Generating report"
     """
     out = {"stage": "", "stage_index": None, "stage_total": None, "case_index": None, "case_total": None}
     if not message:
@@ -61,17 +61,18 @@ def _parse_progress(message: Optional[str]) -> dict:
     if m:
         out["stage_index"] = int(float(m.group(1)))
         out["stage_total"] = int(m.group(2))
-        if out["stage_index"] == 1 and "1.5" in message:
-            out["stage"] = "label"
-        elif out["stage_index"] == 1:
+        si = out["stage_index"]
+        if si == 1:
             out["stage"] = "parse"
-        elif out["stage_index"] == 2:
+        elif si == 2:
+            out["stage"] = "label"
+        elif si == 3:
             out["stage"] = "match"
-        elif out["stage_index"] == 3:
+        elif si == 4:
             out["stage"] = "multi_judge"
-        elif out["stage_index"] == 4:
+        elif si == 5:
             out["stage"] = "review"
-        elif out["stage_index"] == 5:
+        elif si == 6:
             out["stage"] = "report"
     m2 = re.search(r"\((\d+)\s*cases", message)
     if m2:
@@ -193,7 +194,7 @@ def run_v4_pipeline_thread(
         if use_mock_llm is not None:
             os.environ["USE_MOCK_LLM"] = "1" if use_mock_llm else "0"
 
-        job.update(JobStatus.RUNNING, "Step 1/3: Parsing input files")
+        job.update(JobStatus.RUNNING, "Step 1/6: Parsing input files")
 
         # 调 V4 in-process 流水线
         result = run_reverse_pipeline(
@@ -215,20 +216,15 @@ def run_v4_pipeline_thread(
 
         # 拼装 job.result（仅在 V4 路由读；不进 V3 schema）
         job.result = {
-            # V3 兼容字段（值为 0/空，V4 不计算；保留 key 防止 V3 路由读到缺失）
+            # V3 兼容字段
             "requirement_count": counts.get("hlr_count", 0),
             "difference_count": 0,
             # V4 输出（5 类对外）
             **outputs,
             "eoicd_count": counts.get("eoicd_count", 0),
             "hlr_count": counts.get("hlr_count", 0),
-            "matched_count": match_stats["matched_count"],
             "pending_count": match_stats["pending_count"],
             "unmatched_count": match_stats["unmatched_count"],
-            "eoicd_blocks_total": match_stats["eoicd_blocks_total"],
-            "eoicd_blocks_matched": match_stats["eoicd_blocks_matched"],
-            "judged_count": sum(int(v) for v in consensus.get("status_distribution", {}).values()),
-            "agreement_distribution": consensus["agreement_distribution"],
             "star_distribution": consensus["star_distribution"],
             "status_distribution": consensus["status_distribution"],
             "average_star_rating": consensus["average_star_rating"],
