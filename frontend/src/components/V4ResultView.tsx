@@ -104,9 +104,10 @@ function PreviewCard({
 }
 
 const STATUS_META: Record<string, { label: string; color: string; Icon: React.ComponentType<{ size?: number }> }> = {
-  covered: { label: '已覆盖', color: '#2e7d32', Icon: CircleCheck },
-  inconsistent: { label: '不一致', color: '#c62828', Icon: CircleX },
-  needs_review: { label: '待确认', color: '#e65100', Icon: CircleHelp },
+  "已覆盖": { label: '已覆盖', color: '#2e7d32', Icon: CircleCheck },
+  "不一致": { label: '不一致', color: '#c62828', Icon: CircleX },
+  "待确认": { label: '待确认', color: '#e65100', Icon: CircleHelp },
+  "无匹配": { label: '无匹配', color: '#6a1b9a', Icon: CircleDashed },
 }
 
 function StarBar({ dist }: { dist: Record<string, number> }) {
@@ -144,7 +145,6 @@ export default function V4ResultView({ data, jobId, onNewTask }: Props) {
       Icon: meta.Icon,
       color: meta.color,
     })),
-    { label: '无匹配', value: String(s.unmatched_count), Icon: CircleDashed, color: '#6a1b9a' },
   ]
 
   return (

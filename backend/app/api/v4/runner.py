@@ -226,7 +226,7 @@ def run_v4_pipeline_thread(
             "pending_count": match_stats["pending_count"],
             "unmatched_count": match_stats["unmatched_count"],
             "star_distribution": consensus["star_distribution"],
-            "status_distribution": consensus["status_distribution"],
+            "status_distribution": {**consensus["status_distribution"], "无匹配": match_stats["unmatched_count"]},
             "average_star_rating": consensus["average_star_rating"],
             "mock_models": mock_models,
             "errors": [],

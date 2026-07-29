@@ -161,18 +161,25 @@ def generate_consensus_report(
         ("不一致", RGBColor(0xCC, 0x33, 0x00)),
         ("待确认", RGBColor(0xCC, 0x55, 0x00)),
     ]
-    judged_total = 0
+    judge_total = 0
     for label, color in judged_categories:
         count = status_dist.get(label, 0)
         if count > 0:
             row = st.add_row()
             _set_cell_font(row.cells[0], label, bold=True, color=color)
             _set_cell_font(row.cells[1], str(count))
-            judged_total += count
+            judge_total += count
+
+    # 无匹配（来自匹配层统计）
+    unmatched = match_stats.get("hlr_无匹配", 0)
+    if unmatched > 0:
+        row = st.add_row()
+        _set_cell_font(row.cells[0], "无匹配", bold=True, color=RGBColor(0x99, 0x33, 0xCC))
+        _set_cell_font(row.cells[1], str(unmatched))
 
     row = st.add_row()
     _set_cell_font(row.cells[0], "合计", bold=True)
-    _set_cell_font(row.cells[1], str(judged_total), bold=True)
+    _set_cell_font(row.cells[1], str(judge_total + unmatched), bold=True)
 
     for row_obj in st.rows:
         row_obj.cells[0].width = Cm(6.0)
