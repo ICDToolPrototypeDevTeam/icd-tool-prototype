@@ -108,7 +108,7 @@ export default function App() {
   }
 
   function pollV4Status(id: string) {
-    const maxRetries = 600
+    const maxRetries = 120
     let retries = 0
 
     const check = async () => {
@@ -133,14 +133,14 @@ export default function App() {
           setPageState('error')
         } else if (retries < maxRetries) {
           retries++
-          setTimeout(check, 2000)
+          setTimeout(check, 10000)
         } else {
           setPageState('error')
         }
       } catch {
         if (retries < maxRetries) {
           retries++
-          setTimeout(check, 2000)
+          setTimeout(check, 10000)
         } else {
           setPageState('error')
         }
