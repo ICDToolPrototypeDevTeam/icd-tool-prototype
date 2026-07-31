@@ -257,41 +257,36 @@ backend/app/
     └── synonyms.yaml       # 别名映射
 ```
 
-### 12.3 V4 业务流程（8 步反向管线）
+### 12.3 V4 业务流程（6 步反向管线）
 
 ```text
-1. 解析（与正向共享）
+1. 解析输入
    EoICD PubSub Excel + HLR Word → 结构化需求列表
-   CLI: parse-eoicd, parse-hlr
+   模块: parsers/{eoicd_excel_parser,hlr_word_parser}.py
 
-2. 条目过滤
-   排除协议 DataFormatType 条目
-   模块: matching/entry_filter.py
+2. HLR AI 标注
+   DeepSeek 对每条 HLR 标注 bus_types / labels / devices / signal_keywords
+   模块: matching/hlr_labeler.py
 
-3. 信号画像聚类
-   按 (Label, LeafName) 聚类 EoICD 条目 → SignalProfile
-   模块: matching/signal_profiler.py → build_profiles()
+3. 反向匹配（含条目过滤→信号画像→Block 聚合→HLR 分类→匹配→可选追溯预筛选+兜底）
+   3a. 条目过滤: 排除协议 DataFormatType 条目 — matching/entry_filter.py
+   3b. 信号画像聚类: 按 (Label, LeafName) 聚类 → SignalProfile — matching/signal_profiler.py
+   3c. ICD Block 聚合: 按 (label, signal_family) 分组 → ICDBlock
+   3d. HLR 分类: 4 路正则分类 + 提取 Label/位字段/SDI/方向 — matching/hlr_classifier.py
+   3e. 两阶段 Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三层过滤 → 三级分层）— matching/reverse_matcher.py
+   3f. 可选追溯表预筛选 + 兜底机制 — matching/traceability.py
 
-4. ICD Block 聚合
-   按 (label, signal_family) 分组 → ICDBlock
-   模块: matching/signal_profiler.py → build_blocks()
+4. 多智能体裁判
+   3 Agent 平行裁判（DeepSeek/MiniMax/Qwen）
+   模块: comparison/{multi_judge,semantic_judge}.py
+   LLM 抽象: llm/factory.py → get_llm(provider)
 
-5. HLR 分类
-   4 路正则分类 + 提取 Label/位字段/SDI/方向
-   模块: matching/hlr_classifier.py
+5. Review Agent 共识
+   综合复核 + 星级评价（1-3★）
+   模块: comparison/review_agent.py
 
-6. 反向匹配
-   两阶段 Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三层过滤 → 三级分层）
-   模块: matching/reverse_matcher.py
-   可选: matching/traceability.py（追溯表预筛选）
-
-7. 多智能体裁判 + Review Agent 共识
-   3 Agent 平行裁判（DeepSeek/MiniMax/Qwen）→ Review Agent 共识（星级 1-3 + agreement_level）
-   模块: comparison/{multi_judge,review_agent}.py + comparison/semantic_judge.py
-   API 抽象: llm/factory.py → get_llm(provider)
-
-8. 报告生成
-   JSON 汇总报告 + 1 份 xlsx + 3 份单模型 docx + 1 份共识 docx
+6. 报告生成
+   1 份 xlsx + 3 份单模型 docx + 1 份共识 docx
    模块: doc_generators/{excel_generator,word_generator,consensus_word_generator}.py
    + comparison/report_generator.py
 ```
@@ -315,11 +310,11 @@ backend/app/
     ├── EoICD与SWHLR多模型差异分析报告.docx         # 对外 (URL: .../consensus-docx)
     ├── eoicd_requirements.json          # 内部
     ├── hlr_requirements.json            # 内部
-    ├── hlr_labels.json                  # 内部（Step 1.5 输出）
-    ├── reverse_matches.json             # 内部（Step 2 输出）
-    ├── multi_judge_results.json         # 内部（Step 3 输出；mock_models 也从此文件提取）
-    ├── consensus_results.json           # 内部（Step 4 输出）
-    └── reverse_report.json              # 内部（Step 5 输出）
+    ├── hlr_labels.json                  # 内部（Step 2 输出）
+    ├── reverse_matches.json             # 内部（Step 3 输出）
+    ├── multi_judge_results.json         # 内部（Step 4 输出；mock_models 也从此文件提取）
+    ├── consensus_results.json           # 内部（Step 5 输出）
+    └── reverse_report.json              # 内部（Step 6 输出）
 ```
 
 5 类对外下载对应 `V4_OUTPUT_FILES` 常量（`backend/app/api/v4/runner.py`），是 SSoT。7 个 JSON 中间产物按 ADR-001 D7 不作为下载 API 暴露。
@@ -352,12 +347,19 @@ llm/factory.py
   get_llm(provider: str) -> LLMClient
     if USE_MOCK_LLM=1: return MockLLMClient
     if provider == "deepseek": return DeepSeekClient(api_key, base_url, model)
-    if provider in ("minimax", "qwen"): return MockLLMClient  (Phase 2-3 占位)
+    if provider == "qwen": return QwenClient(api_key, base_url, model)
+    if provider == "minimax": return MiniMaxClient(api_key, base_url, model)
 
 llm/deepseek_client.py
-  DeepSeekClient.chat(messages, temperature, max_tokens, max_retries=2, ...)
+  DeepSeekClient.chat(messages, temperature, max_tokens=1024, max_retries=2, ...)
     幂等 URL:  base = base_url.rstrip('/'); if base.endswith('/v1'): base = base[:-3]
     url = f"{base}/v1/chat/completions"
+
+llm/qwen_client.py
+  QwenClient.chat(messages, temperature, max_tokens=1024, max_retries=2, ...)
+
+llm/minimax_client.py
+  MiniMaxClient.chat(messages, temperature, max_tokens=1024, max_retries=2, ...)
 
 llm/mock_llm.py
   MockLLMClient.chat(messages, ...) -> ChatResponse

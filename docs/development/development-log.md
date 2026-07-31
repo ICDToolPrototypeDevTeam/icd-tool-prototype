@@ -660,3 +660,77 @@
 - 参数校验：consistency/openai → 400；judge_providers=claude → 422。
 - JSON 不暴露：multi-judge-json / reverse-report-json → 404。
 - 5 文件 + trace 预筛选走通：1 HLR 1/16 拿到真 `bus=['Analog'] devices=['光耦传感器']`；11 blocks_matched；5 类 docx + 7 类中间 JSON 全部落盘。
+
+---
+
+## 2026-07-31 Issue #43：追溯表预筛选兜底机制与协议开销字段过滤
+
+### 任务目标
+
+为 V4 反向匹配管线的追溯表预筛选能力增加兜底机制和索引质量优化，解决预筛选因追溯表数据覆盖不全导致的可匹配 HLR 被漏判问题。
+
+### 完成内容
+
+1. **协议开销字段过滤**：`trace_parser.py` 新增 `_PROTOCOL_BLOCKKEY_SUFFIXES` 常量（`/SDI`、`/LABEL`、`/PARITY`、`/SSM`、`/OCTLBL`），在 `build_trace_index()` 中过滤以协议开销后缀结尾的 block_key。
+2. **预筛选失败兜底机制**：`pipeline.py` `_match_reverse_with_trace()` 中，Group A 预筛选后对"无匹配"HLR 触发全量 EoICD 匹配兜底，新增 `_count_match_types()` 辅助函数统计兜底前后匹配类型分布。
+3. **前端轮询间隔调整**：`App.tsx` V4 任务轮询从 2 秒调整为 10 秒，最大轮询次数从 600 降为 120 次（总超时约 20 分钟不变）。
+
+### 修改文件
+
+1. `backend/app/v4/matching/traceability/trace_parser.py`（协议开销过滤）
+2. `backend/app/v4/pipeline.py`（兜底机制 + `_count_match_types`）
+3. `frontend/src/App.tsx`（轮询间隔调整）
+
+### 验证方式
+
+1. 上传包含追溯表的 V4 任务，观察后端日志无 `Prefilter fallback` 误触发
+2. 确认 `/SDI`、`/LABEL` 等协议开销 block_key 不出现在追溯索引有效候选列表中
+3. 前端 V4 轮询间隔为 10 秒，进度更新正常
+
+### 验证结果
+
+已验证通过。
+
+### 遗留问题
+
+无。
+
+### 下一步建议
+
+无。
+
+---
+
+## 2026-07-31 Issue #44：共识报告模板增加不一致属性栏输出
+
+### 任务目标
+
+在 V4 共识报告（多模型差异分析报告）的明细表中增加"不一致属性"栏，列出各模型在字段级别的具体差异内容，提升报告可读性。
+
+### 完成内容
+
+1. **不一致属性栏输出**：`consensus_word_generator.py` 明细表从 7 列扩展为 8 列，新增"不一致属性"列，汇总展示各模型在同一 case 上判定不一致的具体属性字段。
+2. **明细表按覆盖状态分组**：输出表格按覆盖状态（covered / needs_review / inconsistent / 无匹配）分组排列，各组内部保持原有排序逻辑。
+3. **无匹配行补全**：此前共识报告明细表缺少"无匹配"HLR 行，现已补全并归入独立分组。
+
+### 修改文件
+
+1. `backend/app/v4/doc_generators/consensus_word_generator.py`（不一致属性栏 + 分组 + 无匹配行）
+
+### 验证方式
+
+1. 运行 V4 管线，打开生成的共识报告 docx，确认明细表为 8 列
+2. 确认不同覆盖状态行分组清晰，无匹配 HLR 行完整输出
+3. 不一致属性栏在有分歧的 case 上正确列出具体差异字段
+
+### 验证结果
+
+已验证通过。
+
+### 遗留问题
+
+无。
+
+### 下一步建议
+
+无。

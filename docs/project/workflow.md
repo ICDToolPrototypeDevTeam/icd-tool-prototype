@@ -149,43 +149,37 @@ Python 硬规则评分用于检查结果的基本完整性、结构一致性、�
 
 本节追加于原 10 节之后。V3 旧流程（§1-§10）保持不变；V4 是与 V3 并存的新主流程之一。
 
-### 11.1 V4 总体流程（8 步）
+### 11.1 V4 总体流程（6 步）
 
 ```text
 用户上传 HLR Word + EoICD PubSub Excel (Publisher 或 Subscriber 至少一个) + 可选追溯 Excel
     ↓
 Step 1: 解析输入
     HLR Word + EoICD PubSub Excel → 结构化需求列表
-    CLI: parse-eoicd, parse-hlr
+    模块: parsers/{eoicd_excel_parser,hlr_word_parser}.py
 
-Step 2: 条目过滤
-    排除协议 DataFormatType 条目
-    模块: matching/entry_filter.py
+Step 2: HLR AI 标注
+    DeepSeek 对每条 HLR 标注 bus_types / labels / devices / signal_keywords
+    模块: matching/hlr_labeler.py
 
-Step 3: 信号画像聚类
-    按 (Label, LeafName) 聚类 EoICD 条目 → SignalProfile
-    模块: matching/signal_profiler.py → build_profiles()
+Step 3: 反向匹配（含条目过滤→信号画像→Block 聚合→HLR 分类→匹配→可选追溯预筛选）
+    3a: 条目过滤（排除协议 DataFormatType 条目）— matching/entry_filter.py
+    3b: 信号画像聚类（按 (Label, LeafName) 聚类 → SignalProfile）— matching/signal_profiler.py
+    3c: ICD Block 聚合（按 (label, signal_family) 分组 → ICDBlock）
+    3d: HLR 分类（4 路正则分类 + 提取 Label/位字段/SDI/方向）— matching/hlr_classifier.py
+    3e: 两阶段 Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三层过滤 → 三级分层）— matching/reverse_matcher.py
+    3f: 可选追溯表预筛选 + 兜底机制 — matching/traceability.py
 
-Step 4: ICD Block 聚合
-    按 (label, signal_family) 分组 → ICDBlock
-    模块: matching/signal_profiler.py → build_blocks()
-
-Step 5: HLR 分类
-    4 路正则分类 + 提取 Label/位字段/SDI/方向
-    模块: matching/hlr_classifier.py
-
-Step 6: 反向匹配（可选追溯预筛选）
-    6a:（可选）matching/traceability.py 预筛 HLR→ICD BlockKey 索引
-    6b: 两阶段 Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三层过滤 → 三级分层）
-    模块: matching/reverse_matcher.py
-    可选: matching/traceability.py（追溯表预筛选）
-
-Step 7: 多智能体裁判 + Review Agent 共识
-    3 Agent 平行裁判（DeepSeek/MiniMax/Qwen）→ Review Agent 共识（星级 1-3 + agreement_level）
-    模块: comparison/{multi_judge,review_agent,semantic_judge}.py
+Step 4: 多智能体裁判
+    DeepSeek / MiniMax / Qwen 三模型并行独立判定
+    模块: comparison/{multi_judge,semantic_judge}.py
     LLM 抽象: llm/factory.py → get_llm(provider)
 
-Step 8: 报告生成
+Step 5: Review Agent 共识
+    对三模型判定结果综合复核并给出星级评价（1-3★）
+    模块: comparison/review_agent.py
+
+Step 6: 报告生成
     1 份 xlsx + 3 份单模型 docx + 1 份共识 docx
     模块: doc_generators/{excel_generator,word_generator,consensus_word_generator}.py
     + comparison/report_generator.py
@@ -210,14 +204,11 @@ Step 8: 报告生成
 | Step | 输入 | 输出 | 模块 |
 | --- | --- | --- | --- |
 | 1 解析输入 | `hlr.docx` + `pub.xlsx` / `sub.xlsx` | `hlr_requirements.json` (16 reqs) + `eoicd_requirements.json` (122674 条目) | parsers/ |
-| 1.5 HLR AI 标注 | `hlr_requirements.json` (16 HLRs) | `hlr_labels.json` (16 标签) | matching/hlr_labeler.py |
-| 2 信号画像聚类 | `eoicd_requirements.json` | `profiles.json` (SignalProfile 列表) | matching/signal_profiler.py |
-| 3 ICD Block 聚合 | `profiles.json` | `reverse_matches.json` (1568 Block) | matching/signal_profiler.py + reverse_case_builder |
-| 4 HLR 分类 | `hlr_requirements.json` + `hlr_labels.json` | `reverse_matches.json` (含分类标记) | matching/hlr_classifier.py |
-| 5 反向匹配 | `reverse_matches.json` | `reverse_matches.json` (含分层层级) | matching/reverse_matcher.py |
-| 6 多智能体裁判 | `reverse_matches.json` + 3 LLM | `multi_judge_results.json` (12 cases × 3 providers) | comparison/{multi_judge,semantic_judge}.py |
-| 7 Review 共识 | `multi_judge_results.json` | `consensus_results.json` (12 cases, agreement + star_rating) | comparison/review_agent.py |
-| 8 报告生成 | `consensus_results.json` + `reverse_matches.json` | 1 xlsx + 4 docx + 7 JSON | doc_generators/* + comparison/report_generator.py |
+| 2 HLR AI 标注 | `hlr_requirements.json` (16 HLRs) | `hlr_labels.json` (16 标签) | matching/hlr_labeler.py |
+| 3 反向匹配 | `eoicd_requirements.json` + `hlr_labels.json` | `reverse_matches.json` (1568 Block, 含分层层级、HLR 分类标记) | matching/{entry_filter,signal_profiler,reverse_case_builder,hlr_classifier,reverse_matcher,traceability}.py |
+| 4 多智能体裁判 | `reverse_matches.json` + 3 LLM | `multi_judge_results.json` (12 cases × 3 providers) | comparison/{multi_judge,semantic_judge}.py |
+| 5 Review 共识 | `multi_judge_results.json` | `consensus_results.json` (12 cases, agreement + star_rating) | comparison/review_agent.py |
+| 6 报告生成 | `consensus_results.json` + `reverse_matches.json` | 1 xlsx + 4 docx + 7 JSON | doc_generators/* + comparison/report_generator.py |
 
 ### 11.4 V4 关键约束
 
@@ -233,11 +224,11 @@ Step 8: 报告生成
 | 阶段 | 异常类型 | 失败后果 | 用户可观察 |
 | --- | --- | --- | --- |
 | Step 1 解析 | `parser` 抛异常 | `job.status = failed` | `/api/v4/jobs/{id}/result` 返 409，`message` 含异常摘要 |
-| Step 1.5 HLR 标注 | DeepSeek API 错误 / 解析失败 | label 退化为空 + `errors: [...]` 累计 | `/api/v4/jobs/{id}/result.errors` 数组；UI 标注 `部分 HLR 标签缺失` |
-| Step 5 反向匹配 | 反向匹配抛异常 | `job.status = failed` | 同 Step 1 |
-| Step 6 多智能体 | 3 provider 全失败 | `consensus_results.json` 中 `agreement_distribution = {"all_failed": N}` | `/result.summary.status_distribution` 全 `failed` |
-| Step 7 Review 共识 | Review 失败 | `consensus_results.json` 中 `summary: {"all_failed": true}` | `mock_models` 仅含失败 provider |
-| Step 8 报告生成 | docx 写盘失败 | `outputs.<key>` 某项为 false | `/result.outputs` 部分 false |
+| Step 2 HLR 标注 | DeepSeek API 错误 / 解析失败 | label 退化为空 + `errors: [...]` 累计 | `/api/v4/jobs/{id}/result.errors` 数组；UI 标注 `部分 HLR 标签缺失` |
+| Step 3 反向匹配 | 反向匹配抛异常 | `job.status = failed` | 同 Step 1 |
+| Step 4 多智能体 | 3 provider 全失败 | `consensus_results.json` 中全失败标记 | `/result.summary.status_distribution` 全 `failed` |
+| Step 5 Review 共识 | Review 失败 | `consensus_results.json` 中 `summary: {"all_failed": true}` | `mock_models` 仅含失败 provider |
+| Step 6 报告生成 | docx 写盘失败 | `outputs.<key>` 某项为 false | `/result.outputs` 部分 false |
 
 ### 11.6 V4 流程变更原则
 

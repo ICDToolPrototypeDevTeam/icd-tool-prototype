@@ -383,7 +383,7 @@ GET /api/v4/jobs/{job_id}/result
     "judged_count": 12,
     "agreement_distribution": {"majority": 7, "full": 4, "split": 1},
     "star_distribution": {"1": 1, "2": 7, "3": 4},
-    "status_distribution": {"covered": 7, "needs_review": 4, "inconsistent": 1},
+    "status_distribution": {"covered": 7, "needs_review": 4, "inconsistent": 1, "无匹配": 4},
     "average_star_rating": 2.25
   },
   "outputs": {
