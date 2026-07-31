@@ -23,10 +23,10 @@ from app.v4.pipeline import run_reverse_pipeline
 # V4 输出文件路径常量（与 V4 pipeline.py 输出一致；ADR-001 §6）
 V4_OUTPUT_FILES = {
     "eoicd_xlsx": "EoICD条目化清单.xlsx",
-    "consistency_deepseek_docx": "EoICD与HLR一致性分析报告_DeepSeek.docx",
-    "consistency_minimax_docx": "EoICD与HLR一致性分析报告_MiniMax.docx",
-    "consistency_qwen_docx": "EoICD与HLR一致性分析报告_Qwen.docx",
-    "consensus_docx": "EoICD与HLR多模型共识分析报告.docx",
+    "consistency_deepseek_docx": "EoICD与SWHLR单模型差异分析报告_DeepSeek.docx",
+    "consistency_minimax_docx": "EoICD与SWHLR单模型差异分析报告_MiniMax.docx",
+    "consistency_qwen_docx": "EoICD与SWHLR单模型差异分析报告_Qwen.docx",
+    "consensus_docx": "EoICD与SWHLR多模型差异分析报告.docx",
 }
 
 # V4 内部使用的 JSON 中间产物；D7 不作为下载 API 暴露
@@ -100,7 +100,7 @@ def derive_mock_models(output_dir: Path) -> list[str]:
 
 def derive_consensus_summary(output_dir: Path) -> dict:
     """反读 consensus_results.json 提取 agreement / star / status 分布。"""
-    out = {"agreement_distribution": {}, "star_distribution": {}, "status_distribution": {}, "average_star_rating": 0.0}
+    out = {"agreement_distribution": {}, "star_distribution": {}, "status_distribution": {}, "average_star_rating": 0.0, "judged_count": 0}
     path = output_dir / V4_INTERMEDIATE_JSON["consensus"]
     if not path.exists():
         return out
@@ -111,6 +111,7 @@ def derive_consensus_summary(output_dir: Path) -> dict:
         out["star_distribution"] = summary.get("star_distribution", {}) or {}
         out["status_distribution"] = summary.get("status_distribution", {}) or {}
         out["average_star_rating"] = float(summary.get("average_star_rating", 0.0) or 0.0)
+        out["judged_count"] = int(summary.get("total", 0) or 0)
     except Exception:
         pass
     return out
@@ -222,9 +223,13 @@ def run_v4_pipeline_thread(
             # V4 输出（5 类对外）
             **outputs,
             "eoicd_count": counts.get("eoicd_count", 0),
+            "eoicd_blocks_total": match_stats["eoicd_blocks_total"],
+            "eoicd_blocks_matched": match_stats["eoicd_blocks_matched"],
             "hlr_count": counts.get("hlr_count", 0),
+            "matched_count": match_stats["matched_count"],
             "pending_count": match_stats["pending_count"],
             "unmatched_count": match_stats["unmatched_count"],
+            "judged_count": consensus["judged_count"],
             "star_distribution": consensus["star_distribution"],
             "status_distribution": {**consensus["status_distribution"], "无匹配": match_stats["unmatched_count"]},
             "average_star_rating": consensus["average_star_rating"],

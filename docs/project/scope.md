@@ -115,10 +115,10 @@ V4 是一套"**反向**"覆盖性分析工具：从软件高层需求（HLR）�
 工具输出（5 类对外 + 7 类内部 JSON）包括：
 
 1. `EoICD条目化清单.xlsx` — EoICD 条目结构化清单（HL vs leaf 属性表）。
-2. `EoICD与HLR一致性分析报告_DeepSeek.docx` — DeepSeek 单模型裁判结论。
-3. `EoICD与HLR一致性分析报告_MiniMax.docx` — MiniMax 单模型裁判结论（当前 mock fallback）。
-4. `EoICD与HLR一致性分析报告_Qwen.docx` — Qwen 单模型裁判结论（当前 mock fallback）。
-5. `EoICD与HLR多模型共识分析报告.docx` — 3 模型共识 + Review Agent 复核 + 星级 1-3。
+2. `EoICD与SWHLR单模型差异分析报告_DeepSeek.docx` — DeepSeek 单模型裁判结论。
+3. `EoICD与SWHLR单模型差异分析报告_MiniMax.docx` — MiniMax 单模型裁判结论（当前 mock fallback）。
+4. `EoICD与SWHLR单模型差异分析报告_Qwen.docx` — Qwen 单模型裁判结论（当前 mock fallback）。
+5. `EoICD与SWHLR多模型差异分析报告.docx` — 3 模型共识 + Review Agent 复核 + 星级 1-3。
 6. 7 个内部 JSON 中间产物（按 ADR-001 D7 **不**作为下载 API 暴露）：
    - `multi_judge_results.json` / `consensus_results.json` / `reverse_matches.json` / `reverse_report.json`
    - `eoicd_requirements.json` / `hlr_requirements.json` / `hlr_labels.json`
@@ -131,7 +131,7 @@ V4 工具输入**不**支持：
 
 V4 工具**不**输出：
 - `EoICD条目化需求.docx`（V3 旧命名；V4 改名为 `EoICD条目化清单.xlsx`）；
-- `EoICD与软件高层需求差异报告.docx`（V3 旧命名；V4 改名为 `EoICD与HLR一致性分析报告_*.docx` + `EoICD与HLR多模型共识分析报告.docx`）。
+- `EoICD与软件高层需求差异报告.docx`（V3 旧命名；V4 改名为 `EoICD与SWHLR单模型差异分析报告_*.docx` + `EoICD与SWHLR多模型差异分析报告.docx`）。
 
 V4 旧文件命名（`_smoke` / `_smoke2` 期间遗留）不构成事实标准；V4 文档事实源以本节为准。
 
@@ -154,10 +154,10 @@ V4 旧文件命名（`_smoke` / `_smoke2` 期间遗留）不构成事实标准�
 
 ```text
 eoicd_xlsx                  -> EoICD条目化清单.xlsx
-consistency_deepseek_docx   -> EoICD与HLR一致性分析报告_DeepSeek.docx
-consistency_minimax_docx    -> EoICD与HLR一致性分析报告_MiniMax.docx
-consistency_qwen_docx       -> EoICD与HLR一致性分析报告_Qwen.docx
-consensus_docx              -> EoICD与HLR多模型共识分析报告.docx
+consistency_deepseek_docx   -> EoICD与SWHLR单模型差异分析报告_DeepSeek.docx
+consistency_minimax_docx    -> EoICD与SWHLR单模型差异分析报告_MiniMax.docx
+consistency_qwen_docx       -> EoICD与SWHLR单模型差异分析报告_Qwen.docx
+consensus_docx              -> EoICD与SWHLR多模型差异分析报告.docx
 ```
 
 5 类文件输出均带命名空间 `EoICD与HLR`（不是 V3 的 `EoICD条目化需求` / `EoICD与软件高层需求差异报告`）。

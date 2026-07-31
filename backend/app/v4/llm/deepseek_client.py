@@ -24,7 +24,7 @@ class DeepSeekClient:
         self,
         messages: list[dict],
         temperature: float = 0.1,
-        max_tokens: int = 4096,
+        max_tokens: int = 1024,
         timeout: int = 60,
         max_retries: int = 2,
     ) -> ChatResponse:

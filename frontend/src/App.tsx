@@ -163,8 +163,8 @@ export default function App() {
         <div className="header__left">
           <img src="/logo1.png" alt="Logo" className="header__logo-img" />
           <div>
-            <div className="header__title">ICD 需求生成器</div>
-            <div className="header__subtitle">Interface Control Document Requirements Generator</div>
+            <div className="header__title">ICD工具平台</div>
+            <div className="header__subtitle">ICD Tool Platform</div>
           </div>
         </div>
         <div className="header__status">

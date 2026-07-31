@@ -11,15 +11,15 @@ interface Props {
 
 const DOWNLOADS: { kind: V4DownloadKind; label: string; desc: string; icon: string }[] = [
   { kind: 'eoicd-xlsx', label: 'EoICD 条目化清单 (XLSX)', desc: '条目化需求清单', icon: '📊' },
-  { kind: 'consistency/deepseek', label: '一致性报告 (DeepSeek)', desc: 'DeepSeek 模型分析', icon: '📄' },
-  { kind: 'consistency/minimax', label: '一致性报告 (MiniMax)', desc: 'MiniMax 模型分析', icon: '📄' },
-  { kind: 'consistency/qwen', label: '一致性报告 (Qwen)', desc: 'Qwen 模型分析', icon: '📄' },
-  { kind: 'consensus-docx', label: '多模型共识报告', desc: '三模型共识分析', icon: '📋' },
+  { kind: 'consistency/deepseek', label: '差异对比报告(DeepSeek)', desc: 'DeepSeek 模型分析', icon: '📄' },
+  { kind: 'consistency/minimax', label: '差异对比报告(MiniMax)', desc: 'MiniMax 模型分析', icon: '📄' },
+  { kind: 'consistency/qwen', label: '差异对比报告(Qwen)', desc: 'Qwen 模型分析', icon: '📄' },
+  { kind: 'consensus-docx', label: '多模型差异分析报告', desc: '三模型分析', icon: '📋' },
 ]
 
 const PREVIEWS: { kind: V4DownloadKind; title: string; desc: string; icon: string }[] = [
   { kind: 'eoicd-xlsx', title: 'EoICD 条目化清单', desc: '条目化需求 Excel 清单', icon: '📊' },
-  { kind: 'consensus-docx', title: '多模型共识报告', desc: '三模型共识分析报告', icon: '📋' },
+  { kind: 'consensus-docx', title: '多模型差异分析报告', desc: '三模型差异分析报告', icon: '📋' },
 ]
 
 function outputAvailable(data: V4JobResultResponse, kind: V4DownloadKind): boolean {
@@ -163,7 +163,7 @@ export default function V4ResultView({ data, jobId, onNewTask }: Props) {
       {/* Star distribution + rating */}
       <div className="star-section">
         <div className="star-section__header">
-          <span>共识质量</span>
+          <span>星级评价分布</span>
           <span className="star-section__rating">
             平均星级 <strong>{s.average_star_rating?.toFixed(1)}</strong>
           </span>

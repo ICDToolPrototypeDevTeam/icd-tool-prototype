@@ -47,10 +47,10 @@ _STATUS_LABELS = {
 }
 
 _STATUS_DESCRIPTIONS = [
-    ("已覆盖", "HLR 中明确声明了与 ICD 定义一致的技术内容，ICD 接口要求在 HLR 中正确落实。"),
-    ("不一致", "HLR 中的声明与 ICD 定义存在矛盾，如数据类型、位含义、方向、数值范围等不一致，需要修正。"),
-    ("需确认", "HLR 与 ICD 之间存在模糊或不确定的对应关系，或匹配的 ICD Block 与 HLR 内容不直接相关，需人工审查。"),
-    ("无匹配", "匹配阶段未在 EoICD 中找到对应的 ICD 信号定义，可能为 HLR 超出 ICD 范围的内容，需人工确认。"),
+    ("已覆盖", "SWHLR 中明确声明了与 ICD 定义一致的技术内容，ICD 接口要求在 SWHLR 中正确落实。"),
+    ("不一致", "SWHLR 中的声明与 ICD 定义存在矛盾，如数据类型、位含义、方向、数值范围等不一致，需要修正。"),
+    ("需确认", "SWHLR 与 ICD 之间存在模糊或不确定的对应关系，或匹配的 ICD Block 与 SWHLR 内容不直接相关，需人工审查。"),
+    ("无匹配", "匹配阶段未在 EoICD 中找到对应的 ICD 信号定义，可能为 SWHLR 超出 ICD 范围的内容，需人工确认。"),
 ]
 
 _MODEL_DISPLAY = {
@@ -156,7 +156,7 @@ def generate_consistency_report(
     section.left_margin = Cm(1.0)
     section.right_margin = Cm(1.0)
 
-    title = doc.add_heading("EoICD 与 HLR 一致性分析报告", level=1)
+    title = doc.add_heading("EoICD 与 SWHLR 单模型差异分析报告", level=1)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     doc.add_paragraph(
@@ -201,16 +201,6 @@ def generate_consistency_report(
         row_obj.cells[1].width = Cm(2.0)
         row_obj.cells[2].width = Cm(2.0)
 
-    # Consensus quality summary from reverse_report
-    consensus = summary.get("共识质量", {})
-    if consensus:
-        doc.add_paragraph("")
-        p = doc.add_paragraph()
-        p.add_run("多模型共识参考: ").bold = True
-        star = consensus.get("average_star_rating", 0)
-        ag = consensus.get("agreement_distribution", {})
-        p.add_run(f"平均星级 {star} | full={ag.get('full', 0)} majority={ag.get('majority', 0)} split={ag.get('split', 0)}")
-
     doc.add_page_break()
 
     # ═══════════════════════════════════════════
@@ -219,7 +209,7 @@ def generate_consistency_report(
     doc.add_heading("二、分析明细", level=2)
     doc.add_paragraph(f"共 {total} 条记录（仅展示 {model_display} 裁判结果）")
 
-    detail_headers = ["序号", "HLR ID", "判定结果", "ICD Block", "分析摘要", "置信度"]
+    detail_headers = ["序号", "SWHLR ID", "判定结果", "ICD Block", "分析摘要", "置信度"]
     dt = doc.add_table(rows=1, cols=len(detail_headers))
     dt.style = "Table Grid"
     dt.alignment = WD_TABLE_ALIGNMENT.CENTER

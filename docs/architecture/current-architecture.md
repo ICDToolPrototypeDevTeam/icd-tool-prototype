@@ -309,10 +309,10 @@ backend/app/
 │       └── <file2>.xlsx
 └── output/                             # V4 pipeline 写出的产物
     ├── EoICD条目化清单.xlsx           # 对外下载 (URL: .../outputs/eoicd-xlsx)
-    ├── EoICD与HLR一致性分析报告_DeepSeek.docx   # 对外 (URL: .../consistency/deepseek)
-    ├── EoICD与HLR一致性分析报告_MiniMax.docx    # 对外 (URL: .../consistency/minimax)
-    ├── EoICD与HLR一致性分析报告_Qwen.docx       # 对外 (URL: .../consistency/qwen)
-    ├── EoICD与HLR多模型共识分析报告.docx         # 对外 (URL: .../consensus-docx)
+    ├── EoICD与SWHLR单模型差异分析报告_DeepSeek.docx   # 对外 (URL: .../consistency/deepseek)
+    ├── EoICD与SWHLR单模型差异分析报告_MiniMax.docx    # 对外 (URL: .../consistency/minimax)
+    ├── EoICD与SWHLR单模型差异分析报告_Qwen.docx       # 对外 (URL: .../consistency/qwen)
+    ├── EoICD与SWHLR多模型差异分析报告.docx         # 对外 (URL: .../consensus-docx)
     ├── eoicd_requirements.json          # 内部
     ├── hlr_requirements.json            # 内部
     ├── hlr_labels.json                  # 内部（Step 1.5 输出）

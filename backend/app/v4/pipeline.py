@@ -495,15 +495,15 @@ def run_reverse_pipeline(
         print(f"  → {display} 单模型报告")
         generate_consistency_report(
             report_path,
-            output_dir / f"EoICD与HLR一致性分析报告_{display}.docx",
+            output_dir / f"EoICD与SWHLR单模型差异分析报告_{display}.docx",
             model=model,
         )
 
-    print("  → 多模型共识报告")
+    print("  → 多模型报告")
     gen_consensus_word(
         consensus_path,
         output_dir / "reverse_matches.json",
-        output_dir / "EoICD与HLR多模型共识分析报告.docx",
+        output_dir / "EoICD与SWHLR多模型差异分析报告.docx",
     )
 
     print()

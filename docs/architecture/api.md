@@ -415,10 +415,10 @@ GET /api/v4/jobs/{job_id}/outputs/consistency/{model}
 | URL 段 | 物理文件名 |
 | --- | --- |
 | `eoicd-xlsx` | `EoICD条目化清单.xlsx` |
-| `consensus-docx` | `EoICD与HLR多模型共识分析报告.docx` |
-| `consistency/deepseek` | `EoICD与HLR一致性分析报告_DeepSeek.docx` |
-| `consistency/minimax` | `EoICD与HLR一致性分析报告_MiniMax.docx` |
-| `consistency/qwen` | `EoICD与HLR一致性分析报告_Qwen.docx` |
+| `consensus-docx` | `EoICD与SWHLR多模型差异分析报告.docx` |
+| `consistency/deepseek` | `EoICD与SWHLR单模型差异分析报告_DeepSeek.docx` |
+| `consistency/minimax` | `EoICD与SWHLR单模型差异分析报告_MiniMax.docx` |
+| `consistency/qwen` | `EoICD与SWHLR单模型差异分析报告_Qwen.docx` |
 
 Content-Type：
 - `.xlsx` → `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
