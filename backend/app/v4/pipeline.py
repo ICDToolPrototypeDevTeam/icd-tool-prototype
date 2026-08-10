@@ -190,6 +190,14 @@ def run_forward_pipeline(
     )
 
 
+def _count_match_types(results: list) -> dict[str, int]:
+    """Count results by match_type for logging."""
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r.match_type] = counts.get(r.match_type, 0) + 1
+    return counts
+
+
 def _merge_reverse_match_outputs(
     result_a: ReverseMatchOutput,
     result_b: ReverseMatchOutput,
@@ -280,6 +288,28 @@ def _match_reverse_with_trace(
             filtered_eoicd,
         )
         print(f"  Group A stats: {result_a.stats}")
+
+        # Per-HLR fallback: if prefilter matching produced "无匹配" for
+        # any HLR, retry against the full EoICD set.  The traceability
+        # table may be incomplete or its block_keys may be incompatible
+        # with the HLR's matching path (e.g. label mismatch).
+        fallback_ids = {
+            r.hlr_id for r in result_a.results if r.match_type == "无匹配"
+        }
+        if fallback_ids:
+            fallback_hlrs = [h for h in group_a_hlrs if h.requirement_id in fallback_ids]
+            print(f"  Prefilter fallback: {len(fallback_hlrs)} HLR(s) retrying on full EoICD")
+            result_fb = match_reverse(
+                fallback_hlrs,
+                {k: v for k, v in hlr_labels.items() if k in fallback_ids},
+                eoicd_requirements,
+            )
+            # Replace the failed results with fallback results
+            fb_map = {r.hlr_id: r for r in result_fb.results}
+            result_a.results = [
+                fb_map.get(r.hlr_id, r) for r in result_a.results
+            ]
+            print(f"  After fallback — Group A stats: {_count_match_types(result_a.results)}")
     else:
         result_a = ReverseMatchOutput(
             total_hlr=0, total_eoicd_profiles=0,
@@ -465,15 +495,15 @@ def run_reverse_pipeline(
         print(f"  → {display} 单模型报告")
         generate_consistency_report(
             report_path,
-            output_dir / f"EoICD与HLR一致性分析报告_{display}.docx",
+            output_dir / f"EoICD与SWHLR单模型差异分析报告_{display}.docx",
             model=model,
         )
 
-    print("  → 多模型共识报告")
+    print("  → 多模型报告")
     gen_consensus_word(
         consensus_path,
         output_dir / "reverse_matches.json",
-        output_dir / "EoICD与HLR多模型共识分析报告.docx",
+        output_dir / "EoICD与SWHLR多模型差异分析报告.docx",
     )
 
     print()

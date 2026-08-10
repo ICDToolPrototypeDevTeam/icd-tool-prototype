@@ -209,3 +209,28 @@
 - 本期 V4 仅暴露 3 类对外下载（`eoicd-xlsx` / `consensus-docx` / `consistency/{model}`）；4 类内部 JSON（`multi_judge_results.json` / `consensus_results.json` / `reverse_matches.json` / `reverse_report.json` 等）按 D7 不暴露给 API。
 - `/api/v4/jobs/{id}/result.outputs.eoicd_xlsx` 等 5 个布尔字段在 V4 落盘成功后均为 true，由 `runner.derive_outputs()` 反读盘与 SSoT 一致。
 - V4 业务内部 import `requests` 仅 1 处（`backend/app/v4/llm/deepseek_client.py`）；其余 4 处 LLM 调用（`comparison/{semantic_judge,multi_judge,review_agent}.py` + `matching/hlr_labeler.py`）均走 `get_llm("deepseek").chat()` 工厂。
+
+## [Unreleased] - 2026-07-31：V4 追溯表兜底机制与共识报告增强
+
+### Added
+
+- **追溯索引协议开销字段过滤**：`trace_parser.py` 新增 `_PROTOCOL_BLOCKKEY_SUFFIXES` 常量，在构建 HLR→BlockKey 追溯索引时自动跳过 `/SDI`、`/LABEL`、`/PARITY`、`/SSM`、`/OCTLBL` 等 A429 协议开销后缀的 block_key，避免虚增 traced-block 统计。
+- **追溯表预筛选兜底机制**：`pipeline.py` 中 `_match_reverse_with_trace()` 新增 per-HLR fallback 逻辑——预筛选匹配结果为"无匹配"的 HLR 自动回退到全量 EoICD 匹配，防止因追溯表数据覆盖不全或 label 不匹配导致的漏判。
+- **共识报告不一致属性栏输出**：`consensus_word_generator.py` 明细表新增"不一致属性"列（位于 ICD Block 和分析摘要之间），Review Agent 识别出的不一致属性（总线类型、信号方向等）以 " | " 分隔显式列出，并按判定状态（已覆盖/不一致/待确认/无匹配）分组展示。
+- **前端 V4 专用组件**：新增 `V4FileUpload.tsx`（HLR Word + Pub/Sub Excel + 追溯表上传）、`V4ResultView.tsx`（状态分布卡片 + 星级柱状图 + 预览 + 下载），替换 V3 旧组件。
+- **前端依赖**：新增 `lucide-react`（图标库）。
+- **环境变量模板**：`.env.example` 新增 Qwen (DashScope) 配置段（`QWEN_API_KEY` 等 11 项）。
+
+### Changed
+
+- **管线步骤编号统一**：`pipeline.py` 中所有 Step 编号从 1/3、1.5/3、2/3、3/5、4/5、5/5 统一为 1/6、2/6、3/6、4/6、5/6、6/6。stage 映射同步调整：1→parse, 2→label, 3→match, 4→multi_judge, 5→review, 6→report。`runner.py` 中 `_parse_progress()` 同步更新。
+- **V4 result.summary 字段调整**：`status_distribution` 增加"无匹配"键（值来自 `match_stats["unmatched_count"]`），使前端可直接展示四种状态分布。
+- **前端轮询间隔**：V4 任务轮询从 2 秒/600 次调整为 10 秒/120 次（总超时约 20 分钟不变）。
+- **前端 `App.tsx`**：完全切换为 V4 管线（`V4FileUpload` / `V4ResultView` / V4 API client），增加 V4 独立健康检查，保留 V3 旧组件文件不动。
+- **HLR Labeler prompt 修正**：bus_types 标准名称明确化（CAN→A825、AFDX→A664、ARINC429→A429）。
+- **DeepSeekClient**：默认 `max_tokens` 从 1024 调整为 4096，新增 `finish_reason=length` 截断告警。
+
+### Fixed
+
+- **共识报告"判定分布"表无匹配缺失**：`consensus_word_generator.py` 中"判定分布"表新增"无匹配"行（紫色标注，来自 `match_stats["hlr_无匹配"]`），合计 = 裁判数 + 无匹配数。
+- **V4ResultView STATUS_META 键名不匹配**：前端 `STATUS_META` 键名从英文（`covered`/`inconsistent`/`needs_review`）改为中文（`已覆盖`/`不一致`/`待确认`），与后端 `status_distribution` 实际键名对齐。

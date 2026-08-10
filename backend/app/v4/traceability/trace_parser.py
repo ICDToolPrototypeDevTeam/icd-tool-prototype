@@ -21,6 +21,13 @@ from pathlib import Path
 _LABEL_SEGMENT_RE = re.compile(r'^(L\d+)', re.IGNORECASE)
 _SIGNAL_FAMILY_PREFIX_RE = re.compile(r'^L\d+_(?:\d+_)?[A-Z]+\d+_')
 
+# BlockKey suffixes that represent A429 protocol overhead fields.
+# These are excluded from the traceability index because they will be
+# filtered out by entry_filter before matching anyway — keeping them
+# in the index inflates traced-block counts without providing usable
+# candidates.  See docs/development/traceability-prefilter-issue-analysis.md
+_PROTOCOL_BLOCKKEY_SUFFIXES = ('/SDI', '/LABEL', '/PARITY', '/SSM', '/OCTLBL')
+
 
 # -- Data structures -------------------------------------------------
 
@@ -273,22 +280,30 @@ def build_trace_index(trace_dir: Path) -> TraceabilityIndex:
     index.total_hlrs_traced = len(hlr_to_icd)
 
     # Step 3: Map ICD FullName -> block_key
+    # Protocol overhead blocks are excluded here because entry_filter
+    # removes them before matching anyway.
     all_icd_fullnames: set[str] = set()
     for icd_set in hlr_to_icd.values():
         all_icd_fullnames.update(icd_set)
     index.total_icd_fullnames = len(all_icd_fullnames)
 
     index.hlr_to_blocks = defaultdict(set)
+    protocol_skipped = 0
     for icd_fn in all_icd_fullnames:
         bk = name_to_block_key(icd_fn)
-        if bk:
-            index.icd_mapped_to_blocks += 1
-            # Assign this block_key to ALL HLRs that reference this ICD FullName
-            for hlr, icd_set in hlr_to_icd.items():
-                if icd_fn in icd_set:
-                    index.hlr_to_blocks[hlr].add(bk)
-        else:
+        if not bk:
             index.icd_unmapped.append(icd_fn)
+            continue
+        if bk.endswith(_PROTOCOL_BLOCKKEY_SUFFIXES):
+            protocol_skipped += 1
+            continue
+        index.icd_mapped_to_blocks += 1
+        # Assign this block_key to ALL HLRs that reference this ICD FullName
+        for hlr, icd_set in hlr_to_icd.items():
+            if icd_fn in icd_set:
+                index.hlr_to_blocks[hlr].add(bk)
+    if protocol_skipped:
+        print(f"  Trace index: skipped {protocol_skipped} protocol-overhead block(s)")
 
     # Convert defaultdict to plain dict
     index.hlr_to_blocks = dict(index.hlr_to_blocks)

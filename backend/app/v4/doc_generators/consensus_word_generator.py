@@ -93,6 +93,7 @@ def generate_consensus_report(
             "final_analysis": cr.get("final_analysis", ""),
             "confidence": cr.get("confidence", 0),
             "model_results": cr.get("model_results", {}),
+            "inconsistent_attributes": cr.get("inconsistent_attributes", []),
             "is_no_match": False,
         })
 
@@ -113,6 +114,7 @@ def generate_consensus_report(
                 "final_analysis": "匹配层未找到对应EoICD信号",
                 "confidence": 0,
                 "model_results": {},
+                "inconsistent_attributes": [],
                 "is_no_match": True,
             })
     merged_all = merged + no_match_entries
@@ -127,23 +129,23 @@ def generate_consensus_report(
     section.right_margin = Cm(1.0)
 
     # Title
-    title = doc.add_heading("EoICD 与 HLR 多模型共识分析报告", level=1)
+    title = doc.add_heading("EoICD 与 SWHLR 多模型差异分析报告", level=1)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     doc.add_paragraph(
         f"生成时间: {consensus_data.get('generated_at', 'N/A')[:19]}"
     )
 
     # ── Summary section ──
-    doc.add_heading("共识分析总结", level=2)
+    doc.add_heading("一、差异分析总结", level=2)
 
     total_hlr = match_data.get("total_hlr", 0)
     match_stats = match_data.get("stats", {})
     cs = consensus_summary
 
     overview_parts = [
-        f"对 {total_hlr} 条软件高层需求(HLR)进行多模型共识分析：",
-        f"3 个裁判模型（DeepSeek / MiniMax / Qwen）并行独立裁判，",
-        f"1 个 Review Agent 综合复核并给出星级评价。",
+        f"对 {total_hlr} 条软件高层需求(SWHLR)进行多模型差异分析：",
+        f"3 个裁判模型（DeepSeek / MiniMax / Qwen）并行独立判定，",
+        f"1 个 Review Agent 对结果综合给出星级评价。",
     ]
     doc.add_paragraph("".join(overview_parts))
 
@@ -186,7 +188,7 @@ def generate_consensus_report(
         row_obj.cells[1].width = Cm(3.0)
 
     # ── Consensus quality section ──
-    doc.add_heading("共识质量", level=3)
+    doc.add_heading("星级分布", level=3)
 
     agreement_dist = cs.get("agreement_distribution", {})
     avg_stars = cs.get("average_star_rating", 0)
@@ -238,19 +240,15 @@ def generate_consensus_report(
 
     doc.add_page_break()
 
-    # ── Detail table ──
-    doc.add_heading("覆盖分析明细（共识结果）", level=2)
+    # ── Detail tables grouped by coverage status ──
+    doc.add_heading("二、分析明细", level=2)
     judged_count = len(merged)
     no_match_count = len(no_match_entries)
     doc.add_paragraph(f"共 {len(merged_all)} 条记录"
                       f"（{judged_count} 条已裁判 + {no_match_count} 条无匹配）")
 
-    headers = ["序号", "HLR ID", "判定", "ICD Block",
-               "分析摘要", "共识", "星级"]
-    table = doc.add_table(rows=1, cols=len(headers))
-    table.style = "Table Grid"
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    _style_header_row(table, headers)
+    headers = ["序号", "SWHLR ID", "判定", "ICD Block",
+               "不一致属性", "分析摘要", "共识", "星级"]
 
     status_labels = {
         "covered": "已覆盖",
@@ -271,39 +269,72 @@ def generate_consensus_report(
         "split": RGBColor(0xCC, 0x00, 0x00),
     }
 
-    for i, m in enumerate(merged_all, 1):
-        row = table.add_row()
-        status = m["final_coverage_status"]
-        agreement = m["agreement_level"]
-        stars = m["star_rating"]
-        is_nm = m["is_no_match"]
+    # Section definitions: (group_key, heading_title, filter_predicate)
+    sections = [
+        ("covered", "已覆盖",
+         lambda m: not m["is_no_match"] and m["final_coverage_status"] == "covered"),
+        ("inconsistent", "不一致",
+         lambda m: not m["is_no_match"] and m["final_coverage_status"] == "inconsistent"),
+        ("needs_review", "待确认",
+         lambda m: not m["is_no_match"] and m["final_coverage_status"] in ("needs_review", "待确认")),
+        ("no_match", "无匹配",
+         lambda m: m["is_no_match"]),
+    ]
 
-        status_cn = status_labels.get(status, status)
+    seq = 0
+    for _group_key, heading_title, pred in sections:
+        group = [m for m in merged_all if pred(m)]
+        if not group:
+            continue
 
-        blocks_str = ", ".join(m["matched_profile_keys"][:5]) if m["matched_profile_keys"] else "—"
-        if len(m["matched_profile_keys"]) > 5:
-            blocks_str += f" ... (+{len(m['matched_profile_keys']) - 5})"
+        doc.add_heading(f"{heading_title}（{len(group)} 条）", level=3)
 
-        agreement_label = {"full": "完全一致", "majority": "多数一致", "split": "分歧"}.get(agreement, agreement)
+        table = doc.add_table(rows=1, cols=len(headers))
+        table.style = "Table Grid"
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        # Set all tables to 100% page width for consistent sizing
+        _tblW = table._tbl.tblPr.find(qn('w:tblW'))
+        if _tblW is not None:
+            _tblW.set(qn('w:w'), '5000')
+            _tblW.set(qn('w:type'), 'pct')
+        _style_header_row(table, headers)
 
-        _set_cell_font(row.cells[0], str(i))
-        _set_cell_font(row.cells[1], m["hlr_id"])
-        _set_cell_font(row.cells[2], status_cn, bold=True, color=status_colors.get(status_cn))
-        _set_cell_font(row.cells[3], blocks_str, size=7)
-        _set_cell_font(row.cells[4], m["final_analysis"], size=8)
-        if is_nm:
-            _set_cell_font(row.cells[5], "—")
-            _set_cell_font(row.cells[6], "—")
-        else:
-            _set_cell_font(row.cells[5], agreement_label, color=agreement_colors.get(agreement))
-            _set_cell_font(row.cells[6], _star_str(stars), bold=True, size=10,
-                           color=RGBColor(0xCC, 0x88, 0x00))
+        for m in group:
+            seq += 1
+            row = table.add_row()
+            status = m["final_coverage_status"]
+            agreement = m["agreement_level"]
+            stars = m["star_rating"]
+            is_nm = m["is_no_match"]
 
-    # Column widths
-    col_widths = [0.8, 2.5, 1.5, 5.5, 9.0, 1.5, 1.5]
-    for row_obj in table.rows:
-        for i, w in enumerate(col_widths):
-            row_obj.cells[i].width = Cm(w)
+            status_cn = status_labels.get(status, status)
+
+            blocks_str = ", ".join(m["matched_profile_keys"][:5]) if m["matched_profile_keys"] else "—"
+            if len(m["matched_profile_keys"]) > 5:
+                blocks_str += f" ... (+{len(m['matched_profile_keys']) - 5})"
+
+            agreement_label = {"full": "完全一致", "majority": "多数一致", "split": "分歧"}.get(agreement, agreement)
+
+            # Inconsistency attributes column
+            attr_list = m.get("inconsistent_attributes", [])
+            if attr_list:
+                attr_str = " | ".join(a.get("attribute", "") for a in attr_list)
+            else:
+                attr_str = "—"
+
+            _set_cell_font(row.cells[0], str(seq))
+            _set_cell_font(row.cells[1], m["hlr_id"])
+            _set_cell_font(row.cells[2], status_cn, bold=True, color=status_colors.get(status_cn))
+            _set_cell_font(row.cells[3], blocks_str, size=7)
+            _set_cell_font(row.cells[4], attr_str, size=7)
+            _set_cell_font(row.cells[5], m["final_analysis"], size=8)
+            if is_nm:
+                _set_cell_font(row.cells[6], "—")
+                _set_cell_font(row.cells[7], "—")
+            else:
+                _set_cell_font(row.cells[6], agreement_label, color=agreement_colors.get(agreement))
+                _set_cell_font(row.cells[7], _star_str(stars), bold=True, size=10,
+                               color=RGBColor(0xCC, 0x88, 0x00))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))

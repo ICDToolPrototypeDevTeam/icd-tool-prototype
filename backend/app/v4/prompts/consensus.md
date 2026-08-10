@@ -26,7 +26,24 @@
   "star_rating": 1-3,
   "final_coverage_status": "covered|partial|missing|inconsistent|needs_review",
   "final_analysis": "综合所有裁判结果的分析总结",
-  "confidence": 0.0-1.0
+  "confidence": 0.0-1.0,
+  "inconsistent_attributes": []
+}
+```
+
+- **inconsistent_attributes**: 仅当 `final_coverage_status` 为 `"inconsistent"` 时填写。列出 HLR 与 ICD 之间存在不一致的具体 EoICD 属性。每条为一个对象：
+  - `attribute`: EoICD 属性名（英文，如 `Direction`, `DataFormatType`, `BitOffset`, `ParameterSize`, `SDIExpected`, `OneState`, `ZeroState`, `Units`, `FuncRngMin`, `FuncRngMax`, `Period`, `Label` 等）
+  - `detail`: 一句话说明不一致内容
+
+  从各裁判的 `inconsistent_points` 和 `analysis` 中提取不一致属性。非 inconsistent 条目返回空数组 `[]`。
+
+示例：
+```json
+{
+  "inconsistent_attributes": [
+    {"attribute": "Direction", "detail": "HLR states receive, ICD defines send"},
+    {"attribute": "OneState", "detail": "HLR bit15=1 means False, ICD bit=1 means FULL CLOSE"}
+  ]
 }
 ```
 

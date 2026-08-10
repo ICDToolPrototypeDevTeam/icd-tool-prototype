@@ -329,6 +329,7 @@ class ConsensusResult(BaseModel):
     confidence: float = 0.0
     consistent_agents: list[str] = Field(default_factory=list)
     divergent_agents: list[str] = Field(default_factory=list)
+    inconsistent_attributes: list[dict] = Field(default_factory=list)
 
 
 class ConsensusOutput(BaseModel):
