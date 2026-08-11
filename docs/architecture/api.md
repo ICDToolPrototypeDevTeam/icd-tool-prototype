@@ -394,6 +394,15 @@ GET /api/v4/jobs/{job_id}/result
     "consensus_docx": true
   },
   "mock_models": ["minimax", "qwen"],
+  "degradation": {
+    "provider_status": {
+      "deepseek": "healthy",
+      "minimax": "healthy",
+      "qwen": "healthy"
+    },
+    "total_case_timeouts": 0,
+    "review_star_capped_count": 0
+  },
   "errors": []
 }
 ```
