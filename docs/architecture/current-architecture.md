@@ -216,7 +216,7 @@ backend/app/output/
 | --- | --- | --- |
 | FastAPI 入口 | `backend/app/main.py`（顶层 thin shell，仅挂 router） | 同 V3（`app.include_router(v4_router, prefix="/api/v4")`） |
 | 路由文件 | `backend/app/api/v3/router.py` | `backend/app/api/v4/router.py` |
-| 业务模块 | `backend/app/{crew,merge,scoring,docx,llm,parsers,prompts,skills,models,pipeline,job_manager}.py` | `backend/app/v4/{comparison,doc_generators,llm,matching,parsers,prompts,traceability,config,models,pipeline,cli}.py` |
+| 业务模块 | `backend/app/{crew,merge,scoring,docx,llm,parsers,prompts,skills,models,pipeline,job_manager}.py` | `backend/app/v4/{comparison,degradation,doc_generators,llm,matching,parsers,prompts,traceability,config,models,pipeline,cli}.py` |
 | 任务目录 | `backend/output/v3/{job_id}/` | `backend/output/v4/{job_id}/input/` + `output/` |
 | JobManager | 共享（带 `kind: Literal["v3","v4"]` 字段） | 同 V3 |
 | LLM | `crewai.BaseLLM` 派生 + `litellm` | `get_llm("deepseek")` → `DeepSeekClient` + `MockLLMClient` |
@@ -254,6 +254,7 @@ backend/app/
     ├── prompts/            # forward_judge / reverse_judge / consensus .md
     ├── llm/                # factory / deepseek_client / mock_llm
     ├── traceability/       # 追溯表预筛选（独立 zero-coupling 模块）
+    ├── degradation/        # Provider 健康跟踪 / Case 超时 / 熔断 / Review 降级
     └── synonyms.yaml       # 别名映射
 ```
 
@@ -351,15 +352,15 @@ llm/factory.py
     if provider == "minimax": return MiniMaxClient(api_key, base_url, model)
 
 llm/deepseek_client.py
-  DeepSeekClient.chat(messages, temperature, max_tokens=1024, max_retries=2, ...)
+  DeepSeekClient.chat(messages, temperature, max_tokens=1024, timeout=120, max_retries=2, ...)
     幂等 URL:  base = base_url.rstrip('/'); if base.endswith('/v1'): base = base[:-3]
     url = f"{base}/v1/chat/completions"
 
 llm/qwen_client.py
-  QwenClient.chat(messages, temperature, max_tokens=1024, max_retries=2, ...)
+  QwenClient.chat(messages, temperature, max_tokens=1024, timeout=120, max_retries=2, ...)
 
 llm/minimax_client.py
-  MiniMaxClient.chat(messages, temperature, max_tokens=1024, max_retries=2, ...)
+  MiniMaxClient.chat(messages, temperature, max_tokens=1024, timeout=120, max_retries=2, ...)
 
 llm/mock_llm.py
   MockLLMClient.chat(messages, ...) -> ChatResponse

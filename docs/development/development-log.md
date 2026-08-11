@@ -734,3 +734,62 @@
 ### 下一步建议
 
 无。
+
+---
+
+## 2026-08-11 Issue #48：V4 Multi-Agent 降级处理机制
+
+### 任务目标
+
+为 V4 反向管线 Step 4（Multi-Judge）和 Step 5（Review Agent）引入独立的降级处理模块，对 LLM API 超时、卡死、异常输出等异常情况进行系统性兜底。
+
+### 完成内容
+
+1. 新增 `backend/app/v4/degradation/` 独立包（`config.py` / `context.py` / `fallback.py` / `__init__.py`），零侵入现有业务模块。
+2. 实现 Case 级超时控制：`_judge_case_with_timeout()` 用 `asyncio.wait(FIRST_COMPLETED)` 逐 provider 收集结果，前 2 个完成后第三个给予固定额外等待时间（默认 120s），不足 2 个时使用兜底上限（默认 300s）。
+3. 实现 Provider 熔断器：`DegradationContext` 跨 case 追踪每个 provider 的连续失败计数，达到阈值后自动标记 unhealthy 并跳过后续 case，TTL 到期自动恢复。AUTH 错误立即熔断。
+4. 实现 Review 评审降级：`_apply_degradation_review()` 对 `review_judgments()` 输出做后处理，仅 1 个 provider 存活时星级 ≤ 1★，2 个存活时空星级 ≤ 2★。
+5. HTTP 超时提升：`DeepSeekClient` / `QwenClient` / `MiniMaxClient` 的 HTTP 请求超时从 60s → 120s。
+6. `max_tokens` 调整：`review_agent.py` 和 `semantic_judge.py` 的 `max_tokens` 从 8192 → 4096。
+7. 可观测性：`ctx.to_summary()` 输出降级摘要写入 `consensus_results.json` 和 API response 的 `degradation` 字段。
+8. 环境变量：`.env.example` 新增 4 个降级配置项。
+
+### 修改文件
+
+1. `backend/app/v4/pipeline.py`（新增 `_judge_case_with_timeout` / `_judge_with_degradation` / `_apply_degradation_review` / `_count_surviving_providers`；Step 4/5 调用切换）
+2. `backend/app/v4/llm/deepseek_client.py`（HTTP timeout 60→120）
+3. `backend/app/v4/llm/qwen_client.py`（HTTP timeout 60→120）
+4. `backend/app/v4/llm/minimax_client.py`（HTTP timeout 60→120）
+5. `backend/app/v4/comparison/review_agent.py`（max_tokens 8192→4096）
+6. `backend/app/v4/comparison/semantic_judge.py`（max_tokens 8192→4096）
+7. `backend/app/api/v4/runner.py`（job.result 新增 `degradation` 字段）
+8. `backend/app/v4/cli.py`（输出文件名 HLR→SWHLR）
+9. `backend/.env.example`（新增降级配置段）
+10. `CHANGELOG.md`
+
+### 新增文件
+
+1. `backend/app/v4/degradation/__init__.py`
+2. `backend/app/v4/degradation/config.py`
+3. `backend/app/v4/degradation/context.py`
+4. `backend/app/v4/degradation/fallback.py`
+
+### 验证方式
+
+1. Mock 模式下运行完整 V4 reverse pipeline，确认 Step 4/5 正常完成
+2. 检查 `consensus_results.json` 包含 `degradation` 字段且结构正确
+3. 不配降级环境变量时，默认值生效，管线不报错
+
+### 验证结果
+
+Mock 模式下已验证通过。真实 LLM 模式待后续端到端测试。
+
+### 遗留问题
+
+1. 熔断器和超时控制在真实 LLM（非 mock）场景下的表现待端到端验证
+2. 超时公式从自适应 `t1 + 0.5*t2` 改为固定 `extra_wait` 后需持续观察 minimax 慢响应是否不再被误杀
+
+### 下一步建议
+
+1. 真实 LLM 模式下跑完整管线，观察降级机制实际表现
+2. 根据实际情况调整 `extra_wait` 和 `case_total_timeout` 默认值
