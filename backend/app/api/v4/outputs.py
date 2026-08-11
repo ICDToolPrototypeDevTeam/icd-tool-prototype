@@ -1,0 +1,85 @@
+# -*- coding: utf-8 -*-
+"""GET /api/v4/jobs/{job_id}/outputs/* 下载。
+
+ADR-001 Issue A：
+- 仅 3 类对外：eoicd-xlsx / consistency/{model} / consensus-docx；
+- {model} 白名单 ∈ {deepseek,minimax,qwen}；非法 → 400；
+- V4 路由与 V3 路由 /outputs/* 完全独立（V3 在 /api/jobs/<job>/outputs/...，V4 在 /api/v4/jobs/<job>/outputs/...）。
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
+
+from app.api.v4.runner import V4_OUTPUT_FILES
+from app.job_manager import job_manager
+
+
+router = APIRouter()
+
+ALLOWED_MODELS = {"deepseek", "minimax", "qwen"}
+
+MEDIA_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+MEDIA_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _output_root(job_id: str) -> Path:
+    job = job_manager.get_job(job_id)
+    if not job or job.kind != "v4":
+        raise HTTPException(status_code=404, detail='job not found')
+    root = Path(__file__).resolve().parent.parent.parent.parent / 'output' / 'v4' / job_id / 'output'
+    if not root.exists():
+        raise HTTPException(status_code=404, detail='output dir does not exist (job likely failed before pipeline produced files)')
+    return root
+
+
+@router.get('/jobs/{job_id}/outputs/eoicd-xlsx')
+def download_eoicd_xlsx(job_id: str):
+    root = _output_root(job_id)
+    f = root / V4_OUTPUT_FILES["eoicd_xlsx"]
+    if not f.exists():
+        raise HTTPException(status_code=404, detail='eoicd xlsx not generated (job may be running or failed)')
+    return FileResponse(
+        path=f,
+        filename=V4_OUTPUT_FILES["eoicd_xlsx"],
+        media_type=MEDIA_XLSX,
+    )
+
+
+@router.get('/jobs/{job_id}/outputs/consensus-docx')
+def download_consensus_docx(job_id: str):
+    root = _output_root(job_id)
+    f = root / V4_OUTPUT_FILES["consensus_docx"]
+    if not f.exists():
+        raise HTTPException(status_code=404, detail='consensus docx not generated (job may be running or failed)')
+    return FileResponse(
+        path=f,
+        filename=V4_OUTPUT_FILES["consensus_docx"],
+        media_type=MEDIA_DOCX,
+    )
+
+
+@router.get('/jobs/{job_id}/outputs/consistency/{model}')
+def download_consistency_docx(job_id: str, model: str):
+    if model not in ALLOWED_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid model: {model}; allowed: deepseek|minimax|qwen",
+        )
+    root = _output_root(job_id)
+    key = f"consistency_{model}_docx"
+    if key not in V4_OUTPUT_FILES:
+        raise HTTPException(status_code=400, detail=f"unknown output kind: {key}")
+    f = root / V4_OUTPUT_FILES[key]
+    if not f.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f'consistency {model} docx not generated (job may be running or failed)',
+        )
+    return FileResponse(
+        path=f,
+        filename=V4_OUTPUT_FILES[key],
+        media_type=MEDIA_DOCX,
+    )

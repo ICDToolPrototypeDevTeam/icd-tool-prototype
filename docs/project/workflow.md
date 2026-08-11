@@ -144,3 +144,95 @@ Python 硬规则评分用于检查结果的基本完整性、结构一致性、�
 7. 输出文档生成失败。
 
 异常信息应便于用户判断问题原因，并支持后续调试定位。
+
+## 11. V4 反向管线流程（Issue A 落地，2026-07-28）
+
+本节追加于原 10 节之后。V3 旧流程（§1-§10）保持不变；V4 是与 V3 并存的新主流程之一。
+
+### 11.1 V4 总体流程（6 步）
+
+```text
+用户上传 HLR Word + EoICD PubSub Excel (Publisher 或 Subscriber 至少一个) + 可选追溯 Excel
+    ↓
+Step 1: 解析输入
+    HLR Word + EoICD PubSub Excel → 结构化需求列表
+    模块: parsers/{eoicd_excel_parser,hlr_word_parser}.py
+
+Step 2: HLR AI 标注
+    DeepSeek 对每条 HLR 标注 bus_types / labels / devices / signal_keywords
+    模块: matching/hlr_labeler.py
+
+Step 3: 反向匹配（含条目过滤→信号画像→Block 聚合→HLR 分类→匹配→可选追溯预筛选）
+    3a: 条目过滤（排除协议 DataFormatType 条目）— matching/entry_filter.py
+    3b: 信号画像聚类（按 (Label, LeafName) 聚类 → SignalProfile）— matching/signal_profiler.py
+    3c: ICD Block 聚合（按 (label, signal_family) 分组 → ICDBlock）
+    3d: HLR 分类（4 路正则分类 + 提取 Label/位字段/SDI/方向）— matching/hlr_classifier.py
+    3e: 两阶段 Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三层过滤 → 三级分层）— matching/reverse_matcher.py
+    3f: 可选追溯表预筛选 + 兜底机制 — matching/traceability.py
+
+Step 4: 多智能体裁判
+    DeepSeek / MiniMax / Qwen 三模型并行独立判定
+    模块: comparison/{multi_judge,semantic_judge}.py
+    LLM 抽象: llm/factory.py → get_llm(provider)
+
+Step 5: Review Agent 共识
+    对三模型判定结果综合复核并给出星级评价（1-3★）
+    模块: comparison/review_agent.py
+
+Step 6: 报告生成
+    1 份 xlsx + 3 份单模型 docx + 1 份共识 docx
+    模块: doc_generators/{excel_generator,word_generator,consensus_word_generator}.py
+    + comparison/report_generator.py
+```
+
+### 11.2 V4 vs V3 关键差异
+
+| 维度 | V3（chunk-level 多智能体条目化） | V4（反向管线） |
+| --- | --- | --- |
+| 主方向 | EoICD → HLR（生成式） | HLR → EoICD（覆盖性） |
+| 输入 | EoICD Word + Excel 附件 + 软件需求 Word | EoICD PubSub Excel (Pub/Sub) + HLR Word + 可选追溯 Excel |
+| 智能体范式 | CrewAI 5 Agent / 5 Task / 3 Crew（chunk 循环） | 工厂：3 provider 平行 judge + Review Agent 共识 |
+| LLM 接入 | CrewAI / LiteLLM 内部 | `get_llm(provider)` 抽象 + DeepSeekClient + MockLLMClient |
+| 多模型策略 | generation + scoring 多模型择优 | multi_judge 3 模型 + Review Agent 共识复核 |
+| 输出文档 | 4 份 docx（条目化 + 差异） | 1 份 xlsx + 4 份 docx（条目化清单 + 3 类一致性 + 共识） |
+| 任务语义 | "EoICD 怎么写" | "HLR 在 EoICD 是否落实" |
+| API 入口 | `POST /api/eoicd/analyze` | `POST /api/v4/coverage-analysis` |
+| 任务目录 | `backend/output/v3/{job_id}/` | `backend/output/v4/{job_id}/{input/,output/}` |
+
+### 11.3 V4 单步输入输出
+
+| Step | 输入 | 输出 | 模块 |
+| --- | --- | --- | --- |
+| 1 解析输入 | `hlr.docx` + `pub.xlsx` / `sub.xlsx` | `hlr_requirements.json` (16 reqs) + `eoicd_requirements.json` (122674 条目) | parsers/ |
+| 2 HLR AI 标注 | `hlr_requirements.json` (16 HLRs) | `hlr_labels.json` (16 标签) | matching/hlr_labeler.py |
+| 3 反向匹配 | `eoicd_requirements.json` + `hlr_labels.json` | `reverse_matches.json` (1568 Block, 含分层层级、HLR 分类标记) | matching/{entry_filter,signal_profiler,reverse_case_builder,hlr_classifier,reverse_matcher,traceability}.py |
+| 4 多智能体裁判 | `reverse_matches.json` + 3 LLM | `multi_judge_results.json` (12 cases × 3 providers) | comparison/{multi_judge,semantic_judge}.py |
+| 5 Review 共识 | `multi_judge_results.json` | `consensus_results.json` (12 cases, agreement + star_rating) | comparison/review_agent.py |
+| 6 报告生成 | `consensus_results.json` + `reverse_matches.json` | 1 xlsx + 4 docx + 7 JSON | doc_generators/* + comparison/report_generator.py |
+
+### 11.4 V4 关键约束
+
+1. **输入只解析一次**：与 V3 一致，HLROutput / EoICDOutput 一次解析后供后续步骤复用。
+2. **mock_models 显式标识**：ADR-001 D5。`/result.mock_models` 与 `/status.mock_models` 都返回当前实际 mock 的 provider 列表。
+3. **JSON 中间产物不暴露**：ADR-001 D7。7 类 JSON 仅落盘，不通过 API 下载。
+4. **env 保存/恢复**：V4 runner 后台线程在进入时 `os.environ.get()` 备份 `JUDGE_PROVIDERS` 与 `USE_MOCK_LLM`，`try/finally` 按 None/赋值恢复（Issue A 修正 #2）。
+5. **跨版本查询 404**：V3/V4 路由严格按 `Job.kind` 分发（V3 路由查 V4 job 返 404 + 提示 `use /api/v4/...`；反之亦然）。
+6. **追溯表预筛选（可选）**：仅 `enable_traceability_prefilter=true` 时走 `matching/traceability.py`，否则 `_match_reverse_with_trace` 跳过。
+
+### 11.5 V4 异常处理
+
+| 阶段 | 异常类型 | 失败后果 | 用户可观察 |
+| --- | --- | --- | --- |
+| Step 1 解析 | `parser` 抛异常 | `job.status = failed` | `/api/v4/jobs/{id}/result` 返 409，`message` 含异常摘要 |
+| Step 2 HLR 标注 | DeepSeek API 错误 / 解析失败 | label 退化为空 + `errors: [...]` 累计 | `/api/v4/jobs/{id}/result.errors` 数组；UI 标注 `部分 HLR 标签缺失` |
+| Step 3 反向匹配 | 反向匹配抛异常 | `job.status = failed` | 同 Step 1 |
+| Step 4 多智能体 | 3 provider 全失败 | `consensus_results.json` 中全失败标记 | `/result.summary.status_distribution` 全 `failed` |
+| Step 5 Review 共识 | Review 失败 | `consensus_results.json` 中 `summary: {"all_failed": true}` | `mock_models` 仅含失败 provider |
+| Step 6 报告生成 | docx 写盘失败 | `outputs.<key>` 某项为 false | `/result.outputs` 部分 false |
+
+### 11.6 V4 流程变更原则
+
+按 §1-§10 同样的"流程变更原则" + ADR-001：
+- 增加 / 删除 / 修改 stage 须同步更新本节；
+- 新增 stage 须有 ADR；
+- 流程变更不修改 V3 旧流程（V3 与 V4 互不污染）。

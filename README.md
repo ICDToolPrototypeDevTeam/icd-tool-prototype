@@ -12,7 +12,7 @@ ICD工具原型Ver2.0聚焦EoICD场景，目标是建立一套从接口文档解
 
 ## 2. 工具输入
 
-工具输入包括：
+### V3 正向管线输入
 
 1. EoICD 源文件：
 
@@ -23,16 +23,45 @@ ICD工具原型Ver2.0聚焦EoICD场景，目标是建立一套从接口文档解
 
    * 第一版优先支持 Word 文件。
 
+### V4 反向管线输入
+
+1. HLR Word 文件（必填）：
+
+   * 软件高层需求 Word 文档（.docx）。
+
+2. EoICD PubSub Excel 文件（二选一）：
+
+   * Publisher Excel（.xlsx）；
+   * Subscriber Excel（.xlsx）。
+
+3. 追溯 Excel 文件（选填，0-N 个）：
+
+   * 用于追溯表预筛选。
+
 ## 3. 工具输出
 
-工具最终输出 4 份 Word 文档（实际为 4+1 份，其中 1 份复用旧文件名）：
+### V3 正向管线输出
+
+工具输出 4 份 Word 文档（实际为 4+1 份，其中 1 份复用旧文件名）：
 
 1. `MiniMax条目化需求.docx` — MiniMax 模型生成的全量候选合并
 2. `DeepSeek条目化需求.docx` — DeepSeek 模型生成的全量候选合并
 3. `最优条目化需求.docx` / `EoICD条目化需求.docx` — 评分择优后的最佳条目化需求（同一份文件，两份文件名）
 4. `EoICD与软件高层需求差异报告.docx` — 差异比对报告
 
+### V4 反向管线输出
+
+工具输出 5 份文档（1 份 xlsx + 4 份 docx）：
+
+1. `EoICD条目化清单.xlsx` — 条目化需求 Excel 清单
+2. `EoICD与SWHLR单模型差异分析报告_DeepSeek.docx` — DeepSeek 单模型一致性分析
+3. `EoICD与SWHLR单模型差异分析报告_MiniMax.docx` — MiniMax 单模型一致性分析
+4. `EoICD与SWHLR单模型差异分析报告_Qwen.docx` — Qwen 单模型一致性分析
+5. `EoICD与SWHLR多模型差异分析报告.docx` — 三模型共识分析报告（含星级评分）
+
 ## 4. 核心流程
+
+### V3 正向管线
 
 工具主要流程如下：
 
@@ -43,6 +72,17 @@ ICD工具原型Ver2.0聚焦EoICD场景，目标是建立一套从接口文档解
 5. 系统选择最佳 EoICD 条目化需求（跨模型择优）；
 6. 系统将最佳 EoICD 条目化需求与软件高层需求进行差异比对；
 7. 系统生成条目化需求文档（按模型 + 最优）和差异报告。
+
+### V4 反向管线
+
+V4 反向管线以 HLR 为起点，验证 EoICD 中是否覆盖了每条 HLR 需求（"HLR 在 EoICD 是否落实"）：
+
+1. **Step 1 — 解析输入**：解析 HLR Word + EoICD PubSub Excel → 结构化需求列表
+2. **Step 2 — HLR AI 标注**：DeepSeek 对每条 HLR 标注 bus_types / labels / devices / signal_keywords
+3. **Step 3 — 反向匹配**：HLR → EoICD Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三级分层），可选追溯表预筛选
+4. **Step 4 — 多模型裁判**：DeepSeek / MiniMax / Qwen 三模型并行独立判定
+5. **Step 5 — Review Agent 共识**：对三模型判定结果综合复核并给出星级评价（1-3★）
+6. **Step 6 — 报告生成**：输出 1 份 xlsx + 4 份 docx
 
 ## 5. 当前范围
 
@@ -68,6 +108,8 @@ ICD工具原型Ver2.0聚焦EoICD场景，目标是建立一套从接口文档解
 * python-docx
 * CrewAI
 * LiteLLM
+* Qwen（DashScope）
+* MiniMax
 
 部署：
 
@@ -81,7 +123,13 @@ ICD工具原型Ver2.0聚焦EoICD场景，目标是建立一套从接口文档解
 icd-tool-prototype/
 ├── frontend/                 # 前端工程
 ├── backend/                  # 后端工程
+│   ├── app/
+│   │   ├── api/v3/           # V3 API 路由
+│   │   ├── api/v4/           # V4 API 路由
+│   │   └── v4/               # V4 业务模块（反向管线）
+│   └── output/               # 运行时输出文件目录
 ├── docs/                     # 正式工程文档
+├── issues_file/              # Issue 草稿文件
 ├── .claude/                  # Claude Code 规则和辅助文件
 ├── README.md                 # 项目说明
 ├── CLAUDE.md                 # Claude Code 工作入口
@@ -113,7 +161,11 @@ icd-tool-prototype/
 
 ## 9. 当前阶段
 
-当前工程处于 ICD 工具 2.0 端到端原型验证阶段，已完成真实 LLM 接入（MiniMax M2.7 + DeepSeek）、EoICD 真实文件解析（Word + PubSub Excel）、CrewAI 多智能体条目化生成与评分择优、差异比对和 DOCX 输出。
+当前工程处于 ICD 工具 2.0 端到端原型验证阶段。
+
+V3 正向管线已完成：真实 LLM 接入（MiniMax M2.7 + DeepSeek）、EoICD 真实文件解析（Word + PubSub Excel）、CrewAI 多智能体条目化生成与评分择优、差异比对和 DOCX 输出。
+
+V4 反向管线已完成：HLR → EoICD 覆盖性分析（解析→HLR AI 标注→反向匹配→三模型裁判→Review Agent 共识→报告生成），三智能体（DeepSeek / MiniMax / Qwen）并行判定 + 星级评分共识，输出 5 份产物（含不一致属性栏等多维度分析明细）。V3 与 V4 通过独立 API 命名空间双版本共存。
 
 ## 10. 本地运行
 

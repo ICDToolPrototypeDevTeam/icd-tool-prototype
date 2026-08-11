@@ -710,3 +710,51 @@ verified
 
 代码验证已通过。实际 Excel 上传测试待进行。
 
+---
+
+### BUG-20260730-001：追溯表预筛选因数据覆盖不全导致可匹配 HLR 被误判为"无匹配"
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-07-30
+
+#### 关联 Issue / PR
+
+- Issue #43：追溯表预筛选兜底机制与协议开销字段过滤
+
+#### 问题现象
+
+上传包含追溯表的 V4 任务后，部分 HLR 在追溯表预筛选阶段被标记为"无匹配"，但经全量 EoICD 匹配验证后这些 HLR 实际存在可匹配的 EoICD Block。追溯表数据覆盖不全时，预筛选反而缩小了搜索范围导致漏判。
+
+同时，A429 协议开销字段（如 `xxx/SDI`、`xxx/LABEL` 等）出现在追溯索引的有效候选列表中，这些 block_key 本身不应参与匹配却占用了索引空间。
+
+#### 原因分析
+
+1. 追溯 Excel 中标注的 ICD 映射关系（ERD → ICD Label）可能不完整，部分 HLR 的 label 在追溯表中没有对应映射条目，导致 `hlr_to_blocks` 索引中无该 HLR 的候选 block。
+2. 旧流程中预筛选结果直接作为最终匹配结果，无兜底机制，导致预筛选失败的 HLR 直接判为"无匹配"。
+3. `trace_parser.py` 在构建 block_key 映射时未过滤协议开销后缀（`/SDI`、`/LABEL`、`/PARITY`、`/SSM`、`/OCTLBL`），导致无意义的协议开销 block 混入候选列表。
+
+#### 修复方案
+
+1. `trace_parser.py`：新增 `_PROTOCOL_BLOCKKEY_SUFFIXES` 常量，在 `build_trace_index()` 的 block_key 映射阶段过滤以协议开销后缀结尾的条目。
+2. `pipeline.py`：`_match_reverse_with_trace()` 中，Group A 预筛选完成后收集"无匹配"HLR，对它们触发全量 EoICD 匹配作为兜底；新增 `_count_match_types()` 辅助函数统计兜底前后匹配分布。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/traceability/trace_parser.py`
+2. `backend/app/v4/pipeline.py`
+
+#### 验证方式
+
+1. 上传包含追溯表的 V4 任务，检查后端日志确认兜底触发情况
+2. 检查反向匹配结果中无匹配 HLR 数量是否合理减少
+3. 验证协议开销 block_key 不出现在追溯索引中
+
+#### 验证结果
+
+已验证通过。兜底机制确保追溯表预筛选只缩小搜索范围而不引入误判。
+

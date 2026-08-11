@@ -282,3 +282,200 @@ EoICD与软件高层需求差异报告.docx
 7. 修改错误响应结构。
 
 本文档是前后端接口协作的初始事实源，但在原型阶段允许随实现过程进行合理调整。
+
+## 13. V4 路由（Issue A 落地，2026-07-28）
+
+本节追加于原 12 节之后。V4 与 V3 双版本共存；V3 旧 API 行为不变（§1-§12），V4 新增 `/api/v4` 命名空间。
+
+### 13.1 V4 健康检查
+
+```text
+GET /api/v4/health
+```
+
+预期返回：
+
+```json
+{ "status": "ok", "api_version": "v4" }
+```
+
+### 13.2 V4 创建分析任务
+
+```text
+POST /api/v4/coverage-analysis
+Content-Type: multipart/form-data
+```
+
+请求字段（multipart）：
+
+| 字段 | 类型 | 必填 | 含义 |
+| --- | --- | --- | --- |
+| `hlr_word_file` | UploadFile (.docx) | 是 | HLR Word 文档 |
+| `eoicd_publisher_file` | UploadFile (.xlsx) | 二选一 | EoICD Publisher PubSub Excel |
+| `eoicd_subscriber_file` | UploadFile (.xlsx) | 二选一 | EoICD Subscriber PubSub Excel |
+| `traceability_files` | list[UploadFile] (.xlsx) | 否 | 0-N 追溯 Excel；启用预筛选时必传 |
+| `use_mock_llm` | bool (form) | 否（默认 false） | 是否走 mock |
+| `judge_providers` | list[str] (form) | 否（默认 `["deepseek"]`） | 多模型 panel provider 白名单 ∈ `{deepseek, minimax, qwen}` |
+| `enable_traceability_prefilter` | bool (form) | 否（默认 false） | 是否启用追溯预筛选 |
+
+文件名校验：`[^A-Za-z0-9._\-一-龥]` 之外字符会被替换为 `_`；`safe_filename()`。
+
+`judge_providers` 任一不在白名单 → 422。
+
+预期返回（V4AnalyzeResponse）：
+
+```json
+{
+  "job_id": "<uuid>",
+  "status": "pending",
+  "message": "V4 反向管线任务已创建"
+}
+```
+
+### 13.3 V4 任务状态
+
+```text
+GET /api/v4/jobs/{job_id}
+```
+
+预期返回（V4JobStatusResponse）：
+
+```json
+{
+  "job_id": "<uuid>",
+  "status": "pending | running | completed | failed",
+  "stage": "parse | label | match | multi_judge | review | report | done",
+  "stage_index": 3,
+  "stage_total": 5,
+  "case_index": 12,
+  "case_total": 12,
+  "message": "Step 3/5: Multi-agent judging",
+  "mock_models": ["minimax", "qwen"],
+  "created_at": "ISO-8601",
+  "updated_at": "ISO-8601"
+}
+```
+
+`mock_models` 按 ADR-001 D5 规则取值：`multi_judge_results.json.providers ∩ {"minimax", "qwen"}`；`USE_MOCK_LLM=1` 时所有 provider 都进 `mock_models`。
+
+### 13.4 V4 任务结果
+
+```text
+GET /api/v4/jobs/{job_id}/result
+```
+
+仅当 `status == completed` 时返 200 + 完整结果，否则 409。
+
+预期返回（V4JobResultResponse）：
+
+```json
+{
+  "job_id": "<uuid>",
+  "status": "completed",
+  "summary": {
+    "eoicd_count": 122674,
+    "eoicd_blocks_total": 1568,
+    "eoicd_blocks_matched": 11,
+    "hlr_count": 16,
+    "matched_count": 5,
+    "pending_count": 7,
+    "unmatched_count": 4,
+    "judged_count": 12,
+    "agreement_distribution": {"majority": 7, "full": 4, "split": 1},
+    "star_distribution": {"1": 1, "2": 7, "3": 4},
+    "status_distribution": {"covered": 7, "needs_review": 4, "inconsistent": 1, "无匹配": 4},
+    "average_star_rating": 2.25
+  },
+  "outputs": {
+    "eoicd_xlsx": true,
+    "consistency_deepseek_docx": true,
+    "consistency_minimax_docx": true,
+    "consistency_qwen_docx": true,
+    "consensus_docx": true
+  },
+  "mock_models": ["minimax", "qwen"],
+  "errors": []
+}
+```
+
+`outputs.*` 5 个布尔为 false 时表示对应 docx/xlsx 未生成（pipeline 中途失败、文件被 GC 等）。
+
+### 13.5 V4 3 类对外下载
+
+```text
+GET /api/v4/jobs/{job_id}/outputs/eoicd-xlsx
+GET /api/v4/jobs/{job_id}/outputs/consensus-docx
+GET /api/v4/jobs/{job_id}/outputs/consistency/{model}
+```
+
+`{model}` ∈ `{deepseek, minimax, qwen}`（白名单校验，非法 → 400）。
+
+5 类文件命名（与 `backend/app/api/v4/runner.V4_OUTPUT_FILES` SSoT 一致）：
+
+| URL 段 | 物理文件名 |
+| --- | --- |
+| `eoicd-xlsx` | `EoICD条目化清单.xlsx` |
+| `consensus-docx` | `EoICD与SWHLR多模型差异分析报告.docx` |
+| `consistency/deepseek` | `EoICD与SWHLR单模型差异分析报告_DeepSeek.docx` |
+| `consistency/minimax` | `EoICD与SWHLR单模型差异分析报告_MiniMax.docx` |
+| `consistency/qwen` | `EoICD与SWHLR单模型差异分析报告_Qwen.docx` |
+
+Content-Type：
+- `.xlsx` → `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+- `.docx` → `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
+
+### 13.6 V4 错误响应
+
+| 场景 | HTTP | 备注 |
+| --- | --- | --- |
+| `hlr_word_file` 缺失或非 .docx | 422 | |
+| pub/sub Excel 都没传 | 422 | 至少传一个 |
+| 任意 Excel 非 .xlsx | 422 | |
+| 文件 >50 MB | 413 | 整请求 >200 MB |
+| 文件名含非法字符 | 422 | |
+| `judge_providers` 出现 `claude` 等 | 422 | 错误信息含 `allowed: deepseek, minimax, qwen` |
+| `{model}` 不在 `{deepseek,minimax,qwen}` | 400 | `invalid model: <name>; allowed: ...` |
+| 任务 `running` 时调 `/result` | 409 | `job not finished: status=...` |
+| 任务 `failed` 时调 `/result` | 409 | |
+| 跨版本查询（如 V3 路由查 V4 job_id） | 404 | `use /api/v4/jobs/... instead` |
+
+### 13.7 V4 路径布局（V3 与 V4 输出文件落到不同根目录）
+
+| 版本 | 根目录 | 内部结构 |
+| --- | --- | --- |
+| V3 | `backend/output/v3/{job_id}/` | 平铺：input / output 不分 |
+| V4 | `backend/output/v4/{job_id}/` | 分层：`input/`（用户上传原始文件）+ `output/`（pipeline 产物） |
+
+`docker-compose.yml` volume 映射 `./backend/output:/app/output`。
+
+V4 `input/traceability/` 子目录用于 `enable_traceability_prefilter=true` 时追溯表落点。
+
+### 13.8 V4 JSON 中间产物（D7 不暴露）
+
+下列 7 个 JSON 是 V4 内部中间产物，**不**作为下载 API 暴露，**仅**保留在 `backend/output/v4/{job_id}/output/` 内供服务端日志与后续 Issue 调试：
+
+- `multi_judge_results.json`
+- `consensus_results.json`
+- `reverse_matches.json`
+- `reverse_report.json`
+- `eoicd_requirements.json`
+- `hlr_requirements.json`
+- `hlr_labels.json`
+
+如前端需要看这些数据，**不**通过 `GET /api/v4/jobs/{id}/outputs/{name}`；应在后续 Issue 加 `Accept: application/json` 内容协商或独立子路由。
+
+### 13.9 V4 路由与 V3 路由的对应关系
+
+| 关注点 | V3 路由 | V4 路由 |
+| --- | --- | --- |
+| 任务创建 | `POST /api/eoicd/analyze` | `POST /api/v4/coverage-analysis` |
+| 任务状态 | `GET /api/jobs/{id}` | `GET /api/v4/jobs/{id}` |
+| 任务结果 | `GET /api/jobs/{id}/result` | `GET /api/v4/jobs/{id}/result` |
+| 下载输出 | `GET /api/jobs/{id}/outputs/{requirements,minimax-requirements,deepseek-requirements,difference-report}` | `GET /api/v4/jobs/{id}/outputs/{eoicd-xlsx,consensus-docx,consistency/{model}}` |
+| 健康检查 | `GET /api/health` | `GET /api/v4/health` |
+
+V3 与 V4 的 `outputs` schema、文件命名、`requirements` 字典字段完全不同；前端若需切换版本，须按 §1-§12 vs §13 各自实现客户端。
+
+### 13.10 V4 API 变更原则
+
+按本文件 §11：V4 任何 API 变更（路径、字段、状态定义、文件命名、错误响应）需同步更新本节。如未来 §13 内容与 `backend/app/api/v4/*.py` 不一致，**§13 以代码为准**并在本文件回写差异。

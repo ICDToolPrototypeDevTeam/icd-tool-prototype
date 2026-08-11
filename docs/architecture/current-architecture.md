@@ -205,3 +205,190 @@ backend/app/output/
 3. 重大架构变化应新增 ADR；
 4. 架构变化后应同步更新本文档；
 5. 不应在普通 Bug 修复任务中顺手进行架构重构。
+
+## 12. V4 后端集成（Issue A 落地，2026-07-28）
+
+本节追加于原 11 节之后。V3 旧架构（§5-§10）保持不变；V4 与 V3 在同一 FastAPI 入口中双版本共存。
+
+### 12.1 V3 / V4 双版本共存
+
+| 维度 | V3 | V4 |
+| --- | --- | --- |
+| FastAPI 入口 | `backend/app/main.py`（顶层 thin shell，仅挂 router） | 同 V3（`app.include_router(v4_router, prefix="/api/v4")`） |
+| 路由文件 | `backend/app/api/v3/router.py` | `backend/app/api/v4/router.py` |
+| 业务模块 | `backend/app/{crew,merge,scoring,docx,llm,parsers,prompts,skills,models,pipeline,job_manager}.py` | `backend/app/v4/{comparison,doc_generators,llm,matching,parsers,prompts,traceability,config,models,pipeline,cli}.py` |
+| 任务目录 | `backend/output/v3/{job_id}/` | `backend/output/v4/{job_id}/input/` + `output/` |
+| JobManager | 共享（带 `kind: Literal["v3","v4"]` 字段） | 同 V3 |
+| LLM | `crewai.BaseLLM` 派生 + `litellm` | `get_llm("deepseek")` → `DeepSeekClient` + `MockLLMClient` |
+| 解析器 | EoICD Word + Excel + 软件高层需求 | EoICD PubSub Excel + HLR Word + 追溯 Excel（可选） |
+| 多智能体 | CrewAI 5 Agent / 5 Task / 3 Crew | 工厂：3 provider 平行 judge + Review Agent 共识 |
+| 输出文档 | 4 份 docx | 1 份 xlsx + 4 份 docx |
+| docker-compose 端口 | 8000 | 8000（同） |
+
+### 12.2 V4 顶层入口与子包
+
+```text
+backend/app/
+├── main.py                 # 顶层 FastAPI 入口（仅 CORS + V3/V4 router 装载；约 33 行）
+├── job_manager.py          # 共享 Job / JobManager（带 kind 字段）
+├── models.py               # V3 Pydantic 模型（含 JobStatus / V3 响应 schema）
+├── api/
+│   ├── v3/
+│   │   └── router.py       # V3 路由（173 行；从原 main.py 机械拆分）
+│   └── v4/
+│       ├── router.py       # V4 路由聚合
+│       ├── schemas.py      # V4Job* Pydantic（与 V3 schema 完全隔离）
+│       ├── runner.py       # V4 后台线程 + env 保存/恢复 + 5 个 derive_* 函数
+│       ├── coverage.py     # POST /api/v4/coverage-analysis
+│       ├── jobs.py         # GET /api/v4/jobs/{id}[/result]
+│       └── outputs.py      # GET /api/v4/jobs/{id}/outputs/{kind}
+└── v4/                     # V4 业务子包（从 _v4_backend_raw/backend/app/ 整体迁入；import 改写为 app.v4.X）
+    ├── cli.py              # V4 CLI 入口（原 main.py 重命名）
+    ├── config.py           # V4 env 加载（DEEPSEEK_*、USE_MOCK_LLM、JUDGE_PROVIDERS）+ 业务常量
+    ├── models.py           # V4 Pydantic（EoICDRequirement / HLRLabel / ReverseCase / ConsensusResult / …）
+    ├── pipeline.py         # V4 反向管线编排（run_reverse_pipeline / _match_reverse_with_trace）
+    ├── parsers/            # EoICD Excel + HLR Word 解析
+    ├── matching/           # 反向匹配、信号画像、HLR 分类、entry filter
+    ├── comparison/         # multi_judge + review_agent + 报告生成
+    ├── doc_generators/     # xlsx + 3 类 docx 生成
+    ├── prompts/            # forward_judge / reverse_judge / consensus .md
+    ├── llm/                # factory / deepseek_client / mock_llm
+    ├── traceability/       # 追溯表预筛选（独立 zero-coupling 模块）
+    └── synonyms.yaml       # 别名映射
+```
+
+### 12.3 V4 业务流程（6 步反向管线）
+
+```text
+1. 解析输入
+   EoICD PubSub Excel + HLR Word → 结构化需求列表
+   模块: parsers/{eoicd_excel_parser,hlr_word_parser}.py
+
+2. HLR AI 标注
+   DeepSeek 对每条 HLR 标注 bus_types / labels / devices / signal_keywords
+   模块: matching/hlr_labeler.py
+
+3. 反向匹配（含条目过滤→信号画像→Block 聚合→HLR 分类→匹配→可选追溯预筛选+兜底）
+   3a. 条目过滤: 排除协议 DataFormatType 条目 — matching/entry_filter.py
+   3b. 信号画像聚类: 按 (Label, LeafName) 聚类 → SignalProfile — matching/signal_profiler.py
+   3c. ICD Block 聚合: 按 (label, signal_family) 分组 → ICDBlock
+   3d. HLR 分类: 4 路正则分类 + 提取 Label/位字段/SDI/方向 — matching/hlr_classifier.py
+   3e. 两阶段 Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三层过滤 → 三级分层）— matching/reverse_matcher.py
+   3f. 可选追溯表预筛选 + 兜底机制 — matching/traceability.py
+
+4. 多智能体裁判
+   3 Agent 平行裁判（DeepSeek/MiniMax/Qwen）
+   模块: comparison/{multi_judge,semantic_judge}.py
+   LLM 抽象: llm/factory.py → get_llm(provider)
+
+5. Review Agent 共识
+   综合复核 + 星级评价（1-3★）
+   模块: comparison/review_agent.py
+
+6. 报告生成
+   1 份 xlsx + 3 份单模型 docx + 1 份共识 docx
+   模块: doc_generators/{excel_generator,word_generator,consensus_word_generator}.py
+   + comparison/report_generator.py
+```
+
+### 12.4 V4 输出文档结构
+
+```text
+{job_dir}/                              # = backend/output/v4/{job_id}/
+├── input/                              # 用户上传的原始文件（HTTP 接收时保存）
+│   ├── hlr.docx
+│   ├── pub.xlsx
+│   ├── sub.xlsx
+│   └── traceability/                   # 仅 enable_traceability_prefilter=true 时存在
+│       ├── <file1>.xlsx
+│       └── <file2>.xlsx
+└── output/                             # V4 pipeline 写出的产物
+    ├── EoICD条目化清单.xlsx           # 对外下载 (URL: .../outputs/eoicd-xlsx)
+    ├── EoICD与SWHLR单模型差异分析报告_DeepSeek.docx   # 对外 (URL: .../consistency/deepseek)
+    ├── EoICD与SWHLR单模型差异分析报告_MiniMax.docx    # 对外 (URL: .../consistency/minimax)
+    ├── EoICD与SWHLR单模型差异分析报告_Qwen.docx       # 对外 (URL: .../consistency/qwen)
+    ├── EoICD与SWHLR多模型差异分析报告.docx         # 对外 (URL: .../consensus-docx)
+    ├── eoicd_requirements.json          # 内部
+    ├── hlr_requirements.json            # 内部
+    ├── hlr_labels.json                  # 内部（Step 2 输出）
+    ├── reverse_matches.json             # 内部（Step 3 输出）
+    ├── multi_judge_results.json         # 内部（Step 4 输出；mock_models 也从此文件提取）
+    ├── consensus_results.json           # 内部（Step 5 输出）
+    └── reverse_report.json              # 内部（Step 6 输出）
+```
+
+5 类对外下载对应 `V4_OUTPUT_FILES` 常量（`backend/app/api/v4/runner.py`），是 SSoT。7 个 JSON 中间产物按 ADR-001 D7 不作为下载 API 暴露。
+
+### 12.5 V3 / V4 JobManager 共享
+
+```python
+# backend/app/job_manager.py
+class Job:
+    def __init__(self, kind: Literal["v3", "v4"] = "v3"):
+        self.job_id: str = str(uuid.uuid4())
+        self.kind: Literal["v3", "v4"] = kind
+        ...
+
+class JobManager:
+    def create_job(self, kind: Literal["v3", "v4"] = "v3") -> Job:
+        ...
+```
+
+V3 路由仍调 `job_manager.create_job()`（默认 kind="v3"），V4 路由显式传 `kind="v4"`。`Job.kind` **不**对外暴露在 `/result` schema（D8 决策）；仅做路由层分发。
+
+跨版本查询：
+- V3 路由收到 `kind="v4"` Job → 404 + `use /api/v4/jobs/...`
+- V4 路由收到 `kind="v3"` Job → 404 + `use /api/jobs/...`
+
+### 12.6 V4 LLM 抽象层
+
+```text
+llm/factory.py
+  get_llm(provider: str) -> LLMClient
+    if USE_MOCK_LLM=1: return MockLLMClient
+    if provider == "deepseek": return DeepSeekClient(api_key, base_url, model)
+    if provider == "qwen": return QwenClient(api_key, base_url, model)
+    if provider == "minimax": return MiniMaxClient(api_key, base_url, model)
+
+llm/deepseek_client.py
+  DeepSeekClient.chat(messages, temperature, max_tokens=1024, max_retries=2, ...)
+    幂等 URL:  base = base_url.rstrip('/'); if base.endswith('/v1'): base = base[:-3]
+    url = f"{base}/v1/chat/completions"
+
+llm/qwen_client.py
+  QwenClient.chat(messages, temperature, max_tokens=1024, max_retries=2, ...)
+
+llm/minimax_client.py
+  MiniMaxClient.chat(messages, temperature, max_tokens=1024, max_retries=2, ...)
+
+llm/mock_llm.py
+  MockLLMClient.chat(messages, ...) -> ChatResponse
+    返写死 JSON，按 MOCK_JUDGE_RESULT 切 covered / inconsistent / needs_review
+```
+
+V4 内 LLM 调用入口：
+- `comparison/semantic_judge.py` × 2 处
+- `comparison/multi_judge.py`（按 provider 列表循环调）
+- `comparison/review_agent.py`
+- `matching/hlr_labeler.py`（_call_label_api）
+
+V4 内 `import requests` 仅 1 处（`deepseek_client.py`），其余全部走 `get_llm(provider).chat()`。
+
+### 12.7 V3 / V4 模块边界约束
+
+| 类别 | 约束 |
+| --- | --- |
+| V3 业务模块 | `crew/` / `merge/` / `scoring/` / `docx/` / `parsers/` 保持 V3 现状，本期不修改 |
+| V4 业务模块 | V4 业务逻辑按 ADR-001 D4 保护，Issue A 期间 2 处修复（`hlr_labeler` URL bug / `trace_parser` 文件名 brittleness）已写为本次"特权"实施 |
+| 共享模块 | `backend/app/{job_manager,models,main}.py` 与 `backend/app/api/v3/router.py` 同源演进（V3 路由不删，V4 router 走独立子包） |
+| 路由层 | V3 / V4 路由完全独立文件，跨版本查询 404 |
+| Schema 层 | V3JobResponse 与 V4JobResponse 互不 import；Pydantic 模型分别定义 |
+| 入口层 | `backend/app/main.py` 仅 33 行（CORS + V3 router 装载 + V4 router 装载），不写业务逻辑 |
+
+### 12.8 V4 工程约束（ADR-001 引用）
+
+V4 工程化集成的关键决策由 `docs/decisions/ADR-001-V4后端接入策略.md` 维护。本节 §12 与 ADR-001 在以下方面保持一致：
+- D1 / D2 / D3 / D4 / D5 / D6 / D7 在 §12.1（双版本共存）、§12.5（JobManager 共享 + 跨版本 404）、§12.6（LLM 抽象层）体现。
+- ADR-002（涉及 V4 内部修改的本次"特权"实施）未建，留作 Issue B 启动后由 B 处理。
+
+如未来 V4 路由 / Schema / JobManager / LLM 抽象层有变化，需同时更新本节与 ADR-001。
