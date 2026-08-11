@@ -2,11 +2,15 @@
 
 ICD工具原型Ver2.0是一个面向EoICD源文件和软件高层需求文件的智能化需求生成与差异分析工具。
 
-本工具包含两条独立管线：**V3 正向管线**通过 MiniMax 和 DeepSeek 双模型 CrewAI 多智能体生成候选结果并评分择优，输出条目化需求文档和差异分析报告；**V4 反向管线**以软件高层需求（HLR）为起点，通过 DeepSeek / MiniMax / Qwen 三模型并行裁判 + Review Agent 共识复核，验证 HLR 在 EoICD 中是否落实，输出条目化清单、单模型一致性报告和多模型共识分析报告。
+本工具包含两条互补管线：V3 正向管线从 EoICD 出发生成条目化需求，并与软件高层需求进行差异比对；V4 反向管线从软件高层需求出发，验证其到 EoICD 接口定义的可追溯性。
+
+**V3 正向管线**用于根据用户输入的 EoICD 源文件（Word + PubSub Excel）和软件高层需求文件，通过 MiniMax 和 DeepSeek 双模型 CrewAI 多智能体生成条目化需求候选结果并评分择优，再将最优条目化需求与软件高层需求进行差异比对，最终输出条目化需求文档和差异分析报告。
+
+**V4 反向管线**用于根据用户输入的软件高层需求文件（HLR Word）和 EoICD PubSub Excel（Publisher/Subscriber 二选一），通过解析→HLR AI 标注→反向匹配→DeepSeek / MiniMax / Qwen 三模型并行裁判→Review Agent 共识复核，验证每条 HLR 需求是否能在 EoICD 中找到对应的接口定义（即 HLR 到 EoICD 的可追溯性），最终输出条目化清单、单模型一致性报告和多模型共识分析报告（含星级评分）。
 
 ## 1. 项目目标
 
-ICD工具原型Ver2.0聚焦EoICD场景，目标是建立一套从接口文档解析、条目化需求生成、候选结果评分择优，到软件高层需求差异比对和报告输出的端到端工具流程。V4 在此基础上新增反向覆盖性分析能力，从 HLR 出发验证 EoICD 接口定义的完整性。
+ICD工具原型Ver2.0聚焦EoICD场景，目标是建立一套从接口文档解析、条目化需求生成、候选结果评分择优，到软件高层需求差异比对和报告输出的端到端工具流程。V4 在此基础上新增反向可追溯性分析能力，从 HLR 出发验证每条 HLR 需求在 EoICD 中是否有对应的接口定义。
 
 当前版本定位为本地演示版本，优先保证流程可运行、结果可展示、逻辑可解释。
 
@@ -77,7 +81,7 @@ ICD工具原型Ver2.0聚焦EoICD场景，目标是建立一套从接口文档解
 
 ### V4 反向管线
 
-V4 反向管线以 HLR 为起点，验证 EoICD 中是否覆盖了每条 HLR 需求（"HLR 在 EoICD 是否落实"）：
+V4 反向管线以 HLR 为起点，验证每条 HLR 需求是否能在 EoICD 中找到对应的接口定义（即 HLR 到 EoICD 的可追溯性）：
 
 1. **Step 1 — 解析输入**：解析 HLR Word + EoICD PubSub Excel → 结构化需求列表，同时生成 EoICD 条目化清单 Excel
 2. **Step 2 — HLR AI 标注**：DeepSeek 对每条 HLR 标注 bus_types / labels / devices / signal_keywords
@@ -88,11 +92,11 @@ V4 反向管线以 HLR 为起点，验证 EoICD 中是否覆盖了每条 HLR 需
 
 ## 5. 当前范围
 
-当前版本支持 EoICD 正向条目化（V3）和 HLR→EoICD 反向覆盖性分析（V4）两条独立管线，双版本在统一 FastAPI 入口下共存。
+当前版本支持 EoICD 正向条目化（V3）和 HLR→EoICD 反向可追溯性分析（V4）两条独立管线，双版本在统一 FastAPI 入口下共存。
 
 V3 正向管线聚焦"EoICD 怎么写"——从 EoICD 源文件生成条目化需求，并与软件高层需求比对。
 
-V4 反向管线聚焦"HLR 在 EoICD 是否落实"——从 HLR 出发验证 EoICD 接口定义的覆盖完整性。
+V4 反向管线聚焦"HLR 到 EoICD 的可追溯性"——从 HLR 出发，判断每条 HLR 需求在 EoICD 中是否有对应的接口定义。
 
 当前版本暂不支持：EICD / MICD / 通用 ICD 文档处理、多项目管理、用户权限管理、在线协同编辑、数据库存储、云端部署、企业级审批流、正式生产环境发布。
 
@@ -193,7 +197,7 @@ icd-tool-prototype/
 
 **V3 正向管线**已完成：真实 LLM 接入（MiniMax + DeepSeek）、EoICD 真实文件解析（Word + PubSub Excel）、CrewAI 多智能体条目化生成与评分择优、差异比对和 DOCX 输出。
 
-**V4 反向管线**已完成：HLR → EoICD 覆盖性分析（解析→HLR AI 标注→反向匹配→三模型裁判→Review Agent 共识→报告生成），DeepSeek / MiniMax / Qwen 三智能体并行判定 + 星级评分共识，输出 5 份产物（含不一致属性栏等多维度分析明细）。当前仅 DeepSeek 为真实 LLM 接入，MiniMax 和 Qwen 在 V4 中走 mock（待 Issue F 真实接入），mock 状态通过 API 响应的 `mock_models` 字段显式标识。
+**V4 反向管线**已完成：HLR → EoICD 可追溯性分析（解析→HLR AI 标注→反向匹配→三模型裁判→Review Agent 共识→报告生成），DeepSeek / MiniMax / Qwen 三智能体并行判定 + 星级评分共识，输出 5 份产物（含不一致属性栏等多维度分析明细）。当前仅 DeepSeek 为真实 LLM 接入，MiniMax 和 Qwen 在 V4 中走 mock（待 Issue F 真实接入），mock 状态通过 API 响应的 `mock_models` 字段显式标识。
 
 **前端**当前默认使用 V4 反向管线界面（V4 专用上传组件、处理进度、结果展示与下载），V3 后端路由保留可用。
 
