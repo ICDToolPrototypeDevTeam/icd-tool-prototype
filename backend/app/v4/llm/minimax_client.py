@@ -24,7 +24,7 @@ class MiniMaxClient:
         messages: list[dict],
         temperature: float = 0.1,
         max_tokens: int = 1024,
-        timeout: int = 60,
+        timeout: int = 120,
         max_retries: int = 2,
     ) -> "ChatResponse":
         """Send a chat completion request. Retries on network errors only."""

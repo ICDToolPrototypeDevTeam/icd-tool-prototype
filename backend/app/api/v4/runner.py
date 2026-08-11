@@ -100,7 +100,7 @@ def derive_mock_models(output_dir: Path) -> list[str]:
 
 def derive_consensus_summary(output_dir: Path) -> dict:
     """反读 consensus_results.json 提取 agreement / star / status 分布。"""
-    out = {"agreement_distribution": {}, "star_distribution": {}, "status_distribution": {}, "average_star_rating": 0.0, "judged_count": 0}
+    out = {"agreement_distribution": {}, "star_distribution": {}, "status_distribution": {}, "average_star_rating": 0.0, "judged_count": 0, "degradation": {}}
     path = output_dir / V4_INTERMEDIATE_JSON["consensus"]
     if not path.exists():
         return out
@@ -112,6 +112,7 @@ def derive_consensus_summary(output_dir: Path) -> dict:
         out["status_distribution"] = summary.get("status_distribution", {}) or {}
         out["average_star_rating"] = float(summary.get("average_star_rating", 0.0) or 0.0)
         out["judged_count"] = int(summary.get("total", 0) or 0)
+        out["degradation"] = data.get("degradation", {}) or {}
     except Exception:
         pass
     return out
@@ -234,6 +235,7 @@ def run_v4_pipeline_thread(
             "status_distribution": {**consensus["status_distribution"], "无匹配": match_stats["unmatched_count"]},
             "average_star_rating": consensus["average_star_rating"],
             "mock_models": mock_models,
+            "degradation": consensus.get("degradation", {}),
             "errors": [],
         }
         job.update(JobStatus.COMPLETED, "V4 reverse pipeline complete")
@@ -247,6 +249,7 @@ def run_v4_pipeline_thread(
             "consistency_qwen_docx": (output_dir / V4_OUTPUT_FILES["consistency_qwen_docx"]).exists(),
             "consensus_docx": (output_dir / V4_OUTPUT_FILES["consensus_docx"]).exists(),
             "mock_models": [],
+            "degradation": {},
             "errors": [f"{type(e).__name__}: {e}"],
         }
         job.update(JobStatus.FAILED, f"V4 pipeline failed: {type(e).__name__}: {e}")

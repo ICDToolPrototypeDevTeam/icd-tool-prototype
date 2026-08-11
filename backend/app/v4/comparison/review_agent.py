@@ -97,7 +97,7 @@ def _call_review_api(
 
     for attempt in range(max_retries + 1):
         try:
-            response = llm.chat(messages=messages, temperature=0.1, max_tokens=8192)
+            response = llm.chat(messages=messages, temperature=0.1, max_tokens=4096)
             from app.v4.comparison.semantic_judge import _extract_json
             content = _extract_json(response["content"])
             data = json.loads(content)

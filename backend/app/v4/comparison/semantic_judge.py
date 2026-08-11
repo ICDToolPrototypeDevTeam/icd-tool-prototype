@@ -360,7 +360,7 @@ def _call_reverse_judge_api(
 
     for attempt in range(max_retries + 1):
         try:
-            response = llm.chat(messages=messages, temperature=0.1, max_tokens=8192)
+            response = llm.chat(messages=messages, temperature=0.1, max_tokens=4096)
             content = _extract_json(response["content"])
             data = json.loads(content)
             return ReverseJudgmentResult(
