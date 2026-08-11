@@ -252,3 +252,22 @@
 - **Step 4 调用切换**：pipeline 中 Step 4 从 `judge_with_panel()` 切换为 `_judge_with_degradation()`。
 - **Step 5 增加后处理**：Review Agent 执行后增加 `_apply_degradation_review()` 对星级和 agreement 做硬上限约束。
 - **LLM Client 默认参数**：`review_agent.py` 和 `semantic_judge.py` 的 `max_tokens` 从 8192 → 4096。
+
+## [Unreleased] - 2026-08-11：V4 一星复查机制（Issue #53）
+
+### Added
+
+- **Step 5.5 一星复查（peer-aware 反思）**：新增 `comparison/re_review.py`，`re_review_judgments()` 对 `star_rating == 1` 的 case 由三个 provider 以 peer-aware 方式各自重新评判。每个 provider 看到自己之前的判断（Judgment A）和 peer 的判断（Judgment B/C），携带完整 analysis 文本触发反思纠正。返回类型 `tuple[MultiJudgeOutput, set[str]]`（更新后的 multi_out + 被复查 case_id 集合）。
+- **Step 5.6 部分共识重跑**：仅对 `re_reviewed_ids` 中的 case 重跑 `review_judgments()`，其余 case 保持 Step 5 原结果不变。
+- **新增 `prompts/re_review.md`**：一星复查 LLM prompt，包含 peer-aware 复查规则、反思引导和证据驱动逐项核对模板。
+- **`hlr_labeler.py` max_tokens 调整**：DeepSeek HLR 标注 `max_tokens` 从 1024 调整为 2048，避免频繁截断告警。
+- **workflow.md Step 5.5/5.6 更新**：V4 总体流程图、单步输入输出表、异常处理表均已同步新增两个步骤。
+
+### Fixed
+
+- **pipeline.py `review_judgments` 局部引用错误**：原 `re_review_judgments()` 内部存在局部 `from review_agent import review_judgments` 导入，导致 Step 5.6 的外层调用因变量遮蔽产生 `UnboundLocalError`。修复：移除内部局部 import，统一从模块级导入。
+
+### Notes
+
+- 一星复查的测试方式为手动注入"错误但看似合理"的 analysis 文本，而非仅修改 coverage_status 标签。peer-aware 机制要求 provider 看到自己之前的错误分析才能触发真正反思和判断纠正。
+- `re_review_results.json` 写入审计记录，`multi_judge_results.json` 更新供 Step 5.6 继续使用，两者落盘时机由 `re_review_judgments()` 内部管理。
