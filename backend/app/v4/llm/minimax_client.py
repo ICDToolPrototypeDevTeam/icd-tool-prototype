@@ -45,19 +45,32 @@ class MiniMaxClient:
         last_error = None
         for attempt in range(max_retries + 1):
             try:
-                resp = requests.post(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                    timeout=timeout,
-                )
-                resp.raise_for_status()
-                body = resp.json()
-                content = body["choices"][0]["message"]["content"]
-                usage = body.get("usage", {})
+                token_budget = max_tokens
+                for _ in range(3):
+                    payload["max_tokens"] = token_budget
+                    resp = requests.post(
+                        url,
+                        headers={
+                            "Authorization": f"Bearer {self._api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                        timeout=timeout,
+                    )
+                    resp.raise_for_status()
+                    body = resp.json()
+                    content = body["choices"][0]["message"]["content"]
+                    usage = body.get("usage", {})
+                    finish_reason = body["choices"][0].get("finish_reason", "")
+                    if finish_reason != "length" or token_budget >= 16384:
+                        break
+                    token_budget = min(token_budget * 2, 16384)
+                    import sys
+                    print(
+                        f"  [minimax] WARNING: response truncated (finish_reason=length), "
+                        f"retrying with max_tokens={token_budget}",
+                        file=sys.stderr,
+                    )
                 return ChatResponse(content=content, usage=usage)
             except requests.RequestException as e:
                 last_error = e

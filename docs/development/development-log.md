@@ -793,3 +793,46 @@ Mock 模式下已验证通过。真实 LLM 模式待后续端到端测试。
 
 1. 真实 LLM 模式下跑完整管线，观察降级机制实际表现
 2. 根据实际情况调整 `extra_wait` 和 `case_total_timeout` 默认值
+
+---
+
+## 2026-08-12 Issue #52：LLM Client 截断自适应重试下沉
+
+### 任务目标
+
+将 `finish_reason=length` 截断重试从业务层（`semantic_judge.py` 的 `_chat_with_truncation_retry`）下沉到三个 LLM client 的 `chat()` 方法内部，使所有调用方（judge / review / labeler）统一受益，消除 HLR Labeler 截断遗漏问题。
+
+### 完成内容
+
+1. 三个 client（DeepSeek / MiniMax / Qwen）的 `chat()` 方法内新增截断检测 + 自适应重试逻辑：`finish_reason=length` 时自动翻倍 `max_tokens` 重试（4096→8192→16384，上限 16384），与网络层 `max_retries` 独立。
+2. 删除 `semantic_judge.py` 中的 `_chat_with_truncation_retry` helper 函数，`_call_judge_api` / `_call_reverse_judge_api` 恢复直接调用 `llm.chat()`。
+3. `review_agent.py` 的 `_call_review_api` 恢复直接调用 `llm.chat()`。
+4. `ChatResponse` 删除 `truncated` 字段（截断已在 client 内部消化，调用方无需感知）。
+5. `hlr_labeler.py` 零改动，自动受益。
+
+### 修改文件
+
+1. `backend/app/v4/llm/deepseek_client.py`（新增内层截断重试）
+2. `backend/app/v4/llm/minimax_client.py`（同上）
+3. `backend/app/v4/llm/qwen_client.py`（同上）
+4. `backend/app/v4/llm/factory.py`（`ChatResponse` 删除 `truncated` 字段）
+5. `backend/app/v4/llm/mock_llm.py`（去掉 `truncated=False` 参数）
+6. `backend/app/v4/comparison/semantic_judge.py`（删除 `_chat_with_truncation_retry`，恢复直接调用）
+7. `backend/app/v4/comparison/review_agent.py`（恢复直接调用）
+
+### 验证方式
+
+1. `python -c` import 全链路验证通过
+2. 真实 LLM 模式下跑完整管线，观察截断 WARNING 后是否自动重试成功
+
+### 验证结果
+
+Import 链路验证通过。截断自适应重试效果待真实 LLM 端到端测试确认。
+
+### 遗留问题
+
+1. 截断重试在真实 LLM 场景下的表现待端到端验证
+
+### 下一步建议
+
+1. 真实 LLM 模式下跑完整管线，观察 WARNING + retrying 日志是否正常触发与恢复
