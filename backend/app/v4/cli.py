@@ -451,7 +451,7 @@ def _cmd_generate_word(args: argparse.Namespace) -> None:
             print(f"Generating {model_display} consistency analysis report...")
             generate_consistency_report(
                 Path(args.reverse_report),
-                output_dir / f"EoICD与HLR一致性分析报告_{model_display}.docx",
+                output_dir / f"EoICD与SWHLR单模型差异分析报告_{model_display}.docx",
                 model=model,
             )
 
@@ -476,7 +476,7 @@ def _cmd_generate_consensus(args: argparse.Namespace) -> None:
     generate_consensus_word(
         consensus_path=Path(args.consensus),
         match_path=Path(match_path),
-        output_path=output_dir / "EoICD与HLR多模型共识分析报告.docx",
+        output_path=output_dir / "EoICD与SWHLR多模型差异分析报告.docx",
     )
 
 

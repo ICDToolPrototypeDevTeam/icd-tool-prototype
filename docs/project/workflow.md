@@ -170,14 +170,29 @@ Step 3: 反向匹配（含条目过滤→信号画像→Block 聚合→HLR 分�
     3e: 两阶段 Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三层过滤 → 三级分层）— matching/reverse_matcher.py
     3f: 可选追溯表预筛选 + 兜底机制 — matching/traceability.py
 
-Step 4: 多智能体裁判
+Step 4: 多智能体裁判（含降级保护）
     DeepSeek / MiniMax / Qwen 三模型并行独立判定
-    模块: comparison/{multi_judge,semantic_judge}.py
+    Case 级超时控制：前 2 个完成后第三个固定额外等待（默认 120s），不足 2 个时兜底上限（300s）
+    Provider 熔断器：连续失败达阈值后自动跳过，TTL 到期自动恢复
+    模块: comparison/{multi_judge,semantic_judge}.py + degradation/{config,context,fallback}.py
     LLM 抽象: llm/factory.py → get_llm(provider)
 
-Step 5: Review Agent 共识
+Step 5: Review Agent 共识（含降级后处理）
     对三模型判定结果综合复核并给出星级评价（1-3★）
-    模块: comparison/review_agent.py
+    降级后处理：存活 provider 不足时硬上限约束（1 个 → ≤1★，2 个 → ≤2★）
+    模块: comparison/review_agent.py + degradation/context.py
+
+Step 5.5: 一星复查（peer-aware 反思）
+    对 star_rating == 1 的 case，由三个 provider 各自重新评判
+    每个 provider 看到自己之前的判断（Judgment A）和 peer 的判断（Judgment B/C），触发反思纠正
+    error provider 跳过：不重新查询 coverage_status="error" 的 provider，保留其 error 状态
+    模块: comparison/re_review.py
+
+Step 5.6: 部分共识重跑（含降级后处理）
+    仅对被复查过的 case（re_reviewed_ids）重跑共识，更新对应条目
+    其余 case 保持不变
+    共识结果经 `_apply_degradation_review()` 应用 star cap（1 个存活 → ≤1★，2 个存活 → ≤2★）
+    模块: comparison/review_agent.py + degradation/context.py
 
 Step 6: 报告生成
     1 份 xlsx + 3 份单模型 docx + 1 份共识 docx
@@ -208,7 +223,9 @@ Step 6: 报告生成
 | 3 反向匹配 | `eoicd_requirements.json` + `hlr_labels.json` | `reverse_matches.json` (1568 Block, 含分层层级、HLR 分类标记) | matching/{entry_filter,signal_profiler,reverse_case_builder,hlr_classifier,reverse_matcher,traceability}.py |
 | 4 多智能体裁判 | `reverse_matches.json` + 3 LLM | `multi_judge_results.json` (12 cases × 3 providers) | comparison/{multi_judge,semantic_judge}.py |
 | 5 Review 共识 | `multi_judge_results.json` | `consensus_results.json` (12 cases, agreement + star_rating) | comparison/review_agent.py |
-| 6 报告生成 | `consensus_results.json` + `reverse_matches.json` | 1 xlsx + 4 docx + 7 JSON | doc_generators/* + comparison/report_generator.py |
+| 5.5 一星复查 | `multi_judge_results.json` + `consensus_results.json` | `re_review_results.json`（审计）+ `multi_judge_results.json`（更新） | comparison/re_review.py |
+| 5.6 部分共识重跑 | `multi_judge_results.json`（复查后） | `consensus_results.json`（更新，仅涉及复查条目） | comparison/review_agent.py |
+| 6 报告生成 | `consensus_results.json` + `reverse_matches.json` | 1 xlsx + 4 docx + JSON | doc_generators/* + comparison/report_generator.py |
 
 ### 11.4 V4 关键约束
 
@@ -218,6 +235,7 @@ Step 6: 报告生成
 4. **env 保存/恢复**：V4 runner 后台线程在进入时 `os.environ.get()` 备份 `JUDGE_PROVIDERS` 与 `USE_MOCK_LLM`，`try/finally` 按 None/赋值恢复（Issue A 修正 #2）。
 5. **跨版本查询 404**：V3/V4 路由严格按 `Job.kind` 分发（V3 路由查 V4 job 返 404 + 提示 `use /api/v4/...`；反之亦然）。
 6. **追溯表预筛选（可选）**：仅 `enable_traceability_prefilter=true` 时走 `matching/traceability.py`，否则 `_match_reverse_with_trace` 跳过。
+7. **降级保护**：Step 4 的 `_judge_with_degradation()` 在每 case 前过滤 unhealthy provider，已熔断的 provider 不再发起 HTTP 调用，超时的 provider 补 error judgment 而不中断 case。Step 5 的 `_apply_degradation_review()` 对 Review Agent 输出做后处理，不修改 `review_judgments()` 本身。
 
 ### 11.5 V4 异常处理
 
@@ -228,7 +246,15 @@ Step 6: 报告生成
 | Step 3 反向匹配 | 反向匹配抛异常 | `job.status = failed` | 同 Step 1 |
 | Step 4 多智能体 | 3 provider 全失败 | `consensus_results.json` 中全失败标记 | `/result.summary.status_distribution` 全 `failed` |
 | Step 5 Review 共识 | Review 失败 | `consensus_results.json` 中 `summary: {"all_failed": true}` | `mock_models` 仅含失败 provider |
+| Step 5.5 一星复查 | 单 provider 复查 API 失败 | 该 provider 标记为 `error`，其余 provider 继续；最终以已有结果计 | re_review_results.json 中该 provider 为 `error` 状态，不阻断其他 provider |
+| Step 5.5 error provider | 原始 judgment 中 coverage_status="error" | 该 provider 不发起 LLM 调用，保留 error 状态 | degradation 统计 surviving provider 时正确排除 |
+| Step 5.6 部分共识重跑 | 共识重跑失败 | 该 case 保持 Step 5 原结果 | 仅影响 re_reviewed_ids 中的失败条目 |
+| Step 5.6 降级 | 存活 provider ≤ 2 | 星级受硬上限约束（≤1★ 或 ≤2★），agreement 可能被覆盖为 single_source | `degradation.review_star_capped_count` 递增 |
 | Step 6 报告生成 | docx 写盘失败 | `outputs.<key>` 某项为 false | `/result.outputs` 部分 false |
+| Step 4 降级超时 | 单 case 超时（t2+120s 或 300s 兜底） | 超时 provider 得 error judgment，其余正常 | `degradation.total_case_timeouts` 递增 |
+| Step 4 降级熔断 | Provider 连续失败 ≥ 3 次 | 该 provider 被标记 unhealthy，后续 case 跳过 | `degradation.provider_status` 显示 unhealthy |
+| Step 4 全部 unhealthy | 所有 provider 均熔断 | `AllProvidersUnhealthyError` → job FAILED | `/result` 返 409 |
+| Step 5 降级 | 存活 provider ≤ 2 | 星级受硬上限约束，agreement 可能被覆盖 | `degradation.review_star_capped_count` 递增 |
 
 ### 11.6 V4 流程变更原则
 

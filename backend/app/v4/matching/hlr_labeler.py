@@ -47,7 +47,7 @@ def _call_label_api(
     hlr: HLRRequirement,
     max_retries: int = 2,
     temperature: float = 0.1,
-    max_tokens: int = 1024,
+    max_tokens: int = 2048,
 ) -> HLRLabel:
     """Call DeepSeek API via factory `llm` to label one HLR requirement.
 

@@ -758,3 +758,66 @@ verified
 
 已验证通过。兜底机制确保追溯表预筛选只缩小搜索范围而不引入误判。
 
+---
+
+## BUG-20260812-001：LLM 输出截断导致 JSON 解析失败
+
+### 状态
+
+fixed
+
+### 发现日期
+
+2026-08-12
+
+### 问题现象
+
+1. Multi-Judge 阶段偶发 `JSON parse error after retries: Expecting value: line 1 column 1 (char 0)`
+2. DeepSeek 输出 `finish_reason=length, completion_tokens=1024` WARNING
+3. HLR Labeler 阶段出现截断 WARNING，但无重试机制，直接进入 fallback 空标签
+
+### 影响范围
+
+- `semantic_judge.py`：`_call_judge_api` / `_call_reverse_judge_api`
+- `review_agent.py`：`_call_review_api`
+- `hlr_labeler.py`：`_call_label_api`（最严重，无任何重试兜底）
+
+### 原因分析
+
+1. **开启思考模式后 think 与 output 共享 `max_tokens`**：DeepSeek/ MiniMax / Qwen 默认开启思考模式，think block 消耗 1500-3000 tokens，留给 JSON 输出的空间不足，触发 `finish_reason=length`。
+2. **初始方案只在业务层点状修补**：`_chat_with_truncation_retry` 仅覆盖 `semantic_judge.py` 和 `review_agent.py` 的 3 个调用点，`hlr_labeler.py`（`max_tokens=1024`）被遗漏。
+3. **client 层未暴露截断状态**：最初尝试通过 `ChatResponse.truncated` 字段透传截断标记，但调用方需显式检查，容易遗漏。
+
+### 修复方案
+
+将截断自适应重试**下沉到三个 LLM client 的 `chat()` 方法内部**：
+
+1. API 返回后检测 `finish_reason == "length"`
+2. 截断时自动翻倍 `max_tokens` 重新 POST（4096→8192→16384，上限 16384）
+3. 此重试独立于网络层 `max_retries`，不计入外层 retry 次数
+4. 截断已在 client 内部消化，删除 `ChatResponse.truncated` 字段和 `_chat_with_truncation_retry` helper
+
+### 修改文件
+
+1. `backend/app/v4/llm/deepseek_client.py`
+2. `backend/app/v4/llm/minimax_client.py`
+3. `backend/app/v4/llm/qwen_client.py`
+4. `backend/app/v4/llm/factory.py`
+5. `backend/app/v4/llm/mock_llm.py`
+6. `backend/app/v4/comparison/semantic_judge.py`
+7. `backend/app/v4/comparison/review_agent.py`
+
+### 验证方式
+
+1. `python -c` import 全链路验证通过
+2. 截断自适应重试效果待真实 LLM 端到端测试确认
+
+### 验证结果
+
+代码结构验证通过。真实 LLM 场景待后续端到端测试。
+
+### 经验总结
+
+1. **通用能力应放在最底层**：截断重试本质是 API 调用保障，与网络超时重试同级，应放在 client 层而非业务层。
+2. **点状修补会制造盲区**：`_chat_with_truncation_retry` 覆盖了 judge/review 但漏了 labeler，导致 labeler 成为唯一无截断保护的调用方。
+3. **开启思考模式后 `max_tokens` 预算需要更宽裕**：think block 消耗不可预测，初始 `max_tokens` 建议 ≥ 4096。

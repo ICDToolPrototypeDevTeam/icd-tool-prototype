@@ -701,6 +701,111 @@
 
 ---
 
+## 2026-08-11 Issue #53：V4 反向管线一星复查机制（Step 5.5/5.6）
+
+### 任务目标
+
+在 V4 反向管线 Step 5（Review Agent 共识）之后，增加一星复查机制：
+- **Step 5.5**：对 `star_rating == 1` 的 case，由三个 provider 以 peer-aware 方式各自重新评判
+- **Step 5.6**：仅对被复查过的 case 重跑共识，其余保持不变
+
+### 完成内容
+
+1. **新增 `re_review.py`**：`re_review_judgments()` 函数实现一星复查逻辑。返回类型 `tuple[MultiJudgeOutput, set[str]]`，返回更新后的 multi_out 和被复查的 case_id 集合。内部按 provider 并行调用 LLM，每个 case 拼接 HLR 内容 + ICD Block + 自己之前的判断（Judgment A）+ peer 的判断（Judgment B/C），触发反思纠正。
+2. **新增 `prompts/re_review.md`**：一星复查 LLM prompt，包含 peer-aware 复查规则、反思引导和证据驱动逐项核对模板。
+3. **集成到 `pipeline.py`**：Step 5.5 → `re_review_judgments()`；Step 5.6 → 仅对 `re_reviewed_ids` 重跑 `review_judgments()`，其余 case 保留 Step 5 结果。
+4. **`hlr_labeler.py` max_tokens 调整**：1024 → 2048，避免 HLR 标注时 deepseek 频繁截断。
+5. **修复 pipeline.py `review_judgments` 引用错误**：移除了内部局部 import，改从模块级导入。
+6. **手动注入测试验证**：REV-0007 和 REV-0012 注入错误 analysis（覆盖状态和错误推理文本），确认 peer-aware 复查触发真正反思和判断纠正。
+
+### 修改文件
+
+1. `backend/app/v4/comparison/re_review.py`（新增）
+2. `backend/app/v4/prompts/re_review.md`（新增）
+3. `backend/app/v4/pipeline.py`（Step 5.5/5.6 集成）
+4. `backend/app/v4/matching/hlr_labeler.py`（max_tokens 2048）
+5. `docs/project/workflow.md`（Step 5.5/5.6 写入 V4 流程）
+6. `docs/development/development-log.md`（本条）
+7. `CHANGELOG.md`（新增变更记录）
+
+### 新增文件
+
+1. `backend/app/v4/comparison/re_review.py`
+2. `backend/app/v4/prompts/re_review.md`
+
+### 验证方式
+
+1. 在已有 V4 管线输出目录（job `3d479b34`）中，手动注入一星：修改 `multi_judge_results.json` 和 `consensus_results.json`，设置两条 case 的 star_rating=1、agreement=split，并写入"错误但看似合理"的 analysis 文本
+2. 执行 `re_review_judgments()` → 确认两个 case 均触发三方复查（re_review_results.json 写入审计记录）
+3. 执行 Step 5.6 共识重跑 → 确认仅 2 个被复查 case 更新，其余 12 个不变
+4. 执行 `generate_consensus_reverse_report()` → 确认 JSON 报告星级分布更新
+5. 执行 `generate_consensus_report()` Word 生成 → 确认 docx 文件存在且内容正确
+
+### 验证结果
+
+已验证通过。注入 REV-0007（deepseek 误以为 HLR BNR 12位中 bit18 可以是 MSB）和 REV-0012（三方都对 LABEL126/137 语义有误解），复查后：
+- REV-0007：deepseek `covered→needs_review`（被 peer 指出 BNR MSB 不能是 bit18）；qwen `needs_review→covered`（被 peer"高位补零"说服）→ majority/2★
+- REV-0012：deepseek `covered→inconsistent`；minimax `covered→needs_review`；qwen `needs_review→inconsistent` → full/3★
+- 最终星级分布：{'1':0, '2':3, '3':11}，无残留一星
+- Word 报告 `EoICD与SWHLR多模型差异分析报告.docx` 生成成功（43,171 bytes）
+
+### 遗留问题
+
+1. 真实管线中一星 case 的"错误 analysis"是否与测试注入的文本风格一致，需有真实一星跑出后对比验证
+2. `re_review_results.json` 仅在测试脚本中手动写入，pipeline 集成后应确认落盘时机正确
+
+### 下一步建议
+
+1. 在真实管线中观察是否出现一星 case，对比其 analysis 风格与测试注入文本的差异
+2. 确认 pipeline 集成后 Step 5.5 的 `re_review_results.json` 在正确的 job 目录下正确落盘
+3. 考虑在 API result 中增加 re_review 相关统计字段（复查 case 数、纠正数）
+
+---
+
+## 2026-08-13 Issue #53 修复：一星复查机制集成验证与 Bug 修复
+
+### 任务目标
+
+集成测试 Issue #53 实现的一星复查机制（Step 5.5/5.6），修复集成过程中暴露的 2 个 bug。
+
+### 完成内容
+
+1. **修复 `re_review_judgments` 的 `multi_out=None` 崩溃**：当 `multi_out` 传入 `None` 时（测试脚本场景），函数内部从 `output_dir / "multi_judge_results.json"` 加载，加载成功后才继续处理。
+2. **修复 error provider 被重新查询的问题**：re-review 跳过 `coverage_status == "error"` 的 provider，保留其 error 状态不被覆盖。这是 degradation 正确统计 surviving provider 的前提。
+3. **修复 `build_cases` case_id 格式错误**：测试脚本的 `build_cases(reverse_matches_data)` 生成 `REV-0199` 格式（HLR 编号），而 pipeline 实际生成 `REV-0001` 格式（顺序编号），导致 case_map 和 mjr_map 的 key 不匹配，所有一星 case 被静默跳过。修复为顺序编号。
+4. **集成测试验证**：三场景测试全部通过——3 providers 存活 → 升至 3★；2 providers 存活（cap=2★）→ 升至 2★；1 provider 存活（cap=1★）→ 保持 1★。
+
+### 修改文件
+
+1. `backend/app/v4/comparison/re_review.py`（`multi_out=None` fallback + skip error providers）
+
+### 新增文件
+
+无。
+
+### 验证方式
+
+1. 构建 `issue53-base` 基准目录（pipeline 跑一次）
+2. 复制基准到测试目录，注入3个一星 case
+3. 执行 Step 5.5 + Step 5.6，验证 re_review_results.json 生成 + 星级正确
+
+### 验证结果
+
+已验证通过：
+- REV-0001（3 alive，cap=3★）：复查后升至 3★ ✅
+- REV-0002（2 alive，deepseek error，cap=2★）：复查后升至 2★ ✅
+- REV-0003（1 alive，deepseek+minimax error，cap=1★）：复查后保持 1★ ✅
+
+### 遗留问题
+
+无。
+
+### 下一步建议
+
+无。
+
+---
+
 ## 2026-07-31 Issue #44：共识报告模板增加不一致属性栏输出
 
 ### 任务目标
@@ -734,3 +839,105 @@
 ### 下一步建议
 
 无。
+
+---
+
+## 2026-08-11 Issue #48：V4 Multi-Agent 降级处理机制
+
+### 任务目标
+
+为 V4 反向管线 Step 4（Multi-Judge）和 Step 5（Review Agent）引入独立的降级处理模块，对 LLM API 超时、卡死、异常输出等异常情况进行系统性兜底。
+
+### 完成内容
+
+1. 新增 `backend/app/v4/degradation/` 独立包（`config.py` / `context.py` / `fallback.py` / `__init__.py`），零侵入现有业务模块。
+2. 实现 Case 级超时控制：`_judge_case_with_timeout()` 用 `asyncio.wait(FIRST_COMPLETED)` 逐 provider 收集结果，前 2 个完成后第三个给予固定额外等待时间（默认 120s），不足 2 个时使用兜底上限（默认 300s）。
+3. 实现 Provider 熔断器：`DegradationContext` 跨 case 追踪每个 provider 的连续失败计数，达到阈值后自动标记 unhealthy 并跳过后续 case，TTL 到期自动恢复。AUTH 错误立即熔断。
+4. 实现 Review 评审降级：`_apply_degradation_review()` 对 `review_judgments()` 输出做后处理，仅 1 个 provider 存活时星级 ≤ 1★，2 个存活时空星级 ≤ 2★。
+5. HTTP 超时提升：`DeepSeekClient` / `QwenClient` / `MiniMaxClient` 的 HTTP 请求超时从 60s → 120s。
+6. `max_tokens` 调整：`review_agent.py` 和 `semantic_judge.py` 的 `max_tokens` 从 8192 → 4096。
+7. 可观测性：`ctx.to_summary()` 输出降级摘要写入 `consensus_results.json` 和 API response 的 `degradation` 字段。
+8. 环境变量：`.env.example` 新增 4 个降级配置项。
+
+### 修改文件
+
+1. `backend/app/v4/pipeline.py`（新增 `_judge_case_with_timeout` / `_judge_with_degradation` / `_apply_degradation_review` / `_count_surviving_providers`；Step 4/5 调用切换）
+2. `backend/app/v4/llm/deepseek_client.py`（HTTP timeout 60→120）
+3. `backend/app/v4/llm/qwen_client.py`（HTTP timeout 60→120）
+4. `backend/app/v4/llm/minimax_client.py`（HTTP timeout 60→120）
+5. `backend/app/v4/comparison/review_agent.py`（max_tokens 8192→4096）
+6. `backend/app/v4/comparison/semantic_judge.py`（max_tokens 8192→4096）
+7. `backend/app/api/v4/runner.py`（job.result 新增 `degradation` 字段）
+8. `backend/app/v4/cli.py`（输出文件名 HLR→SWHLR）
+9. `backend/.env.example`（新增降级配置段）
+10. `CHANGELOG.md`
+
+### 新增文件
+
+1. `backend/app/v4/degradation/__init__.py`
+2. `backend/app/v4/degradation/config.py`
+3. `backend/app/v4/degradation/context.py`
+4. `backend/app/v4/degradation/fallback.py`
+
+### 验证方式
+
+1. Mock 模式下运行完整 V4 reverse pipeline，确认 Step 4/5 正常完成
+2. 检查 `consensus_results.json` 包含 `degradation` 字段且结构正确
+3. 不配降级环境变量时，默认值生效，管线不报错
+
+### 验证结果
+
+Mock 模式下已验证通过。真实 LLM 模式待后续端到端测试。
+
+### 遗留问题
+
+1. 熔断器和超时控制在真实 LLM（非 mock）场景下的表现待端到端验证
+2. 超时公式从自适应 `t1 + 0.5*t2` 改为固定 `extra_wait` 后需持续观察 minimax 慢响应是否不再被误杀
+
+### 下一步建议
+
+1. 真实 LLM 模式下跑完整管线，观察降级机制实际表现
+2. 根据实际情况调整 `extra_wait` 和 `case_total_timeout` 默认值
+
+---
+
+## 2026-08-12 Issue #52：LLM Client 截断自适应重试下沉
+
+### 任务目标
+
+将 `finish_reason=length` 截断重试从业务层（`semantic_judge.py` 的 `_chat_with_truncation_retry`）下沉到三个 LLM client 的 `chat()` 方法内部，使所有调用方（judge / review / labeler）统一受益，消除 HLR Labeler 截断遗漏问题。
+
+### 完成内容
+
+1. 三个 client（DeepSeek / MiniMax / Qwen）的 `chat()` 方法内新增截断检测 + 自适应重试逻辑：`finish_reason=length` 时自动翻倍 `max_tokens` 重试（4096→8192→16384，上限 16384），与网络层 `max_retries` 独立。
+2. 删除 `semantic_judge.py` 中的 `_chat_with_truncation_retry` helper 函数，`_call_judge_api` / `_call_reverse_judge_api` 恢复直接调用 `llm.chat()`。
+3. `review_agent.py` 的 `_call_review_api` 恢复直接调用 `llm.chat()`。
+4. `ChatResponse` 删除 `truncated` 字段（截断已在 client 内部消化，调用方无需感知）。
+5. `hlr_labeler.py` 零改动，自动受益。
+
+### 修改文件
+
+1. `backend/app/v4/llm/deepseek_client.py`（新增内层截断重试）
+2. `backend/app/v4/llm/minimax_client.py`（同上）
+3. `backend/app/v4/llm/qwen_client.py`（同上）
+4. `backend/app/v4/llm/factory.py`（`ChatResponse` 删除 `truncated` 字段）
+5. `backend/app/v4/llm/mock_llm.py`（去掉 `truncated=False` 参数）
+6. `backend/app/v4/comparison/semantic_judge.py`（删除 `_chat_with_truncation_retry`，恢复直接调用）
+7. `backend/app/v4/comparison/review_agent.py`（恢复直接调用）
+
+### 验证方式
+
+1. `python -c` import 全链路验证通过
+2. 真实 LLM 模式下跑完整管线，观察截断 WARNING 后是否自动重试成功
+
+### 验证结果
+
+Import 链路验证通过。截断自适应重试效果待真实 LLM 端到端测试确认。
+
+### 遗留问题
+
+1. 截断重试在真实 LLM 场景下的表现待端到端验证
+
+### 下一步建议
+
+1. 真实 LLM 模式下跑完整管线，观察 WARNING + retrying 日志是否正常触发与恢复

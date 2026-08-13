@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型Ver2.0 的版本级变化。
 
+## [Unreleased] - 2026-08-12
+
+### Changed
+
+- **LLM Client 截断自适应重试下沉**：`finish_reason=length` 截断重试从业务层 (`_chat_with_truncation_retry`) 下沉到三个 LLM client（DeepSeek / MiniMax / Qwen）的 `chat()` 方法内部，截断时自动翻倍 `max_tokens` 重试（4096→8192→16384，上限 16384），覆盖所有 LLM 调用方（judge / review / labeler）。`ChatResponse.truncated` 字段随之移除。
+
 ## Unreleased
 
 ### Added
@@ -234,3 +240,63 @@
 
 - **共识报告"判定分布"表无匹配缺失**：`consensus_word_generator.py` 中"判定分布"表新增"无匹配"行（紫色标注，来自 `match_stats["hlr_无匹配"]`），合计 = 裁判数 + 无匹配数。
 - **V4ResultView STATUS_META 键名不匹配**：前端 `STATUS_META` 键名从英文（`covered`/`inconsistent`/`needs_review`）改为中文（`已覆盖`/`不一致`/`待确认`），与后端 `status_distribution` 实际键名对齐。
+
+## [Unreleased] - 2026-08-11：V4 Multi-Agent 降级处理机制
+
+### Added
+
+- **降级模块**：新增 `backend/app/v4/degradation/` 独立包（`config.py` / `context.py` / `fallback.py`），对 Step 4 Multi-Judge 和 Step 5 Review Agent 提供系统性异常兜底。
+- **Case 级超时控制**：3 个 provider 并行裁判时，前 2 个完成后第三个给予固定额外等待时间（默认 120s），超时后生成 error judgment 而不中断 case。不足 2 个完成时使用兜底上限（默认 300s）。
+- **Provider 熔断器**：连续失败达阈值（默认 3 次）后自动跳过该 provider，TTL 到期自动恢复。401/403 认证错误立即熔断。
+- **Review 评审降级**：1 个 provider 存活 → 星 ≤ 1★，agreement = "single_source"；2 个存活 → 星 ≤ 2★。对 review_judgments() 输出做后处理。
+- **降级可观测性**：`consensus_results.json` 和 API response 新增 `degradation` 字段，包含 provider 健康状态、超时次数、星级截断次数。
+- **HTTP 超时提升**：DeepSeek / MiniMax / Qwen 三个 client 的 HTTP 请求超时从 60s → 120s，与 case 级超时配合。
+- **新增 4 个环境变量**：`DEGRADATION_CASE_TIMEOUT`（300） / `DEGRADATION_EXTRA_WAIT`（120） / `DEGRADATION_CONSECUTIVE_FAILURES`（3） / `DEGRADATION_UNHEALTHY_TTL`（300），全部通过 `.env.example` 暴露，不配时用默认值。
+
+### Changed
+
+- **Step 4 调用切换**：pipeline 中 Step 4 从 `judge_with_panel()` 切换为 `_judge_with_degradation()`。
+- **Step 5 增加后处理**：Review Agent 执行后增加 `_apply_degradation_review()` 对星级和 agreement 做硬上限约束。
+- **LLM Client 默认参数**：`review_agent.py` 和 `semantic_judge.py` 的 `max_tokens` 从 8192 → 4096。
+
+## [Unreleased] - 2026-08-11：V4 一星复查机制（Issue #53）
+
+### Added
+
+- **Step 5.5 一星复查（peer-aware 反思）**：新增 `comparison/re_review.py`，`re_review_judgments()` 对 `star_rating == 1` 的 case 由三个 provider 以 peer-aware 方式各自重新评判。每个 provider 看到自己之前的判断（Judgment A）和 peer 的判断（Judgment B/C），携带完整 analysis 文本触发反思纠正。返回类型 `tuple[MultiJudgeOutput, set[str]]`（更新后的 multi_out + 被复查 case_id 集合）。
+- **Step 5.6 部分共识重跑**：仅对 `re_reviewed_ids` 中的 case 重跑 `review_judgments()`，其余 case 保持 Step 5 原结果不变。
+- **新增 `prompts/re_review.md`**：一星复查 LLM prompt，包含 peer-aware 复查规则、反思引导和证据驱动逐项核对模板。
+- **`hlr_labeler.py` max_tokens 调整**：DeepSeek HLR 标注 `max_tokens` 从 1024 调整为 2048，避免频繁截断告警。
+- **workflow.md Step 5.5/5.6 更新**：V4 总体流程图、单步输入输出表、异常处理表均已同步新增两个步骤。
+
+### Fixed
+
+- **pipeline.py `review_judgments` 局部引用错误**：原 `re_review_judgments()` 内部存在局部 `from review_agent import review_judgments` 导入，导致 Step 5.6 的外层调用因变量遮蔽产生 `UnboundLocalError`。修复：移除内部局部 import，统一从模块级导入。
+- **`re_review_judgments` 的 `multi_out=None` 崩溃**：集成测试中发现当 `multi_out` 传入 `None` 时，函数访问 `.results` 报 `AttributeError`。修复：从 `output_dir / "multi_judge_results.json"` 加载 MultiJudgeOutput 后再继续处理。
+- **error provider 被重新查询的问题**：re-review 对所有一星 case 的所有 provider 都重新调用 LLM，即使该 provider 在原始 judgment 中已经是 `coverage_status="error"`。error judgment 被覆盖丢失，导致 degradation 统计错误。修复：跳过 `coverage_status == "error"` 的 provider，不重新查询。
+- **`build_cases` case_id 格式错误**：测试脚本生成的 case_id 格式为 `REV-0199`（来自 HLR 编号），与 pipeline 实际生成的 `REV-0001`（顺序编号）不一致，导致 `case_map` 和 `mjr_map` 的 key 无法匹配，所有一星 case 被静默跳过。修复：`build_cases` 改用顺序编号。
+
+### Notes
+
+- 一星复查的测试方式为手动注入"错误但看似合理"的 analysis 文本，而非仅修改 coverage_status 标签。peer-aware 机制要求 provider 看到自己之前的错误分析才能触发真正反思和判断纠正。
+- `re_review_results.json` 写入审计记录，`multi_judge_results.json` 更新供 Step 5.6 继续使用，两者落盘时机由 `re_review_judgments()` 内部管理。
+- 集成测试三场景验证通过：3 providers 存活 → 3★；2 providers 存活 → cap 2★；1 provider 存活 → cap 1★。
+
+## [Unreleased] - 2026-08-11：V4 Multi-Agent 降级处理机制
+
+### Added
+
+- **降级模块**：新增 `backend/app/v4/degradation/` 独立包（`config.py` / `context.py` / `fallback.py`），对 Step 4 Multi-Judge 和 Step 5 Review Agent 提供系统性异常兜底。
+- **Case 级超时控制**：3 个 provider 并行裁判时，前 2 个完成后第三个给予固定额外等待时间（默认 120s），超时后生成 error judgment 而不中断 case。不足 2 个完成时使用兜底上限（默认 300s）。
+- **Provider 熔断器**：连续失败达阈值（默认 3 次）后自动跳过该 provider，TTL 到期自动恢复。401/403 认证错误立即熔断。
+- **Review 评审降级**：1 个 provider 存活 → 星 ≤ 1★，agreement = "single_source"；2 个存活 → 星 ≤ 2★。对 review_judgments() 输出做后处理。
+- **降级可观测性**：`consensus_results.json` 和 API response 新增 `degradation` 字段，包含 provider 健康状态、超时次数、星级截断次数。
+- **HTTP 超时提升**：DeepSeek / MiniMax / Qwen 三个 client 的 HTTP 请求超时从 60s → 120s，与 case 级超时配合。
+- **新增 4 个环境变量**：`DEGRADATION_CASE_TIMEOUT`（300） / `DEGRADATION_EXTRA_WAIT`（120） / `DEGRADATION_CONSECUTIVE_FAILURES`（3） / `DEGRADATION_UNHEALTHY_TTL`（300），全部通过 `.env.example` 暴露，不配时用默认值。
+
+### Changed
+
+- **Step 4 调用切换**：pipeline 中 Step 4 从 `judge_with_panel()` 切换为 `_judge_with_degradation()`。
+- **Step 5 增加后处理**：Review Agent 执行后增加 `_apply_degradation_review()` 对星级和 agreement 做硬上限约束。
+- **LLM Client 默认参数**：`review_agent.py` 和 `semantic_judge.py` 的 `max_tokens` 从 8192 → 4096。
+

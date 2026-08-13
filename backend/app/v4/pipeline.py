@@ -3,15 +3,25 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import sys
+import time
 from pathlib import Path
 
 from app.v4.comparison.case_builder import build_cases
-from app.v4.comparison.multi_judge import judge_with_panel
+from app.v4.comparison.multi_judge import (
+    _judge_with_provider,
+    _load_reverse_prompt,
+    judge_with_panel,
+)
 from app.v4.comparison.report_generator import generate_report, generate_consensus_reverse_report
-from app.v4.comparison.review_agent import review_judgments
+from app.v4.comparison.re_review import re_review_judgments
+from app.v4.comparison.review_agent import review_judgments, _build_summary
 from app.v4.comparison.semantic_judge import judge_cases
 from app.v4.config import DEEPSEEK_MODEL, JUDGE_PROVIDERS
+from app.v4.degradation import DegradationConfig, DegradationContext
+from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.v4.doc_generators.excel_generator import generate_eoicd_excel
 from app.v4.doc_generators.word_generator import generate_consistency_report
 from app.v4.doc_generators.consensus_word_generator import generate_consensus_report as gen_consensus_word
@@ -23,14 +33,17 @@ from app.v4.matching.reverse_matcher import match_reverse
 from app.v4.matching.signal_profiler import build_profiles, build_blocks, ICDBlock
 from app.v4.matching.entry_filter import should_keep
 from app.v4.models import (
+    ConsensusOutput,
     EoICDOutput,
     HLROutput,
     HLRLabelOutput,
     JudgmentOutput,
     MatchOutput,
+    MultiJudgeOutput,
     PipelineResult,
     ReverseJudgmentOutput,
     ReverseMatchOutput,
+    ConsensusOutput,
 )
 from app.v4.parsers.eoicd_excel_parser import EoICDExcelParser
 from app.v4.parsers.hlr_word_parser import HLRWordParser
@@ -344,6 +357,203 @@ def _match_reverse_with_trace(
     return _merge_reverse_match_outputs(result_a, result_b, trace_stats)
 
 
+# ── Degradation helpers ────────────────────────────────────
+
+
+async def _judge_case_with_timeout(
+    case,
+    providers: list[str],
+    system_prompt: str,
+    ceiling: float,
+    extra_wait: float,
+) -> tuple[dict[str, dict], bool]:
+    """Run all providers in parallel with fixed extra-wait timeout.
+
+    Waits for providers one-by-one (FIRST_COMPLETED). Once 2 valid (non-error)
+    completions are collected, sets a fixed deadline for the remaining:
+
+        deadline = start + t2 + extra_wait
+
+    Before 2 valid samples, uses *ceiling* as the fallback timeout.
+    Fast errors (connection refused, etc.) are excluded from valid_times
+    so they do not pollute the formula.
+    """
+    start = time.monotonic()
+    tasks = {
+        asyncio.create_task(_judge_with_provider(case, p, system_prompt)): p
+        for p in providers
+    }
+
+    pending = set(tasks.keys())
+    results: dict[str, dict] = {}
+    valid_times: list[float] = []   # elapsed times of non-error completions
+    had_timeout = False
+
+    while pending:
+        if len(valid_times) >= 2:
+            extra = extra_wait
+            deadline = start + valid_times[-1] + extra
+        else:
+            deadline = start + ceiling
+
+        remaining = deadline - time.monotonic()
+
+        if remaining <= 0:
+            for t in pending:
+                t.cancel()
+                results[tasks[t]] = make_error_judgment(
+                    tasks[t], "adaptive timeout", "TIMEOUT"
+                )
+            had_timeout = True
+            break
+
+        done, pending = await asyncio.wait(
+            pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        for t in done:
+            elapsed = time.monotonic() - start
+            p = tasks[t]
+            if t.exception():
+                exc = t.exception()
+                results[p] = make_error_judgment(
+                    p, str(exc), classify_exception(exc) if exc else "UNKNOWN"
+                )
+            else:
+                result = t.result()
+                results[p] = result
+                if result.get("coverage_status") != "error":
+                    valid_times.append(elapsed)
+
+    return results, had_timeout
+
+
+def _is_failure(judgment: dict) -> bool:
+    """Check if a judgment dict represents a failure (error or very low confidence)."""
+    return judgment.get("coverage_status") == "error"
+
+
+def _judge_with_degradation(
+    cases: list,
+    providers: list[str],
+    ctx: DegradationContext,
+) -> MultiJudgeOutput:
+    """Judge cases with provider health tracking, timeout, and circuit breaking.
+
+    Replaces direct judge_with_panel() call. Handles:
+    - Skipping providers marked unhealthy
+    - Case-level timeout via asyncio.wait
+    - Recording per-provider failures for circuit breaker
+    """
+    from app.v4.models import MultiJudgeOutput, MultiJudgeResult
+
+    system_prompt = _load_reverse_prompt()
+    total = len(cases)
+    results: list[MultiJudgeResult] = []
+
+    for idx, case in enumerate(cases):
+        healthy = ctx.filter_healthy(providers)
+
+        # Pre-fill skipped providers
+        skipped = {
+            p: make_error_judgment(p, "provider unhealthy", "SKIPPED")
+            for p in providers if p not in healthy
+        }
+
+        # Parallel judge with adaptive timeout
+        gathered, had_timeout = asyncio.run(
+            _judge_case_with_timeout(
+                case, healthy, system_prompt,
+                ceiling=ctx.config.case_total_timeout,
+                extra_wait=ctx.config.extra_wait,
+            )
+        )
+        if had_timeout:
+            ctx.record_case_timeout()
+
+        # Update health per provider from actual results
+        for provider, judgment in gathered.items():
+            if _is_failure(judgment):
+                ctx.record_failure(provider)
+            else:
+                ctx.record_success(provider)
+
+        case_judgments = {**skipped, **gathered}
+        results.append(MultiJudgeResult(
+            case_id=case.case_id,
+            judgments=case_judgments,
+        ))
+
+        statuses = {p: j.get("coverage_status", "?") for p, j in case_judgments.items()}
+        print(
+            f"  [multi] {case.case_id} ({idx + 1}/{total}) {statuses}",
+            file=sys.stderr,
+        )
+
+        if idx < total - 1:
+            time.sleep(0.3)
+
+    return MultiJudgeOutput(
+        total_cases=total,
+        providers=providers,
+        results=results,
+    )
+
+
+def _count_surviving_providers(judgments: dict[str, dict]) -> int:
+    """Count how many providers returned non-error judgments for a case."""
+    return sum(
+        1 for j in judgments.values()
+        if j.get("coverage_status") != "error"
+    )
+
+
+def _apply_degradation_review(
+    consensus_out: ConsensusOutput,
+    ctx: DegradationContext,
+) -> ConsensusOutput:
+    """Apply star cap and agreement override based on surviving provider count.
+
+    Does NOT modify review_judgments(). Operates as post-processing on
+    the already-computed ConsensusOutput.
+    """
+    for result in consensus_out.results:
+        surviving = _count_surviving_providers(result.model_results)
+        if surviving == 1:
+            if result.star_rating > ctx.config.single_provider_star_cap:
+                result.star_rating = ctx.config.single_provider_star_cap
+                ctx.record_review_star_capped()
+            result.agreement_level = ctx.config.single_provider_agreement
+            print(
+                f"  [degradation] review downgraded: {result.case_id} "
+                f"1 surviving → star_cap={ctx.config.single_provider_star_cap}, "
+                f"agreement={ctx.config.single_provider_agreement}",
+                file=sys.stderr,
+            )
+        elif surviving == 2:
+            if result.star_rating > ctx.config.two_provider_star_cap:
+                result.star_rating = ctx.config.two_provider_star_cap
+                ctx.record_review_star_capped()
+
+    return consensus_out
+
+
+def _extract_frozen_providers(multi_out: MultiJudgeOutput, all_providers: list[str]) -> list[str]:
+    """从 multi_out 中提取本轮有效的 provider 集合。
+
+    一个 provider 被纳入集合的条件：在 multi_out 的任意 case 中，
+    其 judgment 的 coverage_status 不是 "error"。
+
+    即：该 provider 在本轮的至少一个 case 上成功返回过有效结果（OR 逻辑）。
+    """
+    successful_providers = set()
+    for mr in multi_out.results:
+        for p, j in (mr.judgments or {}).items():
+            if j.get("coverage_status") != "error":
+                successful_providers.add(p)
+    return [p for p in all_providers if p in successful_providers]
+
+
 def run_reverse_pipeline(
     hlr: Path,
     eoicd_json: Path | None,
@@ -368,7 +578,6 @@ def run_reverse_pipeline(
     job.update(JobStatus.RUNNING, "Step 1/6: Parsing input files")
 
     if eoicd_json and eoicd_json.exists():
-        import json
         print(f"  [skip] Using cached EoICD JSON: {eoicd_json}")
         eoicd_data = json.loads(eoicd_json.read_text(encoding="utf-8"))
         eoicd_out = EoICDOutput(**eoicd_data)
@@ -379,7 +588,6 @@ def run_reverse_pipeline(
         )
 
     if hlr.suffix == ".json":
-        import json
         print(f"  [skip] Using cached HLR JSON: {hlr}")
         hlr_data = json.loads(hlr.read_text(encoding="utf-8"))
         hlr_out = HLROutput(**hlr_data)
@@ -439,13 +647,14 @@ def run_reverse_pipeline(
 
     cases = build_reverse_cases(match_result, block_index)
 
-    # Step 4: Multi-agent judging
+    # Step 4: Multi-agent judging (with degradation)
     print()
     print("=" * 50)
     print(f"Step 4/6: Multi-agent judging ({len(cases)} cases, providers={JUDGE_PROVIDERS})")
     print("=" * 50)
     job.update(JobStatus.RUNNING, "Step 4/6: Multi-agent judging")
-    multi_out = judge_with_panel(cases, providers=JUDGE_PROVIDERS)
+    ctx = DegradationContext(config=DegradationConfig.from_env())
+    multi_out = _judge_with_degradation(cases, JUDGE_PROVIDERS, ctx)
     multi_path = output_dir / "multi_judge_results.json"
     multi_path.write_text(
         multi_out.model_dump_json(indent=2, ensure_ascii=False),
@@ -453,22 +662,81 @@ def run_reverse_pipeline(
     )
     print(f"  Output: {multi_path}")
 
-    # Step 5: Review agent consensus
+    # Freeze provider set after Step 4 — used for all subsequent steps
+    frozen_providers = _extract_frozen_providers(multi_out, JUDGE_PROVIDERS)
+    print(f"  Frozen providers: {frozen_providers}")
+
+    # Step 5: Review agent consensus (first pass — identifies one-star cases for re-review)
     print()
     print("=" * 50)
     print(f"Step 5/6: Review agent consensus ({len(multi_out.results)} cases)")
     print("=" * 50)
     job.update(JobStatus.RUNNING, "Step 5/6: Review agent consensus")
     consensus_out = review_judgments(multi_out.results)
+    consensus_out = _apply_degradation_review(consensus_out, ctx)
     consensus_path = output_dir / "consensus_results.json"
+    consensus_data = json.loads(consensus_out.model_dump_json(indent=2, ensure_ascii=False))
+    consensus_data["degradation"] = ctx.to_summary()
     consensus_path.write_text(
-        consensus_out.model_dump_json(indent=2, ensure_ascii=False),
+        json.dumps(consensus_data, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     print(f"  Output: {consensus_path}")
     print(f"  Summary: {consensus_out.summary}")
+    print(f"  Degradation: {consensus_data['degradation']}")
 
-    # Step 6: Report
+    # Step 5.5: Re-review one-star cases (AFTER first consensus to know which are one-star)
+    print()
+    print("=" * 50)
+    print("Step 5.5/6: Re-review one-star cases")
+    print("=" * 50)
+    job.update(JobStatus.RUNNING, "Step 5.5/6: Re-review one-star cases")
+    multi_out, re_reviewed_ids = re_review_judgments(
+        multi_out=multi_out,
+        consensus_out=consensus_out,  # pass in-memory consensus_out for one-star detection
+        cases=cases,
+        output_dir=output_dir,
+        providers=frozen_providers,
+    )
+
+    # Step 5.6: Re-run consensus only for re-reviewed cases
+    print()
+    print("=" * 50)
+    print("Step 5.6/6: Re-run consensus after re-review")
+    print("=" * 50)
+    job.update(JobStatus.RUNNING, "Step 5.6/6: Re-run consensus after re-review")
+
+    if re_reviewed_ids:
+        # Partial update: re-run consensus only for re-reviewed cases
+        consensus_map = {r.case_id: r for r in consensus_out.results}
+        for case_id in sorted(re_reviewed_ids):
+            mr = next((m for m in multi_out.results if m.case_id == case_id), None)
+            if mr is None:
+                continue
+            new_consensus = review_judgments([mr])
+            if new_consensus.results:
+                consensus_map[case_id] = new_consensus.results[0]
+        all_results = list(consensus_map.values())
+        new_summary = _build_summary(all_results)
+        consensus_out = ConsensusOutput(
+            total_cases=len(consensus_out.results),
+            summary=new_summary,
+            results=all_results,
+        )
+        consensus_path = output_dir / "consensus_results.json"
+        consensus_data = json.loads(consensus_out.model_dump_json(indent=2, ensure_ascii=False))
+        consensus_data["degradation"] = ctx.to_summary()
+        consensus_path.write_text(
+            json.dumps(consensus_data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"  Updated {len(re_reviewed_ids)} case(s): {sorted(re_reviewed_ids)}")
+        print(f"  Summary: {consensus_out.summary}")
+    else:
+        print("  No cases re-reviewed, skipping consensus update")
+        print(f"  Summary: {consensus_out.summary}")
+
+    # Step 6: Report (uses re-reviewed multi_judge + re-computed consensus)
     print()
     print("=" * 50)
     print("Step 6/6: Generating report")
