@@ -762,6 +762,50 @@
 
 ---
 
+## 2026-08-13 Issue #53 修复：一星复查机制集成验证与 Bug 修复
+
+### 任务目标
+
+集成测试 Issue #53 实现的一星复查机制（Step 5.5/5.6），修复集成过程中暴露的 2 个 bug。
+
+### 完成内容
+
+1. **修复 `re_review_judgments` 的 `multi_out=None` 崩溃**：当 `multi_out` 传入 `None` 时（测试脚本场景），函数内部从 `output_dir / "multi_judge_results.json"` 加载，加载成功后才继续处理。
+2. **修复 error provider 被重新查询的问题**：re-review 跳过 `coverage_status == "error"` 的 provider，保留其 error 状态不被覆盖。这是 degradation 正确统计 surviving provider 的前提。
+3. **修复 `build_cases` case_id 格式错误**：测试脚本的 `build_cases(reverse_matches_data)` 生成 `REV-0199` 格式（HLR 编号），而 pipeline 实际生成 `REV-0001` 格式（顺序编号），导致 case_map 和 mjr_map 的 key 不匹配，所有一星 case 被静默跳过。修复为顺序编号。
+4. **集成测试验证**：三场景测试全部通过——3 providers 存活 → 升至 3★；2 providers 存活（cap=2★）→ 升至 2★；1 provider 存活（cap=1★）→ 保持 1★。
+
+### 修改文件
+
+1. `backend/app/v4/comparison/re_review.py`（`multi_out=None` fallback + skip error providers）
+
+### 新增文件
+
+无。
+
+### 验证方式
+
+1. 构建 `issue53-base` 基准目录（pipeline 跑一次）
+2. 复制基准到测试目录，注入3个一星 case
+3. 执行 Step 5.5 + Step 5.6，验证 re_review_results.json 生成 + 星级正确
+
+### 验证结果
+
+已验证通过：
+- REV-0001（3 alive，cap=3★）：复查后升至 3★ ✅
+- REV-0002（2 alive，deepseek error，cap=2★）：复查后升至 2★ ✅
+- REV-0003（1 alive，deepseek+minimax error，cap=1★）：复查后保持 1★ ✅
+
+### 遗留问题
+
+无。
+
+### 下一步建议
+
+无。
+
+---
+
 ## 2026-07-31 Issue #44：共识报告模板增加不一致属性栏输出
 
 ### 任务目标

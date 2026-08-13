@@ -266,8 +266,31 @@
 ### Fixed
 
 - **pipeline.py `review_judgments` 局部引用错误**：原 `re_review_judgments()` 内部存在局部 `from review_agent import review_judgments` 导入，导致 Step 5.6 的外层调用因变量遮蔽产生 `UnboundLocalError`。修复：移除内部局部 import，统一从模块级导入。
+- **`re_review_judgments` 的 `multi_out=None` 崩溃**：集成测试中发现当 `multi_out` 传入 `None` 时，函数访问 `.results` 报 `AttributeError`。修复：从 `output_dir / "multi_judge_results.json"` 加载 MultiJudgeOutput 后再继续处理。
+- **error provider 被重新查询的问题**：re-review 对所有一星 case 的所有 provider 都重新调用 LLM，即使该 provider 在原始 judgment 中已经是 `coverage_status="error"`。error judgment 被覆盖丢失，导致 degradation 统计错误。修复：跳过 `coverage_status == "error"` 的 provider，不重新查询。
+- **`build_cases` case_id 格式错误**：测试脚本生成的 case_id 格式为 `REV-0199`（来自 HLR 编号），与 pipeline 实际生成的 `REV-0001`（顺序编号）不一致，导致 `case_map` 和 `mjr_map` 的 key 无法匹配，所有一星 case 被静默跳过。修复：`build_cases` 改用顺序编号。
 
 ### Notes
 
 - 一星复查的测试方式为手动注入"错误但看似合理"的 analysis 文本，而非仅修改 coverage_status 标签。peer-aware 机制要求 provider 看到自己之前的错误分析才能触发真正反思和判断纠正。
 - `re_review_results.json` 写入审计记录，`multi_judge_results.json` 更新供 Step 5.6 继续使用，两者落盘时机由 `re_review_judgments()` 内部管理。
+- 集成测试三场景验证通过：3 providers 存活 → 3★；2 providers 存活 → cap 2★；1 provider 存活 → cap 1★。
+
+## [Unreleased] - 2026-08-11：V4 Multi-Agent 降级处理机制
+
+### Added
+
+- **降级模块**：新增 `backend/app/v4/degradation/` 独立包（`config.py` / `context.py` / `fallback.py`），对 Step 4 Multi-Judge 和 Step 5 Review Agent 提供系统性异常兜底。
+- **Case 级超时控制**：3 个 provider 并行裁判时，前 2 个完成后第三个给予固定额外等待时间（默认 120s），超时后生成 error judgment 而不中断 case。不足 2 个完成时使用兜底上限（默认 300s）。
+- **Provider 熔断器**：连续失败达阈值（默认 3 次）后自动跳过该 provider，TTL 到期自动恢复。401/403 认证错误立即熔断。
+- **Review 评审降级**：1 个 provider 存活 → 星 ≤ 1★，agreement = "single_source"；2 个存活 → 星 ≤ 2★。对 review_judgments() 输出做后处理。
+- **降级可观测性**：`consensus_results.json` 和 API response 新增 `degradation` 字段，包含 provider 健康状态、超时次数、星级截断次数。
+- **HTTP 超时提升**：DeepSeek / MiniMax / Qwen 三个 client 的 HTTP 请求超时从 60s → 120s，与 case 级超时配合。
+- **新增 4 个环境变量**：`DEGRADATION_CASE_TIMEOUT`（300） / `DEGRADATION_EXTRA_WAIT`（120） / `DEGRADATION_CONSECUTIVE_FAILURES`（3） / `DEGRADATION_UNHEALTHY_TTL`（300），全部通过 `.env.example` 暴露，不配时用默认值。
+
+### Changed
+
+- **Step 4 调用切换**：pipeline 中 Step 4 从 `judge_with_panel()` 切换为 `_judge_with_degradation()`。
+- **Step 5 增加后处理**：Review Agent 执行后增加 `_apply_degradation_review()` 对星级和 agreement 做硬上限约束。
+- **LLM Client 默认参数**：`review_agent.py` 和 `semantic_judge.py` 的 `max_tokens` 从 8192 → 4096。
+

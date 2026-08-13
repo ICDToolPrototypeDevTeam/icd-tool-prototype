@@ -538,6 +538,22 @@ def _apply_degradation_review(
     return consensus_out
 
 
+def _extract_frozen_providers(multi_out: MultiJudgeOutput, all_providers: list[str]) -> list[str]:
+    """从 multi_out 中提取本轮有效的 provider 集合。
+
+    一个 provider 被纳入集合的条件：在 multi_out 的任意 case 中，
+    其 judgment 的 coverage_status 不是 "error"。
+
+    即：该 provider 在本轮的至少一个 case 上成功返回过有效结果（OR 逻辑）。
+    """
+    successful_providers = set()
+    for mr in multi_out.results:
+        for p, j in (mr.judgments or {}).items():
+            if j.get("coverage_status") != "error":
+                successful_providers.add(p)
+    return [p for p in all_providers if p in successful_providers]
+
+
 def run_reverse_pipeline(
     hlr: Path,
     eoicd_json: Path | None,
@@ -646,6 +662,10 @@ def run_reverse_pipeline(
     )
     print(f"  Output: {multi_path}")
 
+    # Freeze provider set after Step 4 — used for all subsequent steps
+    frozen_providers = _extract_frozen_providers(multi_out, JUDGE_PROVIDERS)
+    print(f"  Frozen providers: {frozen_providers}")
+
     # Step 5: Review agent consensus (first pass — identifies one-star cases for re-review)
     print()
     print("=" * 50)
@@ -676,6 +696,7 @@ def run_reverse_pipeline(
         consensus_out=consensus_out,  # pass in-memory consensus_out for one-star detection
         cases=cases,
         output_dir=output_dir,
+        providers=frozen_providers,
     )
 
     # Step 5.6: Re-run consensus only for re-reviewed cases
@@ -703,8 +724,10 @@ def run_reverse_pipeline(
             results=all_results,
         )
         consensus_path = output_dir / "consensus_results.json"
+        consensus_data = json.loads(consensus_out.model_dump_json(indent=2, ensure_ascii=False))
+        consensus_data["degradation"] = ctx.to_summary()
         consensus_path.write_text(
-            consensus_out.model_dump_json(indent=2, ensure_ascii=False),
+            json.dumps(consensus_data, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
         print(f"  Updated {len(re_reviewed_ids)} case(s): {sorted(re_reviewed_ids)}")

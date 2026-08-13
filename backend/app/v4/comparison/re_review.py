@@ -257,6 +257,13 @@ def re_review_judgments(
     if not one_star_ids:
         return multi_out, set()
 
+    # 当 multi_out=None 时从 output_dir 加载
+    if multi_out is None:
+        multi_path = output_dir / "multi_judge_results.json"
+        if multi_path.exists():
+            multi_data = json.loads(multi_path.read_text(encoding="utf-8"))
+            multi_out = MultiJudgeOutput(**multi_data)
+
     case_map: dict[str, ReverseCase] = {c.case_id: c for c in cases}
     mjr_map: dict[str, MultiJudgeResult] = {r.case_id: r for r in multi_out.results}
 
@@ -284,6 +291,10 @@ def re_review_judgments(
             if provider not in original_judgments:
                 continue
             my_judgment = original_judgments.get(provider, {}) or {}
+            # Skip providers that errored in the original judgment — their
+            # error status is meaningful and should not be overwritten.
+            if my_judgment.get("coverage_status") == "error":
+                continue
             other_judgments = [
                 j for p, j in original_judgments.items() if p != provider
             ]
