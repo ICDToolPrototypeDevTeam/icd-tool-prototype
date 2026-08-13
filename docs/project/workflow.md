@@ -182,6 +182,18 @@ Step 5: Review Agent 共识（含降级后处理）
     降级后处理：存活 provider 不足时硬上限约束（1 个 → ≤1★，2 个 → ≤2★）
     模块: comparison/review_agent.py + degradation/context.py
 
+Step 5.5: 一星复查（peer-aware 反思）
+    对 star_rating == 1 的 case，由三个 provider 各自重新评判
+    每个 provider 看到自己之前的判断（Judgment A）和 peer 的判断（Judgment B/C），触发反思纠正
+    error provider 跳过：不重新查询 coverage_status="error" 的 provider，保留其 error 状态
+    模块: comparison/re_review.py
+
+Step 5.6: 部分共识重跑（含降级后处理）
+    仅对被复查过的 case（re_reviewed_ids）重跑共识，更新对应条目
+    其余 case 保持不变
+    共识结果经 `_apply_degradation_review()` 应用 star cap（1 个存活 → ≤1★，2 个存活 → ≤2★）
+    模块: comparison/review_agent.py + degradation/context.py
+
 Step 6: 报告生成
     1 份 xlsx + 3 份单模型 docx + 1 份共识 docx
     模块: doc_generators/{excel_generator,word_generator,consensus_word_generator}.py
@@ -211,7 +223,9 @@ Step 6: 报告生成
 | 3 反向匹配 | `eoicd_requirements.json` + `hlr_labels.json` | `reverse_matches.json` (1568 Block, 含分层层级、HLR 分类标记) | matching/{entry_filter,signal_profiler,reverse_case_builder,hlr_classifier,reverse_matcher,traceability}.py |
 | 4 多智能体裁判 | `reverse_matches.json` + 3 LLM | `multi_judge_results.json` (12 cases × 3 providers) | comparison/{multi_judge,semantic_judge}.py |
 | 5 Review 共识 | `multi_judge_results.json` | `consensus_results.json` (12 cases, agreement + star_rating) | comparison/review_agent.py |
-| 6 报告生成 | `consensus_results.json` + `reverse_matches.json` | 1 xlsx + 4 docx + 7 JSON | doc_generators/* + comparison/report_generator.py |
+| 5.5 一星复查 | `multi_judge_results.json` + `consensus_results.json` | `re_review_results.json`（审计）+ `multi_judge_results.json`（更新） | comparison/re_review.py |
+| 5.6 部分共识重跑 | `multi_judge_results.json`（复查后） | `consensus_results.json`（更新，仅涉及复查条目） | comparison/review_agent.py |
+| 6 报告生成 | `consensus_results.json` + `reverse_matches.json` | 1 xlsx + 4 docx + JSON | doc_generators/* + comparison/report_generator.py |
 
 ### 11.4 V4 关键约束
 
@@ -232,6 +246,10 @@ Step 6: 报告生成
 | Step 3 反向匹配 | 反向匹配抛异常 | `job.status = failed` | 同 Step 1 |
 | Step 4 多智能体 | 3 provider 全失败 | `consensus_results.json` 中全失败标记 | `/result.summary.status_distribution` 全 `failed` |
 | Step 5 Review 共识 | Review 失败 | `consensus_results.json` 中 `summary: {"all_failed": true}` | `mock_models` 仅含失败 provider |
+| Step 5.5 一星复查 | 单 provider 复查 API 失败 | 该 provider 标记为 `error`，其余 provider 继续；最终以已有结果计 | re_review_results.json 中该 provider 为 `error` 状态，不阻断其他 provider |
+| Step 5.5 error provider | 原始 judgment 中 coverage_status="error" | 该 provider 不发起 LLM 调用，保留 error 状态 | degradation 统计 surviving provider 时正确排除 |
+| Step 5.6 部分共识重跑 | 共识重跑失败 | 该 case 保持 Step 5 原结果 | 仅影响 re_reviewed_ids 中的失败条目 |
+| Step 5.6 降级 | 存活 provider ≤ 2 | 星级受硬上限约束（≤1★ 或 ≤2★），agreement 可能被覆盖为 single_source | `degradation.review_star_capped_count` 递增 |
 | Step 6 报告生成 | docx 写盘失败 | `outputs.<key>` 某项为 false | `/result.outputs` 部分 false |
 | Step 4 降级超时 | 单 case 超时（t2+120s 或 300s 兜底） | 超时 provider 得 error judgment，其余正常 | `degradation.total_case_timeouts` 递增 |
 | Step 4 降级熔断 | Provider 连续失败 ≥ 3 次 | 该 provider 被标记 unhealthy，后续 case 跳过 | `degradation.provider_status` 显示 unhealthy |

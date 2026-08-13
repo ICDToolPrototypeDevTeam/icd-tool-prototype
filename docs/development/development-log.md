@@ -701,6 +701,111 @@
 
 ---
 
+## 2026-08-11 Issue #53：V4 反向管线一星复查机制（Step 5.5/5.6）
+
+### 任务目标
+
+在 V4 反向管线 Step 5（Review Agent 共识）之后，增加一星复查机制：
+- **Step 5.5**：对 `star_rating == 1` 的 case，由三个 provider 以 peer-aware 方式各自重新评判
+- **Step 5.6**：仅对被复查过的 case 重跑共识，其余保持不变
+
+### 完成内容
+
+1. **新增 `re_review.py`**：`re_review_judgments()` 函数实现一星复查逻辑。返回类型 `tuple[MultiJudgeOutput, set[str]]`，返回更新后的 multi_out 和被复查的 case_id 集合。内部按 provider 并行调用 LLM，每个 case 拼接 HLR 内容 + ICD Block + 自己之前的判断（Judgment A）+ peer 的判断（Judgment B/C），触发反思纠正。
+2. **新增 `prompts/re_review.md`**：一星复查 LLM prompt，包含 peer-aware 复查规则、反思引导和证据驱动逐项核对模板。
+3. **集成到 `pipeline.py`**：Step 5.5 → `re_review_judgments()`；Step 5.6 → 仅对 `re_reviewed_ids` 重跑 `review_judgments()`，其余 case 保留 Step 5 结果。
+4. **`hlr_labeler.py` max_tokens 调整**：1024 → 2048，避免 HLR 标注时 deepseek 频繁截断。
+5. **修复 pipeline.py `review_judgments` 引用错误**：移除了内部局部 import，改从模块级导入。
+6. **手动注入测试验证**：REV-0007 和 REV-0012 注入错误 analysis（覆盖状态和错误推理文本），确认 peer-aware 复查触发真正反思和判断纠正。
+
+### 修改文件
+
+1. `backend/app/v4/comparison/re_review.py`（新增）
+2. `backend/app/v4/prompts/re_review.md`（新增）
+3. `backend/app/v4/pipeline.py`（Step 5.5/5.6 集成）
+4. `backend/app/v4/matching/hlr_labeler.py`（max_tokens 2048）
+5. `docs/project/workflow.md`（Step 5.5/5.6 写入 V4 流程）
+6. `docs/development/development-log.md`（本条）
+7. `CHANGELOG.md`（新增变更记录）
+
+### 新增文件
+
+1. `backend/app/v4/comparison/re_review.py`
+2. `backend/app/v4/prompts/re_review.md`
+
+### 验证方式
+
+1. 在已有 V4 管线输出目录（job `3d479b34`）中，手动注入一星：修改 `multi_judge_results.json` 和 `consensus_results.json`，设置两条 case 的 star_rating=1、agreement=split，并写入"错误但看似合理"的 analysis 文本
+2. 执行 `re_review_judgments()` → 确认两个 case 均触发三方复查（re_review_results.json 写入审计记录）
+3. 执行 Step 5.6 共识重跑 → 确认仅 2 个被复查 case 更新，其余 12 个不变
+4. 执行 `generate_consensus_reverse_report()` → 确认 JSON 报告星级分布更新
+5. 执行 `generate_consensus_report()` Word 生成 → 确认 docx 文件存在且内容正确
+
+### 验证结果
+
+已验证通过。注入 REV-0007（deepseek 误以为 HLR BNR 12位中 bit18 可以是 MSB）和 REV-0012（三方都对 LABEL126/137 语义有误解），复查后：
+- REV-0007：deepseek `covered→needs_review`（被 peer 指出 BNR MSB 不能是 bit18）；qwen `needs_review→covered`（被 peer"高位补零"说服）→ majority/2★
+- REV-0012：deepseek `covered→inconsistent`；minimax `covered→needs_review`；qwen `needs_review→inconsistent` → full/3★
+- 最终星级分布：{'1':0, '2':3, '3':11}，无残留一星
+- Word 报告 `EoICD与SWHLR多模型差异分析报告.docx` 生成成功（43,171 bytes）
+
+### 遗留问题
+
+1. 真实管线中一星 case 的"错误 analysis"是否与测试注入的文本风格一致，需有真实一星跑出后对比验证
+2. `re_review_results.json` 仅在测试脚本中手动写入，pipeline 集成后应确认落盘时机正确
+
+### 下一步建议
+
+1. 在真实管线中观察是否出现一星 case，对比其 analysis 风格与测试注入文本的差异
+2. 确认 pipeline 集成后 Step 5.5 的 `re_review_results.json` 在正确的 job 目录下正确落盘
+3. 考虑在 API result 中增加 re_review 相关统计字段（复查 case 数、纠正数）
+
+---
+
+## 2026-08-13 Issue #53 修复：一星复查机制集成验证与 Bug 修复
+
+### 任务目标
+
+集成测试 Issue #53 实现的一星复查机制（Step 5.5/5.6），修复集成过程中暴露的 2 个 bug。
+
+### 完成内容
+
+1. **修复 `re_review_judgments` 的 `multi_out=None` 崩溃**：当 `multi_out` 传入 `None` 时（测试脚本场景），函数内部从 `output_dir / "multi_judge_results.json"` 加载，加载成功后才继续处理。
+2. **修复 error provider 被重新查询的问题**：re-review 跳过 `coverage_status == "error"` 的 provider，保留其 error 状态不被覆盖。这是 degradation 正确统计 surviving provider 的前提。
+3. **修复 `build_cases` case_id 格式错误**：测试脚本的 `build_cases(reverse_matches_data)` 生成 `REV-0199` 格式（HLR 编号），而 pipeline 实际生成 `REV-0001` 格式（顺序编号），导致 case_map 和 mjr_map 的 key 不匹配，所有一星 case 被静默跳过。修复为顺序编号。
+4. **集成测试验证**：三场景测试全部通过——3 providers 存活 → 升至 3★；2 providers 存活（cap=2★）→ 升至 2★；1 provider 存活（cap=1★）→ 保持 1★。
+
+### 修改文件
+
+1. `backend/app/v4/comparison/re_review.py`（`multi_out=None` fallback + skip error providers）
+
+### 新增文件
+
+无。
+
+### 验证方式
+
+1. 构建 `issue53-base` 基准目录（pipeline 跑一次）
+2. 复制基准到测试目录，注入3个一星 case
+3. 执行 Step 5.5 + Step 5.6，验证 re_review_results.json 生成 + 星级正确
+
+### 验证结果
+
+已验证通过：
+- REV-0001（3 alive，cap=3★）：复查后升至 3★ ✅
+- REV-0002（2 alive，deepseek error，cap=2★）：复查后升至 2★ ✅
+- REV-0003（1 alive，deepseek+minimax error，cap=1★）：复查后保持 1★ ✅
+
+### 遗留问题
+
+无。
+
+### 下一步建议
+
+无。
+
+---
+
 ## 2026-07-31 Issue #44：共识报告模板增加不一致属性栏输出
 
 ### 任务目标
