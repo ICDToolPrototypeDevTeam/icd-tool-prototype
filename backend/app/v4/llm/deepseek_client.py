@@ -29,7 +29,7 @@ class DeepSeekClient:
         max_retries: int = 2,
     ) -> ChatResponse:
         """Send a chat completion request. Retries on network errors only."""
-        from app.v4.llm.factory import ChatResponse
+        from app.v4.llm.factory import MAX_TOKEN_CAP, ChatResponse
 
         # 幂等拼接 /v1：若 base_url 已经以 /v1 收尾则不再叠一次（修 Bug：.env 写成
         # https://api.deepseek.com/v1 + client 再拼 /v1 时变成 /v1/v1/chat/completions 404）
@@ -64,9 +64,9 @@ class DeepSeekClient:
                     content = body["choices"][0]["message"]["content"]
                     usage = body.get("usage", {})
                     finish_reason = body["choices"][0].get("finish_reason", "")
-                    if finish_reason != "length" or token_budget >= 16384:
+                    if finish_reason != "length" or token_budget >= MAX_TOKEN_CAP:
                         break
-                    token_budget = min(token_budget * 2, 16384)
+                    token_budget = min(token_budget * 2, MAX_TOKEN_CAP)
                     import sys
                     print(
                         f"  [deepseek] WARNING: response truncated (finish_reason=length), "

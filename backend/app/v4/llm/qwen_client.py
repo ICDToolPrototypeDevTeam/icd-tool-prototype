@@ -28,7 +28,7 @@ class QwenClient:
         max_retries: int = 2,
     ) -> "ChatResponse":
         """Send a chat completion request. Retries on network errors only."""
-        from app.v4.llm.factory import ChatResponse
+        from app.v4.llm.factory import MAX_TOKEN_CAP, ChatResponse
 
         # Idempotent /v1拼接：若 base_url 已经以 /v1 收尾则不再叠一次
         base = self._base_url
@@ -62,9 +62,9 @@ class QwenClient:
                     content = body["choices"][0]["message"]["content"]
                     usage = body.get("usage", {})
                     finish_reason = body["choices"][0].get("finish_reason", "")
-                    if finish_reason != "length" or token_budget >= 16384:
+                    if finish_reason != "length" or token_budget >= MAX_TOKEN_CAP:
                         break
-                    token_budget = min(token_budget * 2, 16384)
+                    token_budget = min(token_budget * 2, MAX_TOKEN_CAP)
                     import sys
                     print(
                         f"  [qwen] WARNING: response truncated (finish_reason=length), "
