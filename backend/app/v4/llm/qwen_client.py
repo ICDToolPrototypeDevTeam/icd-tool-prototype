@@ -28,7 +28,7 @@ class QwenClient:
         max_retries: int = 2,
     ) -> "ChatResponse":
         """Send a chat completion request. Retries on network errors only."""
-        from app.v4.llm.factory import ChatResponse
+        from app.v4.llm.factory import MAX_TOKEN_CAP, ChatResponse
 
         # Idempotent /v1拼接：若 base_url 已经以 /v1 收尾则不再叠一次
         base = self._base_url
@@ -45,19 +45,32 @@ class QwenClient:
         last_error = None
         for attempt in range(max_retries + 1):
             try:
-                resp = requests.post(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                    timeout=timeout,
-                )
-                resp.raise_for_status()
-                body = resp.json()
-                content = body["choices"][0]["message"]["content"]
-                usage = body.get("usage", {})
+                token_budget = max_tokens
+                for _ in range(3):
+                    payload["max_tokens"] = token_budget
+                    resp = requests.post(
+                        url,
+                        headers={
+                            "Authorization": f"Bearer {self._api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                        timeout=timeout,
+                    )
+                    resp.raise_for_status()
+                    body = resp.json()
+                    content = body["choices"][0]["message"]["content"]
+                    usage = body.get("usage", {})
+                    finish_reason = body["choices"][0].get("finish_reason", "")
+                    if finish_reason != "length" or token_budget >= MAX_TOKEN_CAP:
+                        break
+                    token_budget = min(token_budget * 2, MAX_TOKEN_CAP)
+                    import sys
+                    print(
+                        f"  [qwen] WARNING: response truncated (finish_reason=length), "
+                        f"retrying with max_tokens={token_budget}",
+                        file=sys.stderr,
+                    )
                 return ChatResponse(content=content, usage=usage)
             except requests.RequestException as e:
                 last_error = e

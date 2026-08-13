@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型Ver2.0 的版本级变化。
 
+## [Unreleased] - 2026-08-12
+
+### Changed
+
+- **LLM Client 截断自适应重试下沉**：`finish_reason=length` 截断重试从业务层 (`_chat_with_truncation_retry`) 下沉到三个 LLM client（DeepSeek / MiniMax / Qwen）的 `chat()` 方法内部，截断时自动翻倍 `max_tokens` 重试（4096→8192→16384，上限 16384），覆盖所有 LLM 调用方（judge / review / labeler）。`ChatResponse.truncated` 字段随之移除。
+
 ## Unreleased
 
 ### Added

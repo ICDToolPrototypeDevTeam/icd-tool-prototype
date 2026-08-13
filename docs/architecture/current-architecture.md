@@ -373,7 +373,9 @@ V4 内 LLM 调用入口：
 - `comparison/review_agent.py`
 - `matching/hlr_labeler.py`（_call_label_api）
 
-V4 内 `import requests` 仅 1 处（`deepseek_client.py`），其余全部走 `get_llm(provider).chat()`。
+三个 client（DeepSeek / MiniMax / Qwen）的 `chat()` 均内置 `finish_reason=length` 截断自适应重试：截断时自动翻倍 `max_tokens` 重试（上限 16384，最多 2 次倍增），所有调用方自动受益，无需在业务层自行处理。
+
+V4 内 `import requests` 仅 3 处（`deepseek_client.py` / `minimax_client.py` / `qwen_client.py`），其余全部走 `get_llm(provider).chat()`。
 
 ### 12.7 V3 / V4 模块边界约束
 

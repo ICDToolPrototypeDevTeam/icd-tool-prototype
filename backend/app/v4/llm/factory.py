@@ -7,6 +7,10 @@ import os
 from typing import Protocol, TypedDict
 
 
+# 截断自适应重试的 max_tokens 上限（各模型的 max output 防止无限倍增）
+MAX_TOKEN_CAP = 16384
+
+
 class ChatResponse(TypedDict):
     content: str
     usage: dict
