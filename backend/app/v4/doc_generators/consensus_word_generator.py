@@ -313,7 +313,7 @@ def generate_consensus_report(
             if len(m["matched_profile_keys"]) > 5:
                 blocks_str += f" ... (+{len(m['matched_profile_keys']) - 5})"
 
-            agreement_label = {"full": "完全一致", "majority": "多数一致", "split": "分歧"}.get(agreement, agreement)
+            agreement_label = {"full": "完全一致", "majority": "多数一致", "split": "分歧", "no_consensus": "无有效裁判", "single_source": "仅单一来源"}.get(agreement, agreement)
 
             # Inconsistency attributes column
             attr_list = m.get("inconsistent_attributes", [])

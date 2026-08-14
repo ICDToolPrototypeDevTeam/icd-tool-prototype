@@ -15,9 +15,11 @@ class DegradationConfig:
     extra_wait: float = 120.0              # extra wait for third provider after t2
     consecutive_fail_threshold: int = 3     # N consecutive failures → unhealthy
     unhealthy_ttl: float = 300.0            # seconds, auto-recovery TTL
-    single_provider_star_cap: int = 1       # max stars when 1 provider alive
+    zero_provider_star_cap: int = 1          # max stars when 0 providers alive
+    zero_provider_agreement: str = "no_consensus"
+    single_provider_star_cap: int = 1        # max stars when 1 provider alive
     single_provider_agreement: str = "single_source"
-    two_provider_star_cap: int = 2          # max stars when 2 providers alive
+    two_provider_star_cap: int = 2           # max stars when 2 providers alive
 
     @classmethod
     def from_env(cls) -> DegradationConfig:
