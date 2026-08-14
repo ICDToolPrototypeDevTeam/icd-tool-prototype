@@ -2,13 +2,14 @@
 
 ICD工具原型Ver2.0是一个面向EoICD源文件和软件高层需求（HLR）文件的智能化差异分析与需求生成工具。
 
-当前运行版本为 **V4 反向管线**：从软件高层需求（HLR）出发，验证每条 HLR 需求是否能在 EoICD 接口定义中找到对应项（即 HLR 到 EoICD 的可追溯性），通过 DeepSeek / MiniMax / Qwen 三模型并行裁判 + Review Agent 共识复核，输出条目化清单和一致性分析报告。项目同时保留了 V3 正向管线代码，作为版本补充（详见 [§9 V3 正向管线（旧版保留）](#9-v3-正向管线旧版保留)）。
+当前工具运行版本为 **V4 反向管线**：从软件高层需求（HLR）出发，验证每条 HLR 需求是否能在 EoICD 接口定义中找到对应项（即 HLR 到 EoICD 的可追溯性），从而表明HLR是否覆盖了对应的EoICD条目，通过 DeepSeek / MiniMax / Qwen 三模型并行裁判 + Review Agent 共识复核，输出条目化清单和一致性分析报告。项目同时保留了 V3 正向管线代码，作为版本补充（详见 [§9 V3 正向管线（旧版保留）](#9-v3-正向管线旧版保留)）。
 
 ## 1. 主要功能
 
-- **HLR→EoICD 可追溯性分析**：解析 HLR Word 和 EoICD PubSub Excel，通过 AI 标注 → 反向匹配 → 三模型裁判 → 共识复核，判断每条 HLR 需求在 EoICD 中是否有对应的接口定义。
-- **智能裁判与共识评分**：DeepSeek / MiniMax / Qwen 三模型并行独立判定，Review Agent 综合复核并给出 1-3★ 星级评分。
-- **追溯表预筛选**：支持上传设备→HLR / 设备→ICD 追溯表，预先缩小匹配范围，匹配失败时自动回退到全量匹配。
+- **HLR→EoICD 可追溯性分析**：从软件高层需求（HLR）出发，逐条验证每条 HLR 需求是否能在 EoICD 接口定义中找到对应项，从而判断 HLR 到 EoICD 的追溯与覆盖情况。
+- **输入解析与 HLR 标注**：解析 HLR Word 和 EoICD PubSub Excel，得到结构化的 HLR 需求列表与 EoICD 接口清单；用 DeepSeek 为每条 HLR 需求标注总线类型、Label 号、关联设备、信号关键词，作为匹配线索。
+- **反向匹配（含追溯表预筛选）**：根据标注线索为每条 HLR 需求寻找最可能对应的 EoICD 接口定义（Block）；支持上传追溯表预先缩小匹配范围，匹配失败时自动回退到全量匹配。
+- **三模型裁判与共识评分**：DeepSeek / MiniMax / Qwen 三模型并行独立判定，Review Agent 综合复核并给出 1-3★ 星级评分。
 - **多维度报告输出**：输出条目化清单（.xlsx）和单模型/多模型一致性分析报告（.docx），含不一致属性栏等分析明细。
 
 ## 2. 输入输出
@@ -20,33 +21,33 @@ ICD工具原型Ver2.0是一个面向EoICD源文件和软件高层需求（HLR）
 | HLR Word 文件 | .docx | **必填**，从"软件需求"章节提取需求条目 |
 | EoICD Publisher Excel | .xlsx | 与 Subscriber 二选一，发送侧接口定义 |
 | EoICD Subscriber Excel | .xlsx | 与 Publisher 二选一，接收侧接口定义 |
-| 追溯 Excel | .xlsx | 选填（0-N 个），设备→HLR / 设备→ICD 追溯表 |
+| 追溯 Excel | .xlsx | 选填（0-N 个），设备需求（ERD）→HLR / 设备需求（ERD）→ICD 追溯表 |
 
 ### 输出
 
-| 输出文件 | 说明 |
+| 输出文件 | 内容说明 |
 |------|------|
-| `EoICD条目化清单.xlsx` | 条目化需求 Excel 清单 |
-| `EoICD与SWHLR单模型差异分析报告_DeepSeek.docx` | DeepSeek 一致性分析 |
-| `EoICD与SWHLR单模型差异分析报告_MiniMax.docx` | MiniMax 一致性分析 |
-| `EoICD与SWHLR单模型差异分析报告_Qwen.docx` | Qwen 一致性分析 |
-| `EoICD与SWHLR多模型差异分析报告.docx` | 三模型共识分析（含星级评分） |
+| `EoICD条目化清单.xlsx` | 把 EoICD PubSub Excel 中嵌套的接口信号（HL 高层 / DP 数据点 / RP 接收参数）解析、整理成的结构化条目清单 |
+| `EoICD与SWHLR单模型差异分析报告_DeepSeek.docx` | DeepSeek 单独判定的结果：每条 HLR 需求是否在 EoICD 中找到对应接口、两者是否一致 |
+| `EoICD与SWHLR单模型差异分析报告_MiniMax.docx` | MiniMax 单独判定的结果（内容同上） |
+| `EoICD与SWHLR单模型差异分析报告_Qwen.docx` | Qwen 单独判定的结果（内容同上） |
+| `EoICD与SWHLR多模型差异分析报告.docx` | 汇总三个模型的判定，经 Review Agent 复核后给出最终结论与 1-3★ 星级评分 |
 
-> V4 三模型并行裁判均支持真实 LLM 接入。DeepSeek API Key 为必填（同时用于 HLR 标注和 Review Agent），MiniMax / Qwen API Key 为可选（未配置时从 `JUDGE_PROVIDERS` 中移除对应模型即可）。`USE_MOCK_LLM=1` 模式下所有模型均走 mock。
+> **报告含义**：本工具的核心是判断"每条 HLR 软件需求，是否能在 EoICD 接口定义中找到对应的接口"（即 HLR 到 EoICD 的可追溯性）。"一致性"指的就是"HLR 需求与 EoICD 接口定义之间是否对应、对应得是否一致"。3 份单模型报告是三个模型各自的独立判断，1 份多模型报告是综合三个模型结果共识度的最终结论和可靠度评分（星级）。
 
 ## 3. 处理流程
 
 ```text
-上传文件 → 解析输入 → HLR AI 标注 → 反向匹配（可选用追溯表预筛选）
-         → 三模型并行裁判 → Review Agent 共识 → 输出报告
+上传文件 → 解析输入 → HLR 需求标注 → 反向匹配（找对应接口）
+         → 三模型判定（是否对应一致） → 共识复核 → 生成报告
 ```
 
-1. **解析输入**：解析 HLR Word + EoICD PubSub Excel → 结构化需求列表，同时生成条目化清单 Excel
-2. **HLR AI 标注**：DeepSeek 对每条 HLR 标注 bus_types / labels / devices / signal_keywords
-3. **反向匹配**：HLR → EoICD Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三级分层），可选追溯表预筛选 + 兜底机制
-4. **多模型裁判**：DeepSeek / MiniMax / Qwen 三模型并行独立判定
-5. **Review Agent 共识**：综合复核并给出星级评价（1-3★）
-6. **报告生成**：输出 1 份 xlsx + 4 份 docx
+1. **解析输入**：读取 HLR Word（提取"软件需求"章节的每条需求）和 EoICD PubSub Excel（提取接口信号），整理成结构化的"HLR 需求列表"和"EoICD 接口清单"。
+2. **HLR 需求标注**：用 DeepSeek 为每条 HLR 需求自动标注关键信息（总线类型、Label 号、关联设备、信号关键词），作为后续匹配的线索。
+3. **反向匹配**：根据标注线索，为每条 HLR 需求在 EoICD 接口清单中寻找最可能对应的接口定义（Block），得到候选匹配结果。
+4. **三模型判定**：DeepSeek / MiniMax / Qwen 三个模型分别独立判断"每条 HLR 需求是否在 EoICD 中找到了正确对应的接口，且两者描述（数据类型、方向、范围等）是否一致"，各自给出结论。
+5. **共识复核**：由 Review Agent 汇总三个模型的结论，对分歧处复核，给出最终判定和 1-3★ 星级（星级代表判定结果的可靠程度）。
+6. **生成报告**：将以上结果整理成 1 份 xlsx（条目化清单）+ 4 份 docx（差异分析报告）。
 
 详细流程说明见 [`docs/project/workflow.md`](docs/project/workflow.md)。
 
@@ -60,32 +61,35 @@ ICD工具原型Ver2.0是一个面向EoICD源文件和软件高层需求（HLR）
 
 ### 4.2 配置
 
-在项目根目录创建 `backend/.env`（直接复制 `backend/.env.example` 即可）：
+在项目根目录创建 `backend/.env`（复制 `backend/.env.example` 后按需填写）。
+
+#### 方式一：Mock 模式（无需 API Key，开箱即用）
 
 ```bash
-# 默认 mock 模式，无需任何 API Key，开箱即用
 USE_MOCK_LLM=1
 ```
 
-如需接入真实 LLM，将 `USE_MOCK_LLM` 改为 `0` 并填写对应模型的 API Key：
+此模式下所有模型走本地 mock，无需任何 API Key，可快速验证完整流程。
+
+#### 方式二：真实模式（以只接入 DeepSeek 为例）
 
 ```bash
 USE_MOCK_LLM=0
+DEEPSEEK_API_KEY=sk-xxxxxxxx
+JUDGE_PROVIDERS=deepseek
+```
 
-# DeepSeek（必填）
-DEEPSEEK_API_KEY=your_key
+> **重要**：`.env.example` 中的 `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 等字段**不要留空值**。留空会覆盖代码默认值（`https://api.deepseek.com` / `deepseek-v4-flash`），导致 `Invalid URL: No scheme supplied` 报错。要么删除这些行，要么填写正确值。
 
-# MiniMax（可选，未配置时需从 JUDGE_PROVIDERS 中移除，否则报错）
-MINIMAX_API_KEY=your_key
+如需同时接入 MiniMax / Qwen，补充对应 Key 并更新 `JUDGE_PROVIDERS`：
 
-# Qwen（可选，未配置时从 JUDGE_PROVIDERS 中移除即可）
-QWEN_API_KEY=your_key
-
-# 裁判模型白名单（按实际填写的 Key 调整，如只填了 DeepSeek 则设为 deepseek）
+```bash
+MINIMAX_API_KEY=sk-xxxxxxxx
+QWEN_API_KEY=sk-xxxxxxxx
 JUDGE_PROVIDERS=deepseek,minimax,qwen
 ```
 
-> **注意**：`JUDGE_PROVIDERS` 中列出的每个模型都必须有对应的 API Key，否则会报错。如果只配置了 DeepSeek Key，请将此项设为 `deepseek`。
+> **规则**：`JUDGE_PROVIDERS` 中列出的每个模型都必须有对应 API Key，否则任务会报错。配了几个模型，就只写几个模型名。
 
 ### 4.3 启动
 在项目根目录中启动
@@ -119,7 +123,7 @@ docker compose up -d --build
 | HLR Word 文件 | 必填 | 软件高层需求 Word（.docx） |
 | EoICD Publisher Excel | 与 Subscriber 至少填一 | 发送侧接口定义（.xlsx/.xls） |
 | EoICD Subscriber Excel | 与 Publisher 至少填一 | 接收侧接口定义（.xlsx/.xls） |
-| 追溯表 | 选填（0-N 个） | 设备→HLR / 设备→ICD 追溯表，可多选 |
+| 追溯表 | 选填（0-N 个） | 设备需求（ERD）→HLR / 设备需求（ERD）→ICD 追溯表，可多选 |
 
 点击文件条目可在右侧"文件预览"卡片查看内容；点击文件旁的 ✕ 可移除已选文件。
 ![alt text](docs/images/image-2.png)
@@ -167,7 +171,8 @@ icd-tool-prototype/
 │   │   ├── prompts/              # V3 Prompt 文本资产（旧版保留）
 │   │   ├── skills/               # V3 Skill 文本资产（旧版保留）
 │   │   ├── v4/                   # V4 业务模块（反向管线）
-│   │   │   ├── comparison/       #   多模型裁判 + Review Agent 共识 + 报告生成
+│   │   │   ├── comparison/       #   多模型裁判 + Review Agent 共识 + 一星复查 + 报告生成
+│   │   │   ├── degradation/      #   多智能体降级保护（超时、熔断、星级降级）
 │   │   │   ├── matching/         #   反向匹配（HLR 标注、信号画像、Block 聚合、HLR 分类）
 │   │   │   ├── llm/              #   LLM 抽象层（DeepSeek / MiniMax / Qwen Client + Mock）
 │   │   │   ├── doc_generators/   #   xlsx + 单模型 docx + 共识 docx 生成
