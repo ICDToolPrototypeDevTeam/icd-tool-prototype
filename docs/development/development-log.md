@@ -941,3 +941,55 @@ Import 链路验证通过。截断自适应重试效果待真实 LLM 端到端�
 ### 下一步建议
 
 1. 真实 LLM 模式下跑完整管线，观察 WARNING + retrying 日志是否正常触发与恢复
+
+---
+
+## 2026-08-14 Issue #59：降级机制修复与共识报告星级表调整
+
+### 任务目标
+
+修复 Multi-Judge 失败兜底状态不一致问题，补齐 0 存活降级分支与复查后降级重应用；并调整共识报告星级分布表布局。
+
+### 完成内容
+
+1. **裁判失败状态归一**：`semantic_judge.py` 三种失败路径（JSON 解析失败 / API 错误 / 重试耗尽）的 `coverage_status` 从 `needs_review` / `unmatched` 统一改为 `error`，避免失败被误判为业务结论，保证 degradation 的 surviving provider 统计正确。
+2. **0 存活降级分支**：`_apply_degradation_review()` 新增 0 个 provider 存活场景——强制星级 ≤ 1★（`zero_provider_star_cap`）、`agreement_level = "no_consensus"`、`final_coverage_status = "待确认"`，防止共识 LLM 在纯 error 输入上幻觉出高星级。
+3. **复查后重新应用降级**：Step 5.6 部分共识重跑后重新调用 `_apply_degradation_review()` 并重建 summary，避免复查升星绕过降级封顶。
+4. **共识明细表标签映射补齐**：`consensus_word_generator.py` 明细表共识列新增 `no_consensus → 无有效裁判`、`single_source → 仅单一来源` 映射。
+5. **星级分布表布局调整**：删除 1★ 主行（需人工复核），仅保留 3 个子类型行（分歧/仅单一来源/无有效裁判）；★☆☆ 显示在首个子行星列并与后两行纵向合并；子类型标签加粗、与主行格式一致（居左统一、无特殊颜色）。
+6. **降级配置扩展**：`DegradationConfig` 新增 `zero_provider_star_cap=1`、`zero_provider_agreement="no_consensus"` 默认值。
+
+### 修改文件
+
+1. `backend/app/v4/comparison/semantic_judge.py`（失败兜底归一为 error）
+2. `backend/app/v4/degradation/config.py`（新增 0 存活降级配置）
+3. `backend/app/v4/models.py`（coverage_status / agreement_level 注释补充取值）
+4. `backend/app/v4/pipeline.py`（0 存活降级分支 + 复查后重新应用降级并重建 summary）
+5. `backend/app/v4/doc_generators/consensus_word_generator.py`（明细表标签映射 + 星级分布表布局）
+6. `docs/project/workflow.md`、`docs/architecture/api.md`、`CHANGELOG.md`
+
+### 新增文件
+
+1. `backend/tests/unit/test_word_star_table_style.py`（星级分布表确定性样式检查，raw lxml 校验；本地验证脚本，.gitignore 排除不入库）
+2. `backend/tests/e2e/test_use_case_1_consensus_cap.py`（真实 LLM 三场景降级验证；本地验证脚本，.gitignore 排除不入库）
+
+### 验证方式
+
+1. `docker compose build backend` 重建镜像
+2. 容器内 `python tests/unit/test_word_star_table_style.py`（确定性、无 LLM）
+3. 容器内 `python tests/e2e/test_use_case_1_consensus_cap.py`（真实 LLM 三场景）
+
+### 验证结果
+
+1. Word 星级分布表样式检查全部通过（7 行结构、vMerge 纵向合并、无合计行、格式统一）
+2. E2E 三场景全部通过：场景 A（2 存活，cap 2★）17 PASS；场景 B（1 存活，cap 1★ + single_source）18 PASS；场景 C（0 存活，强制 1★ + no_consensus + 待确认）12 PASS
+
+### 遗留问题
+
+1. MiniMax API 偶发环境性失败（重试后仍报 JSON 解析错误），测试逻辑容忍并 WARN 跳过
+2. 星级分布表布局改动与降级修复（`268c4f5`）分属两个提交，布局改动待单独提交
+
+### 下一步建议
+
+1. 星级分布表布局改动单独提交
+2. 真实管线完整跑一轮，观察 0 存活场景在产出文档中的呈现

@@ -383,7 +383,7 @@ GET /api/v4/jobs/{job_id}/result
     "judged_count": 12,
     "agreement_distribution": {"majority": 7, "full": 4, "split": 1},
     "star_distribution": {"1": 1, "2": 7, "3": 4},
-    "status_distribution": {"covered": 7, "needs_review": 4, "inconsistent": 1, "无匹配": 4},
+    "status_distribution": {"已覆盖": 7, "待确认": 4, "不一致": 1, "无匹配": 4},
     "average_star_rating": 2.25
   },
   "outputs": {
@@ -408,6 +408,8 @@ GET /api/v4/jobs/{job_id}/result
 ```
 
 `outputs.*` 5 个布尔为 false 时表示对应 docx/xlsx 未生成（pipeline 中途失败、文件被 GC 等）。
+
+降级场景下 `agreement_distribution` 可能出现 `single_source` / `no_consensus` 键（仅 1 个 / 0 个 provider 存活）；0 个存活时对应 case 强制 1★、`no_consensus`，`status_distribution` 计入 待确认。
 
 ### 13.5 V4 3 类对外下载
 

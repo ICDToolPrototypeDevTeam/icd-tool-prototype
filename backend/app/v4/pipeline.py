@@ -549,6 +549,16 @@ def _apply_degradation_review(
                 result.star_rating = ctx.config.two_provider_star_cap
                 ctx.record_review_star_capped()
 
+        # 共识多数投票可能含 error 票（如 2 error + 1 真实），此时
+        # final_coverage_status="error" 不是可展示状态，统一转待确认
+        if result.final_coverage_status == "error":
+            result.final_coverage_status = "待确认"
+            print(
+                f"  [degradation] review downgraded: {result.case_id} "
+                f"status=error → 待确认（多数票含 error 票）",
+                file=sys.stderr,
+            )
+
     return consensus_out
 
 
