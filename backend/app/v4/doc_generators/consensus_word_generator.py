@@ -9,7 +9,7 @@ from pathlib import Path
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 
 
@@ -157,18 +157,22 @@ def generate_consensus_report(
     st.style = "Table Grid"
     _style_header_row(st, ["判定结果", "数量"])
 
-    # AI 裁判结果（仅共识判定）
-    judged_categories = [
-        ("已覆盖", RGBColor(0x00, 0x80, 0x00)),
-        ("不一致", RGBColor(0xCC, 0x33, 0x00)),
-        ("待确认", RGBColor(0xCC, 0x55, 0x00)),
-    ]
+    # 数据驱动：遍历汇总键渲染，保证任何判定状态都不会从合计中静默消失
+    status_colors = {
+        "已覆盖": RGBColor(0x00, 0x80, 0x00),
+        "不一致": RGBColor(0xCC, 0x33, 0x00),
+        "待确认": RGBColor(0xCC, 0x55, 0x00),
+    }
+    ordered_statuses = ["已覆盖", "不一致", "待确认"]
+    status_keys = ordered_statuses + sorted(
+        k for k in status_dist if k not in ordered_statuses
+    )
     judge_total = 0
-    for label, color in judged_categories:
+    for label in status_keys:
         count = status_dist.get(label, 0)
         if count > 0:
             row = st.add_row()
-            _set_cell_font(row.cells[0], label, bold=True, color=color)
+            _set_cell_font(row.cells[0], label, bold=True, color=status_colors.get(label))
             _set_cell_font(row.cells[1], str(count))
             judge_total += count
 
@@ -191,35 +195,66 @@ def generate_consensus_report(
     doc.add_heading("星级分布", level=3)
 
     agreement_dist = cs.get("agreement_distribution", {})
+    star_dist = cs.get("star_distribution", {})
     avg_stars = cs.get("average_star_rating", 0)
 
-    # Map agreement → star: full=3★, majority=2★, split=1★
+    # 3★/2★ 主行按星级计数（star_distribution）；1★ 无独立主行，直接以 3 个子类型行
+    # 呈现（agreement_distribution），保证降级产生的共识类型（仅单一来源/无有效裁判）
+    # 与非常规星级不丢计数；主行与子行均默认渲染（0 条时也显示）
     star_levels = [
-        ("3", _star_str(3), "完全一致", agreement_dist.get("full", 0),
-         "3 个模型判断完全一致，可直接采纳"),
-        ("2", _star_str(2), "多数一致", agreement_dist.get("majority", 0),
-         "2/3 模型一致，需关注少数意见中是否有被忽略的证据"),
-        ("1", _star_str(1), "分歧", agreement_dist.get("split", 0),
-         "三方各持不同意见，建议人工逐条复核"),
+        ("3", "完全一致", "3 个模型判断完全一致，可直接采纳"),
+        ("2", "多数一致", "2/3模型一致，需关注少数意见中是否有被忽略的证据"),
+    ]
+    one_star_subs = [
+        ("split", "分歧", "三方各持不同意见"),
+        ("single_source", "仅单一来源", "仅 1 个模型有效，结论仅供参考"),
+        ("no_consensus", "无有效裁判", "全部模型调用失败，AI 结论不可用"),
     ]
 
     qt = doc.add_table(rows=1, cols=4)
     qt.style = "Table Grid"
     _style_header_row(qt, ["星级", "共识等级", "数量", "说明"])
 
-    for _, star_icon, label, count, desc in star_levels:
+    for star_key, label, desc in star_levels:
+        count = star_dist.get(star_key, 0)
         row = qt.add_row()
-        _set_cell_font(row.cells[0], star_icon, bold=True, size=10,
+        _set_cell_font(row.cells[0], _star_str(int(star_key)), bold=True, size=10,
                        color=RGBColor(0xCC, 0x88, 0x00))
         _set_cell_font(row.cells[1], label, bold=True)
         _set_cell_font(row.cells[2], f"{count} 条")
         _set_cell_font(row.cells[3], desc)
 
+    # 1★ 子类型行：标签格式与主行一致（加粗、默认颜色）；首行星列放 ★☆☆ 后纵向合并
+    one_star_first_row_idx: int | None = None
+    one_star_last_row_idx: int | None = None
+    for i, (agr_key, sub_label, sub_desc) in enumerate(one_star_subs):
+        sub_count = agreement_dist.get(agr_key, 0)
+        srow = qt.add_row()
+        if i == 0:
+            _set_cell_font(srow.cells[0], _star_str(1), bold=True, size=10,
+                           color=RGBColor(0xCC, 0x88, 0x00))
+            one_star_first_row_idx = len(qt.rows) - 1
+        _set_cell_font(srow.cells[1], sub_label, bold=True)
+        _set_cell_font(srow.cells[2], f"{sub_count} 条")
+        _set_cell_font(srow.cells[3], sub_desc)
+        one_star_last_row_idx = len(qt.rows) - 1
+
+    for star_key in sorted(
+        (k for k in star_dist if k not in ("1", "2", "3")),
+        key=lambda k: int(k) if k.isdigit() else 999,
+    ):
+        count = star_dist.get(star_key, 0)
+        if count > 0:
+            row = qt.add_row()
+            _set_cell_font(row.cells[0], f"{star_key}★", bold=True, size=10,
+                           color=RGBColor(0xCC, 0x88, 0x00))
+            _set_cell_font(row.cells[1], "非常规", bold=True)
+            _set_cell_font(row.cells[2], f"{count} 条")
+            _set_cell_font(row.cells[3], "LLM 输出非常规星级，请人工复核")
+
     row = qt.add_row()
-    _set_cell_font(row.cells[0], "", bold=True)
     _set_cell_font(row.cells[1], "平均星级", bold=True)
     _set_cell_font(row.cells[2], f"{avg_stars:.1f}", bold=True)
-    _set_cell_font(row.cells[3], "")
 
     for row_obj in qt.rows:
         row_obj.cells[0].width = Cm(2.5)
@@ -227,12 +262,21 @@ def generate_consensus_report(
         row_obj.cells[2].width = Cm(2.0)
         row_obj.cells[3].width = Cm(8.0)
 
+    # 1★ 3 个子类型行在星列合并为一个 ★☆☆ 单元格（纵向居中）
+    if one_star_first_row_idx is not None and one_star_last_row_idx is not None:
+        merged_cell = qt.cell(one_star_first_row_idx, 0).merge(qt.cell(one_star_last_row_idx, 0))
+        merged_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        for p in merged_cell.paragraphs[1:]:
+            p._element.getparent().remove(p._element)
+
     # ── Suggestions ──
     doc.add_heading("处置建议", level=3)
     suggestions = [
         f"{_star_str(3)} 星条目：模型完全一致，可直接采纳结论。",
         f"{_star_str(2)} 星条目：多数模型一致，需关注少数意见中是否有被忽略的证据。",
-        f"{_star_str(1)} 星条目：三方分歧，建议人工逐条复核并做出最终判断。",
+        f"{_star_str(1)} 星条目（分歧）：三方各持不同意见，建议人工逐条复核并做出最终判断。",
+        f"{_star_str(1)} 星条目（仅单一来源）：仅 1 个模型有效（其余模型调用失败），结论仅供参考，建议人工确认。",
+        f"{_star_str(1)} 星条目（无有效裁判）：全部模型调用失败，AI 结论不可用，必须人工复核。",
         "无匹配 条目：匹配层未找到对应EoICD信号，需确认HLR是否属于ICD接口范畴。",
     ]
     for s in suggestions:
@@ -313,7 +357,7 @@ def generate_consensus_report(
             if len(m["matched_profile_keys"]) > 5:
                 blocks_str += f" ... (+{len(m['matched_profile_keys']) - 5})"
 
-            agreement_label = {"full": "完全一致", "majority": "多数一致", "split": "分歧"}.get(agreement, agreement)
+            agreement_label = {"full": "完全一致", "majority": "多数一致", "split": "分歧", "no_consensus": "无有效裁判", "single_source": "仅单一来源"}.get(agreement, agreement)
 
             # Inconsistency attributes column
             attr_list = m.get("inconsistent_attributes", [])

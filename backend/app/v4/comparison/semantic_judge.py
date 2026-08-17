@@ -380,7 +380,7 @@ def _call_reverse_judge_api(
                 continue
             return ReverseJudgmentResult(
                 case_id=case_id,
-                coverage_status="needs_review",
+                coverage_status="error",
                 analysis=f"JSON parse error after retries: {e}",
                 confidence=0.0,
                 **source_fields,
@@ -391,7 +391,7 @@ def _call_reverse_judge_api(
                 continue
             return ReverseJudgmentResult(
                 case_id=case_id,
-                coverage_status="needs_review",
+                coverage_status="error",
                 analysis=f"API error: {e}",
                 confidence=0.0,
                 **source_fields,
@@ -399,7 +399,7 @@ def _call_reverse_judge_api(
 
     return ReverseJudgmentResult(
         case_id=case_id,
-        coverage_status="unmatched",
+        coverage_status="error",
         analysis="Max retries exceeded",
         confidence=0.0,
         **source_fields,

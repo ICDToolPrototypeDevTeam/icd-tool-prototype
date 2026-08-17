@@ -519,7 +519,21 @@ def _apply_degradation_review(
     """
     for result in consensus_out.results:
         surviving = _count_surviving_providers(result.model_results)
-        if surviving == 1:
+        if surviving == 0:
+            # 所有 provider 均失败：共识输入无有效裁判，共识 LLM 在纯 error 输入上
+            # 可能幻觉出高星级，强制最低置信度并转入人工审核
+            if result.star_rating > ctx.config.zero_provider_star_cap:
+                result.star_rating = ctx.config.zero_provider_star_cap
+                ctx.record_review_star_capped()
+            result.agreement_level = ctx.config.zero_provider_agreement
+            result.final_coverage_status = "待确认"
+            print(
+                f"  [degradation] review downgraded: {result.case_id} "
+                f"0 surviving → star_cap={ctx.config.zero_provider_star_cap}, "
+                f"agreement={ctx.config.zero_provider_agreement}, status=待确认",
+                file=sys.stderr,
+            )
+        elif surviving == 1:
             if result.star_rating > ctx.config.single_provider_star_cap:
                 result.star_rating = ctx.config.single_provider_star_cap
                 ctx.record_review_star_capped()
@@ -534,6 +548,16 @@ def _apply_degradation_review(
             if result.star_rating > ctx.config.two_provider_star_cap:
                 result.star_rating = ctx.config.two_provider_star_cap
                 ctx.record_review_star_capped()
+
+        # 共识多数投票可能含 error 票（如 2 error + 1 真实），此时
+        # final_coverage_status="error" 不是可展示状态，统一转待确认
+        if result.final_coverage_status == "error":
+            result.final_coverage_status = "待确认"
+            print(
+                f"  [degradation] review downgraded: {result.case_id} "
+                f"status=error → 待确认（多数票含 error 票）",
+                file=sys.stderr,
+            )
 
     return consensus_out
 
@@ -723,6 +747,9 @@ def run_reverse_pipeline(
             summary=new_summary,
             results=all_results,
         )
+        # 复查改变了部分 case 的 judgments，需重新应用降级星封顶
+        _apply_degradation_review(consensus_out, ctx)
+        consensus_out.summary = _build_summary(consensus_out.results)
         consensus_path = output_dir / "consensus_results.json"
         consensus_data = json.loads(consensus_out.model_dump_json(indent=2, ensure_ascii=False))
         consensus_data["degradation"] = ctx.to_summary()

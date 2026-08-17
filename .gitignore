@@ -41,6 +41,10 @@ backend/output/
 backend/app/output/*
 !backend/app/output/.gitkeep
 
+# Local verification test scripts
+
+backend/tests/
+
 # Superpowers / local process memory
 
 .remember/

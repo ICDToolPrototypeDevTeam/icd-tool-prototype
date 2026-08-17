@@ -251,7 +251,7 @@ class ReverseJudgmentResult(BaseModel):
     matched_profiles_summary: list[str] = Field(default_factory=list)
     match_evidence: dict = Field(default_factory=dict)
     # ── Agent judgment ──
-    coverage_status: str = ""          # "covered" | "inconsistent" | "needs_review" | "无匹配" (match-layer)
+    coverage_status: str = ""          # "covered" | "inconsistent" | "needs_review" | "无匹配" (match-layer) | "error" (失败兜底)
     difference_type: str = ""          # 无差异 | 缺失 | 不一致 | 部分覆盖 | 需确认
     missing_points: list[str] = Field(default_factory=list)
     inconsistent_points: list[str] = Field(default_factory=list)
@@ -322,7 +322,7 @@ class ConsensusResult(BaseModel):
 
     case_id: str
     model_results: dict[str, dict] = Field(default_factory=dict)
-    agreement_level: str = ""     # "full" | "majority" | "split"
+    agreement_level: str = ""     # "full" | "majority" | "split" | "single_source" | "no_consensus" (降级覆写)
     star_rating: int = 0          # 1-3
     final_coverage_status: str = ""
     final_analysis: str = ""

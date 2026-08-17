@@ -282,21 +282,17 @@
 - `re_review_results.json` 写入审计记录，`multi_judge_results.json` 更新供 Step 5.6 继续使用，两者落盘时机由 `re_review_judgments()` 内部管理。
 - 集成测试三场景验证通过：3 providers 存活 → 3★；2 providers 存活 → cap 2★；1 provider 存活 → cap 1★。
 
-## [Unreleased] - 2026-08-11：V4 Multi-Agent 降级处理机制
+## [Unreleased] - 2026-08-14：V4 降级机制修复与共识报告星级表调整（Issue #59）
 
-### Added
+### Fixed
 
-- **降级模块**：新增 `backend/app/v4/degradation/` 独立包（`config.py` / `context.py` / `fallback.py`），对 Step 4 Multi-Judge 和 Step 5 Review Agent 提供系统性异常兜底。
-- **Case 级超时控制**：3 个 provider 并行裁判时，前 2 个完成后第三个给予固定额外等待时间（默认 120s），超时后生成 error judgment 而不中断 case。不足 2 个完成时使用兜底上限（默认 300s）。
-- **Provider 熔断器**：连续失败达阈值（默认 3 次）后自动跳过该 provider，TTL 到期自动恢复。401/403 认证错误立即熔断。
-- **Review 评审降级**：1 个 provider 存活 → 星 ≤ 1★，agreement = "single_source"；2 个存活 → 星 ≤ 2★。对 review_judgments() 输出做后处理。
-- **降级可观测性**：`consensus_results.json` 和 API response 新增 `degradation` 字段，包含 provider 健康状态、超时次数、星级截断次数。
-- **HTTP 超时提升**：DeepSeek / MiniMax / Qwen 三个 client 的 HTTP 请求超时从 60s → 120s，与 case 级超时配合。
-- **新增 4 个环境变量**：`DEGRADATION_CASE_TIMEOUT`（300） / `DEGRADATION_EXTRA_WAIT`（120） / `DEGRADATION_CONSECUTIVE_FAILURES`（3） / `DEGRADATION_UNHEALTHY_TTL`（300），全部通过 `.env.example` 暴露，不配时用默认值。
+- **裁判失败状态归一为 error**：`semantic_judge.py` 三种失败路径（JSON 解析失败 / API 错误 / 重试耗尽）的 `coverage_status` 从 `needs_review` / `unmatched` 统一改为 `error`，避免失败被误判为业务结论，保证 degradation 的 surviving provider 统计正确。
+- **0 存活降级分支缺失**：`_apply_degradation_review()` 新增 0 个 provider 存活场景——强制星级 ≤ 1★、`agreement = "no_consensus"`、`final_coverage_status = "待确认"`，防止共识 LLM 在纯 error 输入上幻觉出高星级。
+- **复查后降级封顶失效**：Step 5.6 部分共识重跑后重新应用 `_apply_degradation_review()` 并重建 summary，避免复查升星绕过降级封顶。
 
 ### Changed
 
-- **Step 4 调用切换**：pipeline 中 Step 4 从 `judge_with_panel()` 切换为 `_judge_with_degradation()`。
-- **Step 5 增加后处理**：Review Agent 执行后增加 `_apply_degradation_review()` 对星级和 agreement 做硬上限约束。
-- **LLM Client 默认参数**：`review_agent.py` 和 `semantic_judge.py` 的 `max_tokens` 从 8192 → 4096。
+- **共识报告星级分布表**：删除 1★ 主行（需人工复核），仅保留 3 个子类型行（分歧/仅单一来源/无有效裁判）；★☆☆ 显示在首个子行星列并纵向合并 3 行；子类型标签加粗、与主行格式统一。
+- **共识明细表共识列标签映射**：新增 `no_consensus → 无有效裁判`、`single_source → 仅单一来源`。
+- **降级配置**：`DegradationConfig` 新增 `zero_provider_star_cap=1`、`zero_provider_agreement="no_consensus"` 默认值。
 
