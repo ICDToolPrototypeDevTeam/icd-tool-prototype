@@ -533,3 +533,60 @@ def load_synonyms() -> dict:
     with open(_SYNONYMS_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
+
+# ============================================================================
+# HLR 系统类型配置
+# ============================================================================
+
+HLR_SYSTEMS: dict[str, dict] = {
+    "hvac": {
+        "name": "环控系统",
+        # 术语表配置
+        "glossary_table_index": 0,
+        "glossary_cols": 3,
+        # 需求表配置
+        "requirement_rows": 8,
+        # 字段行索引（从0开始，值在列1）
+        "field_rows": {
+            "requirement_id": 0,
+            "content": 1,
+            "is_requirement": 2,
+            "is_derived": 3,
+            "rationale": 4,
+            "is_safety_related": 5,
+            "verification_method": 6,
+            "implementation_method": 7,
+        },
+        # is_requirement 特殊解析：列1值等于"需求"时为True
+        "is_requirement_value": "需求",
+    },
+    "fuel": {
+        "name": "燃油系统",
+        # 术语表配置
+        "glossary_table_index": 1,
+        "glossary_cols": 3,
+        # 需求表配置
+        "requirement_rows": 13,
+        # 字段行索引（从0开始，值在列1）
+        "field_rows": {
+            "requirement_id": 1,
+            "content": 2,
+            "is_requirement": 3,
+            "is_derived": 3,
+            "is_safety_related": 4,
+            "rationale": 6,
+            "verification_method": 9,
+            "implementation_method": None,
+        },
+        # is_requirement 特殊解析：列1为布尔值
+        "is_requirement_is_boolean": True,
+    },
+}
+
+
+def get_hlr_system_config(system_type: str) -> dict:
+    """获取指定系统类型的 HLR 配置"""
+    if system_type not in HLR_SYSTEMS:
+        raise ValueError(f"Unsupported system type: {system_type}")
+    return HLR_SYSTEMS[system_type]
+
