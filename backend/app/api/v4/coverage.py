@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from docx import Document
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.api.v4.runner import launch_v4_pipeline
@@ -20,6 +21,85 @@ from app.job_manager import job_manager
 
 
 router = APIRouter()
+
+
+def _detect_system_type(hlr_file: UploadFile) -> str:
+    """Auto-detect HLR file system type from table structure.
+
+    Detection logic:
+    1. Parse HLR file tables
+    2. Check second table (index 1) row count and cell content
+    3. HVAC: 8 rows × 2 cols, first cell contains "需求ID"
+    4. Fuel: 13 rows × 2 cols, row 0 has "ID", row 1 has "需求编号"
+
+    Returns: "hvac" | "fuel"
+    Raises: ValueError if detection fails
+    """
+    import tempfile
+
+    content = hlr_file.file.read()
+    with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+
+    try:
+        doc = Document(str(tmp_path))
+        if len(doc.tables) < 2:
+            raise ValueError("HLR 文件表格数量不足，无法识别系统类型")
+
+        table1 = doc.tables[1]
+        rows, cols = len(table1.rows), len(table1.columns)
+
+        if rows == 8 and cols == 2:
+            cell0 = table1.cell(0, 0).text.strip()
+            if "需求ID" in cell0:
+                return "hvac"
+
+        if rows == 13 and cols == 2:
+            cell0 = table1.cell(0, 0).text.strip()
+            cell1 = table1.cell(1, 0).text.strip()
+            if "ID" in cell0 and "需求编号" in cell1:
+                return "fuel"
+
+        raise ValueError(
+            f"无法识别 HLR 文件所属系统类型。表格结构：{rows}行×{cols}列，"
+            f"请在上传时选择对应的系统类型。"
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+        hlr_file.file.seek(0)
+
+
+def _validate_hlr_format(hlr_path: Path, system_type: str) -> None:
+    """Validate HLR file format matches the system configuration.
+
+    Raises: ValueError if format doesn't match
+    """
+    from app.v4.config import get_hlr_system_config
+
+    system_config = get_hlr_system_config(system_type)
+    doc = Document(str(hlr_path))
+
+    table_index = system_config["glossary_table_index"]
+    if len(doc.tables) <= table_index:
+        raise ValueError(
+            f"HLR 文件术语表位置不符合 {system_config['name']} 格式，"
+            f"请确认系统类型选择正确"
+        )
+
+    requirement_rows = system_config["requirement_rows"]
+    found_valid = False
+    for table in doc.tables[table_index + 1:]:
+        if len(table.rows) == requirement_rows and len(table.columns) == 2:
+            found_valid = True
+            break
+
+    if not found_valid:
+        raise ValueError(
+            f"HLR 文件需求表行数不符合 {system_config['name']} 格式（应为{requirement_rows}行），"
+            f"请确认系统类型选择正确"
+        )
+
 
 # ADR-001 §2 校验白名单
 ALLOWED_JUDGE_PROVIDERS = {"deepseek", "minimax", "qwen"}
@@ -60,6 +140,7 @@ async def coverage_analysis(
     use_mock_llm: bool = Form(False),
     judge_providers: list[str] = Form(default_factory=lambda: ["deepseek"]),
     enable_traceability_prefilter: bool = Form(False),
+    system_type: Optional[str] = Form(None),
 ):
     # —— 字段校验 ——
     if not hlr_word_file.filename.lower().endswith(".docx"):
@@ -100,6 +181,21 @@ async def coverage_analysis(
                 raise HTTPException(status_code=422, detail=f"traceability file {tf.filename} must be .xlsx")
             await _save_upload(tf, trace_dir)
 
+    # —— 确定系统类型 ——
+    if system_type is None:
+        detected_type = _detect_system_type(hlr_word_file)
+        system_type = detected_type
+        print(f"自动识别系统类型: {system_type}")
+    else:
+        if system_type not in ("hvac", "fuel"):
+            raise HTTPException(status_code=422, detail=f"Unsupported system_type: {system_type}")
+
+    # —— 验证 HLR 文件格式 ——
+    try:
+        _validate_hlr_format(hlr_path, system_type)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
     # —— 后台线程跑 V4 管线（使用 runner 的 env 保存/恢复保护） ——
     launch_v4_pipeline(
         job=job,
@@ -110,6 +206,7 @@ async def coverage_analysis(
         trace_dir=trace_dir,
         judge_providers=judge_providers,
         use_mock_llm=use_mock_llm,
+        system_type=system_type,
     )
 
     return V4AnalyzeResponse(
