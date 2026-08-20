@@ -28,9 +28,9 @@ def _detect_system_type(hlr_file: UploadFile) -> str:
 
     Detection logic:
     1. Parse HLR file tables
-    2. Check second table (index 1) row count and cell content
+    2. Search for requirement table matching HVAC (8 rows, "需求ID") or Fuel (13 rows, "ID")
     3. HVAC: 8 rows × 2 cols, first cell contains "需求ID"
-    4. Fuel: 13 rows × 2 cols, row 0 has "ID", row 1 has "需求编号"
+    4. Fuel: 13 rows × 2 cols, first cell contains "ID"
 
     Returns: "hvac" | "fuel"
     Raises: ValueError if detection fails
@@ -47,23 +47,20 @@ def _detect_system_type(hlr_file: UploadFile) -> str:
         if len(doc.tables) < 2:
             raise ValueError("HLR 文件表格数量不足，无法识别系统类型")
 
-        table1 = doc.tables[1]
-        rows, cols = len(table1.rows), len(table1.columns)
+        for table in doc.tables:
+            rows, cols = len(table.rows), len(table.columns)
+            if rows == 8 and cols == 2:
+                cell0 = table.cell(0, 0).text.strip()
+                if "需求ID" in cell0:
+                    return "hvac"
 
-        if rows == 8 and cols == 2:
-            cell0 = table1.cell(0, 0).text.strip()
-            if "需求ID" in cell0:
-                return "hvac"
-
-        if rows == 13 and cols == 2:
-            cell0 = table1.cell(0, 0).text.strip()
-            cell1 = table1.cell(1, 0).text.strip()
-            if "ID" in cell0 and "需求编号" in cell1:
-                return "fuel"
+            if rows == 13 and cols == 2:
+                cell0 = table.cell(0, 0).text.strip()
+                if "ID" in cell0:
+                    return "fuel"
 
         raise ValueError(
-            f"无法识别 HLR 文件所属系统类型。表格结构：{rows}行×{cols}列，"
-            f"请在上传时选择对应的系统类型。"
+            f"无法识别 HLR 文件所属系统类型，请手动选择系统类型上传。"
         )
     finally:
         tmp_path.unlink(missing_ok=True)
