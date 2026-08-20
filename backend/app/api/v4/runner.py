@@ -182,6 +182,7 @@ def run_v4_pipeline_thread(
     trace_dir: Optional[Path],
     judge_providers: list[str],
     use_mock_llm: bool,
+    system_type: str = "hvac",
 ) -> None:
     """在后台线程内跑 V4 反向管线；带 env 保存/恢复；异常 → job.status=FAILED。"""
     output_dir = job_dir / "output"
@@ -207,6 +208,7 @@ def run_v4_pipeline_thread(
             output_dir=output_dir,
             job=job,
             trace_dir=trace_dir,
+            system_type=system_type,
         )
 
         # —— 反读落盘 JSON 派生结构化字段（避免在 runner 中实现 V4 Pydantic 序列化） ——
@@ -275,11 +277,12 @@ def launch_v4_pipeline(
     trace_dir: Optional[Path],
     judge_providers: list[str],
     use_mock_llm: bool,
+    system_type: str = "hvac",
 ) -> threading.Thread:
     """工厂：返回后台线程对象；前端已启动并发由 daemon 线程承载。"""
     t = threading.Thread(
         target=run_v4_pipeline_thread,
-        args=(job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir, judge_providers, use_mock_llm),
+        args=(job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir, judge_providers, use_mock_llm, system_type),
         daemon=True,
     )
     t.start()
