@@ -8,11 +8,17 @@ ADR-001 Issue A：
 """
 from __future__ import annotations
 
+from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel
 
 from app.models import JobStatus
+
+
+class SystemType(str, Enum):
+    HVAC = "hvac"
+    FUEL = "fuel"
 
 
 # ============================================================================
