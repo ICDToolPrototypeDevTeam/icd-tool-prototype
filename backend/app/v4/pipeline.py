@@ -86,10 +86,10 @@ def _parse_eoicd(
     return result
 
 
-def _parse_hlr(input_path: Path, output_path: Path) -> HLROutput:
+def _parse_hlr(input_path: Path, output_path: Path, system_config: dict) -> HLROutput:
     """Parse the HLR Word document."""
-    print(f"Parsing HLR: {input_path}")
-    parser = HLRWordParser(input_path)
+    print(f"Parsing HLR: {input_path} (system: {system_config['name']})")
+    parser = HLRWordParser(input_path, system_config)
     result: HLROutput = parser.parse()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -586,14 +586,19 @@ def run_reverse_pipeline(
     output_dir: Path,
     job: Job,
     trace_dir: Path | None = None,
+    system_type: str = "hvac",
 ) -> PipelineResult:
     """Run reverse pipeline: parse → label → match → judge → report.
 
     If trace_dir is provided, enables traceability-based pre-filtering
     to narrow the EoICD search space before reverse matching.
+    system_type selects the HLR system config (default "hvac").
     """
     if not (eoicd_json or publisher or subscriber):
         raise ValueError("need eoicd (parsed JSON) or publisher/subscriber (Excel)")
+
+    from app.v4.config import get_hlr_system_config
+    system_config = get_hlr_system_config(system_type)
 
     # Step 1: Parse
     print("=" * 50)
@@ -616,7 +621,11 @@ def run_reverse_pipeline(
         hlr_data = json.loads(hlr.read_text(encoding="utf-8"))
         hlr_out = HLROutput(**hlr_data)
     else:
-        hlr_out = _parse_hlr(hlr, output_dir / "hlr_requirements.json")
+        hlr_out = _parse_hlr(
+            hlr,
+            output_dir / "hlr_requirements.json",
+            system_config,
+        )
 
     # Step 1: EoICD itemization Excel
     eoicd_json_path = output_dir / "eoicd_requirements.json"
