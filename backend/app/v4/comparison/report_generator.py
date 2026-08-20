@@ -1,140 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Report generator: aggregates judgment results into a DifferenceReport."""
+"""Report generator: aggregates consensus results into a reverse coverage report."""
 
 from __future__ import annotations
 
 from app.v4.models import (
     ConsensusOutput,
-    ConsensusResult,
-    DifferenceReport,
-    JudgmentResult,
     ReverseJudgmentResult,
     ReverseJudgmentOutput,
     ReverseMatchOutput,
-    HLRCoverageResult,
 )
-
-
-def generate_report(
-    judgments: list[JudgmentResult],
-) -> DifferenceReport:
-    """Aggregate judgments into a structured difference report.
-
-    - Computes statistics per coverage_status
-    - Filters out 'covered' items from the differences list
-    """
-    stats: dict[str, int] = {}
-    for j in judgments:
-        status = j.coverage_status or "unknown"
-        stats[status] = stats.get(status, 0) + 1
-
-    differences = [
-        j for j in judgments if j.coverage_status != "covered"
-    ]
-
-    return DifferenceReport(
-        total_cases=len(judgments),
-        statistics=stats,
-        differences=differences,
-    )
-
-
-def generate_reverse_report(
-    judgments: list[ReverseJudgmentResult],
-    match_output: ReverseMatchOutput | None = None,
-) -> ReverseJudgmentOutput:
-    """Aggregate reverse judgments into output with an overall summary.
-
-    When match_output is provided, also reports "待确定" and "无匹配" HLRs
-    that were filtered before AI judging.
-    """
-    total = len(judgments)
-
-    # Per-status counts
-    status_counts: dict[str, int] = {}
-    for j in judgments:
-        s = j.coverage_status or "unknown"
-        status_counts[s] = status_counts.get(s, 0) + 1
-
-    # Categorize by signal_category
-    cat_counts: dict[str, int] = {}
-    cat_status: dict[str, dict[str, int]] = {}
-    for j in judgments:
-        cat = j.signal_category or "其他"
-        cat_counts[cat] = cat_counts.get(cat, 0) + 1
-        if cat not in cat_status:
-            cat_status[cat] = {}
-        s = j.coverage_status or "unknown"
-        cat_status[cat][s] = cat_status[cat].get(s, 0) + 1
-
-    # Key findings — four-category
-    key_findings = []
-
-    covered_count = status_counts.get("covered", 0)
-    if covered_count:
-        key_findings.append(f"{covered_count} 条HLR与EoICD一致（接口定义正确落实）")
-
-    inconsistent_count = status_counts.get("inconsistent", 0)
-    if inconsistent_count:
-        key_findings.append(f"{inconsistent_count} 条HLR存在与ICD不一致（方向/数据类型/范围/bit条件等）")
-
-    ai_review_count = status_counts.get("needs_review", 0)
-    if ai_review_count:
-        key_findings.append(f"{ai_review_count} 条HLR经AI判定为待确认（ICD Block与HLR不相关或无法判断，需人工确认）")
-
-    # ── Match-layer 无匹配 (never sent to AI) ──
-    no_match_judgments: list[ReverseJudgmentResult] = []
-    if match_output:
-        for r in match_output.results:
-            if r.match_type == "无匹配":
-                no_match_judgments.append(ReverseJudgmentResult(
-                    case_id=f"NOMATCH-{len(no_match_judgments) + 1:04d}",
-                    hlr_id=r.hlr_id,
-                    hlr_content=r.hlr_content,
-                    signal_category=r.signal_category,
-                    matched_profiles_summary=[],
-                    match_evidence={k: v for k, v in r.match_evidence.items() if k != "top_scores"},
-                    coverage_status="无匹配",
-                    analysis="匹配层未在EoICD中找到对应的ICD信号定义，建议人工确认。",
-                    confidence=0.0,
-                ))
-
-    no_match_count = len(no_match_judgments)
-    if no_match_count:
-        key_findings.append(f"{no_match_count} 条HLR未匹配（匹配层未找到对应EoICD信号）")
-
-    hlr_total = match_output.total_hlr if match_output else total
-    summary = {
-        "概述": (
-            f"对{hlr_total}条软件高层需求(HLR)进行EoICD反向覆盖分析（DeepSeek单模型裁判）: "
-            f"{total}条通过匹配层进入AI裁判, {no_match_count}条在匹配层未找到对应信号。"
-        ),
-        "判定分布": {
-            "一致": covered_count,
-            "不一致": inconsistent_count,
-            "待确认": ai_review_count,
-            "未匹配": no_match_count,
-        },
-        "按信号类别分布": {
-            cat: {"小计": cat_counts[cat], "判定": cat_status[cat]}
-            for cat in sorted(cat_counts.keys())
-        },
-        "关键发现": key_findings,
-        "建议": [
-            "一致的 HLR: EoICD定义的接口要求在HLR中正确落实，无需处理",
-            "不一致的 HLR: 逐一核对与ICD矛盾的具体属性（方向/bit/数据类型/范围等），确定以哪方为准",
-            "待确认的 HLR: AI判定ICD Block与HLR不相关或无法判断，需人工逐条确认",
-            "未匹配的 HLR: 匹配层未在EoICD中找到对应信号，需检查HLR是否属于ICD接口范畴",
-        ],
-    }
-
-    all_results = list(judgments) + no_match_judgments
-
-    return ReverseJudgmentOutput(
-        total_cases=hlr_total,
-        summary=summary,
-        results=all_results,
-    )
 
 
 def generate_consensus_reverse_report(

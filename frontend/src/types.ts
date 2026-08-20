@@ -8,20 +8,6 @@ export interface FileItem {
   file?: File;
 }
 
-export interface ResultData {
-  job_id: string;
-  summary: {
-    requirement_count: number;
-    difference_count: number;
-  };
-  outputs: {
-    requirements_docx: boolean;
-    difference_report_docx: boolean;
-    minimax_docx: boolean;
-    deepseek_docx: boolean;
-  };
-}
-
 // ========== V4 Types ==========
 
 export type V4DownloadKind =

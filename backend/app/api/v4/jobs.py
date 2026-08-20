@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""GET /api/v4/jobs/{job_id}  状态 / 结果查询。
-
-ADR-001 Issue A：
-- V3 / V4 通过 `job.kind` 严格分发；跨版本查询返回 404 + 提示；
-- V4JobStatusResponse / V4JobResultResponse 不 import 任何 V3 schema 类。
-"""
+"""GET /api/v4/jobs/{job_id}  状态 / 结果查询。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
@@ -16,8 +11,7 @@ from app.api.v4.schemas import (
     V4JobResultSummary,
     V4JobStatusResponse,
 )
-from app.job_manager import job_manager
-from app.models import JobStatus
+from app.job_manager import JobStatus, job_manager
 
 import json
 from pathlib import Path
@@ -26,21 +20,16 @@ from pathlib import Path
 router = APIRouter()
 
 
-def _ensure_v4_job(job_id: str):
+def _get_job(job_id: str):
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail='job not found')
-    if job.kind != "v4":
-        raise HTTPException(
-            status_code=404,
-            detail=f'job belongs to v{("3" if job.kind == "v3" else "?")}; use /api/jobs/{job_id} instead',
-        )
     return job
 
 
 @router.get('/jobs/{job_id}', response_model=V4JobStatusResponse)
 def get_v4_job_status(job_id: str):
-    job = _ensure_v4_job(job_id)
+    job = _get_job(job_id)
     progress = _parse_progress(job.message)
     mock_models: list[str] = []
     if job.result and "mock_models" in job.result:
@@ -62,7 +51,7 @@ def get_v4_job_status(job_id: str):
 
 @router.get('/jobs/{job_id}/result', response_model=V4JobResultResponse)
 def get_v4_job_result(job_id: str):
-    job = _ensure_v4_job(job_id)
+    job = _get_job(job_id)
     if job.status != JobStatus.COMPLETED:
         raise HTTPException(status_code=409, detail=f'job not finished: status={job.status.value}')
 

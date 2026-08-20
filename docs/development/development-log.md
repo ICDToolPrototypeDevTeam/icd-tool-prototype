@@ -1,6 +1,6 @@
 # 开发纪要
 
-本文档用于记录 **ICD工具原型Ver2.0** 的主要开发过程、关联 Issue、修改内容、验证方式和遗留问题。
+本文档用于记录 **ICD工具原型** 的主要开发过程、关联 Issue、修改内容、验证方式和遗留问题。
 
 ## 1. 记录原则
 
@@ -993,3 +993,66 @@ Import 链路验证通过。截断自适应重试效果待真实 LLM 端到端�
 
 1. 星级分布表布局改动单独提交
 2. 真实管线完整跑一轮，观察 0 存活场景在产出文档中的呈现
+
+---
+
+## 2026-08-20：V4 冗余代码清理（早期正向原型 + 旧单模型反向 CLI）
+
+### 任务目标
+
+清理 `app/v4/` 内未被 Web API 调用的冗余代码：早期正向原型（EoICD→HLR 属性级正向匹配）与旧单模型反向 CLI，并同步更新文档与 ADR（ADR-003）。
+
+### 完成内容
+
+1. 删除早期正向原型整链：`run_forward_pipeline`、`comparison/case_builder.py`、`matching/{candidate_matcher,text_matcher,unified_matcher}.py`、`prompts/forward_judge.md`。
+2. 删除正向/死代码符号：`models.py` 的 6 个正向模型（`MatchCandidate`/`ComparisonCase`/`JudgmentResult`/`DifferenceReport`/`MatchOutput`/`JudgmentOutput`）+ `AgentJudgment`；`config.py` 的 `MATCH_SCORE_WEIGHTS`/`MATCH_WEIGHTS`/`DATA_TYPE_EQUIV`/`UNIT_EQUIV` 等常量与 `is_data_type_equiv`/`is_unit_equiv`；`multi_judge.judge_with_panel`、`factory.get_available_providers`、`entry_filter.filter_requirements`、`eoicd_enricher.enrich_query` 等。
+3. 删除旧单模型反向 CLI 与正向 CLI：`reverse-judge`/`reverse-report`（及 `judge_reverse_cases`/`generate_reverse_report`）、`match`/`judge`/`report`/`analyze` 共 6 个子命令。
+4. 保留反向主链（parse → label → reverse match → multi-judge → review → report）与共享函数（`should_keep`、`_resolve_aliases`/`_get_synonym_lookup`/`_tokenize_name` 等）。
+5. 新增 ADR-003；ADR-002 D4 标记被 ADR-003 取代；同步 `current-architecture.md`、`CHANGELOG.md`。
+
+### 修改文件
+
+1. `backend/app/v4/pipeline.py`、`comparison/{semantic_judge,report_generator,multi_judge}.py`
+2. `backend/app/v4/matching/{entry_filter,eoicd_enricher}.py`、`llm/factory.py`
+3. `backend/app/v4/{models,config,cli}.py`
+4. `backend/app/v4/synonyms.yaml`、`prompts/loader.py`
+5. `docs/decisions/ADR-002-移除V3.md`、`docs/architecture/current-architecture.md`、`CHANGELOG.md`
+
+### 新增文件
+
+1. `docs/decisions/ADR-003-移除V4早期正向原型与旧反向CLI.md`
+
+### 删除文件
+
+1. `backend/app/v4/comparison/case_builder.py`
+2. `backend/app/v4/matching/{candidate_matcher,text_matcher,unified_matcher}.py`
+3. `backend/app/v4/prompts/forward_judge.md`
+
+### 验证方式
+
+1. `python -m compileall backend/app/v4 backend/app/api`
+2. `python -c` import 全链路（pipeline/models/config/comparison/matching/llm/cli）
+3. `python -m app.v4.cli --help`
+4. `docker compose up -d --build` 端到端测试（mock）
+5. 残留引用 `rg` 扫描（排除 `__pycache__` / `backend/output`）
+6. 清理前后反向结果基线对比（eoicd_count / hlr_count / matched/pending/unmatched/judged / star_distribution / status_distribution）
+
+### 验证结果
+
+1. `python -m compileall backend/app/v4 backend/app/api` —— 通过（无语法错误）。
+2. import 全链路（pipeline / models / config / comparison / matching / llm / cli）—— 通过。
+3. `python -m app.v4.cli --help` —— 通过，剩余 8 个子命令（parse-eoicd / parse-hlr / all / label-hlr / reverse-match / reverse-analyze / generate-word / generate-consensus-report）。
+4. `docker compose up -d --build` —— 通过，后端 `icd-tool-backend-v4.0` healthy。
+5. 残留引用 `rg` 扫描（排除 `__pycache__` / `backend/output`）—— 活跃 Python 代码中已删除符号/文件零引用；剩余命中均为保留的 `Reverse*` 模型、`--reverse-report` 参数与 `generate_consensus_reverse_report`。
+6. 端到端测试（mock，真实输入样本）—— job `8d3cec35-23ba-41b1-824a-ef8db1b1f60f` completed，5 产物 + 5 下载全 200。
+7. 清理前后反向结果基线对比 —— **ALL_MATCH**（8 项全一致）：`eoicd_count=122674`、`hlr_count=16`、`matched_count=5`、`pending_count=7`、`unmatched_count=4`、`judged_count=12`、`star_distribution={"1":12,"2":0,"3":0}`、`status_distribution`（12，键为既存「待确认」乱码 U+FFFD，两侧一致）。
+8. `git diff --check` —— 通过（仅 LF→CRLF 换行提示，无空白错误）。
+
+### 遗留问题
+
+1. `final_coverage_status` / `status_distribution` 键的「待确认」乱码（U+FFFD）为 V4 既存编码 bug，本次未处理。
+
+### 下一步建议
+
+1. 用户手动 push / PR / 关闭 Issue（CLAUDE.md §11.2 红线）。
+2. 择期修复「待确认」乱码编码 bug。

@@ -9,7 +9,7 @@ PROMPTS_DIR = Path(__file__).parent
 def load_prompt(name: str) -> str:
     """Load a prompt template by name.
 
-    name ∈ {"forward_judge", "reverse_judge", "consensus"}
+    name ∈ {"reverse_judge", "consensus", "re_review"}
 
     Raises FileNotFoundError if the .md file does not exist.
     """

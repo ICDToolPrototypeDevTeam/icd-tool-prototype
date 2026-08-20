@@ -80,8 +80,8 @@ async def coverage_analysis(
                     detail=f"judge_providers: unsupported provider '{p}'; allowed: deepseek, minimax, qwen",
                 )
 
-    # —— 创建 V4 Kind Job 与目录（V4 路径：backend/output/v4/{job_id}/input/ + output/）——
-    job = job_manager.create_job(kind="v4")
+    # —— 创建 Job 与目录（V4 路径：backend/output/v4/{job_id}/input/ + output/）——
+    job = job_manager.create_job()
     job_dir = Path(__file__).resolve().parent.parent.parent.parent / 'output' / 'v4' / job.job_id
     input_dir = job_dir / 'input'
     input_dir.mkdir(parents=True, exist_ok=True)

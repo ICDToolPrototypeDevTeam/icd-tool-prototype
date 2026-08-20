@@ -2,8 +2,8 @@
 # synonyms.yaml — Alias/normalization mappings for candidate recall
 #
 # Structure: canonical_term → [list of aliases]
-# Used by alias_matcher.py (via config.load_synonyms()) to normalize
-# EoICD and HLR terms before matching.
+# Used by eoicd_enricher._build_synonym_lookup() (via config.load_synonyms())
+# to normalize EoICD and HLR terms before matching.
 #
 # Categories:
 #   - Bus type aliases (A429, A664, A825, Analog, Discrete)

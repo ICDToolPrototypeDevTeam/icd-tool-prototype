@@ -1,5 +1,6 @@
 services:
   backend:
+    image: icd-tool-backend-v4.0
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -14,6 +15,7 @@ services:
       - PYTHONUNBUFFERED=1
 
   frontend:
+    image: icd-tool-frontend-v4.0
     build:
       context: ./frontend
       dockerfile: Dockerfile

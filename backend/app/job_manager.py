@@ -1,14 +1,19 @@
 import uuid
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from enum import Enum
+from typing import Optional
 
-from app.models import JobStatus
+
+class JobStatus(str, Enum):
+    PENDING = 'pending'
+    RUNNING = 'running'
+    COMPLETED = 'completed'
+    FAILED = 'failed'
 
 
 class Job:
-    def __init__(self, kind: Literal["v3", "v4"] = "v3"):
+    def __init__(self):
         self.job_id: str = str(uuid.uuid4())
-        self.kind: Literal["v3", "v4"] = kind
         self.status: JobStatus = JobStatus.PENDING
         self.message: Optional[str] = None
         self.created_at: datetime = datetime.now(timezone.utc)
@@ -26,9 +31,9 @@ class JobManager:
     def __init__(self):
         self._jobs: dict[str, Job] = {}
 
-    def create_job(self, kind: Literal["v3", "v4"] = "v3") -> Job:
-        """Create a new Job. `kind="v3"` 默认；V4 路由显式传 `kind="v4"` 以做分发。"""
-        job = Job(kind=kind)
+    def create_job(self) -> Job:
+        """Create a new Job."""
+        job = Job()
         self._jobs[job.job_id] = job
         return job
 
