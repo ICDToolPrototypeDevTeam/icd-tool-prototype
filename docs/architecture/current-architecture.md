@@ -87,7 +87,7 @@ V4 反向管线 pipeline（6 步）
 | `v4/degradation/` | Provider 健康跟踪、Case 超时、熔断、星级降级 |
 | `v4/doc_generators/` | xlsx + 单模型 docx + 共识 docx 生成 |
 | `v4/llm/`       | LLM 抽象层：`factory.py`（env 驱动 + mock fallback）、deepseek/minimax/qwen client、`mock_llm.py` |
-| `v4/prompts/`   | Prompt Markdown 文本资产（forward_judge / reverse_judge / consensus） |
+| `v4/prompts/`   | Prompt Markdown 文本资产（reverse_judge / consensus / re_review） |
 | `v4/traceability/` | 追溯表预筛选（独立零耦合模块） |
 | `output/`      | 运行时生成的输出文件存放目录                |
 
@@ -223,7 +223,7 @@ backend/app/
     ├── matching/           # 反向匹配、信号画像、HLR 分类、entry filter
     ├── comparison/         # multi_judge + review_agent + 报告生成
     ├── doc_generators/     # xlsx + 3 类 docx 生成
-    ├── prompts/            # forward_judge / reverse_judge / consensus .md
+    ├── prompts/            # reverse_judge / consensus / re_review .md
     ├── llm/                # factory / deepseek_client / minimax_client / qwen_client / mock_llm
     ├── traceability/       # 追溯表预筛选（独立零耦合模块）
     ├── degradation/        # Provider 健康跟踪 / Case 超时 / 熔断 / Review 降级
@@ -335,6 +335,7 @@ V4 工程化集成的关键决策由 `docs/decisions/ADR-001-V4后端接入策�
 
 - ADR-001 中 D3（`/api/v4` 命名空间）、D4（import 适配但不改业务逻辑）、D5（mock_models 显式标识）、D6（`consistency/{model}` 扩展点）、D7（JSON 不暴露）仍有效。
 - ADR-001 中 D2 / D8 及 D1 的「暂不删 V3」部分已由 ADR-002 取代（V3 已移除、`kind` 字段已删除）。
-- ADR-002 记录了 V3 移除范围、决策点 A1（去 kind）与 B（保留 app/v4 正向原型）。
+- ADR-002 记录了 V3 移除范围、决策点 A1（去 kind）与 B（保留 app/v4 正向原型）；其中 D4（保留正向原型）已由 ADR-003 取代（正向原型已删除）。
+- ADR-003 记录了 V4 早期正向原型与旧单模型反向 CLI 的移除范围，并约定未来正向采用 ICDBlock 级 Case、候选检索算法待定。
 
 如未来 V4 路由 / Schema / JobManager / LLM 抽象层有变化，需同时更新本节与相应 ADR。

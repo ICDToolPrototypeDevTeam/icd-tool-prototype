@@ -20,7 +20,7 @@ def _filter_protocol_dataformat(req: EoICDRequirement) -> bool:
 
     A429OCTLBL (Label field), A429PARITY (parity bit), A429SDI (SDI field),
     and A429_SSM_BNR (SSM field) are protocol stack overhead, not
-    application-layer data. They should not generate ComparisonCases.
+    application-layer data. They should not participate in reverse matching.
     """
     if req.attribute_name != "DataFormatType":
         return True
@@ -36,7 +36,7 @@ _FILTER_RULES = [
 
 
 def should_keep(req: EoICDRequirement) -> bool:
-    """Check whether an EoICD entry should generate a ComparisonCase.
+    """Check whether an EoICD entry should be kept for reverse matching.
 
     Returns False if any filter rule rejects the entry.
     """
@@ -44,11 +44,3 @@ def should_keep(req: EoICDRequirement) -> bool:
         if not rule(req):
             return False
     return True
-
-
-def filter_requirements(
-    reqs: list[EoICDRequirement],
-) -> tuple[list[EoICDRequirement], int]:
-    """Return (kept_entries, filtered_count)."""
-    kept = [r for r in reqs if should_keep(r)]
-    return kept, len(reqs) - len(kept)

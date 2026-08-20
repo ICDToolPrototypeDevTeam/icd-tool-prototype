@@ -148,35 +148,8 @@ JUDGE_PROVIDERS = [
     if p.strip()
 ]
 
-# Matching score weights
-MATCH_SCORE_WEIGHTS = {
-    "signal_token": 40,
-    "bus_interface": 20,
-    "attribute_keyword": 10,
-    "device": 10,
-    "alias": 15,
-}
-LOW_SCORE_THRESHOLD = 10
-DEFAULT_TOP_K = 5
-DEFAULT_LIMIT = 0  # 0 = no limit
-
-# BM25 parameters
-BM25_K1 = 1.5
-BM25_B = 0.75
-
 # ——— Protocol overhead DataFormatType values (not application-layer data) ———
 PROTOCOL_DATAFORMATS = {"A429OCTLBL", "A429PARITY", "A429SDI", "A429_SSM_BNR"}
-
-# ——— Unified matching weights (sum = 100) ———
-MATCH_WEIGHTS = {
-    "bus": 10,
-    "label": 20,
-    "direction": 10,
-    "device": 15,
-    "signal": 20,
-    "attr_cat": 5,
-    "bm25": 20,
-}
 
 # ——— Attribute → category mapping ———
 ATTR_CATEGORY_MAP = {
@@ -243,49 +216,6 @@ SIGNAL_LEAF_ALIASES = {
     "ANGLE": ["角度"],
     "RATE": ["速率"],
 }
-
-# ——— Data type equivalence for reverse matching (IRD ↔ SWHLR) ———
-# Maps EoICD DataFormatType values to HLR-equivalent descriptions
-DATA_TYPE_EQUIV: dict[str, set[str]] = {
-    "BNR": {"bnr", "binary", "二进制数值", "数值", "sint", "analog", "模拟量"},
-    "DIS": {"dis", "discrete", "离散", "离散量", "bool", "boolean", "开关", "状态位"},
-    "OPAQUE": {"opaque", "不透明", "透传"},
-}
-
-
-def is_data_type_equiv(ird_type: str, hlr_description: str) -> bool:
-    """Check if an EoICD DataFormatType is equivalent to an HLR description."""
-    ird_upper = ird_type.strip().upper()
-    hlr_lower = hlr_description.strip().lower()
-    equivalents = DATA_TYPE_EQUIV.get(ird_upper, set())
-    return hlr_lower in equivalents
-
-
-# ——— Unit equivalence for reverse matching (IRD ↔ SWHLR) ———
-UNIT_EQUIV: dict[str, set[str]] = {
-    "ft": {"ft", "feet", "英尺", "foot"},
-    "degrees c": {"degrees c", "℃", "°c", "摄氏度", "deg c", "degc"},
-    "degrees": {"degrees", "°", "度", "deg"},
-    "ms": {"ms", "毫秒", "millisecond", "milliseconds"},
-    "bytes": {"bytes", "byte", "b", "字节"},
-    "bits": {"bits", "bit", "位"},
-    "v": {"v", "volt", "volts", "伏", "伏特"},
-    "ma": {"ma", "毫安", "milliamp"},
-    "kg": {"kg", "千克", "公斤", "kilogram"},
-    "psi": {"psi", "磅/平方英寸"},
-    "%": {"%", "percent", "百分比"},
-}
-
-
-def is_unit_equiv(ird_unit: str, hlr_description: str) -> bool:
-    """Check if an EoICD unit is equivalent to an HLR description."""
-    ird_lower = ird_unit.strip().lower()
-    hlr_lower = hlr_description.strip().lower()
-    if ird_lower == hlr_lower:
-        return True
-    equivalents = UNIT_EQUIV.get(ird_lower, set())
-    return hlr_lower in equivalents
-
 
 # ——— Chinese → English signal keyword mapping ———
 # Used in reverse matching to bridge the cross-language gap:
