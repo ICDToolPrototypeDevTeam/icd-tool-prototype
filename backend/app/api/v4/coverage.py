@@ -24,7 +24,7 @@ router = APIRouter()
 # ADR-001 §2 校验白名单
 ALLOWED_JUDGE_PROVIDERS = {"deepseek", "minimax", "qwen"}
 # Issue #63 / Task 12: v4 controller profile whitelist (matches profiles/ subdirs)
-ALLOWED_CONTROLLER_PROFILES = {"ams", "fgmc"}
+ALLOWED_CONTROLLER_PROFILES = {"ams", "fgmc", "hscu"}
 
 # 文件名安全字符：保留中英数 + . _ - + 空格 + 各种括号（合法 FS 字符）
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._\-一-龥\s()（）\[\]【】]")
@@ -95,7 +95,7 @@ async def coverage_analysis(
     if controller_profile not in ALLOWED_CONTROLLER_PROFILES:
         raise HTTPException(
             status_code=422,
-            detail=f"controller_profile: unsupported '{controller_profile}'; allowed: ams, fgmc",
+            detail=f"controller_profile: unsupported '{controller_profile}'; allowed: ams, fgmc, hscu",
         )
 
     # —— 创建 V4 Kind Job 与目录（V4 路径：backend/output/v4/{job_id}/input/ + output/）——

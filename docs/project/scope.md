@@ -143,6 +143,7 @@ V4 通过 `controller_profile` 字段控制输入解析规则（默认 `ams`）�
 | --- | --- | --- | --- | --- |
 | `ams` | 空气管理系统控制器（默认） | `tables[0]` | ≥ 8 行 × ≥ 2 列 | `设备需求与系统ICD追溯表.xlsx` + `单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx`（精确名） |
 | `fgmc` | 燃油测量管理计算机 | `tables[1]` | ≥ 12 行 × ≥ 2 列（含"是否为需求"= "否" 过滤） | `*追溯*.xlsx` + `*矩阵分析*.xlsx`（glob 模式） |
+| `hscu` | 液压系统控制单元 | `tables[0]` | ≥ 8 行 × ≥ 2 列（行标签用 `需求正文` 而非 `需求中文`） | `附件1*需求*ICD*.xlsx` + `*液压*单模块需求矩阵*.xlsx` |
 
 profile 配置位于 `backend/app/v4/profiles/{id}/config.yaml`，覆盖 HLR 字段映射、分类关键词（analog / discrete / bus 等）、追溯表配置和 AI 标注示例四类内容。
 

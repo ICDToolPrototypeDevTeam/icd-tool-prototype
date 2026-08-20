@@ -316,3 +316,34 @@
 
 - V4 不再硬编码 AMS 专属的追溯表中文文件名、sheet 名、HLR 表行数阈值和字段名；接入新控制器不再需要修改 parser / matcher 源码。
 
+## [Unreleased] - 2026-08-20：V4 HSCU 控制器 Profile 接入（Issue #63 续）
+
+### Added
+
+- **HSCU profile（液压系统控制单元）**：新增 `backend/app/v4/profiles/hscu/` 子包，含 `__init__.py` / `config.yaml` / `hooks.py` / `README.md`。基于现有 AMS / FGMC profile 模式，无需改动业务代码即可接入。
+- **HSCU 适配要点**（与 AMS / FGMC 差异）：
+  - HLR 字段映射：HSCU 需求表行标签用 `需求正文` 而非 `需求中文`（其他控制器均为 `需求中文`）；术语表位于 `tables[0]`，需求表 ≥ 8 行。
+  - 无 `is_requirement` 列：HSCU 需求表中没有"是否需求"列，`filter_non_requirement` 关闭；其他控制器中 AMS 默认开启，FGMC 通过 `filter_non_requirement: true` + 匹配 "否" 过滤。
+  - 追溯表 T1：glob 模式 `附件1*需求*ICD*.xlsx`（AMS 用精确中文文件名，FGMC 用 `*追溯*.xlsx`）；sheet 名匹配关键词 `待填_需求接口追溯表`。
+  - 追溯表 T2：glob 模式 `*液压*单模块需求矩阵*.xlsx`，`data_start_row: 2`（跳过当前需求文档 / 下层需求文档合并行 + 列标题行）。
+- **API `controller_profile` 白名单扩展**：`POST /api/v4/coverage-analysis` form 字段 `controller_profile` 白名单由 `{ams, fgmc}` 扩展为 `{ams, fgmc, hscu}`，非法值仍返回 422。
+- **HSCU 测试文档**：在 `backend/app/v4/profiles/hscu/README.md` 中记录 HSCU 与 AMS / FGMC 的差异、T1 sheet 名纠正（`待填_需求接口追溯表` 而非 `需求_设备接口追溯表`）和 `data_start_row` 含义。
+
+### Changed
+
+- `backend/app/api/v4/coverage.py` `ALLOWED_CONTROLLER_PROFILES` 集合加入 `"hscu"`，错误信息更新为 `allowed: ams, fgmc, hscu`。
+- `docs/architecture/api.md` §13.2 `controller_profile` 字段白名单由 `{ams, fgmc}` 改为 `{ams, fgmc, hscu}`，§13.6 错误响应同步更新。
+- `docs/project/scope.md` §8.2.1 profile 表新增 `hscu` 行，描述 HSCU 适用控制器 / 术语表位置 / HLR 需求表结构 / 追溯表文件名。
+- `docs/architecture/current-architecture.md` profiles 目录树新增 `hscu/` 节点。
+
+### Fixed
+
+- **HSCU T1 sheet 名配置纠正**：最初错误将 T1 sheet 名配置为 `需求_设备接口追溯表`，通过对 `wb.sheetnames` 做 codepoint inspection 后改为 `待填_需求接口追溯表`（HSCU 实际 sheet 名），与 trace_parser `by_name_keywords` 匹配逻辑对齐。
+- **HSCU 早期误诊的 GBK mojibake 修复已删除**：首次接入时误判 HSCU T1 xlsx 存在 GBK-as-UTF-8 mojibake，引入 `_xlsx_mojibake.py` 工具 + 在 `TraceabilityTableConfig` 加 `repair_gbk_mojibake` 字段 + 在 `trace_parser._read_table1/2` 加 `_maybe_heal()` 调用。经 codepoint 校验 HSCU 文件实际为干净 UTF-8，"mojibake" 现象是 Windows console 无法渲染某些 CJK 字符所致。按 debug-rules.md "最小修改原则" 全部回退删除，无 mojibake 相关代码残留。
+
+### Notes
+
+- HSCU E2E 已通过 mock LLM 验证：job `dd0790ed` 跑通完整 6 步管线，4 类 DOCX 输出齐全，HLR 解析 10 条 / 追溯匹配 15 条。
+- HSCU 0/10 反向匹配：当前 HSCU HLR 信号关键词（如 `HYD_xxx` / `LBL_xxx`）在提供的 EoICD 样例文件中未出现（样例仅含 AHMU `AIRCRAFT_STATUS` 信号），属测试数据问题，非 profile 问题。
+- AMS / FGMC 回归验证通过：AMS job `a335bce9`（~60s）+ FGMC job `67e745b9`（<5s）均产出 4 DOCX，无回归。
+

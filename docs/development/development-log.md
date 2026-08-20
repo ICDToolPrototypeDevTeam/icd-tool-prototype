@@ -1049,3 +1049,78 @@ FGMC（燃油测量管理计算机）作为第二个测试样例引入后，原�
 
 1. 用 FGMC 样例跑一轮完整管线，检查匹配率与报告产出
 2. 前端 V4 上传页增加控制器选择控件，透传 `controller_profile`
+
+---
+
+## 2026-08-20 Issue #63 续：HSCU 控制器 Profile 接入
+
+### 任务目标
+
+将 HSCU（液压系统控制单元）作为 V4 第 3 个 controller profile 接入，参照现有 AMS / FGMC profile 模式（位于 `backend/app/v4/profiles/{id}/config.yaml`），无需改动业务代码。
+
+### 完成内容
+
+1. **新增 HSCU profile 子包**：`backend/app/v4/profiles/hscu/`
+   - `__init__.py`：标记为 HSCU profile 包。
+   - `config.yaml`：声明 HSCU 专属的 HLR 字段映射（含 `需求正文` 字段名）、术语表位置、需求表行数阈值、追溯表文件名模式 + sheet 名匹配 + 列偏移。
+   - `hooks.py`：预留 HSCU 专属扩展点（当前为空）。
+   - `README.md`：记录 HSCU 与 AMS / FGMC 的差异、T1 sheet 名纠正说明和 `data_start_row` 含义。
+2. **profile 白名单扩展**：`backend/app/api/v4/coverage.py` `ALLOWED_CONTROLLER_PROFILES = {"ams", "fgmc", "hscu"}`，错误信息同步更新。
+3. **HSCU 适配关键差异**：
+   - HLR 字段映射：HSCU 需求表行标签用 `需求正文`（`field_map.content: ["需求正文", "需求中文", "需求描述"]`），AMS / FGMC 均为 `需求中文`。
+   - 无 `is_requirement` 列：`filter_non_requirement: false`（AMS 默认开启过滤、FGMC 显式开启过滤匹配 "否"）。
+   - 追溯表 T1：glob 模式 `附件1*需求*ICD*.xlsx`，sheet 名匹配 `待填_需求接口追溯表`（初次配置为 `需求_设备接口追溯表` 是错误的，经 codepoint inspection 后纠正）。
+   - 追溯表 T2：glob 模式 `*液压*单模块需求矩阵*.xlsx`，`data_start_row: 2`（跳过当前需求文档 / 下层需求文档合并行 + 列标题行）。
+4. **误诊清理**：初次接入时误判 HSCU T1 xlsx 存在 GBK-as-UTF-8 mojibake，引入 `_xlsx_mojibake.py` 工具 + `TraceabilityTableConfig.repair_gbk_mojibake` 字段 + `trace_parser._maybe_heal()` 调用。经 codepoint 校验 HSCU 文件实际为干净 UTF-8（"mojibake" 是 Windows console 无法渲染某些 CJK 字符所致），按 debug-rules.md "最小修改原则" 全部回退删除，无 mojibake 相关代码残留。
+5. **文档更新**：
+   - `docs/architecture/api.md` §13.2 `controller_profile` 字段白名单 `{ams, fgmc}` → `{ams, fgmc, hscu}`；§13.6 错误响应同步。
+   - `docs/project/scope.md` §8.2.1 profile 表新增 `hscu` 行。
+   - `docs/architecture/current-architecture.md` profiles 目录树新增 `hscu/` 节点。
+
+### 修改文件
+
+1. `backend/app/api/v4/coverage.py`（`ALLOWED_CONTROLLER_PROFILES` 加入 `"hscu"`，错误信息更新）
+2. `docs/architecture/api.md`（profile 白名单 + 错误响应）
+3. `docs/project/scope.md`（profile 表新增 `hscu` 行）
+4. `docs/architecture/current-architecture.md`（profile 目录树新增 `hscu/` 节点）
+5. `CHANGELOG.md`（新增 Unreleased 2026-08-20 条目）
+6. `docs/development/development-log.md`（本条记录）
+
+### 新增文件
+
+1. `backend/app/v4/profiles/hscu/__init__.py`
+2. `backend/app/v4/profiles/hscu/config.yaml`
+3. `backend/app/v4/profiles/hscu/hooks.py`
+4. `backend/app/v4/profiles/hscu/README.md`
+
+### 删除文件
+
+1. `backend/app/v4/traceability/_xlsx_mojibake.py`（早期误诊引入的 mojibake 修复工具，已按最小修改原则删除）
+
+### 验证方式
+
+1. Dry-run：HSCU profile YAML 加载 + ProfileRegistry 注册 + HLR parser 解析 HSCU 测试 HLR Word + trace parser 识别 T1/T2 文件
+2. `docker compose build backend && docker compose up -d backend`（source code 未挂载 volume，必须重建）
+3. E2E：`python` 脚本调用 `POST /api/v4/coverage-analysis`，传 `controller_profile=hscu` + HSCU 测试 5 文件（HLR Word + 2 EoICD Excel + 2 trace Excel），轮询至 `completed`
+4. 输出校验：`/api/v4/jobs/{id}/result.outputs.*` 5 布尔全 true + `backend/output/v4/{id}/output/` 下 5 DOCX/XLSX 文件齐全
+5. AMS / FGMC 回归验证：同样脚本传 `controller_profile=ams` / `fgmc`，确认已完成且 4 DOCX 全产出
+
+### 验证结果
+
+1. **HSCU E2E**：job `dd0790ed` mock LLM 完整跑通 6 步管线（parse → label → match → multi_judge → review → report），5 类输出齐全（`eoicd_xlsx.xlsx` + 4 DOCX），HLR 解析 10 条（如 `FSF29005501_HLR_025797`），追溯匹配 15 条 HLR（含 9 ERDs + 6 ICDs）。任务状态：`pending → running → completed`，总耗时 ~25s。
+2. **HSCU 0/10 反向匹配**：当前 HSCU HLR 信号关键词（`HYD_xxx` / `LBL_xxx` 等）在提供的 EoICD 样例文件中未出现（样例仅含 AHMU `AIRCRAFT_STATUS` 信号），属测试数据覆盖问题，非 HSCU profile 问题。
+3. **AMS 回归**：job `a335bce9` mock LLM 跑通，~60s 完成，4 DOCX 全产出，message `Reverse pipeline complete`。
+4. **FGMC 回归**：job `67e745b9` mock LLM 跑通，<5s 完成（mock LLM 极快），4 DOCX 全产出，message `V4 reverse pipeline complete`。
+5. AMS / FGMC 行为与 Issue #63 接入前一致，无回归。
+
+### 遗留问题
+
+1. HSCU 端到端真实 LLM 模式尚未验证（当前 mock LLM）
+2. HSCU 0/10 反向匹配率因 EoICD 样例不含液压域信号而无法评估；需提供 HSCU EoICD 真实 PubSub Excel 样例才能验证匹配率
+3. 前端 V4 上传页尚未暴露 `controller_profile` 选择入口（仍为 Issue #63 既有遗留）
+
+### 下一步建议
+
+1. 收集 / 提供 HSCU EoICD 真实 PubSub Excel 样例（含 `HYD_xxx` / `LBL_xxx` 等液压域信号），重新跑 HSCU E2E 验证匹配率
+2. 前端 V4 上传页增加控制器选择控件，透传 `controller_profile`（仍是 Issue #63 既有遗留）
+3. HSCU 真实 LLM 模式端到端验证

@@ -261,6 +261,11 @@ backend/app/
     │       ├── config.yaml
     │       ├── hooks.py
     │       └── README.md
+    │   └── hscu/           # HSCU profile（液压系统控制单元）
+    │       ├── __init__.py
+    │       ├── config.yaml
+    │       ├── hooks.py
+    │       └── README.md
     ├── matching/           # 反向匹配、信号画像、HLR 分类、entry filter
     ├── comparison/         # multi_judge + review_agent + 报告生成
     ├── doc_generators/     # xlsx + 3 类 docx 生成
