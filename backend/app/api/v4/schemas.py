@@ -3,8 +3,7 @@
 
 ADR-001 Issue A：
 - V4Job* 响应 schema 不与 V3 Job* schema 互通（独立 import、无依赖）；
-- `mock_models` 取值规则严格按 ADR-001 D5；
-- 不向 V3 响应注入任何 V4 字段。
+- `mock_models` 取值规则严格按 ADR-001 D5。
 """
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from app.models import JobStatus
+from app.job_manager import JobStatus
 
 
 # ============================================================================

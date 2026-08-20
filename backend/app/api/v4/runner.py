@@ -216,7 +216,7 @@ def run_v4_pipeline_thread(
         match_stats = derive_match_summary(output_dir)
         counts = derive_eoicd_hlr_counts(output_dir)
 
-        # 拼装 job.result（仅在 V4 路由读；不进 V3 schema）
+        # 拼装 job.result
         job.result = {
             # V3 兼容字段
             "requirement_count": counts.get("hlr_count", 0),

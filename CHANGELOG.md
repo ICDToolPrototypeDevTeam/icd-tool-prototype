@@ -1,6 +1,19 @@
 # 变更记录
 
-本文档记录 ICD工具原型Ver2.0 的版本级变化。
+本文档记录 ICD工具原型 的版本级变化。
+
+## [Unreleased] - 2026-08-20
+
+### Removed
+
+- 移除 V3 旧版代码与依赖：后端顶层 `crew/` / `merge/` / `scoring/` / `docx/` / `parsers/` / `llm/` / `prompts/` / `skills/` / `pipeline.py` / `models.py` 及 `api/v3/` 路由全部删除；`requirements.txt` 移除 `crewai` / `litellm`。详见 ADR-002。
+- 移除 `Job.kind` 字段与 V3/V4 跨版本分派逻辑（ADR-002 D3）；`JobStatus` 枚举迁入 `job_manager.py`。
+
+### Changed
+
+- FastAPI 入口仅保留 `/api/v4` 命名空间；旧 `/api/health`、`/api/eoicd/analyze`、`/api/jobs/*` 全部移除（现返 404）。
+- 前端移除 V3 上传 / 状态 / 结果组件与 `api/index.ts`、`types.ts` 中的 V3 符号；仅保留 V4 界面。
+- 文档同步：`README.md`、`docs/architecture/*`、`docs/project/*`、`backend/.env.example` 移除 V3 表述；新增 ADR-002；ADR-001 标记 Partially Superseded。
 
 ## [Unreleased] - 2026-08-12
 
