@@ -52,15 +52,22 @@ class EoICDOutput(BaseModel):
 class HLRRequirement(BaseModel):
     """A single requirement from the HLR Word document."""
 
-    requirement_id: str
-    content: str
-    object_type: str
-    is_derived: str
-    rationale: str
-    is_safety_related: str
-    verification_method: str
-    implementation_method: str
-    source_file: str
+    requirement_id: str = ""
+    content: str = ""
+    object_type: str = ""
+    is_derived: str = ""
+    rationale: str = ""
+    is_safety_related: str = ""
+    verification_method: str = ""
+    implementation_method: str = ""
+    source_file: str = ""
+    # FGMC 引入的新字段（AMS 全部 default ""，向后兼容）
+    code: str = ""
+    source: str = ""
+    covered_ids: str = ""
+    notes: str = ""
+    input_data: str = ""
+    output_data: str = ""
 
 
 class HLRGlossaryEntry(BaseModel):

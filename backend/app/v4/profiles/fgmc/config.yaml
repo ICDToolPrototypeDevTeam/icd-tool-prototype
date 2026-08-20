@@ -1,0 +1,188 @@
+profile:
+  id: fgmc
+  display_name: 燃油测量管理计算机 (FGMC)
+  version: 1.0
+
+hlr_parser:
+  glossary_table_index: 1
+  requirement_table_min_rows: 12
+  filter_non_requirement: true
+  non_requirement_value: "否"
+  field_map:
+    id:
+      - "ID"
+      - "RequirementID"
+      - "需求ID"
+    content:
+      - "需求描述"
+      - "需求中文"
+      - "Description"
+    code:
+      - "需求编号"
+      - "RequirementCode"
+    object_type:
+      - "对象类型"
+      - "Type"
+    is_derived:
+      - "是否衍生"
+      - "IsDerived"
+    rationale:
+      - "需求原理"
+      - "基本原理"
+      - "Rationale"
+    is_safety_related:
+      - "是否安全性相关"
+      - "安全相关"
+      - "SafetyRelated"
+    verification_method:
+      - "验证方法"
+      - "VerificationMethod"
+    implementation:
+      - "实现方法"
+      - "ImplementationMethod"
+    source:
+      - "需求来源"
+      - "Source"
+    covered_ids:
+      - "覆盖的需求ID"
+      - "CoveredIds"
+    notes:
+      - "注释"
+      - "Notes"
+    is_requirement:
+      - "是否为需求"
+    input_data:
+      - "输入数据"
+      - "InputData"
+    output_data:
+      - "输出数据"
+      - "OutputData"
+
+classifier_keywords:
+  analog:
+    - "ADC"
+    - "模拟量"
+    - "电压"
+    - "电流"
+    - "传感器"
+    - "采样"
+    - "量程"
+    - "[Vv]oltage"
+    - "[Cc]urrent"
+    - "[Ss]ensor"
+    - "A/D"
+    - "AD转换"
+    - "ADCIN"
+    - "温度"
+    - "压力"
+    - "油量"
+    - "密度"
+    - "燃油"
+  discrete:
+    - "微动"
+    - "开关"
+    - "[Tt]rue"
+    - "[Ff]alse"
+    - "故障"
+    - "跳变"
+    - "触点"
+    - "离散量"
+    - "开关量"
+    - "BOOL"
+    - "BOOLEAN"
+    - "DISCRETE"
+    - "状态位"
+    - "有效位"
+    - "告警"
+    - "传感器故障"
+    - "故障状态"
+  bus:
+    - "CAN"
+    - "A825"
+    - "A664"
+    - "A429"
+    - "AFDX"
+    - "总线"
+    - "ARINC"
+    - "通信"
+    - "接收"
+    - "发送"
+    - "写入"
+    - "采集"
+    - "解析"
+  direction_send:
+    - "发送"
+    - "写入"
+    - "输出"
+    - "上报"
+    - "发布"
+    - "驱动"
+    - "设置"
+    - "控制"
+  direction_receive:
+    - "接收"
+    - "采集"
+    - "解析"
+    - "获取"
+    - "读取"
+    - "监测"
+    - "判断"
+    - "检测"
+    - "输入"
+
+traceability:
+  table1:
+    filename_patterns:
+      - "*追溯*.xlsx"
+      - "*接口基线*.xlsx"
+    sheet_match:
+      by_name_keywords:
+        - "追溯"
+        - "接口基线"
+        - "接口基线表_EoICD"
+        - "待填_需求接口追溯表"
+      fallback_index: 0
+    columns:
+      erd: 3
+      icd_fullname: 7
+  table2:
+    filename_patterns:
+      - "*矩阵分析*.xlsx"
+      - "*需求矩阵*.xlsx"
+    sheet_match:
+      by_name_keywords:
+        - "Sheet1"
+        - "矩阵"
+      fallback_index: 0
+    columns:
+      erd: 0
+      hlr: 3
+      module: 4
+    skip_module: []
+    # FGMC Sheet1 has row 1 ('当前需求文档/下层需求文档') and row 2
+    # ('需求ID/模块名称/模块需求'); data starts at row 3.
+    # Note: data_start_row uses the same semantics as the internal
+    # `data_start` variable (1-indexed count of header rows), so
+    # data_start_row=2 produces min_row=3 which picks up the first
+    # actual data row. Using 1 would also pick up row 2 (the column
+    # header) and introduce a fake parent '需求ID'.
+    data_start_row: 2
+
+ai_labeling:
+  device_examples:
+    - "FRDC"
+    - "RDCP"
+    - "RDCU"
+    - "FGMC"
+    - "HF_FGMC"
+    - "燃油"
+    - "燃油测量管理计算机"
+  signal_examples:
+    - "温度"
+    - "油量"
+    - "密度"
+    - "流量"
+    - "压力"
+    - "FS_Pressure"
+    - "燃油温度"
+    - "油箱温度"

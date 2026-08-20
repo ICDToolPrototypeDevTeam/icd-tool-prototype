@@ -47,7 +47,30 @@ from app.v4.models import (
 )
 from app.v4.parsers.eoicd_excel_parser import EoICDExcelParser
 from app.v4.parsers.hlr_word_parser import HLRWordParser
+from app.v4.profiles.base import ControllerProfile, TraceabilityConfig
 from app.v4.traceability import build_trace_index, name_to_block_key
+
+
+def _resolve_profile(profile: ControllerProfile | None) -> ControllerProfile:
+    """Return the provided profile, or fall back to the registry's AMS default.
+
+    Centralizes registry lookup so that callers passing ``profile=None`` get
+    byte-identical behaviour to pre-#63 code (AMS defaults). Raises a clear
+    RuntimeError if neither is available.
+    """
+    if profile is not None:
+        return profile
+    from app.v4.profiles import init_registry, get_registry
+
+    reg_dir = Path(__file__).resolve().parent / "profiles"
+    try:
+        init_registry(reg_dir)
+        return get_registry().get_or_raise("ams")
+    except Exception as e:
+        raise RuntimeError(
+            "No profile provided and default AMS profile not found. "
+            "Pass profile=... explicitly or initialize the registry."
+        ) from e
 
 
 def _parse_eoicd(
@@ -86,10 +109,19 @@ def _parse_eoicd(
     return result
 
 
-def _parse_hlr(input_path: Path, output_path: Path) -> HLROutput:
-    """Parse the HLR Word document."""
+def _parse_hlr(
+    input_path: Path,
+    output_path: Path,
+    profile: ControllerProfile | None = None,
+) -> HLROutput:
+    """Parse the HLR Word document.
+
+    When ``profile`` is ``None`` the registry's AMS default is used (so that
+    pre-#63 callers get byte-identical output).
+    """
     print(f"Parsing HLR: {input_path}")
-    parser = HLRWordParser(input_path)
+    resolved = _resolve_profile(profile)
+    parser = HLRWordParser(input_path, profile=resolved)
     result: HLROutput = parser.parse()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,8 +144,16 @@ def run_forward_pipeline(
     top_k: int,
     limit: int,
     job: Job,
+    profile: ControllerProfile | None = None,
 ) -> PipelineResult:
-    """Run forward pipeline: parse → label → match → judge → report."""
+    """Run forward pipeline: parse → label → match → judge → report.
+
+    ``profile`` is accepted for API symmetry with ``run_reverse_pipeline``.
+    The forward pipeline currently has no profile-dependent call sites (it
+    does not use ``build_trace_index``), so the parameter is reserved for
+    future wiring without changing behaviour today. ``None`` keeps the
+    pre-#63 byte-identical behaviour.
+    """
     job.update(JobStatus.RUNNING, "Step 1/4: Parsing input files")
 
     # Step 1: Parse
@@ -126,7 +166,7 @@ def run_forward_pipeline(
             publisher, subscriber,
             output_dir / "eoicd_requirements.json",
         )
-    hlr_out = _parse_hlr(hlr, output_dir / "hlr_requirements.json")
+    hlr_out = _parse_hlr(hlr, output_dir / "hlr_requirements.json", profile=profile)
 
     if not eoicd_out or not hlr_out:
         raise RuntimeError("Need both EoICD and HLR data for analysis")
@@ -254,14 +294,19 @@ def _match_reverse_with_trace(
     hlr_labels: dict,
     eoicd_requirements: list,
     trace_dir: Path,
+    trace_cfg: TraceabilityConfig,
 ) -> ReverseMatchOutput:
     """Run reverse matching with traceability-based pre-filtering.
 
     Splits HLRs into:
       - Group A (has trace data): match against filtered EoICD subset
       - Group B (no trace data): fallback to full EoICD matching
+
+    ``trace_cfg`` is required (Task 7 made the second arg to
+    ``build_trace_index`` non-optional). Callers resolve it from a profile
+    (via ``_resolve_profile``) so AMS defaults keep working.
     """
-    trace_index = build_trace_index(trace_dir)
+    trace_index = build_trace_index(trace_dir, trace_cfg)
     print(f"  Traced HLRs: {trace_index.total_hlrs_traced}")
     print(f"  ERDs: {trace_index.total_erds}")
     print(f"  ICD FullNames: {trace_index.total_icd_fullnames}")
@@ -586,14 +631,25 @@ def run_reverse_pipeline(
     output_dir: Path,
     job: Job,
     trace_dir: Path | None = None,
+    profile: ControllerProfile | None = None,
 ) -> PipelineResult:
     """Run reverse pipeline: parse → label → match → judge → report.
 
     If trace_dir is provided, enables traceability-based pre-filtering
     to narrow the EoICD search space before reverse matching.
+
+    ``profile`` (Task 10, Issue #63) is threaded into every profile-aware
+    consumer: ``HLRWordParser``, ``label_hlrs``, ``enrich_all_labels``, and
+    ``build_trace_index``. ``None`` falls back to the registry's AMS default
+    so pre-#63 callers keep byte-identical output.
     """
     if not (eoicd_json or publisher or subscriber):
         raise ValueError("need eoicd (parsed JSON) or publisher/subscriber (Excel)")
+
+    # Resolve profile once (loads AMS from registry if profile=None). Done
+    # eagerly so any registry/load error surfaces before the long-running
+    # parse/label steps.
+    resolved_profile = _resolve_profile(profile)
 
     # Step 1: Parse
     print("=" * 50)
@@ -616,7 +672,11 @@ def run_reverse_pipeline(
         hlr_data = json.loads(hlr.read_text(encoding="utf-8"))
         hlr_out = HLROutput(**hlr_data)
     else:
-        hlr_out = _parse_hlr(hlr, output_dir / "hlr_requirements.json")
+        hlr_out = _parse_hlr(
+            hlr,
+            output_dir / "hlr_requirements.json",
+            profile=resolved_profile,
+        )
 
     # Step 1: EoICD itemization Excel
     eoicd_json_path = output_dir / "eoicd_requirements.json"
@@ -629,8 +689,16 @@ def run_reverse_pipeline(
     print("=" * 50)
     job.update(JobStatus.RUNNING, "Step 2/6: HLR AI labeling")
     labels_cache = output_dir / "hlr_labels.json"
-    hlr_labels = label_hlrs(hlr_out.requirements, cache_path=labels_cache)
-    hlr_labels = enrich_all_labels(hlr_out.requirements, hlr_labels)
+    hlr_labels = label_hlrs(
+        hlr_out.requirements,
+        cache_path=labels_cache,
+        profile=resolved_profile,
+    )
+    hlr_labels = enrich_all_labels(
+        hlr_out.requirements,
+        hlr_labels,
+        keywords=resolved_profile.classifier_keywords,
+    )
     print(f"  HLRs labeled: {len(hlr_labels)}")
 
     # Step 3: Reverse match
@@ -645,6 +713,7 @@ def run_reverse_pipeline(
             hlr_labels,
             eoicd_out.requirements,
             trace_dir,
+            resolved_profile.traceability,
         )
     else:
         print(f"Step 3/6: Reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")

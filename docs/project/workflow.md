@@ -154,6 +154,12 @@ Python 硬规则评分用于检查结果的基本完整性、结构一致性、�
 ```text
 用户上传 HLR Word + EoICD PubSub Excel (Publisher 或 Subscriber 至少一个) + 可选追溯 Excel
     ↓
+Step 0: Profile 加载
+    根据 controller_profile 字段从 backend/app/v4/profiles/{id}/config.yaml 加载
+    ControllerProfile（HLR 字段映射、分类关键词、追溯表配置、AI 标注示例）
+    默认 controller_profile = ams；白名单 {ams, fgmc}
+    模块: profiles/__init__.py（ProfileRegistry）+ profiles/base.py
+    ↓
 Step 1: 解析输入
     HLR Word + EoICD PubSub Excel → 结构化需求列表
     模块: parsers/{eoicd_excel_parser,hlr_word_parser}.py

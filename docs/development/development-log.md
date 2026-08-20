@@ -993,3 +993,59 @@ Import 链路验证通过。截断自适应重试效果待真实 LLM 端到端�
 
 1. 星级分布表布局改动单独提交
 2. 真实管线完整跑一轮，观察 0 存活场景在产出文档中的呈现
+
+## 2026-08-19 Issue #63：V4 反向管线多控制器 Profile 化
+
+### 任务目标
+
+FGMC（燃油测量管理计算机）作为第二个测试样例引入后，原有 V4 代码大量硬编码 AMS 控制器专属的输入结构（HLR 表行数与字段名、追溯表中文文件名、分类关键词、AI 标注示例），无法直接分析 FGMC。本次任务将这些硬编码抽取为 Controller Profile 配置，使新控制器可通过增加 profile 目录接入，且保持 AMS 默认行为 100% 向后兼容。
+
+### 完成内容
+
+1. 新增 `backend/app/v4/profiles/` 子包：`base.py` 定义 `ControllerProfile` + 4 个 Config dataclass（`HLRParserConfig` / `TraceabilityConfig` / `ClassifierKeywords` / `AILabelingConfig`），`__init__.py` 提供 `ProfileRegistry` 单例与 `init_registry` / `get_registry`。
+2. AMS profile 从现状代码 1:1 抽取为 `ams/config.yaml`（术语表 `tables[0]`、需求表 ≥8 行、追溯表精确中文文件名），保证向后兼容。
+3. 新增 FGMC profile `fgmc/config.yaml`（术语表 `tables[1]`、需求表 ≥12 行、"是否为需求"= "否" 行过滤、追溯表 glob 模式 `*追溯*.xlsx` / `*矩阵分析*.xlsx`、燃油域分类关键词与标注示例）。
+4. `HLRWordParser` / `trace_parser` / `hlr_classifier` / `hlr_labeler` 全部改为接受 profile 注入，不再读取模块级硬编码常量。
+5. `HLRRequirement` 模型扩展 6 个 optional 字段（`code` / `source` / `covered_ids` / `notes` / `input_data` / `output_data`），供 FGMC 需求表使用。
+6. pipeline / CLI / API 打通 `controller_profile` 字段：API `POST /api/v4/coverage-analysis` 新增 form 字段（默认 `ams`，白名单校验失败返回 422）；CLI 三个子命令新增 `--controller-profile`（`choices=["ams","fgmc"]`，默认 `ams`）。
+7. 新增 profile 单元测试目录 `backend/app/v4/tests/profiles/`（registry / models / HLR parser / classifier / labeler / trace / pipeline 共 24 个用例）。
+
+### 修改文件
+
+1. `backend/app/v4/parsers/hlr_word_parser.py`（profile 驱动的字段映射与表识别）
+2. `backend/app/v4/traceability/trace_parser.py`（追溯表文件名与 sheet / 列配置外置）
+3. `backend/app/v4/matching/hlr_classifier.py`（分类关键词由 profile 注入）
+4. `backend/app/v4/matching/hlr_labeler.py`（AI 标注示例由 profile 注入）
+5. `backend/app/v4/models.py`（`HLRRequirement` 扩展 6 个 optional 字段）
+6. `backend/app/v4/pipeline.py`（profile 解析与向下注入）
+7. `backend/app/v4/cli.py`（三个子命令新增 `--controller-profile`）
+8. `backend/app/api/v4/coverage.py`、`backend/app/api/v4/runner.py`（API `controller_profile` 字段与透传）
+9. `docs/architecture/api.md`、`docs/architecture/current-architecture.md`、`docs/project/scope.md`、`docs/project/workflow.md`、`CHANGELOG.md`
+
+### 新增文件
+
+1. `backend/app/v4/profiles/{__init__.py,base.py}`
+2. `backend/app/v4/profiles/ams/{__init__.py,config.yaml,hooks.py,README.md}`
+3. `backend/app/v4/profiles/fgmc/{__init__.py,config.yaml,hooks.py,README.md}`
+4. `backend/app/v4/tests/profiles/`（7 个测试模块）
+
+### 验证方式
+
+1. `cd backend && py -3.10 -m pytest app/v4/tests/profiles/ -v`
+2. HLR 解析 smoke（仅 parser，不调 LLM）：分别用 ams / fgmc profile 解析两份 HLR Word
+
+### 验证结果
+
+1. 单元测试 24 passed（Python 3.10.11 / pytest 9.1.1），无 failed / error
+2. 解析 smoke：AMS 16 条需求（与 Issue #62 输出一致）；FGMC 10 条需求，"是否为需求"= "否" 行已过滤
+3. 端到端真实 LLM 管线尚未验证
+
+### 遗留问题
+
+1. 端到端（含真实 LLM 的完整 6 步管线）在 FGMC 样例上尚未跑通验证，当前仅验证到解析与匹配前段
+2. 前端未暴露 `controller_profile` 选择入口，Web 端目前只能使用默认 AMS profile
+
+### 下一步建议
+
+1. 用 FGMC 样例跑一轮完整管线，检查匹配率与报告产出
+2. 前端 V4 上传页增加控制器选择控件，透传 `controller_profile`

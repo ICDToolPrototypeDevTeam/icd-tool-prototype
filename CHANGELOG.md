@@ -296,3 +296,23 @@
 - **共识明细表共识列标签映射**：新增 `no_consensus → 无有效裁判`、`single_source → 仅单一来源`。
 - **降级配置**：`DegradationConfig` 新增 `zero_provider_star_cap=1`、`zero_provider_agreement="no_consensus"` 默认值。
 
+## [Unreleased] - 2026-08-19：V4 反向管线多控制器 Profile 化（Issue #63）
+
+### Added
+
+- **Controller Profile 子包**：新增 `backend/app/v4/profiles/`，`base.py` 定义 `ControllerProfile` + 4 个 Config dataclass（`HLRParserConfig` / `TraceabilityConfig` / `ClassifierKeywords` / `AILabelingConfig`），`__init__.py` 提供 `ProfileRegistry` 单例。profile 配置以 `profiles/{id}/config.yaml` 声明，新控制器可通过新增目录接入，无需改动业务代码。
+- **AMS profile（默认）**：从现状代码 1:1 抽取，行为与 Issue A 完全一致，向后兼容。
+- **FGMC profile（燃油测量管理计算机）**：术语表位于 `tables[1]`、需求表 ≥12 行、支持"是否为需求"= "否" 行过滤、追溯表用 glob 模式（`*追溯*.xlsx` / `*矩阵分析*.xlsx`）、燃油域分类关键词与 AI 标注示例。
+- **API 新增 `controller_profile` 字段**：`POST /api/v4/coverage-analysis` 新增 form 字段，默认 `ams`，白名单 `{ams, fgmc}`，非法值在创建任务前返回 422。
+- **CLI 新增 `--controller-profile`**：`label` / `reverse` / `reverse-analyze` 三个子命令支持，`choices=["ams","fgmc"]`，默认 `ams`。
+- **Profile 单元测试**：新增 `backend/app/v4/tests/profiles/`，覆盖 registry / models / HLR parser / classifier / labeler / 追溯表 / pipeline 共 24 个用例。
+
+### Changed
+
+- `HLRWordParser` / `trace_parser` / `hlr_classifier` / `hlr_labeler` 改为 profile-driven，profile 由 pipeline 统一注入，不再依赖模块级硬编码常量；未传 profile 时退化为 AMS 默认行为。
+- `HLRRequirement` 模型扩展 6 个 optional 字段（`code` / `source` / `covered_ids` / `notes` / `input_data` / `output_data`），供 FGMC 需求表使用；AMS 侧保持为空不影响既有输出。
+
+### Fixed
+
+- V4 不再硬编码 AMS 专属的追溯表中文文件名、sheet 名、HLR 表行数阈值和字段名；接入新控制器不再需要修改 parser / matcher 源码。
+

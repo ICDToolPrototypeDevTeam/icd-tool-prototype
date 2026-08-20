@@ -23,15 +23,25 @@ router = APIRouter()
 
 # ADR-001 §2 校验白名单
 ALLOWED_JUDGE_PROVIDERS = {"deepseek", "minimax", "qwen"}
+# Issue #63 / Task 12: v4 controller profile whitelist (matches profiles/ subdirs)
+ALLOWED_CONTROLLER_PROFILES = {"ams", "fgmc"}
 
-# 文件名安全字符：仅保留中英数 + . _ -
-_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._\-一-龥]")
+# 文件名安全字符：保留中英数 + . _ - + 空格 + 各种括号（合法 FS 字符）
+_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._\-一-龥\s()（）\[\]【】]")
 MAX_FILE_BYTES = 50 * 1024 * 1024          # 50 MB 单文件
 MAX_REQUEST_BYTES = 200 * 1024 * 1024      # 200 MB 总
 
 
 def _safe_filename(name: str) -> str:
     base = Path(name).name
+    # Windows + curl 中文路径会在 multipart filename 字段做 GBK-as-latin1 mojibake。
+    # 反向修复:把 latin-1 unicode 字符还原为 GBK 字节再按 GBK 解出真中文。
+    # 仅在含非 ASCII 时尝试,失败则保持原值。
+    if any(ord(c) > 127 for c in base):
+        try:
+            base = base.encode("latin-1").decode("gbk")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
     base = base.replace(" ", "_")
     cleaned = _SAFE_NAME_RE.sub("_", base)
     if not cleaned:
@@ -60,6 +70,7 @@ async def coverage_analysis(
     use_mock_llm: bool = Form(False),
     judge_providers: list[str] = Form(default_factory=lambda: ["deepseek"]),
     enable_traceability_prefilter: bool = Form(False),
+    controller_profile: str = Form("ams"),
 ):
     # —— 字段校验 ——
     if not hlr_word_file.filename.lower().endswith(".docx"):
@@ -79,6 +90,13 @@ async def coverage_analysis(
                     status_code=422,
                     detail=f"judge_providers: unsupported provider '{p}'; allowed: deepseek, minimax, qwen",
                 )
+
+    # Issue #63 / Task 12: controller_profile whitelist (fail fast before job creation)
+    if controller_profile not in ALLOWED_CONTROLLER_PROFILES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"controller_profile: unsupported '{controller_profile}'; allowed: ams, fgmc",
+        )
 
     # —— 创建 V4 Kind Job 与目录（V4 路径：backend/output/v4/{job_id}/input/ + output/）——
     job = job_manager.create_job(kind="v4")
@@ -110,6 +128,7 @@ async def coverage_analysis(
         trace_dir=trace_dir,
         judge_providers=judge_providers,
         use_mock_llm=use_mock_llm,
+        controller_profile=controller_profile,
     )
 
     return V4AnalyzeResponse(

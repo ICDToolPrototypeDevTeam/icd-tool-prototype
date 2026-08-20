@@ -135,6 +135,19 @@ V4 工具**不**输出：
 
 V4 旧文件命名（`_smoke` / `_smoke2` 期间遗留）不构成事实标准；V4 文档事实源以本节为准。
 
+### 8.2.1 V4 Controller Profile（Issue #63）
+
+V4 通过 `controller_profile` 字段控制输入解析规则（默认 `ams`）：
+
+| profile id | 适用控制器 | 术语表位置 | HLR 需求表结构 | 追溯表文件名 |
+| --- | --- | --- | --- | --- |
+| `ams` | 空气管理系统控制器（默认） | `tables[0]` | ≥ 8 行 × ≥ 2 列 | `设备需求与系统ICD追溯表.xlsx` + `单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx`（精确名） |
+| `fgmc` | 燃油测量管理计算机 | `tables[1]` | ≥ 12 行 × ≥ 2 列（含"是否为需求"= "否" 过滤） | `*追溯*.xlsx` + `*矩阵分析*.xlsx`（glob 模式） |
+
+profile 配置位于 `backend/app/v4/profiles/{id}/config.yaml`，覆盖 HLR 字段映射、分类关键词（analog / discrete / bus 等）、追溯表配置和 AI 标注示例四类内容。
+
+不带 `controller_profile` 字段时行为与 Issue A 完全一致（AMS 默认），向后兼容。
+
 ### 8.3 V4 输入边界
 
 | 字段 | 扩展名 | 大小限制 | 必填 |

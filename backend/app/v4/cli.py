@@ -236,6 +236,13 @@ def _cmd_all(args: argparse.Namespace) -> None:
 
 def _cmd_label_hlr(args: argparse.Namespace) -> None:
     """label-hlr: AI pre-label HLR requirements and save to JSON."""
+    from pathlib import Path as _P
+    from app.v4.profiles import ProfileRegistry
+
+    reg = ProfileRegistry()
+    reg.load_all(_P(__file__).resolve().parent / "profiles")
+    profile = reg.get_or_raise(args.controller_profile)
+
     print("Loading HLR data...")
     hlr_data = json.loads(Path(args.hlr).read_text(encoding="utf-8"))
     hlr_out = HLROutput(**hlr_data)
@@ -244,6 +251,7 @@ def _cmd_label_hlr(args: argparse.Namespace) -> None:
     labels = label_hlrs(
         hlr_out.requirements,
         cache_path=None,  # force re-label when explicitly invoked
+        profile=profile,
     )
 
     output = HLRLabelOutput(
@@ -262,6 +270,13 @@ def _cmd_label_hlr(args: argparse.Namespace) -> None:
 
 def _cmd_reverse_match(args: argparse.Namespace) -> None:
     """reverse-match: HLR → EoICD reverse matching with 4-path classification."""
+    from pathlib import Path as _P
+    from app.v4.profiles import ProfileRegistry
+
+    reg = ProfileRegistry()
+    reg.load_all(_P(__file__).resolve().parent / "profiles")
+    profile = reg.get_or_raise(args.controller_profile)
+
     print("Loading parsed data...")
     hlr_data = json.loads(Path(args.hlr).read_text(encoding="utf-8"))
     eoicd_data = json.loads(Path(args.eoicd).read_text(encoding="utf-8"))
@@ -278,10 +293,14 @@ def _cmd_reverse_match(args: argparse.Namespace) -> None:
         hlr_labels = labels_out.labels
     else:
         print("  [label] No cache found, running AI labeling...")
-        hlr_labels = label_hlrs(hlr_out.requirements)
+        hlr_labels = label_hlrs(hlr_out.requirements, profile=profile)
 
     # Enrich with script-based classifier
-    hlr_labels = enrich_all_labels(hlr_out.requirements, hlr_labels)
+    hlr_labels = enrich_all_labels(
+        hlr_out.requirements,
+        hlr_labels,
+        keywords=profile.classifier_keywords,
+    )
 
     print(
         f"Reverse matching: {len(hlr_out.requirements)} HLR items "
@@ -397,6 +416,12 @@ def _cmd_reverse_analyze(args: argparse.Namespace) -> None:
     """reverse-analyze: full reverse pipeline — match → judge → report."""
     from app.v4.pipeline import run_reverse_pipeline
     from app.job_manager import job_manager
+    from pathlib import Path as _P
+    from app.v4.profiles import ProfileRegistry
+
+    reg = ProfileRegistry()
+    reg.load_all(_P(__file__).resolve().parent / "profiles")
+    profile = reg.get_or_raise(args.controller_profile)
 
     hlr_path = Path(args.hlr) if args.hlr else None
     eoicd_json = Path(args.eoicd) if args.eoicd else None
@@ -426,6 +451,7 @@ def _cmd_reverse_analyze(args: argparse.Namespace) -> None:
         output_dir=output_dir,
         job=job,
         trace_dir=trace_dir,
+        profile=profile,
     )
     if result.errors:
         for e in result.errors:
@@ -547,6 +573,12 @@ def main() -> None:
     )
     p_label.add_argument("--hlr", required=True)
     p_label.add_argument("--output", required=True)
+    p_label.add_argument(
+        "--controller-profile",
+        default="ams",
+        choices=["ams", "fgmc"],
+        help="Controller profile id (default: ams)",
+    )
 
     # reverse-match
     p_rev = sub.add_parser(
@@ -557,6 +589,12 @@ def main() -> None:
     p_rev.add_argument("--labels", default=None)
     p_rev.add_argument("--traceability-dir", default=None, help="Optional: directory with traceability Excel files for pre-filtering")
     p_rev.add_argument("--output", required=True)
+    p_rev.add_argument(
+        "--controller-profile",
+        default="ams",
+        choices=["ams", "fgmc"],
+        help="Controller profile id (default: ams)",
+    )
 
     # reverse-judge
     p_rj = sub.add_parser(
@@ -584,6 +622,12 @@ def main() -> None:
     p_ra.add_argument("--eoicd", default=None, help="Optional: skip parsing, use cached EoICD JSON")
     p_ra.add_argument("--traceability-dir", default=None, help="Optional: directory with traceability Excel files for pre-filtering")
     p_ra.add_argument("--output-dir", default="output")
+    p_ra.add_argument(
+        "--controller-profile",
+        default="ams",
+        choices=["ams", "fgmc"],
+        help="Controller profile id (default: ams)",
+    )
 
     # generate-word
     p_gw = sub.add_parser(

@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Traceability parser: reads two Excel traceability tables and builds
+"""Traceability parser: reads traceability Excel tables and builds
 an HLR -> ICD BlockKey index for reverse-matching pre-filtering.
 
-Trace chains:
-  Table 2 (设备->高层): ERD编号 -> HLR ID
-  Table 1 (ICD->设备):   ERD编号 -> ICD FullName
-  Combined:             HLR ID -> ICD FullName -> BlockKey
+Profile-driven: file patterns, sheet selection, and column positions are
+all controlled by TraceabilityConfig.
 """
 
 from __future__ import annotations
@@ -15,36 +13,22 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
-# -- Regex patterns (mirror signal_profiler.py logic) -----------------
-
-_LABEL_SEGMENT_RE = re.compile(r'^(L\d+)', re.IGNORECASE)
-_SIGNAL_FAMILY_PREFIX_RE = re.compile(r'^L\d+_(?:\d+_)?[A-Z]+\d+_')
-
-# BlockKey suffixes that represent A429 protocol overhead fields.
-# These are excluded from the traceability index because they will be
-# filtered out by entry_filter before matching anyway — keeping them
-# in the index inflates traced-block counts without providing usable
-# candidates.  See docs/development/traceability-prefilter-issue-analysis.md
-_PROTOCOL_BLOCKKEY_SUFFIXES = ('/SDI', '/LABEL', '/PARITY', '/SSM', '/OCTLBL')
+from app.v4.profiles.base import TraceabilityConfig, TraceabilityTableConfig
 
 
-# -- Data structures -------------------------------------------------
+_LABEL_SEGMENT_RE = re.compile(r"^(L\d+)", re.IGNORECASE)
+_SIGNAL_FAMILY_PREFIX_RE = re.compile(r"^L\d+_(?:\d+_)?[A-Z]+\d+_")
+_PROTOCOL_BLOCKKEY_SUFFIXES = ("/SDI", "/LABEL", "/PARITY", "/SSM", "/OCTLBL")
+
 
 @dataclass
 class TraceabilityIndex:
-    """Pre-computed index mapping HLR IDs to ICD BlockKeys.
-
-    Built from two Excel traceability tables:
-      - 设备->高层需求矩阵 (ERD -> HLR)
-      - 设备->ICD追溯表 (ERD -> ICD FullName)
-    """
+    """Pre-computed index mapping HLR IDs to ICD BlockKeys."""
 
     hlr_to_blocks: dict[str, set[str]] = field(default_factory=dict)
     hlr_to_erds: dict[str, list[str]] = field(default_factory=dict)
     erd_to_icd: dict[str, list[str]] = field(default_factory=dict)
 
-    # Statistics
     total_hlrs_traced: int = 0
     total_erds: int = 0
     total_icd_fullnames: int = 0
@@ -52,43 +36,25 @@ class TraceabilityIndex:
     icd_unmapped: list[str] = field(default_factory=list)
 
 
-# -- Core mapping function -------------------------------------------
-
 def name_to_block_key(name: str) -> str | None:
     """Convert an ICD FullName or signal_name to its ICDBlock.block_key.
 
-    Mirrors the logic in signal_profiler._extract_profile_key +
-    _extract_signal_family, but as a standalone function (zero imports
-    from matching to avoid coupling).
-
-    A429 example:
-      "HF_AMSC2.pi429_B2_275_2.L275_2_B2_OVHD_CPA_PACK_FLOW_RECIRC_TRIM_AIR_R_PACK_2"
-      -> "L275/OVHD_CPA_PACK_FLOW_RECIRC_TRIM_AIR_R_PACK_2"
-
-    Non-label example (CAN/A825):
-      "HF_AMSC2.pi825/SPEED_CMD"
-      -> "pi825/SPEED_CMD"
-
-    Returns None for empty or unparseable names.
+    Mirrors signal_profiler._extract_profile_key + _extract_signal_family.
     """
     if not name or not name.strip():
         return None
-
-    segments = [s.strip() for s in name.split('.') if s.strip()]
+    segments = [s.strip() for s in name.split(".") if s.strip()]
     if not segments:
         return None
-
     label = None
     for seg in segments:
         m = _LABEL_SEGMENT_RE.match(seg)
         if m:
             label = m.group(1)
             break
-
     leaf = segments[-1]
-
     if label:
-        label_value = label[1:]  # strip 'L'
+        label_value = label[1:]
         m2 = _SIGNAL_FAMILY_PREFIX_RE.match(leaf)
         if m2:
             family = leaf[m2.end():]
@@ -102,20 +68,24 @@ def name_to_block_key(name: str) -> str | None:
         return leaf
 
 
-# -- Table readers ---------------------------------------------------
+def _select_sheet(wb, cfg: TraceabilityTableConfig):
+    """Select sheet by name keyword match, then fallback to index."""
+    if cfg.sheet_match.by_name_keywords:
+        for kw in cfg.sheet_match.by_name_keywords:
+            for sname in wb.sheetnames:
+                if kw in sname:
+                    return wb[sname]
+    if cfg.sheet_match.fallback_index < len(wb.sheetnames):
+        return wb[wb.sheetnames[cfg.sheet_match.fallback_index]]
+    return wb[wb.sheetnames[0]]
 
-def _read_table2_erd_to_hlr(fpath: Path) -> dict[str, list[str]]:
-    """Read Table 2 (单模块需求矩阵分析) to build ERD -> HLR mapping.
 
-    Expected filename (typical): 单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx
-    Sheet: index 0 (Sheet1)
-      Col A (0): ERD编号 (fill-forward for merged cells)
-      Col D (3): 下级需求编号 (HLR ID or empty)
-      Col E (4): 下级模块名称 (skip when "EICD")
+def _read_table2_erd_to_hlr(
+    fpath: Path, cfg: TraceabilityTableConfig
+) -> dict[str, list[str]]:
+    """Read Table 2 (parent<->HLR matrix) to build parent -> HLR mapping.
 
-    Returns: {erd_id: [hlr_id, ...]}
-
-    fpath 由 build_trace_index 经文件名发现后传入；这里只读不挑文件。
+    Returns: {parent_id: [hlr_id, ...]}
     """
     import openpyxl
 
@@ -124,49 +94,51 @@ def _read_table2_erd_to_hlr(fpath: Path) -> dict[str, list[str]]:
         raise FileNotFoundError(f"Table 2 file not found: {fpath}")
 
     wb = openpyxl.load_workbook(fpath, data_only=True)
-    ws = wb[wb.sheetnames[0]]  # Sheet1
+    ws = _select_sheet(wb, cfg)
 
-    current_erd = ""
+    col_erd = cfg.columns["erd"]
+    col_hlr = cfg.columns["hlr"]
+    col_module = cfg.columns.get("module", -1)
 
-    for row_idx, row in enumerate(ws.iter_rows(min_row=4, max_row=ws.max_row, values_only=True), start=4):
-        erd_cell = str(row[0]).strip() if row[0] else ""
-        hlr_cell = str(row[3]).strip() if len(row) > 3 and row[3] else ""
-        module_name = str(row[4]).strip() if len(row) > 4 and row[4] else ""
+    # Header / data split is now controlled by cfg.data_start_row, so the
+    # iteration starts at (data_start_row + 1) -- row index is 1-based in openpyxl.
+    data_start = cfg.data_start_row
 
-        # Fill-forward: non-empty ERD updates current
-        if erd_cell and erd_cell != 'None':
-            current_erd = erd_cell
+    current_parent = ""
+    for row_idx, row in enumerate(
+        ws.iter_rows(min_row=data_start + 1, max_row=ws.max_row, values_only=True),
+        start=data_start + 1,
+    ):
+        parent_cell = str(row[col_erd]).strip() if len(row) > col_erd and row[col_erd] else ""
+        hlr_cell = str(row[col_hlr]).strip() if len(row) > col_hlr and row[col_hlr] else ""
+        module_name = ""
+        if col_module >= 0 and len(row) > col_module and row[col_module]:
+            module_name = str(row[col_module]).strip()
 
-        # Skip rows without a current ERD
-        if not current_erd:
+        # Fill-forward: non-empty parent updates current
+        if parent_cell and parent_cell != "None":
+            current_parent = parent_cell
+
+        if not current_parent:
             continue
 
-        # Skip rows whose module is EICD (direct ERD->ICD ref, not HLR)
-        if module_name.upper() == "EICD":
+        # Skip rows whose module matches skip_module list (case-insensitive)
+        if module_name and module_name.upper() in {m.upper() for m in cfg.skip_module}:
             continue
 
-        # Skip rows with no HLR ID
-        if not hlr_cell or hlr_cell == 'None':
+        if not hlr_cell or hlr_cell == "None":
             continue
 
-        erd_to_hlr[current_erd].append(hlr_cell)
+        erd_to_hlr[current_parent].append(hlr_cell)
 
     wb.close()
     return dict(erd_to_hlr)
 
 
-def _read_table1_erd_to_icd(fpath: Path) -> dict[str, list[str]]:
-    """Read Table 1 (设备需求与系统ICD追溯表) to build ERD -> ICD FullName mapping.
-
-    Expected filename (typical): 设备需求与系统ICD追溯表.xlsx
-    Sheet: index 1 (设备_设备接口追溯表)
-      Col D (3): ERD编号* (fill-forward for merged cells)
-      Col H (7): ICD FullName*
-
-    Returns: {erd_id: [icd_fullname, ...]}
-
-    fpath 由 build_trace_index 经文件名发现后传入；这里只读不挑文件。
-    """
+def _read_table1_erd_to_icd(
+    fpath: Path, cfg: TraceabilityTableConfig
+) -> dict[str, list[str]]:
+    """Read Table 1 (ERD<->ICD mapping) to build parent -> ICD FullName mapping."""
     import openpyxl
 
     erd_to_icd: dict[str, list[str]] = defaultdict(list)
@@ -174,21 +146,23 @@ def _read_table1_erd_to_icd(fpath: Path) -> dict[str, list[str]]:
         raise FileNotFoundError(f"Table 1 file not found: {fpath}")
 
     wb = openpyxl.load_workbook(fpath, data_only=True)
-    ws = wb[wb.sheetnames[1]]  # 设备_设备接口追溯表
+    ws = _select_sheet(wb, cfg)
+
+    col_erd = cfg.columns["erd"]
+    col_icd = cfg.columns["icd_fullname"]
 
     current_erd = ""
-
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True):
-        erd_cell = str(row[3]).strip() if len(row) > 3 and row[3] else ""
-        icd_fn = str(row[7]).strip() if len(row) > 7 and row[7] else ""
+        erd_cell = str(row[col_erd]).strip() if len(row) > col_erd and row[col_erd] else ""
+        icd_fn = str(row[col_icd]).strip() if len(row) > col_icd and row[col_icd] else ""
 
-        if erd_cell and erd_cell != 'None':
+        if erd_cell and erd_cell != "None":
             current_erd = erd_cell
 
         if not current_erd:
             continue
 
-        if not icd_fn or icd_fn == 'None':
+        if not icd_fn or icd_fn == "None":
             continue
 
         erd_to_icd[current_erd].append(icd_fn)
@@ -197,77 +171,46 @@ def _read_table1_erd_to_icd(fpath: Path) -> dict[str, list[str]]:
     return dict(erd_to_icd)
 
 
-# -- Index builder ---------------------------------------------------
+def _discover_trace_files(
+    trace_dir: Path, cfg: TraceabilityConfig
+) -> tuple[Path, Path]:
+    """Locate the two traceability Excel files via glob patterns."""
+    pool = sorted(p for p in trace_dir.glob("*.xlsx") if p.is_file())
 
-def _discover_trace_files(trace_dir: Path) -> tuple[Path, Path]:
-    """Locate the two traceability Excel files (Table 1 + Table 2).
+    def _find_one(patterns: tuple[str, ...]) -> Path | None:
+        for pat in patterns:
+            for p in pool:
+                if p.match(pat):
+                    return p
+        return None
 
-    Primary strategy: exact filename match for each.
-    Fallback: sorted *.xlsx glob in trace_dir, allocating in order
-    (Table 1 first, then Table 2). Ensures the two paths never collide.
+    t1 = _find_one(cfg.table1.filename_patterns)
+    t2 = _find_one(cfg.table2.filename_patterns)
 
-    Robust to:
-    - Filename mangling by MSYS bash / Windows console encoding.
-    - User renaming files.
-    - Single xlsx with both tables (same file used for both readers).
-    """
-    t1_primary = trace_dir / "设备需求与系统ICD追溯表.xlsx"
-    t2_primary = trace_dir / "单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx"
-    t1 = t1_primary if t1_primary.exists() else None
-    t2 = t2_primary if t2_primary.exists() else None
-
-    if t1 and t2:
-        return t1, t2
-
-    # Pool of .xlsx files in trace_dir, sorted for determinism.
-    pool = [p for p in sorted(trace_dir.glob("*.xlsx"))]
-
-    # Assign first available unmatched file to whichever slot is empty.
     if t1 is None:
-        for p in pool:
-            if p != t2_primary:
-                t1 = p
-                break
-    if t2 is None:
-        for p in pool:
-            if p != t1_primary and p != t1:
-                t2 = p
-                break
-
-    if t1 is None or not t1.exists():
         raise FileNotFoundError(
-            f"Cannot locate Table 1 (设备需求与系统ICD追溯表.xlsx or any .xlsx) in {trace_dir}"
+            f"Cannot locate Table 1 (patterns {cfg.table1.filename_patterns}) in {trace_dir}"
         )
-    if t2 is None or not t2.exists():
+    if t2 is None:
         raise FileNotFoundError(
-            f"Cannot locate Table 2 (单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx or any .xlsx) in {trace_dir}"
+            f"Cannot locate Table 2 (patterns {cfg.table2.filename_patterns}) in {trace_dir}"
         )
 
     return t1, t2
 
 
-def build_trace_index(trace_dir: Path) -> TraceabilityIndex:
-    """Build the complete HLR -> BlockKey traceability index.
+def build_trace_index(
+    trace_dir: Path, cfg: TraceabilityConfig
+) -> TraceabilityIndex:
+    """Build the complete HLR -> BlockKey traceability index."""
+    t1_path, t2_path = _discover_trace_files(trace_dir, cfg)
+    erd_to_hlr = _read_table2_erd_to_hlr(t2_path, cfg.table2)
+    erd_to_icd = _read_table1_erd_to_icd(t1_path, cfg.table1)
 
-    Args:
-        trace_dir: Directory containing the two traceability Excel files.
-
-    Returns:
-        TraceabilityIndex with hlr_to_blocks, statistics, and raw mappings.
-
-    Raises:
-        FileNotFoundError: if either expected Excel file is missing.
-    """
-    # Step 1: Locate the two files (primary exact + glob fallback), then read.
-    t1_path, t2_path = _discover_trace_files(trace_dir)
-    erd_to_hlr = _read_table2_erd_to_hlr(t2_path)
-    erd_to_icd = _read_table1_erd_to_icd(t1_path)
-
-    # Step 2: Combine -> HLR -> [ICD FullName, ...]
     index = TraceabilityIndex()
     index.hlr_to_erds = defaultdict(list)
     index.erd_to_icd = erd_to_icd
-    index.total_erds = len(erd_to_hlr)  # ERDs that link to HLRs
+    index.total_erds = len(erd_to_hlr)
 
     hlr_to_icd: dict[str, set[str]] = defaultdict(set)
     for erd, hlr_list in erd_to_hlr.items():
@@ -279,9 +222,6 @@ def build_trace_index(trace_dir: Path) -> TraceabilityIndex:
 
     index.total_hlrs_traced = len(hlr_to_icd)
 
-    # Step 3: Map ICD FullName -> block_key
-    # Protocol overhead blocks are excluded here because entry_filter
-    # removes them before matching anyway.
     all_icd_fullnames: set[str] = set()
     for icd_set in hlr_to_icd.values():
         all_icd_fullnames.update(icd_set)
@@ -298,15 +238,12 @@ def build_trace_index(trace_dir: Path) -> TraceabilityIndex:
             protocol_skipped += 1
             continue
         index.icd_mapped_to_blocks += 1
-        # Assign this block_key to ALL HLRs that reference this ICD FullName
         for hlr, icd_set in hlr_to_icd.items():
             if icd_fn in icd_set:
                 index.hlr_to_blocks[hlr].add(bk)
     if protocol_skipped:
         print(f"  Trace index: skipped {protocol_skipped} protocol-overhead block(s)")
 
-    # Convert defaultdict to plain dict
     index.hlr_to_blocks = dict(index.hlr_to_blocks)
     index.hlr_to_erds = dict(index.hlr_to_erds)
-
     return index
