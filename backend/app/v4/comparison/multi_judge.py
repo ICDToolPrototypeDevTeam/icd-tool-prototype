@@ -9,6 +9,7 @@ from app.v4.comparison.semantic_judge import (
     _build_reverse_user_prompt,
     _call_reverse_judge_api,
 )
+from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.v4.llm import get_llm
 from app.v4.models import ReverseCase
 
@@ -53,6 +54,40 @@ async def _judge_with_provider(
             "confidence": 0.0,
             "raw_response": "",
         }
+
+
+def _judge_with_provider_sync(
+    case: ReverseCase,
+    provider: str,
+    system_prompt: str,
+) -> dict:
+    """Synchronous twin of _judge_with_provider, used by the drain executor.
+
+    Mirrors the async variant's contract: never raises, returns an error
+    judgment dict on any failure.
+    """
+    llm = get_llm(provider)
+    user_prompt = _build_reverse_user_prompt(case)
+    try:
+        result = _call_reverse_judge_api(
+            llm=llm,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            case=case,
+        )
+        return {
+            "agent_name": provider,
+            "coverage_status": result.coverage_status,
+            "difference_type": result.difference_type,
+            "missing_points": result.missing_points,
+            "inconsistent_points": result.inconsistent_points,
+            "analysis": result.analysis,
+            "suggested_action": result.suggested_action,
+            "confidence": result.confidence,
+            "raw_response": "",
+        }
+    except Exception as e:
+        return make_error_judgment(provider, str(e), classify_exception(e) if e else "UNKNOWN")
 
 
 # Cached prompt load (module-level, read once per process)

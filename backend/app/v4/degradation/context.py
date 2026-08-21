@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 import time
+from concurrent.futures import Future
 
 from app.v4.degradation.config import DegradationConfig
 from app.v4.degradation.fallback import AllProvidersUnhealthyError, classify_exception
@@ -19,6 +20,10 @@ class DegradationContext:
         self._unhealthy_until: dict[str, float] = {}
         self._case_timeouts: int = 0
         self._review_star_capped: int = 0
+        self._drained_late: int = 0
+        # Timed-out judgments still running in the drain executor:
+        # (case_id, provider, future). Drained by the pipeline after Step 4.
+        self.drain: list[tuple[str, str, Future]] = []
 
     # ── health checks ──────────────────────────────────────
 
@@ -85,6 +90,10 @@ class DegradationContext:
         """Increment review star cap counter (stats only)."""
         self._review_star_capped += 1
 
+    def record_drained_late(self) -> None:
+        """Increment counter of late judgments that arrived valid during drain."""
+        self._drained_late += 1
+
     # ── summary ────────────────────────────────────────────
 
     def to_summary(self) -> dict:
@@ -97,6 +106,7 @@ class DegradationContext:
             },
             "total_case_timeouts": self._case_timeouts,
             "review_star_capped_count": self._review_star_capped,
+            "drained_late_count": self._drained_late,
         }
 
     # ── internal ───────────────────────────────────────────
