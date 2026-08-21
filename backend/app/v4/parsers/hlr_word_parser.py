@@ -54,7 +54,8 @@ class HLRWordParser:
         for table in self.doc.tables[1:]:  # 跳过术语表
             if len(table.rows) == req_rows and len(table.columns) == 2:
                 req = self._extract_requirement(table)
-                if req.requirement_id:
+                # 过滤掉 is_requirement=False 的非需求条目
+                if req is not None and req.requirement_id:
                     requirements.append(req)
 
         return HLROutput(
@@ -86,10 +87,12 @@ class HLRWordParser:
                 )
         return entries
 
-    def _extract_requirement(self, table) -> HLRRequirement:
+    def _extract_requirement(self, table) -> HLRRequirement | None:
         """根据配置动态提取需求字段
 
         需求表为2列结构(列0=字段名, 列1=值)
+
+        如果 is_requirement=False（非需求条目），返回 None 由调用方过滤
         """
         field_rows = self.system_config["field_rows"]
 
@@ -105,8 +108,15 @@ class HLRWordParser:
         else:
             is_requirement = is_req_cell == self.system_config.get("is_requirement_value")
 
-        # object_type: 用列0的值
-        object_type = _cell_text(table, field_rows["is_requirement"], 0)
+        # 如果不是需求条目，返回 None 由调用方过滤
+        if not is_requirement:
+            return None
+
+        # object_type: 优先使用 object_type_value 配置
+        if "object_type_value" in self.system_config:
+            object_type = self.system_config["object_type_value"]
+        else:
+            object_type = _cell_text(table, field_rows["content"], 0)
 
         # is_derived
         is_derived_cell = _cell_text(table, field_rows["is_derived"], 1)

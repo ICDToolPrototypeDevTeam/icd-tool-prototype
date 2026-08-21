@@ -557,6 +557,8 @@ HLR_SYSTEMS: dict[str, dict] = {
             "verification_method": 6,
             "implementation_method": 7,
         },
+        # object_type 固定为"需求"
+        "object_type_value": "需求",
         # is_requirement 特殊解析：列1值等于"需求"时为True
         "is_requirement_value": "需求",
     },
@@ -578,6 +580,8 @@ HLR_SYSTEMS: dict[str, dict] = {
             "verification_method": 9,
             "implementation_method": None,
         },
+        # object_type 固定为"需求"
+        "object_type_value": "需求",
         # is_requirement 特殊解析：列1为布尔值
         "is_requirement_is_boolean": True,
     },
