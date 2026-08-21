@@ -541,6 +541,15 @@ def load_synonyms() -> dict:
 HLR_SYSTEMS: dict[str, dict] = {
     "hvac": {
         "name": "环控系统",
+        # 自动检测配置
+        "auto_detect": {
+            "required_rows": 8,
+            "required_cols": 2,
+            "cell_patterns": {
+                0: {"contains": "需求ID"},
+                1: {"starts_with": "FSF21"},
+            },
+        },
         # 术语表配置
         "glossary_table_index": 0,
         "glossary_cols": 3,
@@ -564,6 +573,15 @@ HLR_SYSTEMS: dict[str, dict] = {
     },
     "fuel": {
         "name": "燃油系统",
+        # 自动检测配置
+        "auto_detect": {
+            "required_rows": 13,
+            "required_cols": 2,
+            "cell_patterns": {
+                0: {"contains": "ID"},
+                1: {"starts_with": "FGMC", "row": 1},
+            },
+        },
         # 术语表配置
         "glossary_table_index": 1,
         "glossary_cols": 3,
@@ -587,6 +605,15 @@ HLR_SYSTEMS: dict[str, dict] = {
     },
     "hscu": {
         "name": "液压系统",
+        # 自动检测配置
+        "auto_detect": {
+            "required_rows": 8,
+            "required_cols": 2,
+            "cell_patterns": {
+                0: {"contains": "需求ID"},
+                1: {"starts_with": "FSF29"},
+            },
+        },
         # HSCU无术语表
         "glossary_table_index": -1,
         "glossary_cols": 3,

@@ -23,48 +23,66 @@ from app.job_manager import job_manager
 router = APIRouter()
 
 
-def _detect_system_type(hlr_file: UploadFile) -> str:
-    """Auto-detect HLR file system type from table structure.
+def _detect_system_type(hlr_path: Path) -> str:
+    """Auto-detect HLR file system type using configuration-driven rules.
 
-    Detection logic:
-    1. Parse HLR file tables
-    2. Search for requirement table matching HVAC (8 rows, "需求ID") or Fuel (13 rows, "ID")
-    3. HVAC: 8 rows × 2 cols, first cell contains "需求ID"
-    4. Fuel: 13 rows × 2 cols, first cell contains "ID"
-
-    Returns: "hvac" | "fuel"
+    Reads auto_detect config from HLR_SYSTEMS and matches table patterns.
+    Returns: system_type key from HLR_SYSTEMS
     Raises: ValueError if detection fails
     """
-    import tempfile
+    from app.v4.config import HLR_SYSTEMS
 
-    content = hlr_file.file.read()
-    with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
-        tmp.write(content)
-        tmp_path = Path(tmp.name)
+    def _match_pattern(text: str, pattern: dict) -> bool:
+        """Check if text matches the pattern rules."""
+        if "contains" in pattern and pattern["contains"] not in text:
+            return False
+        if "starts_with" in pattern and not text.startswith(pattern["starts_with"]):
+            return False
+        return True
 
-    try:
-        doc = Document(str(tmp_path))
-        if len(doc.tables) < 2:
-            raise ValueError("HLR 文件表格数量不足，无法识别系统类型")
+    doc = Document(str(hlr_path))
+    if len(doc.tables) < 2:
+        raise ValueError("HLR 文件表格数量不足，无法识别系统类型")
+
+    # Try each system's config
+    for system_type, config in HLR_SYSTEMS.items():
+        detect_cfg = config.get("auto_detect")
+        if not detect_cfg:
+            continue
+
+        required_rows = detect_cfg.get("required_rows")
+        required_cols = detect_cfg.get("required_cols")
+        cell_patterns = detect_cfg.get("cell_patterns", {})
 
         for table in doc.tables:
             rows, cols = len(table.rows), len(table.columns)
-            if rows == 8 and cols == 2:
-                cell0 = table.cell(0, 0).text.strip()
-                if "需求ID" in cell0:
-                    return "hvac"
 
-            if rows == 13 and cols == 2:
-                cell0 = table.cell(0, 0).text.strip()
-                if "ID" in cell0:
-                    return "fuel"
+            # Check dimensions
+            if required_rows and rows != required_rows:
+                continue
+            if required_cols and cols != required_cols:
+                continue
 
-        raise ValueError(
-            f"无法识别 HLR 文件所属系统类型，请手动选择系统类型上传。"
-        )
-    finally:
-        tmp_path.unlink(missing_ok=True)
-        hlr_file.file.seek(0)
+            # Check cell patterns
+            matched = True
+            for cell_pos, pattern in cell_patterns.items():
+                # Support per-pattern row override
+                row_idx = pattern.get("row", 0)
+                col_idx = int(cell_pos)
+                if row_idx >= rows or col_idx >= cols:
+                    matched = False
+                    break
+                cell_text = table.cell(row_idx, col_idx).text.strip()
+                if not _match_pattern(cell_text, pattern):
+                    matched = False
+                    break
+
+            if matched:
+                return system_type
+
+    raise ValueError(
+        f"无法识别 HLR 文件所属系统类型，请手动选择系统类型上传。"
+    )
 
 
 def _validate_hlr_format(hlr_path: Path, system_type: str) -> None:
@@ -180,7 +198,7 @@ async def coverage_analysis(
 
     # —— 确定系统类型 ——
     if system_type is None:
-        detected_type = _detect_system_type(hlr_word_file)
+        detected_type = _detect_system_type(hlr_path)
         system_type = detected_type
         print(f"自动识别系统类型: {system_type}")
     else:
