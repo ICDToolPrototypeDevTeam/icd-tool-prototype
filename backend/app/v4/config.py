@@ -657,6 +657,23 @@ TRACEABILITY_SYSTEMS: dict[str, dict] = {
         "trace_table2_module_col": 1,
         "trace_table2_module_skip": None,  # Fuel无EICD跳过逻辑
     },
+    "hscu": {
+        "name": "液压系统",
+        # Table 1: 附件1：需求与ICD追溯表 - HSCU-EOICDREVA-1.0.xlsx
+        "trace_table1_filename": "附件1：需求与ICD追溯表 - HSCU-EOICDREVA-1.0.xlsx",
+        "trace_table1_sheet_index": 1,
+        "trace_table1_start_row": 2,
+        "trace_table1_erd_col": 3,
+        "trace_table1_icd_col": 7,
+        # Table 2: 液压-单模块需求矩阵分析-设备2软件.xlsx
+        "trace_table2_filename": "液压-单模块需求矩阵分析-设备2软件.xlsx",
+        "trace_table2_sheet_index": 0,
+        "trace_table2_start_row": 3,
+        "trace_table2_erd_col": 0,
+        "trace_table2_hlr_col": 3,
+        "trace_table2_module_col": 4,
+        "trace_table2_module_skip": None,
+    },
 }
 
 

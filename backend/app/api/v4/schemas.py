@@ -19,6 +19,7 @@ from app.models import JobStatus
 class SystemType(str, Enum):
     HVAC = "hvac"
     FUEL = "fuel"
+    HYDRAULIC = "hscu"
 
 
 # ============================================================================

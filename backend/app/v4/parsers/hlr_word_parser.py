@@ -41,11 +41,14 @@ class HLRWordParser:
 
     def parse(self) -> HLROutput:
         """Main entry point."""
-        # 使用配置解析术语表
-        glossary = self._parse_glossary(
-            table_index=self.system_config["glossary_table_index"],
-            cols=self.system_config["glossary_cols"],
-        )
+        # 使用配置解析术语表（-1表示无术语表）
+        glossary_table_index = self.system_config.get("glossary_table_index")
+        glossary = []
+        if glossary_table_index is not None and glossary_table_index >= 0:
+            glossary = self._parse_glossary(
+                table_index=glossary_table_index,
+                cols=self.system_config["glossary_cols"],
+            )
 
         # 解析需求表
         requirements: list[HLRRequirement] = []
