@@ -104,14 +104,10 @@ def name_to_block_key(name: str) -> str | None:
 
 # -- Table readers ---------------------------------------------------
 
-def _read_table2_erd_to_hlr(fpath: Path) -> dict[str, list[str]]:
+def _read_table2_erd_to_hlr(fpath: Path, config: dict) -> dict[str, list[str]]:
     """Read Table 2 (单模块需求矩阵分析) to build ERD -> HLR mapping.
 
-    Expected filename (typical): 单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx
-    Sheet: index 0 (Sheet1)
-      Col A (0): ERD编号 (fill-forward for merged cells)
-      Col D (3): 下级需求编号 (HLR ID or empty)
-      Col E (4): 下级模块名称 (skip when "EICD")
+    Uses config for column indices and module skip logic.
 
     Returns: {erd_id: [hlr_id, ...]}
 
@@ -124,14 +120,21 @@ def _read_table2_erd_to_hlr(fpath: Path) -> dict[str, list[str]]:
         raise FileNotFoundError(f"Table 2 file not found: {fpath}")
 
     wb = openpyxl.load_workbook(fpath, data_only=True)
-    ws = wb[wb.sheetnames[0]]  # Sheet1
+    sheet_index = config.get("trace_table2_sheet_index", 0)
+    ws = wb[wb.sheetnames[sheet_index]]
+
+    start_row = config.get("trace_table2_start_row", 4)
+    erd_col = config.get("trace_table2_erd_col", 0)
+    hlr_col = config.get("trace_table2_hlr_col", 3)
+    module_col = config.get("trace_table2_module_col", 4)
+    module_skip = config.get("trace_table2_module_skip")
 
     current_erd = ""
 
-    for row_idx, row in enumerate(ws.iter_rows(min_row=4, max_row=ws.max_row, values_only=True), start=4):
-        erd_cell = str(row[0]).strip() if row[0] else ""
-        hlr_cell = str(row[3]).strip() if len(row) > 3 and row[3] else ""
-        module_name = str(row[4]).strip() if len(row) > 4 and row[4] else ""
+    for row in ws.iter_rows(min_row=start_row, max_row=ws.max_row, values_only=True):
+        erd_cell = str(row[erd_col]).strip() if len(row) > erd_col and row[erd_col] else ""
+        hlr_cell = str(row[hlr_col]).strip() if len(row) > hlr_col and row[hlr_col] else ""
+        module_name = str(row[module_col]).strip() if len(row) > module_col and row[module_col] else ""
 
         # Fill-forward: non-empty ERD updates current
         if erd_cell and erd_cell != 'None':
@@ -142,7 +145,7 @@ def _read_table2_erd_to_hlr(fpath: Path) -> dict[str, list[str]]:
             continue
 
         # Skip rows whose module is EICD (direct ERD->ICD ref, not HLR)
-        if module_name.upper() == "EICD":
+        if module_skip and module_name.upper() == module_skip.upper():
             continue
 
         # Skip rows with no HLR ID
@@ -155,13 +158,10 @@ def _read_table2_erd_to_hlr(fpath: Path) -> dict[str, list[str]]:
     return dict(erd_to_hlr)
 
 
-def _read_table1_erd_to_icd(fpath: Path) -> dict[str, list[str]]:
+def _read_table1_erd_to_icd(fpath: Path, config: dict) -> dict[str, list[str]]:
     """Read Table 1 (设备需求与系统ICD追溯表) to build ERD -> ICD FullName mapping.
 
-    Expected filename (typical): 设备需求与系统ICD追溯表.xlsx
-    Sheet: index 1 (设备_设备接口追溯表)
-      Col D (3): ERD编号* (fill-forward for merged cells)
-      Col H (7): ICD FullName*
+    Uses config for sheet index and column indices.
 
     Returns: {erd_id: [icd_fullname, ...]}
 
@@ -174,13 +174,18 @@ def _read_table1_erd_to_icd(fpath: Path) -> dict[str, list[str]]:
         raise FileNotFoundError(f"Table 1 file not found: {fpath}")
 
     wb = openpyxl.load_workbook(fpath, data_only=True)
-    ws = wb[wb.sheetnames[1]]  # 设备_设备接口追溯表
+    sheet_index = config.get("trace_table1_sheet_index", 1)
+    ws = wb[wb.sheetnames[sheet_index]]
+
+    start_row = config.get("trace_table1_start_row", 2)
+    erd_col = config.get("trace_table1_erd_col", 3)
+    icd_col = config.get("trace_table1_icd_col", 7)
 
     current_erd = ""
 
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True):
-        erd_cell = str(row[3]).strip() if len(row) > 3 and row[3] else ""
-        icd_fn = str(row[7]).strip() if len(row) > 7 and row[7] else ""
+    for row in ws.iter_rows(min_row=start_row, max_row=ws.max_row, values_only=True):
+        erd_cell = str(row[erd_col]).strip() if len(row) > erd_col and row[erd_col] else ""
+        icd_fn = str(row[icd_col]).strip() if len(row) > icd_col and row[icd_col] else ""
 
         if erd_cell and erd_cell != 'None':
             current_erd = erd_cell
@@ -199,10 +204,10 @@ def _read_table1_erd_to_icd(fpath: Path) -> dict[str, list[str]]:
 
 # -- Index builder ---------------------------------------------------
 
-def _discover_trace_files(trace_dir: Path) -> tuple[Path, Path]:
+def _discover_trace_files(trace_dir: Path, config: dict) -> tuple[Path, Path]:
     """Locate the two traceability Excel files (Table 1 + Table 2).
 
-    Primary strategy: exact filename match for each.
+    Primary strategy: exact filename match for each using config.
     Fallback: sorted *.xlsx glob in trace_dir, allocating in order
     (Table 1 first, then Table 2). Ensures the two paths never collide.
 
@@ -211,8 +216,8 @@ def _discover_trace_files(trace_dir: Path) -> tuple[Path, Path]:
     - User renaming files.
     - Single xlsx with both tables (same file used for both readers).
     """
-    t1_primary = trace_dir / "设备需求与系统ICD追溯表.xlsx"
-    t2_primary = trace_dir / "单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx"
+    t1_primary = trace_dir / config["trace_table1_filename"]
+    t2_primary = trace_dir / config["trace_table2_filename"]
     t1 = t1_primary if t1_primary.exists() else None
     t2 = t2_primary if t2_primary.exists() else None
 
@@ -236,21 +241,23 @@ def _discover_trace_files(trace_dir: Path) -> tuple[Path, Path]:
 
     if t1 is None or not t1.exists():
         raise FileNotFoundError(
-            f"Cannot locate Table 1 (设备需求与系统ICD追溯表.xlsx or any .xlsx) in {trace_dir}"
+            f"Cannot locate Table 1 ({config['trace_table1_filename']} or any .xlsx) in {trace_dir}"
         )
     if t2 is None or not t2.exists():
         raise FileNotFoundError(
-            f"Cannot locate Table 2 (单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx or any .xlsx) in {trace_dir}"
+            f"Cannot locate Table 2 ({config['trace_table2_filename']} or any .xlsx) in {trace_dir}"
         )
 
     return t1, t2
 
 
-def build_trace_index(trace_dir: Path) -> TraceabilityIndex:
+def build_trace_index(trace_dir: Path, system_config: dict | None = None) -> TraceabilityIndex:
     """Build the complete HLR -> BlockKey traceability index.
 
     Args:
         trace_dir: Directory containing the two traceability Excel files.
+        system_config: System-specific traceability config. If None, uses HVAC defaults
+            for backward compatibility.
 
     Returns:
         TraceabilityIndex with hlr_to_blocks, statistics, and raw mappings.
@@ -258,10 +265,17 @@ def build_trace_index(trace_dir: Path) -> TraceabilityIndex:
     Raises:
         FileNotFoundError: if either expected Excel file is missing.
     """
+    # Use HVAC defaults if no config provided (backward compatibility)
+    if system_config is None:
+        system_config = {
+            "trace_table1_filename": "设备需求与系统ICD追溯表.xlsx",
+            "trace_table2_filename": "单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx",
+        }
+
     # Step 1: Locate the two files (primary exact + glob fallback), then read.
-    t1_path, t2_path = _discover_trace_files(trace_dir)
-    erd_to_hlr = _read_table2_erd_to_hlr(t2_path)
-    erd_to_icd = _read_table1_erd_to_icd(t1_path)
+    t1_path, t2_path = _discover_trace_files(trace_dir, system_config)
+    erd_to_hlr = _read_table2_erd_to_hlr(t2_path, system_config)
+    erd_to_icd = _read_table1_erd_to_icd(t1_path, system_config)
 
     # Step 2: Combine -> HLR -> [ICD FullName, ...]
     index = TraceabilityIndex()

@@ -254,6 +254,7 @@ def _match_reverse_with_trace(
     hlr_labels: dict,
     eoicd_requirements: list,
     trace_dir: Path,
+    trace_config: dict | None = None,
 ) -> ReverseMatchOutput:
     """Run reverse matching with traceability-based pre-filtering.
 
@@ -261,7 +262,7 @@ def _match_reverse_with_trace(
       - Group A (has trace data): match against filtered EoICD subset
       - Group B (no trace data): fallback to full EoICD matching
     """
-    trace_index = build_trace_index(trace_dir)
+    trace_index = build_trace_index(trace_dir, trace_config)
     print(f"  Traced HLRs: {trace_index.total_hlrs_traced}")
     print(f"  ERDs: {trace_index.total_erds}")
     print(f"  ICD FullNames: {trace_index.total_icd_fullnames}")
@@ -649,11 +650,14 @@ def run_reverse_pipeline(
         print(f"Step 3/6: Traceability-filtered reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")
         print("=" * 50)
         job.update(JobStatus.RUNNING, "Step 3/6: Traceability-filtered reverse matching")
+        from app.v4.config import get_traceability_config
+        trace_config = get_traceability_config(system_type)
         match_result = _match_reverse_with_trace(
             hlr_out.requirements,
             hlr_labels,
             eoicd_out.requirements,
             trace_dir,
+            trace_config,
         )
     else:
         print(f"Step 3/6: Reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")

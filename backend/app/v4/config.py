@@ -585,6 +585,29 @@ HLR_SYSTEMS: dict[str, dict] = {
         # is_requirement 特殊解析：列1为布尔值
         "is_requirement_is_boolean": True,
     },
+    "hscu": {
+        "name": "液压系统",
+        # HSCU无术语表
+        "glossary_table_index": -1,
+        "glossary_cols": 3,
+        # 需求表配置
+        "requirement_rows": 8,
+        # 字段行索引（从0开始，值在列1）
+        "field_rows": {
+            "requirement_id": 0,
+            "content": 1,
+            "is_requirement": 2,
+            "is_derived": 3,
+            "rationale": 4,
+            "is_safety_related": 5,
+            "verification_method": 6,
+            "implementation_method": 7,
+        },
+        # object_type 固定为"需求"
+        "object_type_value": "需求",
+        # is_requirement 特殊解析：列1值等于"需求"时为True
+        "is_requirement_value": "需求",
+    },
 }
 
 
@@ -593,4 +616,53 @@ def get_hlr_system_config(system_type: str) -> dict:
     if system_type not in HLR_SYSTEMS:
         raise ValueError(f"Unsupported system type: {system_type}")
     return HLR_SYSTEMS[system_type]
+
+
+# ============================================================================
+# 追溯表系统类型配置
+# ============================================================================
+
+TRACEABILITY_SYSTEMS: dict[str, dict] = {
+    "hvac": {
+        "name": "环控系统",
+        # Table 1: 设备需求与系统ICD追溯表
+        "trace_table1_filename": "设备需求与系统ICD追溯表.xlsx",
+        "trace_table1_sheet_index": 1,
+        "trace_table1_start_row": 2,
+        "trace_table1_erd_col": 3,
+        "trace_table1_icd_col": 7,
+        # Table 2: 单模块需求矩阵分析
+        "trace_table2_filename": "单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx",
+        "trace_table2_sheet_index": 0,
+        "trace_table2_start_row": 4,
+        "trace_table2_erd_col": 0,
+        "trace_table2_hlr_col": 3,
+        "trace_table2_module_col": 4,
+        "trace_table2_module_skip": "EICD",
+    },
+    "fuel": {
+        "name": "燃油系统",
+        # Table 1: 需求与ICD追溯表_FGMC_裁剪.xlsx
+        "trace_table1_filename": "需求与ICD追溯表_FGMC_裁剪.xlsx",
+        "trace_table1_sheet_index": 3,
+        "trace_table1_start_row": 2,
+        "trace_table1_erd_col": 3,  # ERD编号在D列
+        "trace_table1_icd_col": 7,
+        # Table 2: 单模块需求矩阵分析 (设备2软件).xlsx
+        "trace_table2_filename": "单模块需求矩阵分析 (设备2软件).xlsx",
+        "trace_table2_sheet_index": 0,
+        "trace_table2_start_row": 3,
+        "trace_table2_erd_col": 0,
+        "trace_table2_hlr_col": 3,
+        "trace_table2_module_col": 1,
+        "trace_table2_module_skip": None,  # Fuel无EICD跳过逻辑
+    },
+}
+
+
+def get_traceability_config(system_type: str) -> dict:
+    """获取指定系统类型的追溯表配置"""
+    if system_type not in TRACEABILITY_SYSTEMS:
+        raise ValueError(f"Unsupported system type: {system_type}")
+    return TRACEABILITY_SYSTEMS[system_type]
 
