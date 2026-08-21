@@ -184,7 +184,7 @@ async def coverage_analysis(
         system_type = detected_type
         print(f"自动识别系统类型: {system_type}")
     else:
-        if system_type not in ("hvac", "fuel"):
+        if system_type not in ("hvac", "fuel", "hscu"):
             raise HTTPException(status_code=422, detail=f"Unsupported system_type: {system_type}")
 
     # —— 验证 HLR 文件格式 ——

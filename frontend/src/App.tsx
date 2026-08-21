@@ -238,6 +238,7 @@ export default function App() {
                 <option value="">自动识别</option>
                 <option value="hvac">环控系统</option>
                 <option value="fuel">燃油系统</option>
+                <option value="hscu">液压系统</option>
               </select>
               <span style={{ fontSize: 12, color: '#888' }}>（默认自动识别，可手动选择）</span>
             </div>
