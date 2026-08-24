@@ -157,3 +157,27 @@ ai_labeling:
     - "泵状态"
     - "FS_Pressure"
     - "HYD_Pressure"
+
+# HLR pre-processing — rewrites symbolic LBL_<name> references in HLR
+# requirements.content to their octal-encoded EoICD form L<octal>_<name>.
+#
+# Background: HSCU HLR Word text uses symbolic LBL names (e.g. LBL_DIS_00_SYS1),
+# but the EoICD blocks encode them with octal label numbers
+# (e.g. L145_DIS_00_SYS1_T1A). Without rewriting, the reverse matcher's
+# Stage1 label-prefix filter (LBL_DIS_00_SYS1/) never matches the EoICD blocks
+# (which are keyed by L145_DIS_00_SYS1/), so the entire HSCU requirement set
+# falls through to 0 matches.
+#
+# The hook appends "(alias: L<octal>_<name>)" annotations to requirement
+# content so the AI labeler sees BOTH forms and emits labels in the octal form
+# that the matcher recognizes. Original text is preserved for traceability.
+hlr_preprocess:
+  enabled: true
+  auto_parse_hlr_table_0: true    # auto-detect LBL catalog table in HLR Word; covers 12 labels (DIS_00_SYS1, DIS_03_INFO, QTY_SYS2, QTY_SYS3, PRESS_SYS1-3, TEMP_SYS1-3, PWR_CMD_HSCU, CONFIG_RPT)
+  apply_to_fields:
+    - "content"
+  # extra_mappings act as fallback / override on top of auto-parsed ones.
+  # The auto-parsed table covers the 4 known-to-HSCU labels plus 8 additional
+  # ones; explicit mappings here are kept for safety / forward-compatibility.
+  extra_mappings:
+    LBL_DIS_00_SYS1: "145"

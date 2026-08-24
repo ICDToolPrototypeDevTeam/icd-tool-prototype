@@ -2,6 +2,33 @@
 
 本文档记录 ICD工具原型Ver2.0 的版本级变化。
 
+## [Unreleased] - 2026-08-24
+
+### Changed
+
+- **HSCU HLR 预处理 hook 适配新文档结构**：`profiles/hscu/hooks.py` 表格解析从固定位置改为自动识别。`_identify_label_tables()` 按启发式（≥ 3 列 + ≥ 2 行 + 至少一行同时含 LBL cell 和 ≥ 2 位数字 octal cell）扫描所有 table，识别 HSCU 新文档中同时存在的 Table[0]（RDCU1 入站 11 行 × 8 列，含 `_R1` 后缀）和 Table[8]（HSCU 出站 12 行 × 4 列，无 `_R1`）两张 LBL 总览表，全部合并入 mapping。`_extract_row_mapping()` 改为行内扫描，定位 LBL cell 和 octal cell 时不再假设固定列偏移。
+- **Hook 扩展支持 RDCU1 catalog col 5 多行信号名称**：8 列 RDCU1 catalog 的 col 5（信号名称列）每个 cell 多行，每行是一个独立 signal name 由同 octal 承载（如 `LBL_ABV1_RPDU_R1 → 51` 承载 `ABV1_CB_CLOSED_RPDU_R1`、`ABV1_LOAD_VOLT_AVAIL_RPDU_R1` 等 12 个信号）。新增 `_extract_signal_names()` 把这些裸 signal 名作为额外 mapping key，让 HSCU HLR 中以裸名形式引用 RDCU1 signal 的需求（023194、022645）也能命中 EoICD 块。
+- **Hook 输出 octal 左填充 3 位**：ARINC-429 八进制是 3 位（000-377），EoICD block key 始终为 3 位形式。HSCU catalog 常省略前导 0（如 `74`、`51`），hook 生成 alias 时统一 `zfill(3)` 避免 Stage1 prefix filter (`L<label>/` vs `L<3位>`) 失配。同时 `_looks_like_octal_cell()` 把长度下限从 3 位降到 2 位以接受省略前导 0 的 octal，但仍拒绝单数字以避免与 SDI（`0/1/2/3`）混淆。
+- **`pipeline._parse_hlr()` 临时暴露完整 source_file 给 hook**：`HLRWordParser.parse()` 把 `result.source_file` 存为 basename，hook 用 `Path(source_file).exists()` 在 backend cwd 下找不到文件导致 auto_parse 静默失败。`_parse_hlr()` 在调用 hook 前临时把 `result.source_file` 切到完整 `input_path`，hook 调用结束后恢复 basename — JSON 输出和 AMS/FGMC 行为一致仍保留 basename。
+
+### Verified
+
+- HSCU E2E（job `a54aab93`，真实 LLM）：`hlr_已匹配=4, hlr_待确定=2, hlr_无匹配=4`，6/10 HLR 拿到 EoICD block key。新文档中 023194（ABV1_LOAD_VOLT_AVAIL_RPDU_R1）从「无匹配」升级到「待确定」。
+- AMS（job `082b4a48`）+ FGMC（job `ed36e75c`）回归：`hlr_requirements.json` 中 0 个 alias annotation（auto_parse 默认 False 不被触发），匹配数不变。
+
+## [Unreleased] - 2026-08-21
+
+### Added
+
+- **Profile HLR 预处理 Hook 机制**：`ControllerProfile` 新增 `HLRPreprocessConfig` 配置段（`enabled` + `extra_mappings` + `auto_parse_hlr_table_0` + `apply_to_fields`）。`profiles/__init__.py` 新增 `apply_hlr_preprocess_hook()` 通用调用入口，通过 `importlib` 动态加载各 profile 的 `preprocess_hlr_requirements()` 函数。`pipeline._parse_hlr()` 在 HLR Word 解析后、写 JSON 前调用 hook，让改写后的内容对下游 AI 标注、分类、匹配可见。
+- **HSCU LBL→L<octal> 别名追加 hook（`profiles/hscu/hooks.py`）**：HSCU HLR 文本使用符号化标签名（`LBL_DIS_00_SYS1`），而 EoICD PubSub 块以八进制编码（`L145_DIS_00_SYS1_T1A`）。Hook 通过 YAML `extra_mappings` 配置映射，按 per-token 范围追加 `（亦称：L<octal>_<NAME>）` 别名，让 AI 标注器在两种形式间识别，从而让反向匹配 Stage1 的 prefix filter 能命中 EoICD 块。规则：仅对实际出现且已映射的 LBL token 追加、自动剥离 `_SSM` 后缀、占位值跳过、幂等。
+- **HSCU 当前映射 1 个（`LBL_DIS_00_SYS1` → `145`）**：job `39f938f5`（真实 LLM）HSCU E2E：matched_count `0 → 1`，unmatched `10 → 9`。补全 4 个映射后预期 ~6/10 matched。
+
+### Changed
+
+- 不修改 `reverse_matcher.py` / `hlr_classifier.py` / `hlr_labeler.py` / `trace_parser.py`。
+- AMS / FGMC profile 不受影响：`hlr_preprocess.enabled` 默认为 `False`。
+
 ## [Unreleased] - 2026-08-12
 
 ### Changed

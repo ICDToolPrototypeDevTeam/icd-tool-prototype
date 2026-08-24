@@ -48,6 +48,7 @@ from app.v4.models import (
 from app.v4.parsers.eoicd_excel_parser import EoICDExcelParser
 from app.v4.parsers.hlr_word_parser import HLRWordParser
 from app.v4.profiles.base import ControllerProfile, TraceabilityConfig
+from app.v4.profiles import apply_hlr_preprocess_hook
 from app.v4.traceability import build_trace_index, name_to_block_key
 
 
@@ -124,6 +125,22 @@ def _parse_hlr(
     parser = HLRWordParser(input_path, profile=resolved)
     result: HLROutput = parser.parse()
 
+    # Profile-specific HLR content rewrite (e.g. HSCU LBL_X → L<octal>_X
+    # alias annotations). No-op for profiles that don't declare
+    # hlr_preprocess.enabled. Mutates ``result.requirements[i].content``
+    # in-place so the persisted JSON reflects the rewritten text.
+    #
+    # HSCU's hook needs to re-open the source Word to auto-parse the LBL
+    # catalog table; ``HLRWordParser`` only stored the basename in
+    # ``result.source_file``, which fails ``Path(...).exists()`` in the
+    # backend cwd. Temporarily expose the full input path for the hook
+    # call, then restore the basename so the persisted JSON keeps the
+    # same display value (avoids changing AMS/FGMC behaviour).
+    _saved_source_file = result.source_file
+    result.source_file = str(input_path)
+    rewritten = apply_hlr_preprocess_hook(resolved, result)
+    result.source_file = _saved_source_file
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         result.model_dump_json(indent=2, ensure_ascii=False),
@@ -133,6 +150,8 @@ def _parse_hlr(
     print(f"  Output: {output_path}")
     print(f"  Requirements: {result.total_count}")
     print(f"  Glossary entries: {len(result.glossary)}")
+    if rewritten:
+        print(f"  HLR preprocess: {rewritten} requirement(s) rewritten by profile hook")
     return result
 
 

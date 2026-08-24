@@ -64,6 +64,41 @@ class AILabelingConfig:
 
 
 @dataclass(frozen=True)
+class HLRPreprocessConfig:
+    """Optional HLR pre-processing configuration for profile-specific transformations.
+
+    Used by `apply_hlr_preprocess_hook()` in profiles/__init__.py. The pipeline
+    invokes the hook after HLR Word parsing and before AI labeling, so any
+    rewriting of `hlr.content` flows downstream into classifier/labeler/matcher.
+
+    Attributes:
+        enabled: Whether this profile declares an HLR preprocess step.
+        extra_mappings: dict mapping symbolic HLR terms (e.g. ``LBL_DIS_00_SYS1``)
+            to their canonical EoICD-encoded form (e.g. ``L145_DIS_00_SYS1``).
+            The hook substitutes occurrences in ``hlr.content`` (append_aliases
+            strategy: original text + appended aliased form, so AI labeler still
+            sees both forms).
+        auto_parse_hlr_table_0: If True, parse HLR Word table[0] as an LABEL
+            catalog (cols: name | octal | ...), using ``table0_name_column``
+            and ``table0_octal_column`` as field positions. Combined with
+            ``extra_mappings`` (Table 0 entries act as the base, extra_mappings
+            extend/override).
+        table0_name_column: 0-based column index for symbolic label name.
+        table0_octal_column: 0-based column index for octal label number.
+        apply_to_fields: which HLR fields to rewrite; default ``("content",)``.
+            Other fields (``signal_keywords``, ``labels``) are filled in by the
+            AI labeler / classifier after the hook runs.
+    """
+
+    enabled: bool = False
+    extra_mappings: tuple[tuple[str, str], ...] = ()
+    auto_parse_hlr_table_0: bool = False
+    table0_name_column: int = 1
+    table0_octal_column: int = 2
+    apply_to_fields: tuple[str, ...] = ("content",)
+
+
+@dataclass(frozen=True)
 class ControllerProfile:
     profile_id: str
     display_name: str
@@ -72,6 +107,9 @@ class ControllerProfile:
     classifier_keywords: ClassifierKeywords
     traceability: TraceabilityConfig
     ai_labeling: AILabelingConfig
+    hlr_preprocess: HLRPreprocessConfig = field(
+        default_factory=HLRPreprocessConfig
+    )
 
 
 def _to_tuple(value: Any) -> tuple:
@@ -142,6 +180,25 @@ def _parse_ai_labeling(data: dict[str, Any]) -> AILabelingConfig:
     )
 
 
+def _parse_hlr_preprocess(data: dict[str, Any] | None) -> HLRPreprocessConfig:
+    if not data:
+        return HLRPreprocessConfig()
+    extra_raw = data.get("extra_mappings", {}) or {}
+    if not isinstance(extra_raw, dict):
+        raise ProfileLoadError(
+            f"hlr_preprocess.extra_mappings must be a dict, got {type(extra_raw).__name__}"
+        )
+    extra_mappings = tuple((str(k), str(v)) for k, v in extra_raw.items())
+    return HLRPreprocessConfig(
+        enabled=bool(data.get("enabled", True)),
+        extra_mappings=extra_mappings,
+        auto_parse_hlr_table_0=bool(data.get("auto_parse_hlr_table_0", False)),
+        table0_name_column=int(data.get("table0_name_column", 1)),
+        table0_octal_column=int(data.get("table0_octal_column", 2)),
+        apply_to_fields=_to_tuple(data.get("apply_to_fields", ["content"])),
+    )
+
+
 def load_profile_from_yaml(yaml_path: Path) -> ControllerProfile:
     """Parse a single profile config.yaml into a ControllerProfile.
 
@@ -167,4 +224,5 @@ def load_profile_from_yaml(yaml_path: Path) -> ControllerProfile:
         classifier_keywords=_parse_classifier_keywords(data.get("classifier_keywords", {})),
         traceability=_parse_traceability(data.get("traceability", {})),
         ai_labeling=_parse_ai_labeling(data.get("ai_labeling", {})),
+        hlr_preprocess=_parse_hlr_preprocess(data.get("hlr_preprocess")),
     )

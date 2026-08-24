@@ -51,6 +51,50 @@
 
 ## 3. 开发记录
 
+### 2026-08-24 Issue #63 续：HSCU HLR 预处理 hook 适配新文档结构
+
+#### 任务目标
+
+HSCU HLR Word 新版本 `HSCU软件高层需求-裁剪.docx` 含两张 LBL 总览表（Table[0] RDCU1 入站 8 列 + Table[8] HSCU 出站 4 列），且 source-select 需求以裸 signal name 形式引用 RDCU1 信号。原 hook 假设固定 Table[0] + 固定列偏移 + 只匹配 `LBL_` 前缀 token，新文档下只有 4/10 matched（022587/023389/023507/023124）。需扩展 hook 让它自动识别两张 catalog + 处理裸 signal name + 修复 pipeline 给 hook 暴露 source_file 的方式。
+
+#### 完成内容
+
+1. **Hook 表格识别改为自动**：`_identify_label_tables()` 按启发式扫描所有 table（≥ 3 列 + ≥ 2 行 + 至少一行同时含 LBL cell 和 ≥ 2 位 octal cell），合并 Table[0] + Table[8]。`_extract_row_mapping()` 改为行内扫描，不再假设固定列偏移。`_R_SUFFIX_RE` 兼容旧 RDCU1 `_R1` 后缀形式。
+2. **Hook 扩展支持 RDCU1 catalog col 5 多行信号名称**：8 列 catalog col 5 多行 cell 包含该 octal 承载的所有 signal name。新增 `_extract_signal_names()` 把每个符合 `^[A-Z][A-Z0-9_]{4,}$` 的 token 加为 mapping key，让 HSCU HLR 中以裸名形式引用 RDCU1 signal 的需求也能命中。新增 `_BARE_SIGNAL_TOKEN` regex 在 `preprocess_hlr_requirements()` 中识别裸 token。
+3. **Octal 长度下限 3 → 2 位**：HSCU catalog 常省略前导 0（`74`、`51`）。放宽 `_looks_like_octal_cell()` 的下限接受 2 位 octal，但仍拒绝单数字（避免与 SDI `0/1/2/3` 混淆）。
+4. **Octal alias 左填充 3 位**：ARINC-429 八进制 3 位（000-377），EoICD block key 始终为 3 位。Hook 生成 alias 时 `zfill(3)` 避免 Stage1 prefix filter (`L<label>/` vs `L<3位>`) 失配。
+5. **`pipeline._parse_hlr()` 临时切换 source_file**：hook 期间把 `result.source_file` 临时切到完整 `input_path`，hook 调用结束后恢复 basename。保证 hook 能用绝对路径 re-open Word，但 JSON 输出和 AMS/FGMC 行为一致仍保留 basename。
+
+#### 修改文件
+
+1. `backend/app/v4/profiles/hscu/hooks.py` — 表格解析改自动、加 signal name 提取、加 3 位 octal 填充
+2. `backend/app/v4/profiles/hscu/config.yaml` — `auto_parse_hlr_table_0: false → true`
+3. `backend/app/v4/pipeline.py` — `_parse_hlr()` 在 hook 期间临时切换 source_file
+4. `backend/app/v4/profiles/hscu/README.md` — 更新 HSCU HLR 文档结构描述、hook 工作机制、实测匹配结果
+5. `CHANGELOG.md` — 新增 [Unreleased] - 2026-08-24 段
+
+#### 验证方式
+
+1. Inline test：直接调用 `_extract_label_mappings()` 解析新 HSCU Word → 56 个 mapping entries（含 12 个 `ABV1_*` signal names）
+2. Inline pipeline test：`_parse_hlr(src_docx, out, profile=hscu)` → 6/10 requirements 被 rewrite
+3. Docker 重建 backend + HSCU E2E（job `a54aab93`，真实 LLM）：`hlr_已匹配=4, hlr_待确定=2, hlr_无匹配=4`
+4. AMS（job `082b4a48`）+ FGMC（job `ed36e75c`）回归：0 个 alias annotation，匹配数不变
+
+#### 验证结果
+
+- HSCU E2E：6/10 matched/pending（023194 ABV1_LOAD_VOLT_AVAIL_RPDU_R1 从「无匹配」升级为「待确定」）
+- AMS / FGMC 回归：行为完全保持（auto_parse 默认 False 不被触发）
+
+#### 遗留问题
+
+1. 022995 / 022996（`LBL_CMD1_OHMS`）仍无匹配：该标签不在两张 catalog 中。需用户提供 R1 → CMD1_OHMS 映射（`extra_mappings` 兜底）或 HSCU HLR 文档补充 catalog
+2. 025797 / 025798 占位 `LBL_XXX`：HSCU HLR 文档未填写，无 hook 修复路径
+
+#### 下一步建议
+
+1. 等待需求方确认 `LBL_CMD1_OHMS` 是否需要 R1 通道映射
+2. 等待 HSCU HLR 文档补全 `LBL_XXX` 占位的实际标签名
+
 ### 2026-06-10 Issue #1：建立工程目录骨架
 
 #### 任务目标
@@ -1124,3 +1168,75 @@ FGMC（燃油测量管理计算机）作为第二个测试样例引入后，原�
 1. 收集 / 提供 HSCU EoICD 真实 PubSub Excel 样例（含 `HYD_xxx` / `LBL_xxx` 等液压域信号），重新跑 HSCU E2E 验证匹配率
 2. 前端 V4 上传页增加控制器选择控件，透传 `controller_profile`（仍是 Issue #63 既有遗留）
 3. HSCU 真实 LLM 模式端到端验证
+
+---
+
+## 2026-08-21：HSCU LBL→L<octal> 别名追加 Hook（Profile HLR 预处理）
+
+### 任务目标
+
+修复 HSCU 0/10 反向匹配根因：HLR 文本使用符号化标签名（`LBL_DIS_00_SYS1`），但 EoICD PubSub 块以八进制编码（`L145_DIS_00_SYS1_T1A`），反向匹配 Stage1 prefix filter 永远 0 命中。在不改 `reverse_matcher.py` / `hlr_classifier.py` / `hlr_labeler.py` / `trace_parser.py` 的前提下，通过 profile 声明的预处理 hook 改写 HLR 内容追加八进制别名，让 AI 标注器识别 octal 形式。
+
+### 完成内容
+
+1. **`ControllerProfile` 扩展 `HLRPreprocessConfig`**：`base.py` 新增 dataclass，含 `enabled` / `extra_mappings` (tuple[tuple[str, str]]) / `auto_parse_hlr_table_0` / `table0_name_column` / `table0_octal_column` / `apply_to_fields`。`_parse_hlr_preprocess()` 解析 YAML `hlr_preprocess` 段，`load_profile_from_yaml()` 集成。
+2. **`apply_hlr_preprocess_hook()` 通用入口**：`profiles/__init__.py` 新增函数，按 `importlib.import_module("app.v4.profiles.<profile_id>.hooks")` 动态加载 profile 专属 hooks，调用 `preprocess_hlr_requirements(profile, hlr_out)`，返回改写条数（int）。enabled=False 或 module 缺失时返回 0。
+3. **HSCU hook**：`profiles/hscu/hooks.py` 实现 `preprocess_hlr_requirements()`，按 per-token 范围追加别名：
+   - 仅对配置文件中**实际配置了映射**的 LBL token 才追加（避免越界误标）
+   - 自动剥离 `_SSM` 后缀（HSCU HLR 文本写 `LBL_DIS_00_SYS1_SSM` 而映射 key 为 `LBL_DIS_00_SYS1`）
+   - 占位值（`???` / `?`）跳过
+   - 幂等（重复执行不重复追加）
+4. **HSCU config.yaml**：新增 `hlr_preprocess` 段，配置 `LBL_DIS_00_SYS1: "145"`（已验证）；其余 4 个 LBL（DIS_03_INFO / QTY_SYS2 / CMD1_OHMS / CMD1_OHMS_Status）保留为注释占位，待用户提供八进制号后启用。
+5. **`pipeline._parse_hlr()` 集成**：HLRWordParser.parse() 完成后、写 JSON 前调用 `apply_hlr_preprocess_hook()`，让改写后的 HLR 内容流入下游 AI 标注 / 分类 / 匹配。
+
+### 修改文件
+
+1. `backend/app/v4/profiles/base.py`（新增 `HLRPreprocessConfig` + `_parse_hlr_preprocess` + `ControllerProfile` 新字段）
+2. `backend/app/v4/profiles/__init__.py`（新增 `apply_hlr_preprocess_hook()`）
+3. `backend/app/v4/profiles/hscu/config.yaml`（新增 `hlr_preprocess` 段）
+4. `backend/app/v4/profiles/hscu/hooks.py`（从空 docstring 升级为 `preprocess_hlr_requirements()` 实现）
+5. `backend/app/v4/pipeline.py`（`_parse_hlr` 调用 hook 并按返回值输出进度行）
+6. `backend/app/v4/profiles/hscu/README.md`（新增"HLR 预处理 Hook（HSCU 专用）"章节）
+7. `CHANGELOG.md`（新增 Unreleased 2026-08-21 条目）
+8. `docs/development/development-log.md`（本条）
+
+### 不修改范围
+
+- `reverse_matcher.py` / `hlr_classifier.py` / `hlr_labeler.py` / `trace_parser.py` 不动
+- AMS / FGMC profile 不受影响（`hlr_preprocess.enabled` 默认 False，hook 为 no-op）
+
+### 验证方式
+
+1. 内联 Python 验证 hook 行为（仓库无 pytest 基础设施）：26/26 通过，覆盖 per-token 范围 / `_SSM` 剥离 / 占位跳过 / 幂等 / 多映射
+2. `python -c "from app.v4.profiles import init_registry; ..."` 验证 YAML 加载
+3. Docker 重建：`docker compose build backend`（--no-cache）+ `docker compose up -d backend`
+4. 容器内 `python -c "..."` 验证 HSCU config 加载
+5. HSCU 真实 LLM E2E：`POST /api/v4/coverage-analysis controller_profile=hscu` + 5 HSCU 文件
+6. AMS 回归：job `75425aa0`（真实 LLM）
+7. FGMC 回归：job `59664e42`（真实 LLM）
+
+### 验证结果
+
+| 阶段 | hlr_count | matched | pending | unmatched | status_distribution |
+|---|---|---|---|---|---|
+| HSCU hook 前（job `f1eff041`） | 10 | 0 | 0 | 10 | 无匹配×10 |
+| HSCU hook 后（job `39f938f5`，仅 1 映射）| 10 | **1** | 0 | 9 | 已覆盖×1, 无匹配×9 |
+| HSCU hook 满 4 映射（预期） | 10 | ~6 | – | ~4 | – |
+| AMS 回归（job `75425aa0`）| 16 | 9 | 5 | 2 | 已覆盖×10, 待判定×2, 待确认×2, 无匹配×2 |
+| FGMC 回归（job `59664e42`）| 7 | 3 | 1 | 3 | 已覆盖×2, 待确认×2, 无匹配×3 |
+
+1. HSCU 真实 LLM E2E：matched_count 从 0 升至 1（仅 1 个映射生效），unmatched 10→9。无 0 存活降级分支 / 解析异常 / 输出缺失。5 类输出齐全。
+2. AMS / FGMC 真实 LLM E2E：与 hook 接入前行为一致，无退化。
+3. 容器内单步验证：`preprocess_hlr_requirements` 对真实 HLR 022587 内容（`LBL_DIS_00_SYS1_SSM`）正确追加 `L145_DIS_00_SYS1` 别名。
+
+### 遗留问题
+
+1. HSCU HLR 中 4 个未配置的 LBL（`LBL_DIS_03_INFO` / `LBL_QTY_SYS2` / `LBL_CMD1_OHMS` / `LBL_CMD1_OHMS_Status`）对应的 EoICD 八进制号未填写，config.yaml 中保留为注释占位，待用户提供。
+2. HSCU HLR 025797 / 025798 使用占位符 `LBL_XXX`（文档模板问题），匹配永远为 0，需 HSCU HLR 文档修订才能解决。
+3. HSCU HLR 023194 / 022645 不涉及 A429 标签（`ABV1_LOAD_VOLT` / `AIR_SPEED_FCM1_R1`），非本机制可解决。
+
+### 下一步建议
+
+1. 用户提供 4 个 LBL 八进制映射 → 填入 HSCU `config.yaml` 的 `extra_mappings`，预期 matched 1 → 6。
+2. HSCU HLR 文档维护方修订 `LBL_XXX` 占位符，改为具体标签名。
+3. 评估是否将 `auto_parse_hlr_table_0` 实际启用（自动从 HLR Word Table 0 抽取 LBL→octal 映射，减少手工配置工作量）。
