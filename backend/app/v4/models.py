@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -241,12 +241,18 @@ class MultiJudgeOutput(BaseModel):
 
 
 class ConsensusResult(BaseModel):
-    """共识复核结果（Phase 2-3，Review Agent 输出）。"""
+    """共识复核结果（Phase 2-3，Review Agent 输出）。
+
+    5 星体系（ADR-004）：
+    - star_rating ∈ {1, 2, 3, 4, 5}；evidence_alignment 字段由 review LLM 自评 evidence 强度，
+      与 agreement_level 联合映射到 5 档星评。
+    """
 
     case_id: str
     model_results: dict[str, dict] = Field(default_factory=dict)
     agreement_level: str = ""     # "full" | "majority" | "split" | "single_source" | "no_consensus" (降级覆写)
-    star_rating: int = 0          # 1-3
+    star_rating: int = 0          # 1-5（ADR-004；老 1-3 体系）
+    evidence_alignment: str = ""  # "strong" | "moderate" | "weak" | ""（ADR-004）
     final_coverage_status: str = ""
     final_analysis: str = ""
     confidence: float = 0.0

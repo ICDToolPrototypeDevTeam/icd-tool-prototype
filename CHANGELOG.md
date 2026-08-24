@@ -26,6 +26,25 @@
 
 - **FGMC Table 1 sheet 选择冲突**：`需求与ICD追溯表_FGMC_裁剪.xlsx` 含 9 张 sheet，其中 `接口基线表_EoICD_old_待删除`（旧表，标记删除）和 `待填_需求接口追溯表`（当前使用）并存。原 `by_name_keywords` 列表把模糊关键词 `接口基线` 放在 `待填_需求接口追溯表` 之前，导致 `_select_sheet` 选到了已废弃 sheet，Table 1 只产出 2 个 ERD。修复：把 `待填_需求接口追溯表` 移至关键词列表首位，并删除过宽的 `接口基线` 模糊关键词。
 
+## [Unreleased] - 2026-08-23
+
+### Added
+
+- **5 星评价体系（ADR-004）**：V4 反向管线 Step 5 Review Agent 升级为 5 档星评（5★/4★/3★/2★/1★），新增 `evidence_alignment` 字段（strong/moderate/weak）由 review LLM 自评 evidence 强度，后端按 `(agreement_level, evidence_alignment)` 二维映射到 5 档星评，避免 LLM 直接选星的批次漂移。映射规则：full+strong→5★、full+moderate/weak→4★、majority+strong/moderate→3★、majority+weak→2★、split/single_source/no_consensus→1★。新增 e2e 用例5（`backend/tests/e2e/test_use_case_5_five_star_rating.py`）。
+
+### Changed
+
+- **Step 5.5 一星复查触发条件扩展**：`_resolve_low_confidence_case_ids` 触发条件从 `star_rating == 1` 扩展到 `star_rating ∈ {1, 2}`，peer-aware 复查给 2★（多数一致但 evidence 弱）一个升到 3★ 的机会。
+- **共识报告星级分布表**：从「3 主行 + 3 子行」扩展为「4 主行（5★/4★/3★/2★）+ 3 子行（1★ 三降级子类型）」，`_star_str` 渲染 0-5 共 6 档（含无匹配 0 颗）。
+- **`final_coverage_status` 阈值**：5★/4★/3★（star ≥ 3）取多数一致的 coverage_status；2★/1★ 强制「待确认」，防止 majority+weak 的低 evidence 共识被当成业务结论采纳。
+
+### Breaking Change
+
+- **`ConsensusResult.star_rating`**：类型注解从 `1-3` 扩展到 `1-5`（数据契约变化）。
+- **`star_distribution` summary 字段**：键从 `{1, 2, 3}` 扩展为 `{1, 2, 3, 4, 5}`，前端读取要兼容。
+- **`ConsensusResult.evidence_alignment`**：新增字段（默认 ""），老 mock 数据缺失可视为 ""；review LLM 不再输出 `star_rating`，仅输出 `agreement_level` + `evidence_alignment`，由后端按映射规则算星。
+- 老 `consensus_results.json` 不存在跨版本兼容，老数据需重新跑管线。
+
 ## [Unreleased] - 2026-08-20
 
 ### Removed
