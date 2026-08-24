@@ -2,7 +2,7 @@
 
 ICD工具原型Ver4.0是一个面向EoICD源文件和软件高层需求（HLR）文件的智能化差异分析与需求生成工具。
 
-当前工具运行版本为 **V4.0**：从软件高层需求（HLR）出发，验证每条 HLR 需求是否能在 EoICD 接口定义中找到对应项（即 HLR 到 EoICD 的可追溯性），从而表明HLR是否覆盖了对应的EoICD条目，通过 DeepSeek / MiniMax / Qwen 三模型并行裁判 + Review Agent 共识复核，输出条目化清单和一致性分析报告。项目同时保留了 V3.0 代码，作为版本补充（详见 [§9 V3.0（旧版保留）](#9-v3.0旧版保留)）。
+当前工具运行版本为 **V4.0**：从软件高层需求（HLR）出发，验证每条 HLR 需求是否能在 EoICD 接口定义中找到对应项（即 HLR 到 EoICD 的可追溯性），从而表明HLR是否覆盖了对应的EoICD条目，通过 DeepSeek / MiniMax / Qwen 三模型并行裁判 + Review Agent 共识复核，输出条目化清单和一致性分析报告。早期 V3.0 代码已移除（见 [ADR-002](docs/decisions/ADR-002-移除V3.md)）。
 
 ## 1. 主要功能
 
@@ -102,8 +102,7 @@ docker compose up -d --build
 | 地址 | 说明 |
 |------|------|
 | `http://localhost:3000` | 前端界面 |
-| `http://localhost:8000/api/health` | 后端健康检查 |
-| `http://localhost:8000/api/v4/health` | V4 健康检查 |
+| `http://localhost:8000/api/v4/health` | 后端健康检查 |
 
 ### 4.5 使用演示
 
@@ -160,16 +159,7 @@ icd-tool-prototype/
 │   └── package.json
 ├── backend/                      # 后端工程
 │   ├── app/
-│   │   ├── api/v3/               # V3 API 路由（旧版保留）
 │   │   ├── api/v4/               # V4 API 路由（router / schemas / runner / coverage / jobs / outputs）
-│   │   ├── crew/                 # V3 CrewAI 多智能体编排（旧版保留）
-│   │   ├── merge/                # V3 跨 chunk 合并（旧版保留）
-│   │   ├── scoring/              # V3 Python 硬规则评分（旧版保留）
-│   │   ├── docx/                 # V3 Word 文档生成（旧版保留）
-│   │   ├── parsers/              # V3 输入文件解析（旧版保留）
-│   │   ├── llm/                  # V3 LLM 工厂 + Mock（旧版保留）
-│   │   ├── prompts/              # V3 Prompt 文本资产（旧版保留）
-│   │   ├── skills/               # V3 Skill 文本资产（旧版保留）
 │   │   ├── v4/                   # V4 业务模块
 │   │   │   ├── comparison/       #   多模型裁判 + Review Agent 共识 + 一星复查 + 报告生成
 │   │   │   ├── degradation/      #   多智能体降级保护（超时、熔断、星级降级）
@@ -179,11 +169,9 @@ icd-tool-prototype/
 │   │   │   ├── parsers/          #   EoICD PubSub Excel + HLR Word 解析
 │   │   │   ├── traceability/     #   追溯表预筛选
 │   │   │   └── prompts/          #   V4 Prompt 文本资产
-│   │   ├── job_manager.py        # 共享任务状态管理（V3/V4 共用，kind 字段区分）
-│   │   ├── models.py             # V3 Pydantic 数据模型（旧版保留）
-│   │   ├── pipeline.py           # V3 主流程编排（旧版保留）
+│   │   ├── job_manager.py        # 内存任务状态管理（JobStatus / Job / JobManager）
 │   │   └── main.py               # FastAPI 入口（thin shell，仅 CORS + 路由装载）
-│   ├── output/                   # 运行时输出文件（v3/{job_id}/ + v4/{job_id}/）
+│   ├── output/                   # 运行时输出文件（v4/{job_id}/）
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── .env.example
@@ -209,9 +197,10 @@ icd-tool-prototype/
 | `CLAUDE.md` | Claude Code 工作入口和项目规则 |
 | `docs/project/scope.md` | 项目范围、输入输出边界、V4 能力说明 |
 | `docs/project/workflow.md` | 业务流程、各阶段输入输出 |
-| `docs/architecture/current-architecture.md` | 软件架构、模块职责、V3/V4 双版本共存 |
+| `docs/architecture/current-architecture.md` | 软件架构、模块职责 |
 | `docs/architecture/api.md` | API 接口定义 |
-| `docs/decisions/ADR-001-V4后端接入策略.md` | V4 后端工程化集成关键决策 |
+| `docs/decisions/ADR-001-V4后端接入策略.md` | V4 后端工程化集成关键决策（Partially Superseded） |
+| `docs/decisions/ADR-002-移除V3.md` | 移除 V3 旧版代码决策 |
 | `docs/development/development-log.md` | 开发纪要 |
 | `docs/development/debug-log.md` | 问题排查记录 |
 | `.claude/rules/context-rules.md` | Claude Code 上下文读取规则 |
@@ -225,7 +214,7 @@ icd-tool-prototype/
 | 前端 | React、TypeScript、mammoth、xlsx、lucide-react |
 | 后端框架 | Python、FastAPI、Pydantic |
 | 文件处理 | openpyxl、python-docx、PyYAML、python-dotenv |
-| AI/LLM | DeepSeek、MiniMax、Qwen / DashScope、CrewAI、LiteLLM |
+| AI/LLM | DeepSeek、MiniMax、Qwen / DashScope |
 | 部署 | Docker Compose |
 
 ## 8. 当前阶段
@@ -234,58 +223,13 @@ icd-tool-prototype/
 
 - **V4.0**：已完成 HLR→EoICD 可追溯性分析全流程（6 步），三模型并行裁判 + 星级评分共识，输出 5 份产物。DeepSeek 为必填（同时用于 HLR 标注和 Review Agent），MiniMax / Qwen 为可选（未配置时从 `JUDGE_PROVIDERS` 中移除即可）。
 - **前端**：默认使用 V4.0 界面。
-- **V3.0 旧版代码**：后端路由和业务模块保留在项目中，前端不调用（详见 [§9](#9-v30旧版保留)）。
+- **V3.0 旧版代码**：已移除（见 [ADR-002](docs/decisions/ADR-002-移除V3.md)）。
 
-## 9. V3.0（旧版保留）
-
-V3.0 是本项目的早期版本，于 V4.0 开发完成后作为旧版保留。V3.0 代码全部保留在项目中（后端路由通过 `/api` 命名空间注册），但当前前端不调用。按照 ADR-001 规划，V3.0 将在 V4.0 稳定后另开 Issue 评估下线。
-
-### 功能概述
-
-V3.0 从 EoICD 出发，根据用户输入的 EoICD 源文件（Word + PubSub Excel）和软件高层需求文件，通过 MiniMax 和 DeepSeek 双模型 CrewAI 多智能体生成条目化需求候选结果并评分择优，再将最优条目化需求与软件高层需求进行差异比对，最终输出条目化需求文档和差异分析报告。
-
-### 输入
-
-| 文件 | 格式 | 说明 |
-|------|------|------|
-| EoICD Word 主文件 | .docx | 接口说明、数据定义等 |
-| EoICD PubSub Excel 附件 | .xlsx | 一个或多个，接口信号表格 |
-| 软件高层需求文件 | .docx | 优先支持 Word |
-
-### 输出
-
-| 输出文件 | 说明 |
-|------|------|
-| `MiniMax条目化需求.docx` | MiniMax 全量候选合并 |
-| `DeepSeek条目化需求.docx` | DeepSeek 全量候选合并 |
-| `EoICD条目化需求.docx` | 评分择优后的最佳条目化需求（下载文件名为 EoICD条目化需求.docx） |
-| `EoICD与软件高层需求差异报告.docx` | 差异比对报告 |
-
-### 处理流程
-
-```text
-上传文件 → 解析输入 → 双模型生成候选 → 评分择优 → 差异比对 → 输出文档
-```
-
-### API 入口
-
-V3.0 通过 `/api` 命名空间注册，与 V4.0 的 `/api/v4` 隔离。跨版本查询（如用 V3.0 路由查 V4.0 任务）返回 404。
-
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/api/eoicd/analyze` | POST | 创建分析任务 |
-| `/api/jobs/{id}` | GET | 查询任务状态 |
-| `/api/jobs/{id}/result` | GET | 查询任务结果摘要 |
-| `/api/jobs/{id}/outputs/requirements` | GET | 下载最优条目化需求 |
-| `/api/jobs/{id}/outputs/minimax-requirements` | GET | 下载 MiniMax 条目化需求 |
-| `/api/jobs/{id}/outputs/deepseek-requirements` | GET | 下载 DeepSeek 条目化需求 |
-| `/api/jobs/{id}/outputs/difference-report` | GET | 下载差异报告 |
-
-## 10. 开发约定
+## 9. 开发约定
 
 本项目采用 GitHub Repo + GitHub Projects + Claude Code 的轻量化敏捷开发方式。
 
-### 10.1 基本原则
+### 9.1 基本原则
 
 1. `main` 分支保持稳定；
 2. 每个明确任务通过 Issue 跟踪；
@@ -295,7 +239,7 @@ V3.0 通过 `/api` 命名空间注册，与 V4.0 的 `/api/v4` 隔离。跨版�
 6. 工程事实源以 `CLAUDE.md` 和 `docs/` 下文档为准；
 7. Claude Code 不得主动创建分支、push、创建/合并 PR、关闭 Issue 或修改 Project 看板状态（由用户手动完成）。
 
-### 10.2 分支命名约定
+### 9.2 分支命名约定
 
 推荐分支命名格式如下：
 
@@ -322,7 +266,7 @@ feature/issue-4-end-to-end-prototype
 fix/issue-12-upload-error
 ```
 
-### 10.3 Issue 与 PR 关联
+### 9.3 Issue 与 PR 关联
 
 PR 描述中可以使用以下语法关联或关闭 Issue：
 

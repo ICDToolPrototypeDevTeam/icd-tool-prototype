@@ -3,8 +3,7 @@
 
 ADR-001 Issue A：
 - 仅 3 类对外：eoicd-xlsx / consistency/{model} / consensus-docx；
-- {model} 白名单 ∈ {deepseek,minimax,qwen}；非法 → 400；
-- V4 路由与 V3 路由 /outputs/* 完全独立（V3 在 /api/jobs/<job>/outputs/...，V4 在 /api/v4/jobs/<job>/outputs/...）。
+- {model} 白名单 ∈ {deepseek,minimax,qwen}；非法 → 400。
 """
 from __future__ import annotations
 
@@ -27,7 +26,7 @@ MEDIA_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 def _output_root(job_id: str) -> Path:
     job = job_manager.get_job(job_id)
-    if not job or job.kind != "v4":
+    if not job:
         raise HTTPException(status_code=404, detail='job not found')
     root = Path(__file__).resolve().parent.parent.parent.parent / 'output' / 'v4' / job_id / 'output'
     if not root.exists():

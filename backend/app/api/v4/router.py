@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 """V4.0 FastAPI Router 聚合。
 
-ADR-001 Issue A：
 - 顶层装载：`app.include_router(router, prefix='/api/v4')`；
-- 包含 health（可选）+ coverage + jobs + outputs 共 5 个对外路由；
-- 不与 V3 router 共享业务模块；V3/V4 通过 `job.kind` 在 jobs.py 内做分发。
+- 包含 health + coverage + jobs + outputs 共 5 个对外路由。
 """
 from __future__ import annotations
 

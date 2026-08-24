@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Pipeline orchestration: forward and reverse analysis workflows."""
+"""Pipeline orchestration: reverse analysis workflow."""
 
 from __future__ import annotations
 
@@ -9,17 +9,14 @@ import sys
 import time
 from pathlib import Path
 
-from app.v4.comparison.case_builder import build_cases
 from app.v4.comparison.multi_judge import (
     _judge_with_provider,
     _load_reverse_prompt,
-    judge_with_panel,
 )
-from app.v4.comparison.report_generator import generate_report, generate_consensus_reverse_report
+from app.v4.comparison.report_generator import generate_consensus_reverse_report
 from app.v4.comparison.re_review import re_review_judgments
 from app.v4.comparison.review_agent import review_judgments, _build_summary
-from app.v4.comparison.semantic_judge import judge_cases
-from app.v4.config import DEEPSEEK_MODEL, JUDGE_PROVIDERS
+from app.v4.config import JUDGE_PROVIDERS
 from app.v4.degradation import DegradationConfig, DegradationContext
 from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.v4.doc_generators.excel_generator import generate_eoicd_excel
@@ -37,13 +34,10 @@ from app.v4.models import (
     EoICDOutput,
     HLROutput,
     HLRLabelOutput,
-    JudgmentOutput,
-    MatchOutput,
     MultiJudgeOutput,
     PipelineResult,
     ReverseJudgmentOutput,
     ReverseMatchOutput,
-    ConsensusOutput,
 )
 from app.v4.parsers.eoicd_excel_parser import EoICDExcelParser
 from app.v4.parsers.hlr_word_parser import HLRWordParser
@@ -153,113 +147,6 @@ def _parse_hlr(
     if rewritten:
         print(f"  HLR preprocess: {rewritten} requirement(s) rewritten by profile hook")
     return result
-
-
-def run_forward_pipeline(
-    publisher: Path | None,
-    subscriber: Path | None,
-    hlr: Path,
-    output_dir: Path,
-    top_k: int,
-    limit: int,
-    job: Job,
-    profile: ControllerProfile | None = None,
-) -> PipelineResult:
-    """Run forward pipeline: parse → label → match → judge → report.
-
-    ``profile`` is accepted for API symmetry with ``run_reverse_pipeline``.
-    The forward pipeline currently has no profile-dependent call sites (it
-    does not use ``build_trace_index``), so the parameter is reserved for
-    future wiring without changing behaviour today. ``None`` keeps the
-    pre-#63 byte-identical behaviour.
-    """
-    job.update(JobStatus.RUNNING, "Step 1/4: Parsing input files")
-
-    # Step 1: Parse
-    print("=" * 50)
-    print("Step 1/4: Parsing input files")
-    print("=" * 50)
-    eoicd_out = None
-    if publisher or subscriber:
-        eoicd_out = _parse_eoicd(
-            publisher, subscriber,
-            output_dir / "eoicd_requirements.json",
-        )
-    hlr_out = _parse_hlr(hlr, output_dir / "hlr_requirements.json", profile=profile)
-
-    if not eoicd_out or not hlr_out:
-        raise RuntimeError("Need both EoICD and HLR data for analysis")
-
-    # Step 1.5: HLR Labeling
-    print()
-    print("=" * 50)
-    print("Step 1.5/4: HLR AI labeling")
-    print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 1.5/4: HLR AI labeling")
-    labels_cache = output_dir / "hlr_labels.json"
-    hlr_labels = label_hlrs(hlr_out.requirements, cache_path=labels_cache)
-    print(f"  HLRs labeled: {len(hlr_labels)}")
-
-    # Step 2: Match
-    print()
-    print("=" * 50)
-    print(f"Step 2/4: Candidate matching (top_k={top_k}, limit={limit or 'all'})")
-    print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 2/4: Candidate matching")
-    cases = build_cases(
-        eoicd_out.requirements,
-        hlr_out.requirements,
-        top_k=top_k,
-        limit=limit,
-        hlr_labels=hlr_labels,
-        enriched_output_path=output_dir / "enriched_queries.json",
-        profiles_output_path=output_dir / "profiles.json",
-    )
-    match_out = MatchOutput(total_cases=len(cases), top_k=top_k, cases=cases)
-    (output_dir / "matched_cases.json").write_text(
-        match_out.model_dump_json(indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    print(f"  Matched cases: {len(cases)}")
-
-    # Step 3: Judge
-    print()
-    print("=" * 50)
-    print(f"Step 3/4: AI judging ({len(cases)} cases, model={DEEPSEEK_MODEL})")
-    print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 3/4: AI judging")
-    results = judge_cases(cases)
-    judge_out = JudgmentOutput(total_cases=len(results), results=results)
-    (output_dir / "judgment_results.json").write_text(
-        judge_out.model_dump_json(indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    # Step 4: Report
-    print()
-    print("=" * 50)
-    print("Step 4/4: Generating report")
-    print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 4/4: Generating report")
-    report = generate_report(results)
-    report_path = output_dir / "difference_report.json"
-    report_path.write_text(
-        report.model_dump_json(indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    print(f"  Total: {report.total_cases}")
-    print(f"  Stats: {report.statistics}")
-    print(f"  Differences: {len(report.differences)}")
-    print()
-    print("Pipeline complete.")
-
-    job.update(JobStatus.COMPLETED, "Forward pipeline complete")
-    return PipelineResult(
-        parsed_count=len(eoicd_out.requirements),
-        match_count=len(cases),
-        judged_count=len(results),
-        report_path=str(report_path),
-    )
 
 
 def _count_match_types(results: list) -> dict[str, int]:
@@ -504,7 +391,7 @@ def _judge_with_degradation(
 ) -> MultiJudgeOutput:
     """Judge cases with provider health tracking, timeout, and circuit breaking.
 
-    Replaces direct judge_with_panel() call. Handles:
+    Handles:
     - Skipping providers marked unhealthy
     - Case-level timeout via asyncio.wait
     - Recording per-provider failures for circuit breaker

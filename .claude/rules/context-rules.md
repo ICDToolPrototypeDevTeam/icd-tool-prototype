@@ -1,6 +1,6 @@
 # Claude Code 上下文读取规则
 
-本文档用于规定 Claude Code 在 **ICD工具原型Ver2.0** 项目中的上下文读取方式。
+本文档用于规定 Claude Code 在 **ICD工具原型** 项目中的上下文读取方式。
 
 ## 1. 基本原则
 

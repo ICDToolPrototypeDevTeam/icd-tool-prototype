@@ -1,7 +1,6 @@
 # API 设计说明
 
-本文档用于说明 **ICD工具原型Ver2.0** 的目标 API 设计。
-当前版本处于原型初始化阶段，本文档中的接口为初始设计草案，后续可根据前后端实现和任务模型调整。
+本文档用于说明 **ICD工具原型Ver4.0** 的 API 设计。当前版本仅保留 V4 `/api/v4` 命名空间；V3 `/api` 接口已随 V3 代码一并移除（见 ADR-002）。
 
 ## 1. API 设计原则
 
@@ -11,283 +10,25 @@ API 设计应遵守以下原则：
 2. 文件上传、任务状态查询、结果查询和文件下载应分离；
 3. 后端应通过任务标识维护一次分析过程；
 4. API 返回结果应便于前端展示任务状态和下载结果；
-5. 当前版本优先满足本地演示原型，不追求完整生产级接口设计；
-6. API 字段可在最小可运行工程实现过程中继续细化。
+5. 当前版本优先满足本地演示原型，不追求完整生产级接口设计。
 
 ## 2. 目标接口概览
 
-当前规划的核心接口如下：
+当前核心接口如下：
 
 | 接口                                             | 方法     | 说明                              |
 | ---------------------------------------------- | ------ | ------------------------------- |
-| `/api/health`                                  | `GET`  | 后端健康检查                          |
-| `/api/eoicd/analyze`                           | `POST` | 上传输入文件并创建分析任务                   |
-| `/api/jobs/{job_id}`                           | `GET`  | 查询任务状态                          |
-| `/api/jobs/{job_id}/result`                    | `GET`  | 查询任务处理结果摘要                      |
-| `/api/jobs/{job_id}/outputs/requirements`      | `GET`  | 下载"最优 EoICD 条目化需求"（语义见 §7）      |
-| `/api/jobs/{job_id}/outputs/minimax-requirements` | `GET`  | 下载 MiniMax 条目化需求文档            |
-| `/api/jobs/{job_id}/outputs/deepseek-requirements` | `GET`  | 下载 DeepSeek 条目化需求文档           |
-| `/api/jobs/{job_id}/outputs/difference-report` | `GET`  | 下载差异报告文档                        |
+| `/api/v4/health`                               | `GET`  | 后端健康检查                          |
+| `/api/v4/coverage-analysis`                    | `POST` | 上传输入文件并创建 V4 反向管线任务               |
+| `/api/v4/jobs/{job_id}`                        | `GET`  | 查询任务状态                          |
+| `/api/v4/jobs/{job_id}/result`                 | `GET`  | 查询任务处理结果摘要                      |
+| `/api/v4/jobs/{job_id}/outputs/eoicd-xlsx`     | `GET`  | 下载 EoICD 条目化清单（xlsx）      |
+| `/api/v4/jobs/{job_id}/outputs/consensus-docx` | `GET`  | 下载多模型共识差异分析报告（docx）            |
+| `/api/v4/jobs/{job_id}/outputs/consistency/{model}` | `GET`  | 下载单模型差异分析报告（docx）           |
+
+`{model}` ∈ `{deepseek, minimax, qwen}`。
 
 ## 3. 健康检查接口
-
-### 3.1 接口定义
-
-```text
-GET /api/health
-```
-
-### 3.2 接口用途
-
-用于检查后端服务是否正常运行。
-
-### 3.3 预期返回
-
-```json
-{
-  "status": "ok"
-}
-```
-
-## 4. 创建分析任务接口
-
-### 4.1 接口定义
-
-```text
-POST /api/eoicd/analyze
-```
-
-### 4.2 接口用途
-
-用于上传 EoICD 源文件和软件高层需求文件，并创建一次分析任务。
-
-### 4.3 输入文件
-
-该接口应支持上传以下文件：
-
-1. EoICD Word 主文件；
-2. 一个或多个 EoICD Excel 附件；
-3. 软件高层需求文件。
-
-### 4.4 初始请求字段草案
-
-字段命名可在实现阶段进一步细化。
-
-```text
-eoicd_word_file
-eoicd_excel_files
-software_requirement_file
-```
-
-### 4.5 预期返回
-
-接口成功后应返回任务标识和初始任务状态。
-
-```json
-{
-  "job_id": "example-job-id",
-  "status": "pending",
-  "message": "分析任务已创建"
-}
-```
-
-### 4.6 说明
-
-该接口只负责创建任务，不要求同步返回完整分析结果。
-实际分析过程可由后端 pipeline 执行，并通过任务状态接口查询进度。
-
-## 5. 查询任务状态接口
-
-### 5.1 接口定义
-
-```text
-GET /api/jobs/{job_id}
-```
-
-### 5.2 接口用途
-
-用于查询指定分析任务的当前状态。
-
-### 5.3 任务状态
-
-建议状态包括：
-
-| 状态          | 含义           |
-| ----------- | ------------ |
-| `pending`   | 任务已创建，尚未开始处理 |
-| `running`   | 任务正在处理       |
-| `completed` | 任务处理完成       |
-| `failed`    | 任务处理失败       |
-
-### 5.4 预期返回
-
-```json
-{
-  "job_id": "example-job-id",
-  "status": "running",
-  "message": "任务正在处理",
-  "created_at": "2026-01-01T10:00:00",
-  "updated_at": "2026-01-01T10:01:00"
-}
-```
-
-字段可根据实际实现进行调整。
-
-## 6. 查询任务结果摘要接口
-
-### 6.1 接口定义
-
-```text
-GET /api/jobs/{job_id}/result
-```
-
-### 6.2 接口用途
-
-用于查询任务完成后的结果摘要。
-
-该接口不直接返回完整 Word 文档内容，只返回前端展示所需的摘要信息和输出文件状态。
-
-### 6.3 预期返回
-
-```json
-{
-  "job_id": "example-job-id",
-  "status": "completed",
-  "summary": {
-    "requirement_count": 0,
-    "difference_count": 0
-  },
-  "outputs": {
-    "requirements_docx": true,
-    "difference_report_docx": true
-  }
-}
-```
-
-字段可根据实际实现进行调整。
-
-## 7. 下载 EoICD 条目化需求文档接口
-
-### 7.1 接口定义
-
-```text
-GET /api/jobs/{job_id}/outputs/requirements
-```
-
-### 7.2 接口用途
-
-用于下载任务生成的条目化需求文档。
-
-### 7.3 输出文件
-
-预期下载文件名：
-
-```text
-EoICD条目化需求.docx
-```
-
-### 7.4 说明
-
-- 物理文件 `EoICD条目化需求.docx` 的内容**与"最优条目化需求"相同**（同一份 docx 落两份文件名）。
-- 本接口保留向后兼容，**不**强制前端切换文案。
-- 如果任务尚未完成或文件不存在，接口应返回明确错误信息。
-
-### 7.5 下载 MiniMax 条目化需求文档接口
-
-```text
-GET /api/jobs/{job_id}/outputs/minimax-requirements
-```
-
-预期下载文件名：`MiniMax条目化需求.docx`。该文件是 MiniMax generation agent 在所有 chunk 上的全量候选合并。
-
-### 7.6 下载 DeepSeek 条目化需求文档接口
-
-```text
-GET /api/jobs/{job_id}/outputs/deepseek-requirements
-```
-
-预期下载文件名：`DeepSeek条目化需求.docx`。该文件是 DeepSeek generation agent 在所有 chunk 上的全量候选合并。
-
-## 8. 下载差异报告接口
-
-### 8.1 接口定义
-
-```text
-GET /api/jobs/{job_id}/outputs/difference-report
-```
-
-### 8.2 接口用途
-
-用于下载任务生成的 EoICD 与软件高层需求差异报告。
-
-### 8.3 输出文件
-
-预期下载文件名：
-
-```text
-EoICD与软件高层需求差异报告.docx
-```
-
-### 8.4 说明
-
-如果任务尚未完成或文件不存在，接口应返回明确错误信息。
-
-## 9. 错误响应草案
-
-当前阶段可采用统一错误响应结构。
-
-```json
-{
-  "detail": "错误说明"
-}
-```
-
-后续可根据需要扩展为：
-
-```json
-{
-  "error_code": "FILE_PARSE_FAILED",
-  "message": "文件解析失败",
-  "details": {}
-}
-```
-
-当前版本暂不强制完整错误码体系。
-
-## 10. 待实现阶段细化内容
-
-以下内容可在最小可运行工程或端到端原型实现过程中进一步细化：
-
-1. 文件上传字段名称；
-2. 任务状态模型；
-3. 任务结果摘要字段；
-4. 错误码体系；
-5. 文件下载响应头；
-6. 前端轮询任务状态的时间间隔；
-7. 是否采用同步任务、后台任务或队列；
-8. 是否保留中间结果预览接口。
-
-## 11. API 变更原则
-
-如 API 发生变化，应同步更新本文档。
-
-以下变化必须更新本文档：
-
-1. 新增或删除接口；
-2. 修改接口路径；
-3. 修改请求字段；
-4. 修改响应字段；
-5. 修改任务状态定义；
-6. 修改输出文件下载方式；
-7. 修改错误响应结构。
-
-本文档是前后端接口协作的初始事实源，但在原型阶段允许随实现过程进行合理调整。
-
-## 13. V4 路由（Issue A 落地，2026-07-28）
-
-本节追加于原 12 节之后。V4 与 V3 双版本共存；V3 旧 API 行为不变（§1-§12），V4 新增 `/api/v4` 命名空间。
-
-### 13.1 V4 健康检查
 
 ```text
 GET /api/v4/health
@@ -299,7 +40,7 @@ GET /api/v4/health
 { "status": "ok", "api_version": "v4" }
 ```
 
-### 13.2 V4 创建分析任务
+## 4. 创建分析任务接口
 
 ```text
 POST /api/v4/coverage-analysis
@@ -335,7 +76,7 @@ Content-Type: multipart/form-data
 }
 ```
 
-### 13.3 V4 任务状态
+## 5. 查询任务状态接口
 
 ```text
 GET /api/v4/jobs/{job_id}
@@ -361,7 +102,7 @@ GET /api/v4/jobs/{job_id}
 
 `mock_models` 按 ADR-001 D5 规则取值：`multi_judge_results.json.providers ∩ {"minimax", "qwen"}`；`USE_MOCK_LLM=1` 时所有 provider 都进 `mock_models`。
 
-### 13.4 V4 任务结果
+## 6. 查询任务结果摘要接口
 
 ```text
 GET /api/v4/jobs/{job_id}/result
@@ -414,7 +155,7 @@ GET /api/v4/jobs/{job_id}/result
 
 降级场景下 `agreement_distribution` 可能出现 `single_source` / `no_consensus` 键（仅 1 个 / 0 个 provider 存活）；0 个存活时对应 case 强制 1★、`no_consensus`，`status_distribution` 计入 待确认。
 
-### 13.5 V4 3 类对外下载
+## 7. 下载输出接口
 
 ```text
 GET /api/v4/jobs/{job_id}/outputs/eoicd-xlsx
@@ -438,7 +179,7 @@ Content-Type：
 - `.xlsx` → `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
 - `.docx` → `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
 
-### 13.6 V4 错误响应
+## 8. 错误响应
 
 | 场景 | HTTP | 备注 |
 | --- | --- | --- |
@@ -452,20 +193,19 @@ Content-Type：
 | `{model}` 不在 `{deepseek,minimax,qwen}` | 400 | `invalid model: <name>; allowed: ...` |
 | 任务 `running` 时调 `/result` | 409 | `job not finished: status=...` |
 | 任务 `failed` 时调 `/result` | 409 | |
-| 跨版本查询（如 V3 路由查 V4 job_id） | 404 | `use /api/v4/jobs/... instead` |
+| 任务不存在 | 404 | `job not found` |
 
-### 13.7 V4 路径布局（V3 与 V4 输出文件落到不同根目录）
+## 9. 输出路径布局
 
 | 版本 | 根目录 | 内部结构 |
 | --- | --- | --- |
-| V3 | `backend/output/v3/{job_id}/` | 平铺：input / output 不分 |
 | V4 | `backend/output/v4/{job_id}/` | 分层：`input/`（用户上传原始文件）+ `output/`（pipeline 产物） |
 
 `docker-compose.yml` volume 映射 `./backend/output:/app/output`。
 
 V4 `input/traceability/` 子目录用于 `enable_traceability_prefilter=true` 时追溯表落点。
 
-### 13.8 V4 JSON 中间产物（D7 不暴露）
+## 10. JSON 中间产物（不暴露）
 
 下列 7 个 JSON 是 V4 内部中间产物，**不**作为下载 API 暴露，**仅**保留在 `backend/output/v4/{job_id}/output/` 内供服务端日志与后续 Issue 调试：
 
@@ -479,18 +219,18 @@ V4 `input/traceability/` 子目录用于 `enable_traceability_prefilter=true` �
 
 如前端需要看这些数据，**不**通过 `GET /api/v4/jobs/{id}/outputs/{name}`；应在后续 Issue 加 `Accept: application/json` 内容协商或独立子路由。
 
-### 13.9 V4 路由与 V3 路由的对应关系
+## 11. API 变更原则
 
-| 关注点 | V3 路由 | V4 路由 |
-| --- | --- | --- |
-| 任务创建 | `POST /api/eoicd/analyze` | `POST /api/v4/coverage-analysis` |
-| 任务状态 | `GET /api/jobs/{id}` | `GET /api/v4/jobs/{id}` |
-| 任务结果 | `GET /api/jobs/{id}/result` | `GET /api/v4/jobs/{id}/result` |
-| 下载输出 | `GET /api/jobs/{id}/outputs/{requirements,minimax-requirements,deepseek-requirements,difference-report}` | `GET /api/v4/jobs/{id}/outputs/{eoicd-xlsx,consensus-docx,consistency/{model}}` |
-| 健康检查 | `GET /api/health` | `GET /api/v4/health` |
+如 API 发生变化，应同步更新本文档。
 
-V3 与 V4 的 `outputs` schema、文件命名、`requirements` 字典字段完全不同；前端若需切换版本，须按 §1-§12 vs §13 各自实现客户端。
+以下变化必须更新本文档：
 
-### 13.10 V4 API 变更原则
+1. 新增或删除接口；
+2. 修改接口路径；
+3. 修改请求字段；
+4. 修改响应字段；
+5. 修改任务状态定义；
+6. 修改输出文件下载方式；
+7. 修改错误响应结构。
 
-按本文件 §11：V4 任何 API 变更（路径、字段、状态定义、文件命名、错误响应）需同步更新本节。如未来 §13 内容与 `backend/app/api/v4/*.py` 不一致，**§13 以代码为准**并在本文件回写差异。
+如未来本文档内容与 `backend/app/api/v4/*.py` 不一致，**以代码为准**并在本文件回写差异。
