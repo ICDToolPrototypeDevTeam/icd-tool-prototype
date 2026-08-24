@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """One-star re-review: Step 7.5 of the V4 pipeline.
 
-Reviews the cases that the consensus step (Step 8) flagged with
-``star_rating == 1`` by re-querying each of the three judging providers
-with a peer-aware prompt: each provider sees its own previous judgment
-labeled as "Judgment A" and the other two as "Judgment B" / "Judgment C",
-then reconsiders the case and outputs a fresh structured JSON.
+Reviews the cases that the consensus step (Step 8) flagged with low
+confidence (``star_rating in {1, 2}`` in the 5-star system, ADR-004;
+previously ``star_rating == 1`` in the 3-star system) by re-querying each
+of the three judging providers with a peer-aware prompt: each provider
+sees its own previous judgment labeled as "Judgment A" and the other two
+as "Judgment B" / "Judgment C", then reconsiders the case and outputs a
+fresh structured JSON.
 
 The re-reviewed judgments replace the originals in the
 ``MultiJudgeResult.judgments`` dict; the original judgments are preserved
@@ -35,22 +37,26 @@ from app.v4.prompts import load_prompt
 
 
 # ============================================================
-# 1. Identify one-star cases
+# 1. Identify low-confidence cases (5-star system, ADR-004)
 # ============================================================
 
 
-def _resolve_one_star_case_ids(
+def _resolve_low_confidence_case_ids(
     consensus_out: ConsensusOutput | None,
     output_dir: Path,
 ) -> set[str]:
-    """Return the set of case_id values whose star_rating is 1.
+    """Return the set of case_id values whose star_rating is 1 or 2.
+
+    5 星体系（ADR-004）：触发条件从 1★ 扩展到 ≤2★。peer-aware 复查给
+    1★（分歧/单源/无共识）一个升到 2★ 的机会，给 2★（多数一致但 evidence
+    弱）一个升到 3★ 的机会。
 
     Uses ``consensus_out`` when provided; otherwise reads
     ``output_dir / "consensus_results.json"`` if it exists. Returns an
-    empty set when neither source yields any one-star cases.
+    empty set when neither source yields any low-confidence cases.
     """
     if consensus_out is not None:
-        return {r.case_id for r in consensus_out.results if r.star_rating == 1}
+        return {r.case_id for r in consensus_out.results if r.star_rating in (1, 2)}
 
     consensus_path = output_dir / "consensus_results.json"
     if not consensus_path.exists():
@@ -64,7 +70,7 @@ def _resolve_one_star_case_ids(
     return {
         r["case_id"]
         for r in data.get("results", [])
-        if isinstance(r, dict) and r.get("star_rating") == 1
+        if isinstance(r, dict) and r.get("star_rating") in (1, 2)
     }
 
 
@@ -233,11 +239,15 @@ def re_review_judgments(
     cases: list[ReverseCase],
     output_dir: Path,
     providers: list[str] | None = None,
-) -> MultiJudgeOutput:
-    """Re-review every one-star case with each judging provider.
+) -> tuple[MultiJudgeOutput, set[str]]:
+    """Re-review every low-confidence (1★/2★) case with each judging provider.
+
+    5 星体系（ADR-004）：触发条件从 star_rating == 1 扩展到
+    star_rating ∈ {1, 2}。peer-aware 复查给 1★ 一个升 2★ 的机会，
+    给 2★（多数一致但 evidence 弱）一个升 3★ 的机会。
 
     For each case in ``consensus_out`` (or ``output_dir /
-    consensus_results.json``) with ``star_rating == 1``, query every
+    consensus_results.json``) with ``star_rating in {1, 2}``, query every
     provider in ``providers`` (default :data:`JUDGE_PROVIDERS`) with a
     peer-aware user prompt and replace that provider's entry in the
     case's ``judgments`` dict. Original judgments are preserved under
@@ -248,13 +258,13 @@ def re_review_judgments(
     Returns the updated ``multi_out`` (the same object passed in, mutated
     in place) so callers can chain it with downstream steps.
 
-    A no-op when no one-star cases are present.
+    A no-op when no low-confidence cases are present.
     """
     if providers is None:
         providers = JUDGE_PROVIDERS
 
-    one_star_ids = _resolve_one_star_case_ids(consensus_out, output_dir)
-    if not one_star_ids:
+    low_confidence_ids = _resolve_low_confidence_case_ids(consensus_out, output_dir)
+    if not low_confidence_ids:
         return multi_out, set()
 
     # 当 multi_out=None 时从 output_dir 加载
@@ -272,7 +282,7 @@ def re_review_judgments(
     re_review_meta: list[dict] = []
     re_reviewed_count = 0
 
-    for case_id in sorted(one_star_ids):
+    for case_id in sorted(low_confidence_ids):
         mjr = mjr_map.get(case_id)
         case = case_map.get(case_id)
         if mjr is None or case is None:
@@ -343,7 +353,7 @@ def re_review_judgments(
     re_review_path.write_text(
         json.dumps(
             {
-                "total_one_star_cases": len(one_star_ids),
+                "total_low_confidence_cases": len(low_confidence_ids),
                 "re_reviewed_cases": re_reviewed_count,
                 "results": re_review_meta,
             },

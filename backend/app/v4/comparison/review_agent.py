@@ -89,7 +89,12 @@ def _call_review_api(
     model_results: dict[str, dict],
     max_retries: int = 2,
 ) -> ConsensusResult:
-    """Call LLM and parse JSON response for consensus review."""
+    """Call LLM and parse JSON response for consensus review.
+
+    5 星体系（ADR-004）：star_rating 由 agreement_level + evidence_alignment
+    联合映射；LLM 仅输出 agreement_level + evidence_alignment，星档由
+    `_map_star_rating()` 计算，避免 LLM 直接选星的不稳定性。
+    """
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -103,9 +108,10 @@ def _call_review_api(
             data = json.loads(content)
             consistent, divergent = _derive_consensus_details(data, model_results)
             agreement = data.get("agreement_level", "split")
-            star = int(data.get("star_rating", 1))
-            # 3★/2★ → 取多数一致的 coverage_status；1★/split → 待确认
-            if agreement in ("full", "majority") and star >= 2:
+            evidence = data.get("evidence_alignment", "")
+            star = _map_star_rating(agreement, evidence)
+            # 5★/4★/3★ → 取多数一致的 coverage_status；2★/1★/split → 待确认
+            if agreement in ("full", "majority") and star >= 3:
                 final_status = _majority_status(model_results, consistent)
             else:
                 final_status = "待确认"
@@ -114,6 +120,7 @@ def _call_review_api(
                 model_results=model_results,
                 agreement_level=agreement,
                 star_rating=star,
+                evidence_alignment=evidence,
                 final_coverage_status=final_status,
                 final_analysis=data.get("final_analysis", ""),
                 confidence=float(data.get("confidence", 0.5)),
@@ -135,12 +142,37 @@ def _call_review_api(
         model_results=model_results,
         agreement_level="split",
         star_rating=1,
+        evidence_alignment="",
         final_coverage_status="待确认",
         final_analysis="Review API error after retries",
         confidence=0.0,
         consistent_agents=[],
         divergent_agents=[],
     )
+
+
+def _map_star_rating(agreement: str, evidence: str) -> int:
+    """Map (agreement_level, evidence_alignment) to a 1-5 star rating (ADR-004).
+
+    Mapping table:
+        5★: agreement=full,  evidence=strong
+        4★: agreement=full,  evidence=moderate|weak
+        3★: agreement=majority, evidence=strong|moderate
+        2★: agreement=majority, evidence=weak
+        1★: agreement ∈ {split, single_source, no_consensus}
+
+    The function never raises: an unrecognised agreement_level or missing
+    evidence_alignment defaults to 1★ (low-confidence) so a malformed LLM
+    response can never inflate the rating.
+    """
+    a = (agreement or "").lower()
+    e = (evidence or "").lower()
+    if a == "full":
+        return 5 if e == "strong" else 4
+    if a == "majority":
+        return 3 if e in ("strong", "moderate") else 2
+    # split / single_source / no_consensus / 其它未知 agreement
+    return 1
 
 
 def _majority_status(
@@ -192,13 +224,14 @@ _STATUS_CN = {"covered": "已覆盖", "inconsistent": "不一致", "needs_review
 
 
 def _build_summary(results: list[ConsensusResult]) -> dict:
-    """Aggregate review statistics."""
-    star_dist = {"1": 0, "2": 0, "3": 0}
+    """Aggregate review statistics (5-key star_distribution, ADR-004)."""
+    star_dist = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
     agreement_dist: dict[str, int] = {}
     status_dist: dict[str, int] = {}
 
     for r in results:
-        star_dist[str(r.star_rating)] = star_dist.get(str(r.star_rating), 0) + 1
+        key = str(r.star_rating) if r.star_rating in (1, 2, 3, 4, 5) else "1"
+        star_dist[key] += 1
         agreement_dist[r.agreement_level] = agreement_dist.get(r.agreement_level, 0) + 1
         cn = _STATUS_CN.get(r.final_coverage_status, r.final_coverage_status)
         status_dist[cn] = status_dist.get(cn, 0) + 1
@@ -213,7 +246,7 @@ def _build_summary(results: list[ConsensusResult]) -> dict:
         "star_distribution": star_dist,
         "agreement_distribution": agreement_dist,
         "status_distribution": status_dist,
-        "average_star_rating": round(avg_stars, 1),
+        "average_star_rating": round(avg_stars, 2),
     }
 
 

@@ -742,15 +742,15 @@ def run_reverse_pipeline(
     print(f"  Summary: {consensus_out.summary}")
     print(f"  Degradation: {consensus_data['degradation']}")
 
-    # Step 5.5: Re-review one-star cases (AFTER first consensus to know which are one-star)
+    # Step 5.5: Re-review low-confidence cases (1★/2★, ADR-004)
     print()
     print("=" * 50)
-    print("Step 5.5/6: Re-review one-star cases")
+    print("Step 5.5/6: Re-review low-confidence cases (1★/2★)")
     print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 5.5/6: Re-review one-star cases")
+    job.update(JobStatus.RUNNING, "Step 5.5/6: Re-review low-confidence cases")
     multi_out, re_reviewed_ids = re_review_judgments(
         multi_out=multi_out,
-        consensus_out=consensus_out,  # pass in-memory consensus_out for one-star detection
+        consensus_out=consensus_out,
         cases=cases,
         output_dir=output_dir,
         providers=frozen_providers,

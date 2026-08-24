@@ -40,8 +40,18 @@ def _style_header_row(table, headers: list[str]):
 
 
 def _star_str(n: int) -> str:
-    """Render star rating as visual string: ★★★ (3), ★★☆ (2), ★☆☆ (1)."""
-    return "★" * n + "☆" * (3 - n)
+    """Render star rating as visual string (5-star system, ADR-004).
+
+    Examples:
+        5 → ★★★★★
+        4 → ★★★★☆
+        3 → ★★★☆☆
+        2 → ★★☆☆☆
+        1 → ★☆☆☆☆
+        0 → ☆☆☆☆☆ (无匹配等不参与星评的 case)
+    """
+    n = max(0, min(5, int(n)))
+    return "★" * n + "☆" * (5 - n)
 
 
 def generate_consensus_report(
@@ -198,12 +208,18 @@ def generate_consensus_report(
     star_dist = cs.get("star_distribution", {})
     avg_stars = cs.get("average_star_rating", 0)
 
-    # 3★/2★ 主行按星级计数（star_distribution）；1★ 无独立主行，直接以 3 个子类型行
-    # 呈现（agreement_distribution），保证降级产生的共识类型（仅单一来源/无有效裁判）
-    # 与非常规星级不丢计数；主行与子行均默认渲染（0 条时也显示）
+    # 5 星体系（ADR-004）：5 档独立行；1★ 由 3 个降级子类型（split/single_source/
+    # no_consensus）细分，保证降级产生的共识类型不丢计数。其它未在主表中的
+    # 星级以「非常规」追加。
     star_levels = [
-        ("3", "完全一致", "3 个模型判断完全一致，可直接采纳"),
-        ("2", "多数一致", "2/3模型一致，需关注少数意见中是否有被忽略的证据"),
+        ("5", "完全一致且 evidence 强",
+         "3 个模型判断完全一致 + 互相引用具体 ICD 字段，可直接采纳"),
+        ("4", "完全一致但 evidence 一般",
+         "3 个模型判断完全一致，但 analysis 未充分引用具体 ICD 字段"),
+        ("3", "多数一致且 evidence 中上",
+         "多数模型一致 + 反对方 analysis 笼统，取多数结论"),
+        ("2", "多数一致但反对方有据",
+         "多数模型一致，但反对方 analysis 有具体 ICD 引用，建议人工复核"),
     ]
     one_star_subs = [
         ("split", "分歧", "三方各持不同意见"),
@@ -224,7 +240,7 @@ def generate_consensus_report(
         _set_cell_font(row.cells[2], f"{count} 条")
         _set_cell_font(row.cells[3], desc)
 
-    # 1★ 子类型行：标签格式与主行一致（加粗、默认颜色）；首行星列放 ★☆☆ 后纵向合并
+    # 1★ 子类型行：标签格式与主行一致（加粗、默认颜色）；首行星列放 ★☆☆☆☆ 后纵向合并
     one_star_first_row_idx: int | None = None
     one_star_last_row_idx: int | None = None
     for i, (agr_key, sub_label, sub_desc) in enumerate(one_star_subs):
@@ -240,7 +256,7 @@ def generate_consensus_report(
         one_star_last_row_idx = len(qt.rows) - 1
 
     for star_key in sorted(
-        (k for k in star_dist if k not in ("1", "2", "3")),
+        (k for k in star_dist if k not in {"1", "2", "3", "4", "5"}),
         key=lambda k: int(k) if k.isdigit() else 999,
     ):
         count = star_dist.get(star_key, 0)
@@ -254,7 +270,7 @@ def generate_consensus_report(
 
     row = qt.add_row()
     _set_cell_font(row.cells[1], "平均星级", bold=True)
-    _set_cell_font(row.cells[2], f"{avg_stars:.1f}", bold=True)
+    _set_cell_font(row.cells[2], f"{avg_stars:.2f}", bold=True)
 
     for row_obj in qt.rows:
         row_obj.cells[0].width = Cm(2.5)
@@ -262,7 +278,7 @@ def generate_consensus_report(
         row_obj.cells[2].width = Cm(2.0)
         row_obj.cells[3].width = Cm(8.0)
 
-    # 1★ 3 个子类型行在星列合并为一个 ★☆☆ 单元格（纵向居中）
+    # 1★ 3 个子类型行在星列合并为一个 ★☆☆☆☆ 单元格（纵向居中）
     if one_star_first_row_idx is not None and one_star_last_row_idx is not None:
         merged_cell = qt.cell(one_star_first_row_idx, 0).merge(qt.cell(one_star_last_row_idx, 0))
         merged_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
@@ -272,8 +288,10 @@ def generate_consensus_report(
     # ── Suggestions ──
     doc.add_heading("处置建议", level=3)
     suggestions = [
-        f"{_star_str(3)} 星条目：模型完全一致，可直接采纳结论。",
-        f"{_star_str(2)} 星条目：多数模型一致，需关注少数意见中是否有被忽略的证据。",
+        f"{_star_str(5)} 星条目：完全一致且 evidence 强，可直接采纳结论。",
+        f"{_star_str(4)} 星条目：完全一致但 evidence 一般，可采纳结论。",
+        f"{_star_str(3)} 星条目：多数一致 + 反对方 evidence 弱，可采纳多数结论。",
+        f"{_star_str(2)} 星条目：多数一致但反对方有具体 ICD 引用，建议人工复核少数意见。",
         f"{_star_str(1)} 星条目（分歧）：三方各持不同意见，建议人工逐条复核并做出最终判断。",
         f"{_star_str(1)} 星条目（仅单一来源）：仅 1 个模型有效（其余模型调用失败），结论仅供参考，建议人工确认。",
         f"{_star_str(1)} 星条目（无有效裁判）：全部模型调用失败，AI 结论不可用，必须人工复核。",

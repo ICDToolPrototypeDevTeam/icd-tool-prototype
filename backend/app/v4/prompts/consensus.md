@@ -22,14 +22,17 @@
 
 ```json
 {
-  "agreement_level": "full|majority|split",
-  "star_rating": 1-3,
+  "agreement_level": "full|majority|split|single_source|no_consensus",
+  "evidence_alignment": "strong|moderate|weak",
   "final_coverage_status": "covered|partial|missing|inconsistent|needs_review",
   "final_analysis": "综合所有裁判结果的分析总结",
   "confidence": 0.0-1.0,
   "inconsistent_attributes": []
 }
 ```
+
+**注意**：你**不需要**在 JSON 中直接输出 `star_rating`，星档由后端根据
+`agreement_level` 和 `evidence_alignment` 计算（见下方「星级映射规则」）。
 
 - **inconsistent_attributes**: 仅当 `final_coverage_status` 为 `"inconsistent"` 时填写。列出 HLR 与 ICD 之间存在不一致的具体 EoICD 属性。每条为一个对象：
   - `attribute`: EoICD 属性名（英文，如 `Direction`, `DataFormatType`, `BitOffset`, `ParameterSize`, `SDIExpected`, `OneState`, `ZeroState`, `Units`, `FuncRngMin`, `FuncRngMax`, `Period`, `Label` 等）
@@ -53,51 +56,69 @@
   - "full" — 所有模型结果一致
   - "majority" — 多数模型结果一致 (≥2/3)
   - "split" — 三方各持不同意见
+  - "single_source" — 仅 1 个模型给出有效结果（其它模型调用失败）
+  - "no_consensus" — 0 个模型给出有效结果（全部调用失败）
 
-- **star_rating** (1-3 星):
-  - 3 星 — full agreement，所有模型一致
-  - 2 星 — majority agreement，多数一致
-  - 1 星 — split，三方分歧
+- **evidence_alignment**（基于各模型 analysis 文本的证据强度判定）：
+  - "strong" — 至少 2 个模型的 analysis 文本中**明确引用了对方提到的具体 ICD 字段**（Label 号、DataFormatType、方向、单位、范围、BitOffset 等），evidence 互相印证
+  - "moderate" — 各模型结论一致，但只有 1 个模型有具体 ICD 引用，其它笼统
+  - "weak" — 各模型 analysis 文本笼统，无具体 ICD 字段引用（仅说"一致"/"不一致"等结论）
 
-- **final_coverage_status**: 综合考虑多数意见和各模型的 confidence 加权
+## 星级映射规则（5 星体系，ADR-004）
 
-- **confidence**: 基于 agreement_level 和模型间一致性计算
-  - full → 0.95
-  - majority → 0.75-0.85
-  - split → 0.40-0.55
+**不要**直接输出 star_rating。星档由后端根据下表计算：
+
+| agreement_level | evidence_alignment | star_rating | final_coverage_status |
+|---|---|---|---|
+| full | strong | 5★ | majority coverage_status |
+| full | moderate / weak | 4★ | majority coverage_status |
+| majority | strong / moderate | 3★ | majority coverage_status |
+| majority | weak | 2★ | 待确认 |
+| split / single_source / no_consensus | (any) | 1★ | 待确认 |
+
+## final_coverage_status 判定
+
+- 5★/4★/3★：取多数一致的 coverage_status
+- 2★/1★：强制「待确认」(needs_review)
+
+## confidence 字段建议范围
+
+- full + strong → 0.90-0.95
+- full + moderate/weak → 0.75-0.85
+- majority + strong/moderate → 0.70-0.85
+- majority + weak → 0.50-0.65
+- split → 0.40-0.55
+- single_source → 0.30-0.50
+- no_consensus → 0.10-0.30
 
 ## 注意
 
-- 以多数一致的结果为准，但需关注少数意见中是否有被忽略的重要证据
-- 如果所有模型都标注为 needs_review，star_rating 仍可为 3 星（因为一致）
+- 以多数一致的结果为准，但需关注少数意见中是否有被忽略的重要 evidence
+- 如果所有模型都标注为 needs_review，agreement_level 仍可为 full（因为一致），evidence_alignment 视 analysis 文本而定
 - 不引入额外知识，仅基于模型给出的分析做判断
 
-## 星评语义规则（基于语义一致性，非字面一致性）
+## evidence_alignment 判定示例
 
-以下规则用于指导 star_rating 的判断：
+**strong**（至少 2 个 provider 引用具体 ICD 字段）：
+- 专家A analysis："HLR 缺少 Label 220 的 BitOffset 定义，与 ICD 中 0-15 位偏移不符"
+- 专家B analysis："ICD Label 220 BitOffsetWithinDS=12 ParameterSize=4，HLR 仅写了'信号定义'"
+- → A 与 B 都引用了 Label 220 / BitOffset → strong
 
-★★★（完全一致，star_rating=3）：
-三位专家的结论在语义上一致 —— 即使措辞不同或 coverage_status 标签不同，
-各自 analysis 描述的核心判断指向同一事实。
-例（语义一致）：
-  专家A analysis："HLR描述了温度信号的采集功能，但缺少对数据格式、分辨率和量程的具体定义"
-  专家B analysis："ICD要求该信号为BNR格式精度0.01，HLR中只写了采集温度信号，格式和精度要求未落实"
-  → 两者都在说格式和精度定义缺失这同一个事实，视为一致。
+**moderate**（只有 1 个 provider 有具体引用）：
+- 专家A analysis："完整覆盖"
+- 专家B analysis："ICD Label 220 BitOffset=12，HLR 缺失"
+- 专家C analysis："一致"
+- → 仅 B 有具体 ICD 引用 → moderate
 
-★★☆（部分分歧，star_rating=2）：
-两位专家结论语义一致，另一位有实质性分歧。
-分歧不是措辞差异，而是对覆盖性的判断方向不同。
-例（实质分歧）：
-  专家A analysis："HLR完整覆盖了信号方向、数据类型和范围，是一致的实现"
-  专家C analysis："HLR中信号方向为'接收'，但ICD定义为'发送'，存在方向性矛盾"
-  → A认为覆盖了，C认为有矛盾，这是实质性分歧。
-
-★☆☆（严重分歧，star_rating=1）：
-三位专家的结论互不一致，各自表达了实质性不同的判断。
+**weak**（笼统）：
+- 专家A analysis："HLR 与 ICD 一致"
+- 专家B analysis："覆盖完整"
+- 专家C analysis："判定为 covered"
+- → 全部笼统 → weak
 
 ## 重要提示
 - 不要只看 coverage_status 的字面值，要通过 analysis 理解每位专家的实际含义
 - 不同措辞表达相同判断 → 视为一致
 - 相同措辞表达不同判断 → 视为分歧（罕见但可能出现）
-- 如果所有模型都标注为 needs_review，star_rating 仍可为 3 星（因为一致）
+- 如果所有模型都标注为 needs_review，agreement_level 仍可为 full（因为一致）
 - 在输出 JSON 中额外提供 consistent_agents 和 divergent_agents 列表

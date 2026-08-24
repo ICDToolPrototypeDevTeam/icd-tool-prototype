@@ -1181,3 +1181,117 @@ Import 链路验证通过。截断自适应重试效果待真实 LLM 端到端�
 维持现状。`drain_max_tasks=60` 限制 drain 累积上限，`max_inflight=6` 限制 API 并发。主流程被阻塞的表现是 case 处理延迟（等 drain 释放线程），不会导致功能错误或资源无限增长。
 
 如后续 case 数量显著增加（>20）或 drain 任务耗时成为瓶颈，可重新评估双线程池方案（需接受 resubmit 的额外 API 调用开销）。
+
+### 2026-08-23 V4 五星评价体系升级（ADR-004）
+
+#### 任务目标
+
+把 Step 5 Review Agent 从 3 星体系（full→3★、majority→2★、split→1★）升级为 5 星体系（5★/4★/3★/2★/1★），新增 `evidence_alignment` 维度区分「全一致但 evidence 弱」（4★）与「全一致 evidence 强」（5★），复查触发从 1★ 扩展到 ≤2★。详见 ADR-004。
+
+#### 完成内容
+
+1. **5 档映射**：`backend/app/v4/comparison/review_agent.py` 新增 `_map_star_rating(agreement, evidence)` 后端计算函数；`ConsensusResult.evidence_alignment` 字段新增；review LLM 只输出 `agreement_level + evidence_alignment`，星档由后端按映射表计算。
+2. **复查触发扩展**：`backend/app/v4/comparison/re_review.py` `_resolve_low_confidence_case_ids` 触发条件从 `star_rating == 1` 改为 `star_rating ∈ {1, 2}`，给 2★ 一个升到 3★ 的机会。
+3. **final_coverage_status 阈值**：`star >= 3`（5★/4★/3★）取多数一致 status；`star <= 2`（2★/1★）强制「待确认」。
+4. **共识报告 docx**：`consensus_word_generator.py` 星级分布表从「3 主行 + 3 子行」改为「4 主行（5★/4★/3★/2★）+ 3 子行（1★ 降级）」；`_star_str` 渲染 0-5 共 6 档。
+5. **ADR 与 e2e**：新增 `docs/decisions/ADR-004-五星评价体系.md`；新增 `backend/tests/e2e/test_use_case_5_five_star_rating.py`（35 项离线单元断言 + 基线集成验证）。
+
+#### 修改文件
+
+1. `backend/app/v4/models.py` — `ConsensusResult` 新增 `evidence_alignment` 字段，star_rating 类型注解 1-5
+2. `backend/app/v4/comparison/review_agent.py` — 新增 `_map_star_rating()`、`_call_review_api` 读取 `evidence_alignment`、`_build_summary` 输出 5 键 `star_distribution`、`final_status` 阈值 star >= 3
+3. `backend/app/v4/comparison/re_review.py` — `_resolve_one_star_case_ids` → `_resolve_low_confidence_case_ids`，触发 `{1}` → `{1, 2}`
+4. `backend/app/v4/prompts/consensus.md` — 新增 `evidence_alignment` 输出 + 5 档映射规则 + evidence 判定示例
+5. `backend/app/v4/pipeline.py` — Step 5.5 日志更新
+6. `backend/app/v4/doc_generators/consensus_word_generator.py` — `_star_str` 渲染 5 颗，分布表 4 主行 + 3 子行
+7. `backend/app/v4/degradation/config.py` — 注释更新（5 星体系）
+
+#### 新增文件
+
+1. `backend/tests/e2e/test_use_case_5_five_star_rating.py` — 5 档映射 + 复查触发 + summary 5 键 e2e
+2. `docs/decisions/ADR-004-五星评价体系.md` — 5 星体系 ADR
+
+#### 验证方式
+
+1. 6 个 Python 文件 `ast.parse` 语法验证（GBK locale → 显式 `encoding='utf-8'`）
+2. `python -c "from app.v4.comparison.review_agent import _map_star_rating; ..."` 离线单元断言（35 项 PASS）
+3. `python tests/e2e/test_use_case_5_five_star_rating.py`（场景 A 离线断言 + 场景 B 基线集成，需真实 LLM）
+
+#### 验证结果
+
+1. 语法验证全部通过
+2. 离线单元断言 35/35 PASS（_map_star_rating 14 项 + _build_summary 5 项 + 低星触发 3 项 + 状态逻辑 2 项 + _star_str 7 项 + 其它 4 项）
+3. 场景 B（基线集成）尚未运行：需要先跑基线管线生成 e2e_baseline/consensus_results.json
+
+#### 遗留问题
+
+1. 场景 B 需在 docker compose 中真实跑基线 + 集成测试（依赖真实 LLM API）
+2. 老 `consensus_results.json` 不存在跨版本兼容，老数据需重新跑管线（BC 已在 CHANGELOG 标注）
+3. 5★ 与 4★ 的边界主要靠 evidence_alignment 判定，prompt 中 few-shot 示例稳定 LLM 输出；真实 LLM 跑出来后可能需要调整 prompt 提示
+
+#### 下一步建议
+
+1. 真实 LLM 跑 1 个样例，查看 5 档分布是否符合预期
+2. 观察 evidence_alignment 字段的稳定性（批次间是否漂移）
+3. 后续 Issue 可考虑前端 UI 适配 5 星显示
+
+### 2026-08-23 复查升星路径实证（用例6）
+
+#### 任务目标
+
+构造 1★/2★/4★ 三类低星 case，运行 peer-aware 复查 + 共识重跑，验证升星路径是否生效。
+
+#### 完成内容
+
+新增 `backend/tests/e2e/test_use_case_6_five_star_upgrade.py`，基于基线 `e2e_baseline/` 注入：
+- 1★ case：3 provider coverage_status 不同 + analysis 各自引用不同 ICD 字段（split + strong）
+- 2★ case：2 provider "covered"（vague analysis）+ 1 provider "inconsistent"（vague analysis）（majority + weak）
+- 4★ case：3 provider 全 "covered" 但 analysis 笼统、无具体 ICD 字段引用（full + weak）
+
+然后对 1★/2★ case 调用真实 LLM `re_review_judgments()` + `review_judgments()`，对 4★ case 单独重跑 `review_judgments()`。
+
+#### 验证结果
+
+| 注入前 | 升星机制 | 升星后 | evidence | 路径是否生效 |
+|---|---|---|---|---|
+| 1★ (split + strong) | re-review + re-consensus | **3★** (majority + strong) | strong | ✓ 升 2★ |
+| 2★ (majority + weak) | re-review + re-consensus | **5★** (full + strong) | strong | ✓ 升 3★ |
+| 4★ (full + weak) | re-consensus only | **4★** (full + weak) | weak | 维持 4★（不触发 re-review）|
+
+升星成功 2/2（1★/2★ 主动升星），路径验证 3/3。
+
+#### 关键设计发现：4★ → 5★ 是理论路径
+
+**ADR-004 §复查升星路径 表格中列了 4★ → 5★ 一行，但实际机制下不触发**：
+- 复查触发条件是 `star_rating ∈ {1, 2}`（用户明确选择），4★ case 按设计不进入 re-review
+- 重跑共识时 provider 的 analysis 文本本身没变，evidence_alignment 自然保持 weak → 仍是 4★
+- 4★ → 5★ 实际依赖多次自然重判 + provider 主动补充 evidence（不可控机制）
+
+**实证依据（REV-0003）**：review LLM 输出明确指出：
+> 三位裁判均判定 HLR 需求与 EoICD 信号画像覆盖完整、无差异，结论一致。虽然各裁判分析文本较为笼统，未引用具体 ICD 字段或 Label 号，但三方结论相互印证，因此最终共识为 covered。
+
+→ 即 full + weak = 4★ 是当前机制下的稳态。
+
+**1★/2★ 升星机制实证有效**：peer-aware 复查后，provider 看到对方 analysis 后主动细化（"重新逐项核对"、"判断 A 过于笼统，未将 ICD 的 bit offset 与 HLR 的 bit15 做逐位核对"），导致 evidence 由 weak 转 strong。
+
+#### 设计决策（待用户确认）
+
+1. **保持当前设计**：4★ case 不触发 re-review（避免无意义重判），4★ → 5★ 仅靠自然多次重判。需要把 ADR-004 §复查升星路径 表格的 4★ → 5★ 行标记为"理论路径，非主动机制"。
+2. **扩展触发集合**：把 re-review 触发条件改为 `star_rating ∈ {1, 2, 4}`，让 4★ 也走 peer-aware 复查。但代价是 LLM 调用成本翻倍，且 4★ 升 5★ 收益有限（都已是 full agreement，仅 evidence 强弱差异）。
+3. **新增"自然升级"机制**：连续 N 次运行管线后，对未升级的 4★ case 做轻量级 evidence 补充（让 provider 重写 analysis）。
+
+#### 验证命令
+
+```bash
+docker compose build backend
+docker compose run --rm backend python tests/e2e/test_use_case_6_five_star_upgrade.py
+```
+
+#### 修改文件
+
+1. `backend/tests/e2e/test_use_case_6_five_star_upgrade.py`（新增）
+
+#### 遗留问题
+
+1. ADR-004 §复查升星路径 表格中 4★ → 5★ 一行的描述需调整为"理论路径"，与实际机制对齐
+2. 后续 Issue 可根据用户决策选择上述 3 个方案之一
