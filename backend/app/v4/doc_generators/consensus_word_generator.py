@@ -380,11 +380,11 @@ def generate_consensus_report(
                 _set_cell_font(row.cells[7], _star_str(stars), bold=True, size=10,
                                color=RGBColor(0xCC, 0x88, 0x00))
 
-    # 设置明细表列宽
-    detail_col_widths = [1.19, 5.25, 1.5, 4.5, 2.0, 10.5, 1.75, 1.39]
-    for row_obj in table.rows:
-        for i, w in enumerate(detail_col_widths):
-            row_obj.cells[i].width = Cm(w)
+        # 设置明细表列宽
+        detail_col_widths = [1.19, 5.25, 1.5, 4.5, 2.0, 10.5, 1.75, 1.39]
+        for row_obj in table.rows:
+            for i, w in enumerate(detail_col_widths):
+                row_obj.cells[i].width = Cm(w)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
