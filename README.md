@@ -185,6 +185,7 @@ icd-tool-prototype/
 ├── docker-compose.yml
 ├── CLAUDE.md
 ├── CHANGELOG.md
+├── LICENSE.md
 └── README.md
 ```
 
@@ -195,6 +196,7 @@ icd-tool-prototype/
 | 文档 | 说明 |
 |------|------|
 | `CLAUDE.md` | Claude Code 工作入口和项目规则 |
+| `LICENSE.md` | ICD工具使用许可协议 |
 | `docs/project/scope.md` | 项目范围、输入输出边界、V4 能力说明 |
 | `docs/project/workflow.md` | 业务流程、各阶段输入输出 |
 | `docs/architecture/current-architecture.md` | 软件架构、模块职责 |
@@ -225,11 +227,20 @@ icd-tool-prototype/
 - **前端**：默认使用 V4.0 界面。
 - **V3.0 旧版代码**：已移除（见 [ADR-002](docs/decisions/ADR-002-移除V3.md)）。
 
-## 9. 开发约定
+## 9. 贡献者
+
+**中航机载系统有限公司：** 谭家鑫、戴晨洪、王田、刘雨龙
+
+## 10. 许可协议
+
+本项目及相关文档版权归 **中航机载系统有限公司** 所有，并依据《ICD工具使用许可协议》进行分发和使用。
+完整许可条款请参阅 [`LICENSE.md`](LICENSE.md)
+
+## 11. 开发约定
 
 本项目采用 GitHub Repo + GitHub Projects + Claude Code 的轻量化敏捷开发方式。
 
-### 9.1 基本原则
+### 11.1 基本原则
 
 1. `main` 分支保持稳定；
 2. 每个明确任务通过 Issue 跟踪；
@@ -239,7 +250,7 @@ icd-tool-prototype/
 6. 工程事实源以 `CLAUDE.md` 和 `docs/` 下文档为准；
 7. Claude Code 不得主动创建分支、push、创建/合并 PR、关闭 Issue 或修改 Project 看板状态（由用户手动完成）。
 
-### 9.2 分支命名约定
+### 11.2 分支命名约定
 
 推荐分支命名格式如下：
 
@@ -266,7 +277,7 @@ feature/issue-4-end-to-end-prototype
 fix/issue-12-upload-error
 ```
 
-### 9.3 Issue 与 PR 关联
+### 11.3 Issue 与 PR 关联
 
 PR 描述中可以使用以下语法关联或关闭 Issue：
 
@@ -282,3 +293,9 @@ Part of #4
 2. 当该 PR 只与某个 Issue 相关，但尚未完成验收时，应使用 `Related to #编号`；
 3. 当该 PR 只完成某个 Issue 的一部分时，应使用 `Part of #编号`；
 4. 不得关闭尚未验收通过的 Issue。
+
+---
+
+© 2026 ICD工具开发团队
+<br/>
+© 中航机载系统有限公司 版权所有。AVIC Airborne Systems Co., Ltd. All rights reserved.
