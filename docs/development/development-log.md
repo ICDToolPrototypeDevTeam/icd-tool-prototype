@@ -1302,3 +1302,128 @@ FGMC（燃油测量管理计算机）作为第二个测试样例引入后，原�
 
 1. 用户手动 push / PR / 关闭 Issue（CLAUDE.md §11.2 红线）。
 2. 择期修复「待确认」乱码编码 bug。
+
+## 2026-08-19 case 级超时后台收尾（drain）
+
+### 任务目标
+
+解决 Step 4 多智能体裁判中"第三个（慢但有效）输出被超时丢弃"的问题：超时任务不再取消，转入后台线程池继续执行，Step 4.5 统一收尾，迟到有效结果替换 TIMEOUT 占位后进入共识。
+
+### 完成内容
+
+1. **执行模型改造**：`_judge_case_with_timeout()` 从 per-case `asyncio.run` + `asyncio.to_thread` 改为全局 ThreadPoolExecutor + concurrent.futures（`_get_drain_executor()`，进程级单例）；`_judge_with_provider_sync()`（multi_judge.py）为同步版裁判函数，永不抛出，错误归一 error judgment。
+2. **后台收尾（Step 4.5）**：`_drain_and_rereview()` 统一 join 超时任务（预算 `DEGRADATION_DRAIN_BUDGET`，默认 300s）；预算内返回的有效结果替换 TIMEOUT 占位并 reset 该 provider 熔断失败计数；迟到失败不重复计数；迟到结果使该 case 存活 provider 数恢复，Step 5 共识基于最终 judgments。
+3. **降级统计**：`DegradationContext` 新增 `drain` 挂载点与 `drained_late_count` 统计，随 `degradation` summary 输出。
+4. **配置扩展**：`DegradationConfig` 新增 `drain_budget=300`、`drain_max_workers=6`。
+
+### 修改文件
+
+1. `backend/app/v4/pipeline.py`（`_judge_case_with_timeout` 线程版、`_judge_with_degradation` 挂 drain、`_drain_and_rereview`、Step 4.5 插入）
+2. `backend/app/v4/comparison/multi_judge.py`（新增 `_judge_with_provider_sync`）
+3. `backend/app/v4/degradation/config.py`（drain 参数）
+4. `backend/app/v4/degradation/context.py`（drain 挂载点 + 迟到统计）
+5. `backend/.env.example`（新参数说明）
+6. `docs/project/workflow.md`、`CHANGELOG.md`
+
+### 新增文件
+
+1. `backend/tests/e2e/test_use_case_3_slow_provider_drain.py`（慢 provider 假服务器 + 真实 API；验证 TIMEOUT 占位、drain 替换、存活恢复、主流程不被 per-case 拖慢）
+
+### 验证方式
+
+1. `python -m compileall` 语法检查
+2. `docker compose build backend` 重建镜像
+3. 容器内 `python tests/e2e/test_use_case_2_circuit_breaker.py`（既有回归）
+4. 容器内 `python tests/e2e/test_use_case_3_slow_provider_drain.py`（新用例）
+
+### 验证结果
+
+1. `python -m compileall` 语法检查通过
+2. `docker compose build backend` 重建镜像成功
+3. 既有回归 `test_use_case_2_circuit_breaker.py`：全部通过（熔断链路行为不变，degradation summary 含 `drained_late_count: 0`）
+4. 新用例 `test_use_case_3_slow_provider_drain.py`：全部通过（TIMEOUT 占位 → drain 迟到替换 → 存活数恢复 0→3/0→2；主流程 10.3s < 慢响应总和 16s，未 per-case 等待；`drained_late_count=5` 含 minimax 2 条必然值 + 真实 API 迟到条数）
+
+### 遗留问题
+
+1. 后台线程池排队无拒绝策略：池满时任务排队，靠 join 预算兜底（慢任务残留不阻塞主流程）
+2. 迟到结果不参与 Step 5.5 一星复查的 peer 判断（复查基于原始 judgments）
+3. `asyncio` 从 pipeline.py 移除后，`judge_with_panel()`（multi_judge.py 同步入口）未被调用但保留
+
+### 下一步建议
+
+1. 观察真实管线中 `drained_late_count` / `total_case_timeouts` 分布，校准 `DEGRADATION_EXTRA_WAIT` 与 `DEGRADATION_DRAIN_BUDGET`
+2. 关联 GitHub Issue 后补充 Issue 编号
+
+## 2026-08-21 drain 任务上限 + 提交限流
+
+### 任务目标
+
+在 drain 机制基础上增加资源控制：限制 drain 任务数上限（防堆积）+ 限制同时提交到线程池的任务数（防并发）。
+
+### 完成内容
+
+1. **drain 任务上限**：`DegradationConfig` 新增 `drain_max_tasks=60`（env: `DEGRADATION_DRAIN_MAX_TASKS`），`_judge_with_degradation` 中 append 前判断 `len(ctx.drain) < drain_max_tasks`，超限任务调用 `future.cancel()`（未执行的取消，已执行的结果丢弃）。
+2. **任务提交限流**：`DegradationConfig` 新增 `max_inflight=6`（env: `DEGRADATION_MAX_INFLIGHT`），`_submit_with_gate()` 用信号量控制同时提交到 executor 的任务数，超限任务在 submit 前阻塞等待，从源头限制 API 并发。
+3. **配置可 env 覆盖**：`from_env()` 新增 `DEGRADATION_DRAIN_MAX_TASKS`、`DEGRADATION_MAX_INFLIGHT` 读取。
+
+### 修改文件
+
+1. `backend/app/v4/degradation/config.py`（新增 `drain_max_tasks`、`max_inflight` 字段 + `from_env`）
+2. `backend/app/v4/pipeline.py`（新增 `_inflight_sema`、`_get_inflight_sema`、`_submit_with_gate`；`_judge_case_with_timeout` 改用 `_submit_with_gate`；`_judge_with_degradation` 加 drain 上限判断 + `cancel()`）
+3. `backend/.env.example`（新参数说明）
+4. `docs/project/workflow.md`（Step 4/4.5 描述 + 约束 #7 更新）
+5. `CHANGELOG.md`
+
+### 新增文件
+
+1. `backend/tests/e2e/test_use_case_3b_drain_max_tasks.py`（drain_max_tasks 上限验证）
+
+### 验证方式
+
+1. `docker compose build backend` 重建镜像
+2. 容器内 `python tests/e2e/test_use_case_2_circuit_breaker.py`（既有回归）
+3. 容器内 `python tests/e2e/test_use_case_3_slow_provider_drain.py`（既有回归）
+4. 容器内 `python tests/e2e/test_use_case_3b_drain_max_tasks.py`（新用例，drain_max_tasks=2）
+
+### 验证结果
+
+1. `docker compose build backend` 重建镜像成功
+2. `test_use_case_2_circuit_breaker.py`：全部通过
+3. `test_use_case_3_slow_provider_drain.py`：全部通过
+4. `test_use_case_3b_drain_max_tasks.py`：全部通过（3 case × 3 provider = 9 任务，3 个超时，drain 2 个，丢弃 1 个；`drained_late_count=2`，`error_judgments=1`）
+
+### 遗留问题
+
+1. `cancel()` 对已执行的任务无效（already running），仅能取消队列中未执行的任务；正常场景下线程池容量足够，任务几乎立刻执行，cancel 大部分返回 False
+2. `max_inflight=6` 与 `drain_max_workers=6` 对齐，当前场景最多 4 个单 provider 并发（3 当前 case + 1 超时），风险可控
+
+### 下一步建议
+
+1. 观察真实管线中 `drain_max_tasks` 触发频率，校准默认值
+2. 如需进一步限制单 provider 并发，可考虑 per-provider Semaphore（L2）
+
+### 2026-08-21 已知限制：主流程与 drain 任务线程池竞争
+
+#### 问题描述
+
+当前 Step 4 主流程和 Step 4.5 drain 任务共用同一个 `ThreadPoolExecutor`（`drain_max_workers=6`）。随着 case 推进，超时 drain 任务在线程池中累积，逐步挤占主流程可用线程。
+
+典型场景（12 case，每 case 1 超时 provider，drain 任务耗时 120s）：
+
+- Case 1~3：主流程 3 线程 + drain 累积，池未满，正常
+- Case 4 起：drain 任务 ≥ 3，加上主流程 3 线程 = 池满，后续 case 的 submit 需等 drain 释放线程
+- 预计 8/12 个 case 受阻塞影响
+
+#### 候选方案分析
+
+| 方案 | 改动 | 效果 | 结论 |
+|------|------|------|------|
+| 线程池扩容到 9 | 1 行 config | 推迟到 Case 7 才卡，不解决根本 | 收益有限 |
+| 双线程池（主流程 3 + drain 3） | pipeline.py ~30 行 | 完全隔离，但超时 future 需 resubmit，多一次 API 调用 | 与"不浪费已有调用"初衷冲突 |
+| 接受当前风险 | 无 | drain_max_tasks=60 + max_inflight=6 已有兜底 | 当前选择 |
+
+#### 当前结论
+
+维持现状。`drain_max_tasks=60` 限制 drain 累积上限，`max_inflight=6` 限制 API 并发。主流程被阻塞的表现是 case 处理延迟（等 drain 释放线程），不会导致功能错误或资源无限增长。
+
+如后续 case 数量显著增加（>20）或 drain 任务耗时成为瓶颈，可重新评估双线程池方案（需接受 resubmit 的额外 API 调用开销）。

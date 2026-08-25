@@ -3,14 +3,16 @@
 
 from __future__ import annotations
 
-import asyncio
+import concurrent.futures
 import json
 import sys
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from app.v4.comparison.multi_judge import (
-    _judge_with_provider,
+    _judge_with_provider_sync,
     _load_reverse_prompt,
 )
 from app.v4.comparison.report_generator import generate_consensus_reverse_report
@@ -311,14 +313,15 @@ def _match_reverse_with_trace(
 # ── Degradation helpers ────────────────────────────────────
 
 
-async def _judge_case_with_timeout(
+def _judge_case_with_timeout(
     case,
     providers: list[str],
     system_prompt: str,
     ceiling: float,
     extra_wait: float,
-) -> tuple[dict[str, dict], bool]:
-    """Run all providers in parallel with fixed extra-wait timeout.
+    executor: ThreadPoolExecutor,
+) -> tuple[dict[str, dict], bool, list[tuple[str, Future]]]:
+    """Run all providers in parallel with fixed extra-wait timeout (thread version).
 
     Waits for providers one-by-one (FIRST_COMPLETED). Once 2 valid (non-error)
     completions are collected, sets a fixed deadline for the remaining:
@@ -328,14 +331,19 @@ async def _judge_case_with_timeout(
     Before 2 valid samples, uses *ceiling* as the fallback timeout.
     Fast errors (connection refused, etc.) are excluded from valid_times
     so they do not pollute the formula.
+
+    Timed-out tasks are NOT cancelled: they keep running in the shared drain
+    executor, and the caller joins them after Step 4 via _drain_and_rereview()
+    so late-but-valid outputs are not wasted.
     """
-    start = time.monotonic()
-    tasks = {
-        asyncio.create_task(_judge_with_provider(case, p, system_prompt)): p
+    futures = {
+        _submit_with_gate(executor, _judge_with_provider_sync, case, p, system_prompt): p
         for p in providers
     }
+    # start 计时放在 submit 之后，避免信号量阻塞时间吃掉超时预算
+    start = time.monotonic()
 
-    pending = set(tasks.keys())
+    pending = set(futures.keys())
     results: dict[str, dict] = {}
     valid_times: list[float] = []   # elapsed times of non-error completions
     had_timeout = False
@@ -350,38 +358,80 @@ async def _judge_case_with_timeout(
         remaining = deadline - time.monotonic()
 
         if remaining <= 0:
-            for t in pending:
-                t.cancel()
-                results[tasks[t]] = make_error_judgment(
-                    tasks[t], "adaptive timeout", "TIMEOUT"
+            for f in pending:
+                results[futures[f]] = make_error_judgment(
+                    futures[f], "adaptive timeout", "TIMEOUT"
                 )
             had_timeout = True
             break
 
-        done, pending = await asyncio.wait(
-            pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
+        done, pending = concurrent.futures.wait(
+            pending, timeout=remaining, return_when=concurrent.futures.FIRST_COMPLETED,
         )
 
-        for t in done:
+        for f in done:
             elapsed = time.monotonic() - start
-            p = tasks[t]
-            if t.exception():
-                exc = t.exception()
+            p = futures[f]
+            try:
+                result = f.result()
+            except Exception as exc:
                 results[p] = make_error_judgment(
                     p, str(exc), classify_exception(exc) if exc else "UNKNOWN"
                 )
             else:
-                result = t.result()
                 results[p] = result
                 if result.get("coverage_status") != "error":
                     valid_times.append(elapsed)
 
-    return results, had_timeout
+    # Timed-out futures are handed back for draining; results already hold
+    # their TIMEOUT placeholders.
+    timed_out = [(futures[f], f) for f in pending]
+    return results, had_timeout, timed_out
 
 
 def _is_failure(judgment: dict) -> bool:
     """Check if a judgment dict represents a failure (error or very low confidence)."""
     return judgment.get("coverage_status") == "error"
+
+
+_drain_executor: ThreadPoolExecutor | None = None
+
+
+def _get_drain_executor() -> ThreadPoolExecutor:
+    """Shared background executor for timed-out judgments (process-wide)."""
+    global _drain_executor
+    if _drain_executor is None:
+        _drain_executor = ThreadPoolExecutor(
+            max_workers=DegradationConfig.from_env().drain_max_workers,
+            thread_name_prefix="degradation-drain",
+        )
+    return _drain_executor
+
+
+_inflight_sema: threading.Semaphore | None = None
+
+
+def _get_inflight_sema() -> threading.Semaphore:
+    """Gate limiting tasks submitted to executor simultaneously (process-wide)."""
+    global _inflight_sema
+    if _inflight_sema is None:
+        _inflight_sema = threading.Semaphore(
+            DegradationConfig.from_env().max_inflight
+        )
+    return _inflight_sema
+
+
+def _submit_with_gate(executor: ThreadPoolExecutor, fn, *args) -> Future:
+    """Submit fn to executor, blocking until an inflight slot is available.
+
+    The semaphore is released when the future completes (success or failure).
+    This prevents unbounded task accumulation when many cases are queued.
+    """
+    sema = _get_inflight_sema()
+    sema.acquire()
+    future = executor.submit(fn, *args)
+    future.add_done_callback(lambda _: sema.release())
+    return future
 
 
 def _judge_with_degradation(
@@ -393,14 +443,16 @@ def _judge_with_degradation(
 
     Handles:
     - Skipping providers marked unhealthy
-    - Case-level timeout via asyncio.wait
+    - Case-level timeout via concurrent.futures.wait
     - Recording per-provider failures for circuit breaker
+    - Handing timed-out judgments to ctx.drain for background finishing
     """
     from app.v4.models import MultiJudgeOutput, MultiJudgeResult
 
     system_prompt = _load_reverse_prompt()
     total = len(cases)
     results: list[MultiJudgeResult] = []
+    executor = _get_drain_executor()
 
     for idx, case in enumerate(cases):
         healthy = ctx.filter_healthy(providers)
@@ -412,15 +464,25 @@ def _judge_with_degradation(
         }
 
         # Parallel judge with adaptive timeout
-        gathered, had_timeout = asyncio.run(
-            _judge_case_with_timeout(
-                case, healthy, system_prompt,
-                ceiling=ctx.config.case_total_timeout,
-                extra_wait=ctx.config.extra_wait,
-            )
+        gathered, had_timeout, timed_out = _judge_case_with_timeout(
+            case, healthy, system_prompt,
+            ceiling=ctx.config.case_total_timeout,
+            extra_wait=ctx.config.extra_wait,
+            executor=executor,
         )
         if had_timeout:
             ctx.record_case_timeout()
+            for p, f in timed_out:
+                if len(ctx.drain) < ctx.config.drain_max_tasks:
+                    ctx.drain.append((case.case_id, p, f))
+                else:
+                    cancelled = f.cancel()
+                    print(
+                        f"  [degradation] drain limit ({ctx.config.drain_max_tasks}) reached, "
+                        f"discarding {case.case_id} {p}"
+                        f"{' (cancelled)' if cancelled else ' (already running)'}",
+                        file=sys.stderr,
+                    )
 
         # Update health per provider from actual results
         for provider, judgment in gathered.items():
@@ -449,6 +511,65 @@ def _judge_with_degradation(
         providers=providers,
         results=results,
     )
+
+
+def _drain_and_rereview(
+    multi_out: MultiJudgeOutput,
+    ctx: DegradationContext,
+    budget: float,
+) -> tuple[MultiJudgeOutput, set[str]]:
+    """Join timed-out judgments (Step 4.5) and apply late results.
+
+    Waits up to *budget* seconds for every future in ctx.drain. Late results
+    replace the TIMEOUT placeholder in the case's judgments so Step 5
+    consensus sees final judgments. Late valid results reset the provider's
+    failure counter; late errors keep the counter as-is (the TIMEOUT
+    placeholder already counted one failure).
+    """
+    if not ctx.drain:
+        return multi_out, set()
+
+    futures = [f for _, _, f in ctx.drain]
+    done, _ = concurrent.futures.wait(futures, timeout=budget)
+
+    case_map = {r.case_id: r for r in multi_out.results}
+    updated: set[str] = set()
+
+    for case_id, provider, future in ctx.drain:
+        if future not in done:
+            continue
+        mjr = case_map.get(case_id)
+        if mjr is None:
+            continue
+        old = mjr.judgments.get(provider, {})
+        if old.get("coverage_status") != "error":
+            # 不是 TIMEOUT 占位（已有真实结果），不覆盖
+            continue
+        try:
+            result = future.result()
+        except Exception as exc:
+            result = make_error_judgment(
+                provider, str(exc), classify_exception(exc) if exc else "UNKNOWN"
+            )
+        mjr.judgments[provider] = result
+        if result.get("coverage_status") != "error":
+            updated.add(case_id)
+            ctx.record_success(provider)
+            ctx.record_drained_late()
+            print(
+                f"  [degradation] drain: {case_id} {provider} late result "
+                f"applied ({result.get('coverage_status', '?')})",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"  [degradation] drain: {case_id} {provider} late result "
+                f"is also error ({result.get('analysis', '')[:60]})",
+                file=sys.stderr,
+            )
+
+    ctx.drain.clear()
+    return multi_out, updated
 
 
 def _count_surviving_providers(judgments: dict[str, dict]) -> int:
@@ -654,6 +775,23 @@ def run_reverse_pipeline(
     job.update(JobStatus.RUNNING, "Step 4/6: Multi-agent judging")
     ctx = DegradationContext(config=DegradationConfig.from_env())
     multi_out = _judge_with_degradation(cases, JUDGE_PROVIDERS, ctx)
+
+    # Step 4.5: Drain timed-out judgments — late-but-valid outputs are kept
+    # and replace their TIMEOUT placeholders before consensus runs.
+    if ctx.drain:
+        print()
+        print("=" * 50)
+        print(f"Step 4.5/6: Draining {len(ctx.drain)} timed-out judgments "
+              f"(budget {ctx.config.drain_budget:.0f}s)")
+        print("=" * 50)
+        multi_out, drained_ids = _drain_and_rereview(
+            multi_out, ctx, ctx.config.drain_budget
+        )
+        print(f"  Late results applied to {len(drained_ids)} case(s): "
+              f"{sorted(drained_ids) if drained_ids else 'none'}")
+    else:
+        drained_ids = set()
+
     multi_path = output_dir / "multi_judge_results.json"
     multi_path.write_text(
         multi_out.model_dump_json(indent=2, ensure_ascii=False),

@@ -17,6 +17,19 @@
 - 文档同步：`README.md`、`docs/architecture/*`、`docs/project/*`、`backend/.env.example` 移除 V3 表述；新增 ADR-002；ADR-001 标记 Partially Superseded。
 - 新增 ADR-003（移除 V4 早期正向原型与旧单模型反向 CLI）；ADR-002 D4 标记由 ADR-003 取代；`docs/architecture/current-architecture.md` 同步更新 prompts 资产清单与 ADR 引用。
 
+## [Unreleased] - 2026-08-21
+
+### Added
+
+- **drain 任务数上限**：新增 `DEGRADATION_DRAIN_MAX_TASKS`（默认 60）配置，超过上限的超时任务被 cancel（未执行的取消，已执行的结果丢弃），防止极端场景下 drain 任务无限堆积。
+- **任务提交限流**：新增 `DEGRADATION_MAX_INFLIGHT`（默认 6）配置，信号量控制同时提交到线程池的任务数，超限任务在 submit 前阻塞等待，从源头限制并发。新增 e2e 用例3b（drain_max_tasks 上限验证）。
+
+## [Unreleased] - 2026-08-19
+
+### Added
+
+- **case 级超时后台收尾（drain）**：Step 4 多智能体裁判改为线程池执行（concurrent.futures），超时的裁判任务不再取消丢弃，而是转入后台线程池继续执行；Step 4.5 在总预算（`DEGRADATION_DRAIN_BUDGET`，默认 300s）内统一收尾，迟到的有效结果替换 TIMEOUT 占位后进入共识，慢但有效的输出不再被舍掉。新增 `degradation.drained_late_count` 统计与 e2e 用例3（慢 provider 收尾验证）。
+
 ## [Unreleased] - 2026-08-24
 
 ### Changed

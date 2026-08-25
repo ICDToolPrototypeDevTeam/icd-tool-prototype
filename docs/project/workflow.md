@@ -32,11 +32,21 @@ Step 3: 反向匹配（含条目过滤→信号画像→Block 聚合→HLR 分�
     3f: 可选追溯表预筛选 + 兜底机制 — matching/traceability.py
 
 Step 4: 多智能体裁判（含降级保护）
-    DeepSeek / MiniMax / Qwen 三模型并行独立判定
+    DeepSeek / MiniMax / Qwen 三模型并行独立判定（线程池 + concurrent.futures 执行模型）
+    任务提交限流：信号量（DEGRADATION_MAX_INFLIGHT，默认 6）控制同时提交到线程池的任务数，超限任务在 submit 前阻塞等待
     Case 级超时控制：前 2 个完成后第三个固定额外等待（默认 120s），不足 2 个时兜底上限（300s）
+    超时任务不取消：转后台线程池继续执行，等待 Step 4.5 统一收尾（迟到但有效的输出不丢弃）
     Provider 熔断器：连续失败达阈值后自动跳过，TTL 到期自动恢复
     模块: comparison/{multi_judge,semantic_judge}.py + degradation/{config,context,fallback}.py
     LLM 抽象: llm/factory.py → get_llm(provider)
+
+Step 4.5: 超时任务后台收尾（drain）
+    统一 join Step 4 中超时的裁判任务，总预算默认 300s（DEGRADATION_DRAIN_BUDGET）
+    drain 任务数上限（DEGRADATION_DRAIN_MAX_TASKS，默认 60）：超限的超时任务被 cancel（未执行的取消，已执行的结果丢弃）
+    预算内返回的有效结果替换该 provider 的 TIMEOUT 占位，进入 Step 5 共识
+    预算到期未返回的维持 TIMEOUT 降级；迟到失败不重复计入熔断失败计数
+    统计: degradation.drained_late_count
+    模块: pipeline.py `_drain_and_rereview()` + degradation/context.py
 
 Step 5: Review Agent 共识（含降级后处理）
     对三模型判定结果综合复核并给出星级评价（1-3★）
@@ -134,7 +144,7 @@ Review Agent 汇总三个模型的结论，对分歧处复核，给出最终判�
 3. **JSON 中间产物不暴露**：ADR-001 D7。7 类 JSON 仅落盘，不通过 API 下载。
 4. **env 保存/恢复**：V4 runner 后台线程在进入时备份 `JUDGE_PROVIDERS` 与 `USE_MOCK_LLM`，`try/finally` 按 None/赋值恢复。
 5. **追溯表预筛选（可选）**：仅 `enable_traceability_prefilter=true` 时走 `matching/traceability.py`，否则 `_match_reverse_with_trace` 跳过。
-6. **降级保护**：Step 4 的 `_judge_with_degradation()` 在每 case 前过滤 unhealthy provider，已熔断的 provider 不再发起 HTTP 调用，超时的 provider 补 error judgment 而不中断 case。Step 4 失败兜底（JSON 解析失败 / API 错误 / 重试耗尽）统一归一为 `coverage_status="error"`。Step 5 的 `_apply_degradation_review()` 对 Review Agent 输出做后处理，不修改 `review_judgments()` 本身；Step 5.6 复查后重新应用降级约束。
+6. **降级保护**：Step 4 的 `_judge_with_degradation()` 在每 case 前过滤 unhealthy provider，已熔断的 provider 不再发起 HTTP 调用。任务提交受信号量限流（`DEGRADATION_MAX_INFLIGHT`，默认 6），超限任务在 submit 前阻塞等待。超时的 provider 先补 error judgment 占位而不中断 case，任务本体转入后台线程池。Step 4.5 在总预算（`DEGRADATION_DRAIN_BUDGET`，默认 300s）内统一 join，drain 任务数受上限约束（`DEGRADATION_DRAIN_MAX_TASKS`，默认 60），超限任务被 cancel（未执行的取消，已执行的结果丢弃）。迟到的有效结果替换占位后进入 Step 5 共识。Step 4 失败兜底（JSON 解析失败 / API 错误 / 重试耗尽）统一归一为 `coverage_status="error"`。Step 5 的 `_apply_degradation_review()` 对 Review Agent 输出做后处理，不修改 `review_judgments()` 本身；Step 5.6 复查后重新应用降级约束。
 
 ## 12. 异常处理
 
@@ -150,7 +160,7 @@ Review Agent 汇总三个模型的结论，对分歧处复核，给出最终判�
 | Step 5.6 部分共识重跑 | 共识重跑失败 | 该 case 保持 Step 5 原结果 | 仅影响 re_reviewed_ids 中的失败条目 |
 | Step 5.6 降级 | 存活 provider ≤ 2 | 星级受硬上限约束（0 个存活强制 1★，1 个 ≤1★，2 个 ≤2★），agreement 可能被覆盖为 single_source / no_consensus | `degradation.review_star_capped_count` 递增 |
 | Step 6 报告生成 | docx 写盘失败 | `outputs.<key>` 某项为 false | `/result.outputs` 部分 false |
-| Step 4 降级超时 | 单 case 超时（t2+120s 或 300s 兜底） | 超时 provider 得 error judgment，其余正常 | `degradation.total_case_timeouts` 递增 |
+| Step 4 降级超时 | 单 case 超时（t2+120s 或 300s 兜底） | 超时 provider 先得 TIMEOUT error judgment，任务转后台；drain 上限（`drain_max_tasks`）内任务保留等待 join，超限任务 cancel；Step 4.5 预算内返回的有效结果替换占位 | `degradation.total_case_timeouts` 递增；迟到有效结果使 `degradation.drained_late_count` 递增 |
 | Step 4 降级熔断 | Provider 连续失败 ≥ 3 次 | 该 provider 被标记 unhealthy，后续 case 跳过 | `degradation.provider_status` 显示 unhealthy |
 | Step 4 全部 unhealthy | 所有 provider 均熔断 | `AllProvidersUnhealthyError` → job FAILED | `/result` 返 409 |
 

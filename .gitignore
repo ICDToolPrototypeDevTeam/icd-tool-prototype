@@ -75,3 +75,7 @@ input_doc_file/
 # Issue draft files
 
 issues_file/
+
+# Personal notes
+
+notes/
