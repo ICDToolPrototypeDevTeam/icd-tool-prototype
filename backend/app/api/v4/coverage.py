@@ -17,14 +17,22 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from app.api.v4.runner import launch_v4_pipeline
 from app.api.v4.schemas import V4AnalyzeResponse
 from app.job_manager import job_manager
+from app.v4.parsers import registered_extensions
 
 
 router = APIRouter()
 
 # ADR-001 §2 校验白名单
 ALLOWED_JUDGE_PROVIDERS = {"deepseek", "minimax", "qwen"}
-# Issue #63 / Task 12: v4 controller profile whitelist (matches profiles/ subdirs)
-ALLOWED_CONTROLLER_PROFILES = {"ams", "fgmc", "hscu"}
+# Issue #74: HLR file extensions come from the parser factory. New
+# parsers registered in ``parsers/hlr_parser_factory.py`` are accepted
+# here without changing the API surface.
+SUPPORTED_HLR_EXTENSIONS = frozenset(registered_extensions())
+# Issue #63 / Task 12 + Issue #74: v4 controller profile whitelist.
+# Must match the directories under ``backend/app/v4/profiles/``.
+# Each profile is responsible for declaring its own HLR parser driver /
+# matcher enhancements / trace strategy.
+ALLOWED_CONTROLLER_PROFILES = {"ams", "fgmc", "hscu", "rpdu"}
 
 # 文件名安全字符：保留中英数 + . _ - + 空格 + 各种括号（合法 FS 字符）
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._\-一-龥\s()（）\[\]【】]")
@@ -73,8 +81,18 @@ async def coverage_analysis(
     controller_profile: str = Form("ams"),
 ):
     # —— 字段校验 ——
-    if not hlr_word_file.filename.lower().endswith(".docx"):
-        raise HTTPException(status_code=422, detail="hlr_word_file must be .docx")
+    # Issue #74: extension whitelist comes from the parser factory, so
+    # adding a new HLR format only requires a factory registration —
+    # the API stays in sync.
+    _hlr_ext = Path(hlr_word_file.filename or "").suffix.lower()
+    if _hlr_ext not in SUPPORTED_HLR_EXTENSIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"hlr_word_file extension must be one of "
+                f"{sorted(SUPPORTED_HLR_EXTENSIONS)} (got {_hlr_ext!r})"
+            ),
+        )
 
     if eoicd_publisher_file is None and eoicd_subscriber_file is None:
         raise HTTPException(status_code=422, detail="at least one of eoicd_publisher_file or eoicd_subscriber_file is required")
@@ -95,7 +113,10 @@ async def coverage_analysis(
     if controller_profile not in ALLOWED_CONTROLLER_PROFILES:
         raise HTTPException(
             status_code=422,
-            detail=f"controller_profile: unsupported '{controller_profile}'; allowed: ams, fgmc, hscu",
+            detail=(
+                f"controller_profile: unsupported '{controller_profile}'; "
+                f"allowed: {', '.join(sorted(ALLOWED_CONTROLLER_PROFILES))}"
+            ),
         )
 
     # —— 创建 Job 与目录（V4 路径：backend/output/v4/{job_id}/input/ + output/）——

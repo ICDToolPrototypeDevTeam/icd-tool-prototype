@@ -42,7 +42,7 @@ from app.v4.models import (
     ReverseMatchOutput,
 )
 from app.v4.parsers.eoicd_excel_parser import EoICDExcelParser
-from app.v4.parsers.hlr_word_parser import HLRWordParser
+from app.v4.parsers import create_hlr_parser
 from app.v4.profiles.base import ControllerProfile, TraceabilityConfig
 from app.v4.profiles import apply_hlr_preprocess_hook
 from app.v4.traceability import build_trace_index, name_to_block_key
@@ -111,14 +111,19 @@ def _parse_hlr(
     output_path: Path,
     profile: ControllerProfile | None = None,
 ) -> HLROutput:
-    """Parse the HLR Word document.
+    """Parse the HLR input file.
+
+    The parser is selected by extension via ``create_hlr_parser``:
+
+      - ``.docx`` -> ``HLRWordParser`` (AMS/FGMC/HSCU; profile-driven field map).
+      - ``.xlsx`` -> ``HLRExcelParser`` (RPDU; fixed column mapping A/B/C from row 3).
 
     When ``profile`` is ``None`` the registry's AMS default is used (so that
     pre-#63 callers get byte-identical output).
     """
     print(f"Parsing HLR: {input_path}")
     resolved = _resolve_profile(profile)
-    parser = HLRWordParser(input_path, profile=resolved)
+    parser = create_hlr_parser(input_path, profile=resolved)
     result: HLROutput = parser.parse()
 
     # Profile-specific HLR content rewrite (e.g. HSCU LBL_X → L<octal>_X
@@ -157,6 +162,52 @@ def _count_match_types(results: list) -> dict[str, int]:
     for r in results:
         counts[r.match_type] = counts.get(r.match_type, 0) + 1
     return counts
+
+
+def match_reverse_per_hlr(
+    hlr_requirements: list,
+    hlr_labels: dict,
+    per_hlr_eoicd: dict[str, list],
+    profile: ControllerProfile | None = None,
+) -> ReverseMatchOutput:
+    """Run reverse matching per-HLR with a per-HLR EoICD subset.
+
+    Each HLR is matched against its own EoICD subset, not a global union.
+    This is the correct semantics for traceability-based prefiltering:
+    HLR_A should not see HLR_B's traced blocks (Issue #74).
+
+    ``profile`` is forwarded to each per-HLR ``match_reverse`` call so RPDU's
+    four matcher enhancements (Chinese-suffix stripping, direction-soft
+    matching, signal-number bonus, top_k=50) still apply.
+    """
+    from app.v4.matching.reverse_matcher import match_reverse as _match_reverse
+
+    all_results: list = []
+    for hlr in hlr_requirements:
+        eoicd_subset = per_hlr_eoicd.get(hlr.requirement_id, [])
+        single_hlr_labels = (
+            {hlr.requirement_id: hlr_labels[hlr.requirement_id]}
+            if hlr.requirement_id in hlr_labels
+            else {}
+        )
+        out = _match_reverse(
+            [hlr],
+            single_hlr_labels,
+            eoicd_subset,
+            profile=profile,
+        )
+        all_results.extend(out.results)
+
+    total_hlr = len(hlr_requirements)
+    total_eoicd = sum(len(v) for v in per_hlr_eoicd.values())
+    stats = _count_match_types(all_results)
+    return ReverseMatchOutput(
+        total_hlr=total_hlr,
+        total_eoicd_profiles=total_eoicd,
+        stats=stats,
+        results=all_results,
+        eoicd_unmatched_profile_keys=[],
+    )
 
 
 def _merge_reverse_match_outputs(
@@ -203,6 +254,7 @@ def _match_reverse_with_trace(
     eoicd_requirements: list,
     trace_dir: Path,
     trace_cfg: TraceabilityConfig,
+    profile: ControllerProfile | None = None,
 ) -> ReverseMatchOutput:
     """Run reverse matching with traceability-based pre-filtering.
 
@@ -213,8 +265,15 @@ def _match_reverse_with_trace(
     ``trace_cfg`` is required (Task 7 made the second arg to
     ``build_trace_index`` non-optional). Callers resolve it from a profile
     (via ``_resolve_profile``) so AMS defaults keep working.
+
+    ``profile`` (Issue #74) is forwarded to ``build_trace_index`` so the
+    ``header_adaptive`` trace strategy activates for RPDU, and to each
+    ``match_reverse`` call so RPDU's enhancements (Chinese-suffix stripping,
+    direction-soft matching, signal-number bonus, top-k=50) are applied.
+    ``profile=None`` keeps the AMS default behaviour (byte-identical to
+    pre-#63 / pre-#74 code).
     """
-    trace_index = build_trace_index(trace_dir, trace_cfg)
+    trace_index = build_trace_index(trace_dir, trace_cfg, profile=profile)
     print(f"  Traced HLRs: {trace_index.total_hlrs_traced}")
     print(f"  ERDs: {trace_index.total_erds}")
     print(f"  ICD FullNames: {trace_index.total_icd_fullnames}")
@@ -224,12 +283,16 @@ def _match_reverse_with_trace(
     group_a_hlrs: list = []
     group_b_hlrs: list = []
     all_traced_block_keys: set[str] = set()
+    # Issue #74 (RPDU): per-HLR traced block sets so each HLR only sees its
+    # own traced blocks, not the global union of all HLRs' blocks.
+    hlr_traced_blocks: dict[str, set[str]] = {}
 
     for hlr in hlr_requirements:
         traced_blocks = trace_index.hlr_to_blocks.get(hlr.requirement_id)
         if traced_blocks:
             group_a_hlrs.append(hlr)
             all_traced_block_keys.update(traced_blocks)
+            hlr_traced_blocks[hlr.requirement_id] = traced_blocks
         else:
             group_b_hlrs.append(hlr)
 
@@ -240,19 +303,52 @@ def _match_reverse_with_trace(
     group_a_ids = {h.requirement_id for h in group_a_hlrs}
     group_b_ids = {h.requirement_id for h in group_b_hlrs}
 
+    # Issue #74 (RPDU): opt-in per-HLR prefilter pool. AMS/FGMC/HSCU keep
+    # legacy union-pool semantics (``profile.prefilter_per_hlr`` defaults
+    # to False).
+    use_per_hlr = bool(profile and getattr(profile, "prefilter_per_hlr", False))
+
     # Group A: filtered EoICD
     if group_a_hlrs:
-        filtered_eoicd = []
-        for req in eoicd_requirements:
-            bk = name_to_block_key(req.signal_name)
-            if bk in all_traced_block_keys:
-                filtered_eoicd.append(req)
-        print(f"  Filtered EoICD: {len(filtered_eoicd)} / {len(eoicd_requirements)} entries")
-        result_a = match_reverse(
-            group_a_hlrs,
-            {k: v for k, v in hlr_labels.items() if k in group_a_ids},
-            filtered_eoicd,
-        )
+        if use_per_hlr:
+            # Per-HLR filtered EoICD: each HLR sees only its own traced
+            # blocks. Prevents unrelated blocks (from other HLRs sharing
+            # the same EoICD) from polluting top_k=50 with status/noise.
+            per_hlr_filtered: dict[str, list] = {}
+            for hlr_id, traced_bks in hlr_traced_blocks.items():
+                per_hlr_filtered[hlr_id] = [
+                    req for req in eoicd_requirements
+                    if (bk := name_to_block_key(req.signal_name)) in traced_bks
+                ]
+            total_filtered = sum(len(v) for v in per_hlr_filtered.values())
+            print(
+                f"  Per-HLR filtered EoICD total: {total_filtered} / "
+                f"{len(eoicd_requirements)} entries"
+            )
+            result_a = match_reverse_per_hlr(
+                group_a_hlrs,
+                {k: v for k, v in hlr_labels.items() if k in group_a_ids},
+                per_hlr_filtered,
+                profile=profile,
+            )
+        else:
+            # Legacy union-pool (AMS/FGMC/HSCU): all Group A HLRs share one
+            # filtered EoICD subset built from the union of traced blocks.
+            filtered_eoicd = []
+            for req in eoicd_requirements:
+                bk = name_to_block_key(req.signal_name)
+                if bk in all_traced_block_keys:
+                    filtered_eoicd.append(req)
+            print(
+                f"  Filtered EoICD: {len(filtered_eoicd)} / "
+                f"{len(eoicd_requirements)} entries"
+            )
+            result_a = match_reverse(
+                group_a_hlrs,
+                {k: v for k, v in hlr_labels.items() if k in group_a_ids},
+                filtered_eoicd,
+                profile=profile,
+            )
         print(f"  Group A stats: {result_a.stats}")
 
         # Per-HLR fallback: if prefilter matching produced "无匹配" for
@@ -269,6 +365,7 @@ def _match_reverse_with_trace(
                 fallback_hlrs,
                 {k: v for k, v in hlr_labels.items() if k in fallback_ids},
                 eoicd_requirements,
+                profile=profile,
             )
             # Replace the failed results with fallback results
             fb_map = {r.hlr_id: r for r in result_fb.results}
@@ -288,6 +385,7 @@ def _match_reverse_with_trace(
             group_b_hlrs,
             {k: v for k, v in hlr_labels.items() if k in group_b_ids},
             eoicd_requirements,
+            profile=profile,
         )
         print(f"  Group B stats: {result_b.stats}")
     else:
@@ -741,6 +839,7 @@ def run_reverse_pipeline(
             eoicd_out.requirements,
             trace_dir,
             resolved_profile.traceability,
+            profile=resolved_profile,
         )
     else:
         print(f"Step 3/6: Reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")
@@ -750,6 +849,7 @@ def run_reverse_pipeline(
             hlr_out.requirements,
             hlr_labels,
             eoicd_out.requirements,
+            profile=resolved_profile,
         )
     match_path = output_dir / "reverse_matches.json"
     match_path.write_text(

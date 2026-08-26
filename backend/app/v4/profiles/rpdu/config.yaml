@@ -1,0 +1,195 @@
+# RPDU Profile (Issue #74 — multi-controller adaptation)
+#
+# Remote Power Distribution Unit controller. Branches away from AMS's
+# default Word-based HLR + column-fixed traceability path with three
+# profile-scoped switches:
+#
+#   1. hlr_parser_driver.driver: "xlsx"  — select ``HLRExcelParser``
+#      instead of ``HLRWordParser`` (cells A=需求编号, B=模块名称,
+#      C=需求内容; data starts at row 3).
+#
+#   2. trace_strategy: "header_adaptive" — scan each sheet's header row
+#      for ERD/ICD/HLR Chinese keywords instead of trusting a hardcoded
+#      column index. Header rows are unreliable across RPDU revisions.
+#
+#   3. matcher: opt in to all four RPDU-specific reverse-match
+#      enhancements (Chinese-suffix stripping, direction-soft matching
+#      with conflict tag, signal-number bonus, top_k=50).
+#
+# All other AMS/FGMC/HSCU profiles omit these sections and therefore
+# fall back to legacy (byte-identical) behaviour.
+
+profile:
+  id: rpdu
+  display_name: 远程功率分配单元 (RPDU)
+  version: 1.0
+
+# HLR input format: Excel workbook (not Word document).
+hlr_parser_driver:
+  driver: xlsx
+
+# HLR parser config (legacy Word fields kept for completeness even
+# though xlsx driver bypasses HLRWordParser).
+hlr_parser:
+  glossary_table_index: 0
+  requirement_table_min_rows: 3
+  filter_non_requirement: false
+  field_map:
+    id: ["需求编号"]
+    content: ["需求内容"]
+    implementation: ["模块名称"]
+
+# Classifier keywords — reuses the AMS analogue/discrete/bus vocabulary
+# plus RPDU-specific signal words discovered from the RPDU HLR corpus
+# (配电 / 功率 / 汇流条 / 接触器 / 馈线 / 通道状态).
+classifier_keywords:
+  analog:
+    - "ADC"
+    - "模拟量"
+    - "电压"
+    - "电流"
+    - "传感器"
+    - "采样"
+    - "量程"
+    - "[Vv]oltage"
+    - "[Cc]urrent"
+    - "[Ss]ensor"
+    - "A/D"
+    - "AD转换"
+    - "ADCIN"
+    - "功率"
+    - "电流值"
+    - "电压值"
+    - "负载"
+  discrete:
+    - "微动"
+    - "开关"
+    - "[Tt]rue"
+    - "[Ff]alse"
+    - "故障"
+    - "跳变"
+    - "触点"
+    - "离散量"
+    - "开关量"
+    - "BOOL"
+    - "BOOLEAN"
+    - "DISCRETE"
+    - "状态位"
+    - "有效位"
+    - "接触器"
+    - "汇流条状态"
+    - "通道状态"
+    - "过流"
+    - "过压"
+  bus:
+    - "CAN"
+    - "A825"
+    - "A664"
+    - "A429"
+    - "AFDX"
+    - "总线"
+    - "ARINC"
+    - "通信"
+    - "接收"
+    - "发送"
+    - "写入"
+    - "采集"
+    - "解析"
+    - "RS485"
+    - "RS422"
+  direction_send:
+    - "发送"
+    - "写入"
+    - "输出"
+    - "上报"
+    - "发布"
+    - "驱动"
+    - "设置"
+    - "控制"
+    - "接通"
+    - "断开"
+  direction_receive:
+    - "接收"
+    - "采集"
+    - "解析"
+    - "获取"
+    - "读取"
+    - "监测"
+    - "判断"
+    - "检测"
+    - "输入"
+    - "反馈"
+
+# Traceability — filename patterns observed in RPDU test input.
+# trace_strategy "header_adaptive" ignores the fixed ``columns:`` indices
+# below; they are kept only so the legacy ``profile_columns`` strategy
+# stays usable as a fallback for debugging.
+traceability:
+  table1:
+    filename_patterns:
+      - "*配电系统需求与EoICD追溯表*.xlsx"
+      - "*追溯表*.xlsx"
+    sheet_match:
+      by_name_keywords:
+        - "配电系统需求与EoICD"
+        - "EoICD追溯表"
+      fallback_index: 0
+    columns:
+      erd: 0
+      icd_fullname: 1
+  table2:
+    filename_patterns:
+      - "*单模块需求矩阵分析(设备2软件).xlsx"
+      - "*单模块需求矩阵分析*.xlsx"
+      - "*矩阵分析*.xlsx"
+    sheet_match:
+      by_name_keywords:
+        - "Sheet1"
+        - "矩阵"
+      fallback_index: 0
+    columns:
+      erd: 0
+      hlr: 3
+      module: 4
+    skip_module: []
+
+# Header-adaptive trace parsing — scan header row for ERD/ICD/HLR
+# keywords instead of using the (ignored) fixed column indices.
+trace_strategy: header_adaptive
+
+# Issue #74 (RPDU): run Group A matching per-HLR with each HLR's own
+# traced blocks. Prevents other-HLR blocks from polluting top_k=50
+# (e.g. LRM status signals drowning out heater ESW_CMD signals).
+prefilter_per_hlr: true
+
+ai_labeling:
+  device_examples:
+    - "RPDU"
+    - "远程功率分配单元"
+    - "ATA24"
+    - "EPS"
+    - "配电"
+    - "汇流条"
+    - "接触器"
+    - "馈线"
+    - "发电机"
+    - "TRU"
+  signal_examples:
+    - "接触器状态"
+    - "汇流条电压"
+    - "汇流条电流"
+    - "馈线功率"
+    - "馈线电流"
+    - "过流保护"
+    - "过压保护"
+    - "RPDU"
+    - "CB"
+    - "Bus"
+
+# Reverse-matcher enhancements — all 4 flags enabled.
+# See ``MatcherEnhancementConfig`` (profiles/base.py) for semantics.
+matcher:
+  enable_cn_suffix_strip: true               # 状态/命令/值/位/参数/数据/...
+  enable_direction_soft_on_exact_signal: true  # keep dir-contradicting candidates when signal name matches
+  enable_signal_number_bonus: true            # reward exact 3+ digit signal numbers
+  top_k: 50                                   # wider candidate window (legacy default 20)

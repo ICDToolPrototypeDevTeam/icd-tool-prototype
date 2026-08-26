@@ -64,6 +64,55 @@ class AILabelingConfig:
 
 
 @dataclass(frozen=True)
+class HLRParserDriverConfig:
+    """Selects the HLR parser implementation.
+
+    Defaults to ``docx`` (legacy behaviour, ``HLRWordParser``). RPDU-style
+    controllers whose HLR lives in an Excel sheet declare ``driver: xlsx``
+    so the factory dispatches to ``HLRExcelParser``.
+
+    Adding a new driver is opt-in: profiles that omit this section keep
+    the existing Word-only path.
+    """
+
+    driver: str = "docx"  # "docx" | "xlsx"
+
+
+@dataclass(frozen=True)
+class MatcherEnhancementConfig:
+    """Profile-specific knobs for the reverse-matcher scorer.
+
+    Every flag defaults to False / 20 so AMS/FGMC/HSCU — which omit this
+    section entirely — keep byte-identical scoring. Only RPDU (and any
+    future profile that declares them) opt in.
+
+    Attributes:
+        enable_cn_suffix_strip: Strip common Chinese suffixes
+            ("状态", "命令", "值", ...) from HLR signal keywords and family
+            strings before boundary matching. Lets an HLR that writes
+            ``EDP_TCB_STATUS_034状态`` correctly match a family named
+            ``EDP_TCB_STATUS_034``.
+        enable_direction_soft_on_exact_signal: When HLR direction
+            contradicts the block's direction but the signal name already
+            matches exactly (>= 30 pts), DON'T drop the candidate. Tag it
+            with ``direction_conflict`` so the AI judge can review the
+            inconsistency (used for "注入故障" / 文档笔误 scenarios).
+        enable_signal_number_bonus: Award extra points when the HLR
+            content contains a 3+ digit signal number that also appears in
+            the block's signal_family. Skips protocol constants like
+            "200", "429", "664" to avoid noise.
+        top_k: Override the hardcoded ``_TOP_K = 20`` for candidates
+            passed downstream. RPDU raises this to 50 because its HLR
+            catalogue expects a wider candidate window.
+    """
+
+    enable_cn_suffix_strip: bool = False
+    enable_direction_soft_on_exact_signal: bool = False
+    enable_signal_number_bonus: bool = False
+    top_k: int = 20  # default matches legacy hardcoded constant
+
+
+@dataclass(frozen=True)
 class HLRPreprocessConfig:
     """Optional HLR pre-processing configuration for profile-specific transformations.
 
@@ -110,6 +159,22 @@ class ControllerProfile:
     hlr_preprocess: HLRPreprocessConfig = field(
         default_factory=HLRPreprocessConfig
     )
+    hlr_parser_driver: HLRParserDriverConfig = field(
+        default_factory=HLRParserDriverConfig
+    )
+    matcher: MatcherEnhancementConfig = field(
+        default_factory=MatcherEnhancementConfig
+    )
+    # Trace strategy: "profile_columns" (legacy, controlled by columns: cfg)
+    # or "header_adaptive" (RPDU-style: scan header row for ERD/ICD/HLR
+    # keywords to locate columns automatically).
+    trace_strategy: str = "profile_columns"
+    # Issue #74 (RPDU): run Group A matching per-HLR instead of union-pool.
+    # Each HLR sees only its own traced EoICD blocks, preventing unrelated
+    # blocks (from other HLRs sharing the same EoICD) from polluting the
+    # candidate pool and overflowing top_k=50 with status/noise signals.
+    # Defaults to False so AMS/FGMC/HSCU keep legacy union-pool semantics.
+    prefilter_per_hlr: bool = False
 
 
 def _to_tuple(value: Any) -> tuple:
@@ -180,6 +245,37 @@ def _parse_ai_labeling(data: dict[str, Any]) -> AILabelingConfig:
     )
 
 
+def _parse_hlr_parser_driver(data: dict[str, Any] | None) -> HLRParserDriverConfig:
+    if not data:
+        return HLRParserDriverConfig()
+    driver = str(data.get("driver", "docx")).lower().strip()
+    if driver not in ("docx", "xlsx"):
+        raise ProfileLoadError(
+            f"hlr_parser_driver.driver must be 'docx' or 'xlsx', got {driver!r}"
+        )
+    return HLRParserDriverConfig(driver=driver)
+
+
+def _parse_matcher_enhancement(data: dict[str, Any] | None) -> MatcherEnhancementConfig:
+    if not data:
+        return MatcherEnhancementConfig()
+    top_k_raw = data.get("top_k", 20)
+    try:
+        top_k = int(top_k_raw)
+    except (TypeError, ValueError) as e:
+        raise ProfileLoadError(
+            f"matcher.top_k must be an integer, got {top_k_raw!r}"
+        ) from e
+    return MatcherEnhancementConfig(
+        enable_cn_suffix_strip=bool(data.get("enable_cn_suffix_strip", False)),
+        enable_direction_soft_on_exact_signal=bool(
+            data.get("enable_direction_soft_on_exact_signal", False)
+        ),
+        enable_signal_number_bonus=bool(data.get("enable_signal_number_bonus", False)),
+        top_k=top_k,
+    )
+
+
 def _parse_hlr_preprocess(data: dict[str, Any] | None) -> HLRPreprocessConfig:
     if not data:
         return HLRPreprocessConfig()
@@ -225,4 +321,8 @@ def load_profile_from_yaml(yaml_path: Path) -> ControllerProfile:
         traceability=_parse_traceability(data.get("traceability", {})),
         ai_labeling=_parse_ai_labeling(data.get("ai_labeling", {})),
         hlr_preprocess=_parse_hlr_preprocess(data.get("hlr_preprocess")),
+        hlr_parser_driver=_parse_hlr_parser_driver(data.get("hlr_parser_driver")),
+        matcher=_parse_matcher_enhancement(data.get("matcher")),
+        trace_strategy=str(data.get("trace_strategy", "profile_columns")),
+        prefilter_per_hlr=bool(data.get("prefilter_per_hlr", False)),
     )

@@ -10,6 +10,15 @@ hlr_parser:
   non_requirement_value: "否"
   field_map:
     id:
+      # Issue #74 follow-up (FGMC): FGMC HLR tables carry two ID columns —
+      # row 0 ``ID`` holds an internal docx sequence number (e.g. 1781)
+      # and row 1 ``需求编号`` holds the official HLR identifier
+      # (e.g. ``FGMC_OFP_CSCI_HLR_005906``) that the traceability tables
+      # reference. Picking up ``ID`` produced identifiers that never match
+      # Table 2's child column, so Group A stayed 0. ``需求编号`` is now
+      # the primary alias; ``ID`` is kept as a fallback for any legacy
+      # docx that lacks the row 1 header.
+      - "需求编号"
       - "ID"
       - "RequirementID"
       - "需求ID"
@@ -18,7 +27,14 @@ hlr_parser:
       - "需求中文"
       - "Description"
     code:
-      - "需求编号"
+      # ``需求编号`` deliberately omitted here. ``_build_field_map_index``
+      # stores one std_field per header text, so listing ``需求编号`` under
+      # both ``id`` and ``code`` would let whichever field is iterated
+      # last win — and for FGMC the official HLR identifier
+      # (``FGMC_OFP_CSCI_HLR_005906``) lives at the ``需求编号`` row of
+      # every HLR table and MUST be picked up by ``id`` so the trace
+      # chain (HLR→ERD→ICD) can match Table 2's child column. Keep
+      # ``RequirementCode`` as the legacy alias for any other controller.
       - "RequirementCode"
     object_type:
       - "对象类型"
@@ -136,11 +152,17 @@ traceability:
       - "*追溯*.xlsx"
       - "*接口基线*.xlsx"
     sheet_match:
+      # Issue #74 follow-up (FGMC): the FGMC traceability workbook contains
+      # both a current ``待填_需求接口追溯表`` sheet and an obsolete
+      # ``接口基线表_EoICD_old_待删除`` sheet that also matches the broad
+      # ``接口基线`` substring. ``_select_sheet`` picks the first keyword
+      # hit, so we list the specific current-sheet name first to avoid the
+      # obsolete sheet. AMS/HSCU/RPDU profiles are not affected — they
+      # have their own config.yaml.
       by_name_keywords:
-        - "追溯"
-        - "接口基线"
-        - "接口基线表_EoICD"
         - "待填_需求接口追溯表"
+        - "追溯"
+        - "接口基线表_EoICD"
       fallback_index: 0
     columns:
       erd: 3

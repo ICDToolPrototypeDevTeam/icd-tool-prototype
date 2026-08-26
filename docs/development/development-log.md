@@ -1427,3 +1427,232 @@ FGMC（燃油测量管理计算机）作为第二个测试样例引入后，原�
 维持现状。`drain_max_tasks=60` 限制 drain 累积上限，`max_inflight=6` 限制 API 并发。主流程被阻塞的表现是 case 处理延迟（等 drain 释放线程），不会导致功能错误或资源无限增长。
 
 如后续 case 数量显著增加（>20）或 drain 任务耗时成为瓶颈，可重新评估双线程池方案（需接受 resubmit 的额外 API 调用开销）。
+
+### 2026-08-25 Issue #74：RPDU 多控制器适配合并
+
+#### 任务目标
+
+将 RPDU 本地分支适配代码（Excel 格式 HLR、header 自适应追溯解析、4 项反向匹配增强）合并到 V4 主线，所有改动集中在一个新 `rpdu` profile 中，不污染 AMS/FGMC/HSCU 既有行为（全部默认关闭 → 字节一致）。
+
+#### 完成内容
+
+1. profile schema 扩展（`profiles/base.py`）：新增 `HLRParserDriverConfig`、`MatcherEnhancementConfig` 两个 dataclass；`ControllerProfile` 增加 `hlr_parser_driver` / `matcher` / `trace_strategy` 三个字段，所有默认 legacy 行为。
+2. 新增 HLR Excel 解析全局能力（`parsers/hlr_parser_base.py` + `hlr_excel_parser.py` + `hlr_parser_factory.py` + `__init__.py`）：`.docx → HLRWordParser`、`.xlsx → HLRExcelParser`，由 `create_hlr_parser(source_path, profile=)` 工厂按扩展名分发。
+3. `matching/rev_matcher.py`：4 项 RPDU 增强作为 opt-in（中文后缀剥离 / 方向软约束带 conflict 标记 / 信号编号加分 / `top_k=50`），通过 `enhancements: matcherEnhancementConfig | None` 透传，所有改动默认 False/20。
+4. `traceability/trace_parser.py`：新增 `_read_table1_header_adaptive` / `_read_table2_header_adaptive`，`build_trace_index(trace_dir, cfg, profile=None)` 按 `profile.trace_strategy` 分发（`profile_columns` 默认走原列索引，AMS 字节一致；`header_adaptive` 走关键字扫描，RPDU）。
+5. `pipeline.py`：`_parse_hlr` 改用 `create_hlr_parser` 工厂；`_match_reverse_with_trace` 与 `run_reverse_pipeline` Step 3 两条路径全部透传 `profile=` 给 `build_trace_index` 和 `match_reverse`。
+6. `api/v4/coverage.py`：`ALLOWED_CONTROLLER_PROFILES` 加入 `"rpdu"`；错误消息使用 `sorted()` 动态列出支持列表。
+7. 新增 `profiles/rpdu/`：`__init__.py`（空包标记）、`config.yaml`（含 `hlr_parser_driver: driver=xlsx`、`trace_strategy: header_adaptive`、4 项 matcher 全部启用、top_k=50、RPDU 专属分类关键词与 AI 标注示例）、`hooks.py`（no-op 预留）、`README.md`。
+8. 文档同步：`docs/architecture/current-architecture.md` profiles 目录树增 rpdu 节点；`docs/project/scope.md` §8.2.1 profile 表加 rpdu 行、新增 §8.2.2「Profile 扩展维度」描述 Issue #74 的 3 个新增 profile 扩展点（HLR 解析驱动 / 追溯策略 / 匹配增强）。
+9. `api/v4/coverage.py` HLR 扩展名校验改为基于 `parsers.registered_extensions()` 工厂白名单，支持 .docx 与 .xlsx，新增解析器只需在工厂注册。
+
+#### 修改文件
+
+1. `backend/app/v4/profiles/base.py`（2 个新 dataclass + 3 个 ControllerProfile 字段）
+2. `backend/app/v4/matching/rev_matcher.py`（4 项 opt-in 增强 + 默认 None 透传）
+3. `backend/app/v4/traceability/trace_parser.py`（header 自适应 + profile 调度）
+4. `backend/app/v4/pipeline.py`（_parse_hlr 改用工厂；3 处 `profile=` 透传）
+5. `backend/app/api/v4/coverage.py`（白名单 + 错误消息 + 扩展名工厂白名单）
+6. `docs/architecture/current-architecture.md`（profiles 目录树）
+7. `docs/project/scope.md`（profile 表 + §8.2.2）
+8. `docs/development/development-log.md`（本条）
+
+#### 新增文件
+
+1. `backend/app/v4/parsers/__init__.py`
+2. `backend/app/v4/parsers/hlr_parser_base.py`
+3. `backend/app/v4/parsers/hlr_excel_parser.py`
+4. `backend/app/v4/parsers/hlr_parser_factory.py`
+5. `backend/app/v4/profiles/rpdu/__init__.py`
+6. `backend/app/v4/profiles/rpdu/config.yaml`
+7. `backend/app/v4/profiles/rpdu/hooks.py`
+8. `backend/app/v4/profiles/rpdu/README.md`
+
+#### 验证方式
+
+1. `PYTHONPATH=backend python -c "from app.v4.profiles import init_registry, get_registry; init_registry(Path('backend/app/v4/profiles')); print(get_registry().list_ids())"` → 期望 `['ams','fgmc','hscu','rpdu']`
+2. `PYTHONPATH=backend python -c "from app.v4.parsers import create_hlr_parser; from app.v4.profiles import get_registry; rpdu=get_registry().get('rpdu'); out=create_hlr_parser(Path('test-input/RPDU/RPDU测试输入文件/RPDU软高需求_注入故障v1.0.xlsx'),profile=rpdu).parse(); print(out.total_count)"` → 期望 `11`
+3. `PYTHONPATH=backend python -c "from app.v4.profiles import init_registry, get_registry; from app.v4.traceability import build_trace_index; init_registry(...); rpdu=get_registry().get('rpdu'); idx=build_trace_index(Path('test-input/RPDU/RPDU测试输入文件/RPDU追溯表'), rpdu.traceability, profile=rpdu); print(idx.total_erds, idx.icd_mapped_to_blocks)"` → header_adaptive 路径跑通
+4. 验证 AMS/FGMC/HSCU 默认值仍为 `driver=docx / trace=profile_columns / matcher 全 False / top_k=20`
+
+#### 验证结果
+
+已验证通过：
+1. registry 加载返回 4 个 profile（ams/fgmc/hscu/rpdu）；
+2. RPDU HLR Excel 解析在测试样例 `RPDU软高需求_注入故障v1.0.xlsx` 上提取 11 条需求（中文内容完整）；
+3. header_adaptive 路径跑通 Table 1（命中 sheet `接口基线表_EoICD`，映射 327 个 ERD → ICD FullName）；
+4. AMS/FGMC/HSCU profile 加载后 `driver=docx / trace=profile_columns / matcher 全 False / top_k=20`，与 Issue #63 默认值字节相同；
+5. `coverage.py` 白名单接受 `rpdu`。
+
+未端到端跑通真实 V4 pipeline（含 LLM 多智能体裁判），需要真实 MiniMax/DeepSeek/Qwen API Key + 真实 RPDU 输入 → 由后续 Issue 或用户手动验收处理。
+
+#### 遗留问题
+
+1. RPDU 端到端 V4 pipeline 验证未在本次完成（需要真实 API Key）；
+2. `trace_parser._read_table2_header_adaptive` 在 RPDU 测试样例上 `total_erds=0`（Table 2 ERD↔HLR 表可能用 WPS 导出、列宽合并或列名变体，待用户用真实 RPDU 项目文件复核）；
+3. 用户决策：RPDU 本地分支的「forward pipeline + drain async 重构」明确排除在本次合并范围外。
+
+#### 下一步建议
+
+1. 用真实 RPDU 项目文件跑端到端 pipeline，确认 Table 2 header 自适应正确解析、4 项 matcher 增强确实提升了 `已匹配` 命中率；
+2. 若 Table 2 解析失败持续出现，扩展 `_TABLE2_*_KEYWORDS` 关键字白名单或考虑 `_read_table2_*` 进一步做列名模糊匹配；
+3. 若未来需要把 RPDU 适配回灌给 AMS/FGMC（如术语表也允许 Excel 化），可通过 `hlr_parser_driver.driver: docx` 保留 AMS 默认路径，再为该 profile 添加 `hooks.py` 即可，不必新增全局解析器。
+
+## 2026-08-26 Issue #74 续：真实 RPDU 输入端到端验证
+
+#### 任务目标
+
+用 `test-input/RPDU/RPDU测试输入文件/` 下真实文件跑完整 V4 pipeline，验证 RPDU 适配的 4 个开关（HLR Excel 解析、header_adaptive 追溯、4 项 matcher 增强、3-table bridge）真实生效；并校验 AMS/FGMC/HSCU 上传追溯表时 `prefilter_per_hlr` 不会被错误置为 `True`。
+
+#### 完成内容
+
+1. RPDU 端到端 pipeline（job `4ab78c42-…`）跑通 6 阶段：HLR 11 / EoICD 225,825 / 11 HLR 已匹配 / 11 cases 多智能体裁决。
+2. per-HLR 池生效：`Per-HLR filtered EoICD total: 62052 / 225825 entries`，HLR_052331 修复前 top-50 全是 LRM 状态信号、修复后 14 个 `Heater_Group_*_RPDU_ESW_CMD` 候选。
+3. 3-table bridge 生效：`Bridge: mapped 3423 T2 ERDs → T1 ERDs`，跨命名空间 ERD 映射成功。
+4. AMS / FGMC / HSCU smoke test：上传追溯表后日志均为 `Filtered EoICD: ... entries`（union-pool），未出现 `Per-HLR filtered` 字样，证实 `prefilter_per_hlr` 默认 `False` 生效。
+
+#### 修改文件
+
+仅验证调用，未修改代码（除同 Issue 的 per-HLR 池修复，单独记录）。
+
+#### 验证方式
+
+```bash
+# RPDU
+curl -X POST http://localhost:8000/api/v4/coverage-analysis \
+  -F "hlr_word_file=@test-input/RPDU/RPDU测试输入文件/RPDU软高需求_注入故障v1.0.xlsx" \
+  -F "eoicd_publisher_file=@test-input/RPDU/RPDU测试输入文件/ATA24EPS_EoICD_Publisher_Table.xlsx" \
+  -F "eoicd_subscriber_file=@test-input/RPDU/RPDU测试输入文件/ATA24EPS_EoICD_Subscriber_Table.xlsx" \
+  -F "traceability_files=@test-input/RPDU/RPDU测试输入文件/RPDU追溯表/配电系统需求与EoICD追溯表_20260629_统计结果_RevB.xlsx" \
+  -F "traceability_files=@test-input/RPDU/RPDU测试输入文件/RPDU追溯表/单模块需求矩阵分析(系统2设备).xlsx" \
+  -F "traceability_files=@test-input/RPDU/RPDU测试输入文件/RPDU追溯表/单模块需求矩阵分析(设备2软件).xlsx" \
+  -F "enable_traceability_prefilter=true" -F "controller_profile=rpdu"
+# AMS / FGMC / HSCU 同样模板，profile 改为 ams/fgmc/hscu
+```
+
+#### 验证结果
+
+- RPDU job `4ab78c42-…`：completed，`Group A=8`（traceable 6 + fallback 2），最终 `11/11 已匹配`。
+- AMS job `ed89f142-…`：completed，`Group A=11, Filtered EoICD: 3084 / 122674`。
+- FGMC job `0f899326-…`：completed（修复后 `3e5c8fe1-…`），`Group A=2, trace_hlrs_with_trace=2, Filtered EoICD: 1138 / 15539`。
+- HSCU job `e31f6789-…`：completed，`Group A=3, Filtered EoICD: 12 / 30699`。
+
+#### 遗留问题
+
+1. 11 cases 的 AI 裁决结果分布「已覆盖 5 / 待确认 4 / 不一致 2」，需用户对 4 条「待确认」+ 2 条「不一致」逐条复审（属业务问题，不是代码问题）。
+2. RPDU 测试输入的 HLR 文件仅 12 KB（11 条需求），正式项目可能数百条，需要在更大数据集上回归。
+
+#### 下一步建议
+
+1. 推进 RPDU README 中提到的 4 项 matcher 增强在 AMS / FGMC / HSCU 适用性的回灌评估；
+2. 持续观察 per-HLR 池在大 HLR 数（>50）下的耗时表现，必要时把 per-HLR 池下沉到 precompute block-keys 阶段以减少重复 EoICD 过滤。
+
+## 2026-08-26 Issue #74 修复：per-HLR 池缺失导致 LRM 信号淹没目标信号
+
+#### 任务背景
+
+RPDU profile 合并到 V4 主线时遗漏了 RPDU 本地分支的 `match_reverse_per_hlr` 实施。RPDU 现场报告 `HLR_052331` 明确包含 `Heater_Group_X_RPDU_ESW_CMD` 信号，但 trace 后 top-50 候选全是 LRM 状态信号、目标 ESW_CMD 进不去。
+
+#### 任务目标
+
+在 V4 主线补回 per-HLR 预过滤池，确保 RPDU traceable HLR 只在自己的 traced block 集合上跑 reverse match；不污染 AMS/FGMC/HSCU 行为。
+
+#### 根因
+
+RPDU 本地分支使用「per-HLR 池」：每个 HLR 单独跑 `match_reverse`、只在自己的 traced block 集合里选 top_k=50。V4 主线 `pipeline._match_reverse_with_trace` 沿用 v4 #63 的「union-pool」：把所有 Group A HLR 命中的 EoICD block 取并集，一次性送入 `match_reverse`，top_k=50 被其他 HLR 引入的 LRM / 状态类信号淹没。
+
+#### 完成内容
+
+1. `ControllerProfile.prefilter_per_hlr: bool = False`（`backend/app/v4/profiles/base.py`），`from_dict` 读 `data.get("prefilter_per_hlr", False)`，AMS/FGMC/HSCU 不声明自动回落到 `False`。
+2. RPDU `config.yaml` 末尾加 `prefilter_per_hlr: true`，4 行注释说明目的。
+3. `pipeline.match_reverse_per_hlr()` 新函数：每个 HLR 用自己的 EoICD 子集单独调用 `match_reverse(profile=profile)`，保留 4 项 matcher 增强。
+4. `pipeline._match_reverse_with_trace()` 根据 `profile.prefilter_per_hlr` 分流：True 走 per-HLR 池（`Per-HLR filtered EoICD total: X / Y`），False 走 union-pool（`Filtered EoICD: X / Y`，行为不变）。
+
+#### 修改文件
+
+1. `backend/app/v4/profiles/base.py` — `ControllerProfile.prefilter_per_hlr` 字段 + `from_dict` 解析
+2. `backend/app/v4/profiles/rpdu/config.yaml` — `prefilter_per_hlr: true`
+3. `backend/app/v4/pipeline.py` — 新增 `match_reverse_per_hlr()`、`_match_reverse_with_trace()` 分流
+4. `backend/app/v4/profiles/rpdu/README.md` — 新增「追溯预过滤：per-HLR 池」章节
+
+#### 验证方式
+
+1. RPDU smoke test：traceable HLR `HLR_052331` 修复前 top-50 全部含 `lrm`，修复后 14 个 `Heater_Group_*_RPDU_ESW_CMD` 候选。
+2. AMS / FGMC / HSCU smoke test：上传追溯表后日志关键字 `Filtered EoICD` 而非 `Per-HLR filtered`，与 Issue #74 之前字节一致。
+
+#### 验证结果
+
+- RPDU：`Group A=8`，6 traceable 已匹配 + 2 fallback；HLR_052331 / 067016 / 067017 / 052354 全部从「全 LRM 候选」恢复为「Heater ESW_CMD 候选」。
+- AMS / FGMC / HSCU：日志输出 `Filtered EoICD: ...`，与 #74 之前字节一致；AMS Group A=11（11 个 traceable HLR 全部命中）、HSCU Group A=3。
+
+#### 遗留问题
+
+1. RPDU profile 现以 profile-level 开关方式激活 per-HLR 池，未做 profile-level `top_k` 之外的 matcher 增强回灌给 AMS（AMS 当前不需要）；
+2. 大 HLR 数（>50）+ per-HLR 池的耗时数据尚未采集，需要后续在更大数据集上 benchmark。
+
+#### 下一步建议
+
+1. 把 per-HLR 池的日志格式与 union-pool 保持完全一致的 print 行，让 profile 类型在 logs 里可一眼区分；
+2. 后续 Issue 可考虑把 `prefilter_per_hlr` 提升为通用「reverse match 预过滤策略」枚举（`union_pool` / `per_hlr`），新增 profile 不再需要新增布尔开关。
+
+## 2026-08-26 FGMC 追溯表修复：HLR ID 字段映射冲突 + Table 1 sheet 选择
+
+#### 任务背景
+
+Issue #74 端到端验证阶段跑 FGMC smoke test，期望与 AMS / HSCU 行为一致（Group A > 0），实际 `Group A=0, trace_hlrs_with_trace=0, Union traced block_keys=0`。HLR→ERD→ICD 链路整条没打通。
+
+#### 根因（两层）
+
+**根因 1：Table 1 sheet 选错。** FGMC `需求与ICD追溯表_FGMC_裁剪.xlsx` 含 9 张 sheet，其中 `接口基线表_EoICD_old_待删除`（旧表，已标记删除）和 `待填_需求接口追溯表`（当前使用）并存。`_select_sheet()` 按 `by_name_keywords` 顺序找第一个命中的 sheet。FGMC 原 keyword 列表 `[追溯, 接口基线, 接口基线表_EoICD, 待填_需求接口追溯表]` 第一个实际命中的 sheet 是 `接口基线表_EoICD_old_待删除`（匹配 "接口基线" 模糊子串），导致 Table 1 只解析出 2 个 ERD。
+
+**根因 2：HLR ID 字段映射冲突。** FGMC HLR docx `FGMC软件高层需求.docx` 每张需求表有两行 ID：
+- row 0：`ID | 1781`（docx 内部编号）
+- row 1：`需求编号 | FGMC_OFP_CSCI_HLR_005906`（正式 HLR 编号，对应追溯表 child 列）
+
+`field_map` 同时在 `id` 和 `code` 两个 std_field 下声明了 `需求编号`：
+```yaml
+id: ["ID", "RequirementID", "需求ID"]      # 当时不含 需求编号
+code: ["需求编号", "RequirementCode"]
+```
+即使把 `需求编号` 加到 `id` 列表首位，`_build_field_map_index` 用 `dict` 存反向索引（同一 key 只能映射一个 std_field），`code` 字段后注册把 `需求编号 → id` 覆盖为 `需求编号 → code`。结果 row 1 的 `FGMC_OFP_CSCI_HLR_005906` 进 `code` 字段，row 0 的 `1781` 进 `id` 字段。Trace 系统用 `id`（requirement_id）匹配 Table 2 child 列，1781 对不上 `FGMC_OFP_CSCI_HLR_*`，导致 Group A=0。
+
+#### 完成内容
+
+1. **修 Table 1 sheet 关键词顺序**：`fgmc/config.yaml` `traceability.table1.sheet_match.by_name_keywords` 把 `待填_需求接口追溯表` 放第一位，并删除过宽的 `接口基线` 模糊关键词（避免再次被旧 sheet 抢匹配）。保留 `追溯` 和 `接口基线表_EoICD` 作为 fallback。
+2. **修 HLR ID 字段映射冲突**：`fgmc/config.yaml` `hlr_parser.field_map.id` 首位加入 `需求编号`（匹配 row 1 正式 HLR 编号），同时从 `code` 列表移除 `需求编号`（避免反向索引覆盖），仅保留 `RequirementCode` 作为 legacy alias。
+3. 两处修复都加了详细中文注释说明 RPDU / AMS 适配无关，FGMC profile 独立承担。
+
+#### 修改文件
+
+1. `backend/app/v4/profiles/fgmc/config.yaml` — Table 1 sheet 关键词顺序调整 + `field_map.id` / `field_map.code` 调整
+
+#### 验证方式
+
+```bash
+# Inline parser 验证
+python -c "
+from app.v4.profiles.base import load_profile_from_yaml
+from app.v4.parsers.hlr_word_parser import HLRWordParser
+p = load_profile_from_yaml('backend/app/v4/profiles/fgmc/config.yaml')
+out = HLRWordParser(Path('test-input/工具-FGMC控制器测试案例/FGMC软件高层需求.docx'), p).parse()
+# 期望 id='FGMC_OFP_CSCI_HLR_005906' 等
+"
+# E2E smoke test
+bash /c/Users/王田/AppData/Local/Temp/fgmc_smoke.sh
+```
+
+#### 验证结果
+
+- Inline parser：`id` 字段从 `1781` 等内部编号改为 `FGMC_OFP_CSCI_HLR_005906` 等正式 HLR 编号（7/7 全部正确）。
+- FGMC E2E job `3e5c8fe1-…`：completed，`Group A=2 HLRs, trace_hlrs_with_trace=2, Union traced block_keys=80, Filtered EoICD: 1138 / 15539`。
+- 最终 `hlr_已匹配=5, hlr_待确定=1, hlr_无匹配=1`，与 AMS / HSCU 行为一致。
+
+#### 遗留问题
+
+1. FGMC 测试输入的 5 个 Group B HLR（`FGMC_OFP_CSCI_HLR_015273` 等）未在 Table 2 出现（HLR docx 提供了但追溯表只覆盖部分），属测试数据完整性问题，非代码问题；
+2. `field_map` 同一字符串（如 `需求编号`）只能映射到唯一 std_field 的限制是 `_build_field_map_index` 的设计选择，新 profile 设计 field_map 时需注意避免冲突；后续可考虑在 from_dict 阶段做冲突检测并 raise warning。
+
+#### 下一步建议
+
+1. 在 `load_profile_from_yaml` 中加入 field_map 冲突检测（同一 header 文本被映射到多个 std_field 时 raise `ProfileLoadError`），防止后续 profile 静默落入「后注册赢」的陷阱；
+2. FGMC 后续如需支持多 sheet 追溯表，可在 `_select_sheet` 中加入「过滤掉 `*_old_*` / `*_待删除*`」的排除规则。

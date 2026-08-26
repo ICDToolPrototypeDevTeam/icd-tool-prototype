@@ -2,6 +2,16 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-08-26
+
+### Fixed
+
+- **RPDU per-HLR 追溯预过滤池（Issue #74 修复）**：新增 `ControllerProfile.prefilter_per_hlr: bool`（默认 `False`）和 `pipeline.match_reverse_per_hlr()`。RPDU profile 显式声明 `prefilter_per_hlr: true`，每个 traceable HLR 只在自己的 traced EoICD block 集合上跑 reverse match，避免其他 HLR 引入的 LRM / 状态类信号淹没 `Heater_Group_*_RPDU_ESW_CMD` 这类目标信号。修复前 HLR_052331 top-50 全是 LRM 状态信号，修复后 14 个 `Heater_Group_*` ESW_CMD 候选。AMS/FGMC/HSCU profile 不声明该字段自动回落到 `False`，仍走原有 union-pool 路径，行为字节一致。
+
+- **FGMC 追溯表 HLR ID 字段映射冲突**：`profiles/fgmc/config.yaml` 的 `hlr_parser.field_map` 中 `id` 和 `code` 两个 std_field 同时声明了 header 文本 `需求编号`，被 `_build_field_map_index` 的反向 dict 索引机制覆盖（`code` 后注册赢），导致 docx row 1 的正式 HLR 编号（`FGMC_OFP_CSCI_HLR_005906`）落到 `code` 字段、docx row 0 的内部编号（`1781`）落到 `id` 字段。修复：`id` 首位加入 `需求编号`，`code` 列表移除 `需求编号`（保留 `RequirementCode` 作为 legacy alias）。
+
+- **FGMC Table 1 sheet 选择冲突**：`需求与ICD追溯表_FGMC_裁剪.xlsx` 含 9 张 sheet，其中 `接口基线表_EoICD_old_待删除`（旧表，标记删除）和 `待填_需求接口追溯表`（当前使用）并存。原 `by_name_keywords` 列表把模糊关键词 `接口基线` 放在 `待填_需求接口追溯表` 之前，导致 `_select_sheet` 选到了已废弃 sheet，Table 1 只产出 2 个 ERD。修复：把 `待填_需求接口追溯表` 移至关键词列表首位，并删除过宽的 `接口基线` 模糊关键词。
+
 ## [Unreleased] - 2026-08-20
 
 ### Removed
@@ -29,6 +39,20 @@
 ### Added
 
 - **case 级超时后台收尾（drain）**：Step 4 多智能体裁判改为线程池执行（concurrent.futures），超时的裁判任务不再取消丢弃，而是转入后台线程池继续执行；Step 4.5 在总预算（`DEGRADATION_DRAIN_BUDGET`，默认 300s）内统一收尾，迟到的有效结果替换 TIMEOUT 占位后进入共识，慢但有效的输出不再被舍掉。新增 `degradation.drained_late_count` 统计与 e2e 用例3（慢 provider 收尾验证）。
+
+## [Unreleased] - 2026-08-25
+
+### Added
+
+- **RPDU 多控制器适配合并（Issue #74）**：新增 `rpdu` controller profile，支持远程功率分配单元的 Excel 格式 HLR 输入、header 自适应追溯解析、4 项反向匹配增强（中文后缀剥离、方向软约束带 conflict 标记、信号编号加分、`top_k=50`）。
+- **profile 扩展维度**：V4 profile schema 新增三个 profile 维度的扩展点（HLR 解析驱动 `hlr_parser_driver.driver` / 追溯策略 `trace_strategy` / 匹配增强 `matcher`），所有新增字段全部默认关闭 → AMS/FGMC/HSCU 行为字节不变。
+- **HLR 解析工厂**：新增 `create_hlr_parser(source_path, profile=)`，按扩展名分发到 `HLRWordParser`（.docx，默认）或 `HLRExcelParser`（.xlsx，RPDU）。
+- **API HLR 扩展名校验**：`POST /api/v4/coverage-analysis` 的 HLR 文件扩展名校验改为基于 `parsers.registered_extensions()` 工厂白名单，支持 .docx 和 .xlsx；新增解析器只需在工厂注册，API 自动同步。
+
+### Changed
+
+- `backend/app/api/v4/coverage.py` 白名单加入 `"rpdu"`；错误消息改为动态列出支持列表。
+- `backend/app/v4/pipeline.py`：`_parse_hlr` 改用 `create_hlr_parser` 工厂；Step 3 两条路径全部透传 `profile=` 给 `build_trace_index` 和 `match_reverse`。
 
 ## [Unreleased] - 2026-08-24
 

@@ -52,7 +52,7 @@ ICD工具原型 是一套「**反向**」覆盖性分析工具：从软件高层
 10. 企业级审批流；
 11. 正式生产环境发布。
 
-### 8.2.1 V4 Controller Profile（Issue #63）
+### 8.2.1 V4 Controller Profile（Issue #63 / Issue #74）
 
 V4 通过 `controller_profile` 字段控制输入解析规则（默认 `ams`）：
 
@@ -61,12 +61,23 @@ V4 通过 `controller_profile` 字段控制输入解析规则（默认 `ams`）�
 | `ams` | 空气管理系统控制器（默认） | `tables[0]` | ≥ 8 行 × ≥ 2 列 | `设备需求与系统ICD追溯表.xlsx` + `单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx`（精确名） |
 | `fgmc` | 燃油测量管理计算机 | `tables[1]` | ≥ 12 行 × ≥ 2 列（含"是否为需求"= "否" 过滤） | `*追溯*.xlsx` + `*矩阵分析*.xlsx`（glob 模式） |
 | `hscu` | 液压系统控制单元 | `tables[0]` | ≥ 8 行 × ≥ 2 列（行标签用 `需求正文` 而非 `需求中文`） | `附件1*需求*ICD*.xlsx` + `*液压*单模块需求矩阵*.xlsx` |
+| `rpdu` | 远程功率分配单元（Issue #74） | N/A（Excel 无术语表） | `.xlsx` 工作簿（列 A/B/C → 需求编号 / 模块名称 / 需求内容） | `*配电系统需求与EoICD追溯表*.xlsx` + `*单模块需求矩阵分析*.xlsx`（header 关键字自适应） |
 
 profile 配置位于 `backend/app/v4/profiles/{id}/config.yaml`，覆盖 HLR 字段映射、分类关键词（analog / discrete / bus 等）、追溯表配置和 AI 标注示例四类内容。
 
 不带 `controller_profile` 字段时行为与 Issue A 完全一致（AMS 默认），向后兼容。
 
 如后续需要支持上述能力，应通过新的 Issue、设计文档或 ADR 进行明确。
+
+### 8.2.2 Profile 扩展维度（Issue #74）
+
+Issue #74 在不破坏 AMS/FGMC/HSCU 既有行为（默认全部关闭）的前提下，为后续 controller 接入预留了三个 profile 维度的扩展点：
+
+1. **HLR 解析驱动**：`hlr_parser_driver.driver` 选择 `docx`（默认，`HLRWordParser`）或 `xlsx`（RPDU，`HLRExcelParser`），由 `parsers/hlr_parser_factory.py::create_hlr_parser` 按扩展名分发。
+2. **追溯表解析策略**：`trace_strategy` 选择 `profile_columns`（默认，硬编码列索引，AMS/FGMC/HSCU）或 `header_adaptive`（RPDU，按 header 关键字扫描定位列）。
+3. **反向匹配增强开关**：`matcher` 段四个 boolean/int 开关（中文后缀剥离、方向软约束、信号编号加分、top_k 候选窗口），RPDU 全部启用，其余 profile 全部默认关闭。
+
+所有增强默认关闭 → 不影响 AMS/FGMC/HSCU 输出字节一致。
 
 ## 4. 输入边界
 
