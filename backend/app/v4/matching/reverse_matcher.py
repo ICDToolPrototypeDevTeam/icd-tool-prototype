@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 from app.v4.matching.entry_filter import should_keep
 from app.v4.matching.eoicd_enricher import _resolve_aliases, _get_synonym_lookup, _tokenize_name
-from app.v4.config import CN_SIGNAL_KEYWORD_MAP
+from app.v4.config import CN_SIGNAL_KEYWORD_MAP, FRAME_SIGNAL_KEYWORDS
 from app.v4.matching.hlr_classifier import (
     classify_hlr,
     extract_labels,
@@ -55,6 +55,45 @@ _MIN_SCORE_THRESHOLD = 12   # below this → "未匹配"
 def _has_chinese(text: str) -> bool:
     """Check if text contains any Chinese characters (CJK Unified Ideographs)."""
     return any('一' <= c <= '鿿' for c in text)
+
+
+# —— A429 协议层规则检测 ——
+_A429_PROTOCOL_HINT = (
+    "\U0001f4a1 HLR 描述的是 A429 协议级规则（如 SSM/SDI/PARITY 等字段位号定义），"
+    "不对应单个 EoICD Block，建议人工审查 ARINC 429 协议合规性。"
+)
+
+# 匹配"标签第 N 位" / "标签 第 N 和 M 位" / "标签 第 9-10 位" / "标签的第 9 和 10 位" 等位号位置表达
+_LABEL_BIT_POS_RE = re.compile(
+    r"(?:标签|label)\s*(?:第|的\s*第|之\s*第|中\s*第)?\s*\d+\s*(?:[和与至、，/\-]\s*\d+\s*)*位",
+    re.IGNORECASE,
+)
+
+
+def _is_a429_protocol_rule(hlr_content: str, signal_keywords: set[str] | None) -> bool:
+    """检测 HLR 是否描述 A429 协议层规则（非应用层数据）。
+
+    三重判定（任一命中即返回 True）：
+      1. signal_keywords 与 FRAME_SIGNAL_KEYWORDS 交集非空
+      2. hlr_content 中出现"标签第 N 位"位号位置表达
+      3. hlr_content 中直接出现 ssm/sdi/parity/奇偶校验 字面
+
+    参数:
+        hlr_content: HLR 全文
+        signal_keywords: hlr_labeler 标注出的关键词集合（小写，可为空）
+
+    返回:
+        True 表示该 HLR 是协议级规则。
+    """
+    if signal_keywords and (signal_keywords & FRAME_SIGNAL_KEYWORDS):
+        return True
+    text = (hlr_content or "").lower()
+    if _LABEL_BIT_POS_RE.search(text):
+        return True
+    # 兜底：content 里出现协议字段字面（应对 labeler 漏标的中英文混写）
+    if any(k in text for k in ("ssm", "sdi", "parity", "奇偶校验")):
+        return True
+    return False
 
 
 @dataclass
@@ -638,8 +677,8 @@ def match_reverse(
                 match_type = "待确定"
         elif cat == "A429显式" and hlr_prof.labels:
             has_label_in_eoicd = False
-            for lbl in hlr_prof.labels:
-                clean_label = lbl.strip().upper()
+            for label_str in hlr_prof.labels:
+                clean_label = label_str.strip().upper()
                 if not clean_label.startswith("L"):
                     clean_label = f"L{clean_label}"
                 prefix = clean_label + "/"
@@ -690,7 +729,14 @@ def match_reverse(
             )
         else:
             labels_str = ", ".join(hlr_prof.labels[:3]) if hlr_prof.labels else ""
-            summary = f"[{cat}] {match_type}" + (f" (labels: {labels_str})" if labels_str else "")
+            base = f"[{cat}] {match_type}" + (f" (labels: {labels_str})" if labels_str else "")
+            # 无匹配时，若 HLR 描述的是 A429 协议层规则，附加人工审查提示
+            if match_type == "无匹配" and _is_a429_protocol_rule(
+                hlr.content, lbl.signal_keywords_set
+            ):
+                summary = f"{base}\n{_A429_PROTOCOL_HINT}"
+            else:
+                summary = base
 
         results.append(HLRCoverageResult(
             hlr_id=hlr.requirement_id,

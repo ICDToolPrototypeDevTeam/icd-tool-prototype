@@ -111,7 +111,7 @@ def generate_consensus_report(
                 "agreement_level": "",
                 "star_rating": 0,
                 "final_coverage_status": "无匹配",
-                "final_analysis": "匹配层未找到对应EoICD信号",
+                "final_analysis": mr.get("summary") or "匹配层未找到对应EoICD信号",
                 "confidence": 0,
                 "model_results": {},
                 "inconsistent_attributes": [],

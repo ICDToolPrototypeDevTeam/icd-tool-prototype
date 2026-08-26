@@ -95,7 +95,7 @@ def generate_reverse_report(
                     matched_profiles_summary=[],
                     match_evidence={k: v for k, v in r.match_evidence.items() if k != "top_scores"},
                     coverage_status="无匹配",
-                    analysis="匹配层未在EoICD中找到对应的ICD信号定义，建议人工确认。",
+                    analysis=r.summary or "匹配层未在EoICD中找到对应的ICD信号定义，建议人工确认。",
                     confidence=0.0,
                 ))
 
@@ -196,7 +196,7 @@ def generate_consensus_reverse_report(
                     signal_category=r.signal_category,
                     matched_profiles_summary=[],
                     coverage_status="无匹配",
-                    analysis="匹配层未在EoICD中找到对应的ICD信号定义，建议人工确认。",
+                    analysis=r.summary or "匹配层未在EoICD中找到对应的ICD信号定义，建议人工确认。",
                     confidence=0.0,
                 ))
 
