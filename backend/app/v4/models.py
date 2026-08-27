@@ -232,25 +232,43 @@ class MultiJudgeOutput(BaseModel):
     results: list[MultiJudgeResult] = Field(default_factory=list)
 
 
+class FieldDisagreement(BaseModel):
+    """字段级裁判间意见分歧（ADR-004 v2）。
+
+    review LLM 扫描各 provider 的 analysis，提取字段级别的分歧条目。
+    注意：仅记录 provider 之间的判断分歧；EoICD 与 HLR 的事实性不一致
+    （即 3 个 provider 共识识别的问题）不属于本结构，由各 provider 的
+    analysis/inconsistent_points 自行承载。
+    """
+
+    field: str                                         # 字段名（如 "Direction"）
+    category: Literal["key", "non_key", "vague"]      # 字段类型（ADR-004 v2）
+    providers: list[str] = Field(default_factory=list)  # 涉及哪些 provider
+    values: list[str] = Field(default_factory=list)      # 各 provider 给出的值
+    detail: str = ""                                      # 一句话说明
+
+
 class ConsensusResult(BaseModel):
     """共识复核结果（Phase 2-3，Review Agent 输出）。
 
-    5 星体系（ADR-004）：
-    - star_rating ∈ {1, 2, 3, 4, 5}；evidence_alignment 字段由 review LLM 自评 evidence 强度，
-      与 agreement_level 联合映射到 5 档星评。
+    5 星体系（ADR-004 v2）：
+    - star_rating ∈ {1, 2, 3, 4, 5}；由 agreement_level + field_disagreements
+      联合映射（见 review_agent._map_star_rating）。
+    - field_disagreements 列出 provider 之间字段级别的分歧；
+      后端按字段分类（key/non_key/vague）触发不同星档。
     """
 
     case_id: str
     model_results: dict[str, dict] = Field(default_factory=dict)
     agreement_level: str = ""     # "full" | "majority" | "split" | "single_source" | "no_consensus" (降级覆写)
-    star_rating: int = 0          # 1-5（ADR-004；老 1-3 体系）
-    evidence_alignment: str = ""  # "strong" | "moderate" | "weak" | ""（ADR-004）
+    star_rating: int = 0          # 1-5（ADR-004 v2；老 1-3 体系）
+    field_disagreements: list[FieldDisagreement] = Field(default_factory=list)
+    cited_fields: list[str] = Field(default_factory=list)
     final_coverage_status: str = ""
     final_analysis: str = ""
     confidence: float = 0.0
     consistent_agents: list[str] = Field(default_factory=list)
     divergent_agents: list[str] = Field(default_factory=list)
-    inconsistent_attributes: list[dict] = Field(default_factory=list)
 
 
 class ConsensusOutput(BaseModel):

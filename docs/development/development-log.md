@@ -1295,3 +1295,121 @@ docker compose run --rm backend python tests/e2e/test_use_case_6_five_star_upgra
 
 1. ADR-004 §复查升星路径 表格中 4★ → 5★ 一行的描述需调整为"理论路径"，与实际机制对齐
 2. 后续 Issue 可根据用户决策选择上述 3 个方案之一
+
+### 2026-08-24 ADR-004 v2 字段一致性重构
+
+#### 任务目标
+
+ADR-004 v1 的 `evidence_alignment` 多维度方案（Coverage/Consistency/Quality）在真实 LLM 跑 `故障注入1.0.docx` 时暴露根本性问题：**5 档分布严重失衡，只触发 5★ 和 3★，1★/2★/4★ 全部不出现**。根因是 `consistency=2` 子维度门槛过低（仅要求"结论一致 + 各自引用字段"），导致几乎所有 case 都被判 strong，moderate/weak 几乎不可达。
+
+本次重构目标：把 review LLM 任务从"3 维度综合映射"改为"字段冲突检测 + 字段类型分类"，按 agreement_level 分档（full/majority/split）+ key/non_key/vague 字段类型单维度区分。详见 ADR-004 v2。
+
+#### 设计核心
+
+| 档 | 触发条件 |
+|---|---|
+| 5★ | full + 无字段不一致 |
+| 4★ | full + 任意字段不一致（key/non_key/vague） |
+| 3★ | majority + 无 key 字段分歧 |
+| 2★ | majority + 有 key 字段分歧（触发复查） |
+| 1★ | split / single_source / no_consensus |
+
+key 字段白名单（12 个）：Direction / DataFormatType / BitOffset / ParameterSize / OneState / ZeroState / Label / FuncRngMin / FuncRngMax / **Units / Period / SDIExpected**（最后 3 个按用户要求归类为 key）。
+
+#### 完成内容
+
+1. **数据模型重构**（`backend/app/v4/models.py`）：
+   - 删除 `ConsensusResult.evidence_alignment` 字段（**完全删除**，无软删除）
+   - 删除 `ConsensusResult.inconsistent_attributes`（合并到 field_disagreements）
+   - 新增 `FieldDisagreement` Pydantic 模型（field/category: Literal["key","non_key","vague"]/providers/values/detail）
+   - 新增 `ConsensusResult.field_disagreements: list[FieldDisagreement]` 和 `cited_fields: list[str]`
+2. **后端映射重写**（`backend/app/v4/comparison/review_agent.py`）：`_map_star_rating` 新签名 `(agreement, field_disagreements)`，KEY_FIELDS 常量定义 12 个 key 字段；新增 `_parse_field_disagreements` 容错解析 LLM 输出（dict 或 string）。
+3. **Prompt 重写**（`backend/app/v4/prompts/consensus.md`）：任务定义改为"字段冲突检测"；显式枚举 12 个 key 字段；新 JSON schema（field_disagreements + cited_fields）；提供 5 个示例覆盖各档；LLM 不再输出 star_rating，由后端计算。**Step 0 明确区分"两类不一致"**：EoICD-HLR 事实性差异 vs 裁判间意见分歧，避免 LLM 误填。
+4. **Word 渲染**（`backend/app/v4/doc_generators/consensus_word_generator.py`）：`inconsistent_attributes` 渲染改用 `field_disagreements`（每条含 category）；2★/4★/5★ 描述文字按字段类型重写。
+5. **e2e 测试同步**：`test_use_case_5_five_star_rating.py` 注入策略改 field_disagreements 构造（15 个映射分支覆盖 full/majority/split × key/non_key/vague）；`test_use_case_6_five_star_upgrade.py` 同样改造（1★ split、2★ majority+key、4★ full+vague）。
+6. **ADR 重写**：`docs/decisions/ADR-004-五星评价体系.md` v2 替代 v1，记录重构动机、字段类型映射、状态变化。
+
+#### 修改文件
+
+1. `backend/app/v4/models.py` — 替换 evidence_alignment 字段；新增 FieldDisagreement 模型；删除 inconsistent_attributes
+2. `backend/app/v4/prompts/consensus.md` — 任务改字段冲突检测；枚举 12 个 key 字段；Step 0 区分两类不一致
+3. `backend/app/v4/comparison/review_agent.py` — `_map_star_rating` 新签名；KEY_FIELDS 常量；`_parse_field_disagreements` 容错
+4. `backend/app/v4/doc_generators/consensus_word_generator.py` — field_disagreements 渲染；2★/4★/5★ 描述
+5. `backend/tests/e2e/test_use_case_5_five_star_rating.py` — 15 个映射分支重写
+6. `backend/tests/e2e/test_use_case_6_five_star_upgrade.py` — 注入策略改 field_disagreements 构造
+7. `docs/decisions/ADR-004-五星评价体系.md` — v2 ADR 重写
+8. `CHANGELOG.md` — 新增 breaking change 条目（v2 替代 v1）
+9. `docs/project/workflow.md` — Step 5 描述更新
+
+#### 验证方式
+
+1. 6 个 Python 文件 `ast.parse` 语法验证
+2. `python -c "from app.v4.comparison.review_agent import _map_star_rating; ..."` 离线单元断言（15+ 项 PASS）
+3. `python tests/e2e/test_use_case_5_five_star_rating.py`（场景 A 离线断言 + 场景 B 基线集成）
+4. 真实 LLM 跑 `故障注入1.0.docx`，查看 5 档分布
+
+#### 验证结果
+
+1. 语法验证全部通过
+2. 离线单元断言 36+ PASS（涵盖 11+ 个映射分支、5 键 summary、低星触发、_star_str 渲染等）
+3. 场景 B（基线集成）尚未运行；旧 v1 baseline 已被迁移脚本处理过（早期设计），后续改方案改为直接重跑管线
+4. 真实 LLM 验证：尚未执行
+
+#### 遗留问题
+
+1. 真实 LLM 跑 `故障注入1.0.docx` 验证 5 档分布——需 docker compose 启动 + 重跑管线
+2. 老 e2e_baseline/consensus_results.json 含 v1 schema，需重跑基线管线产出 v2 JSON（v2 设计下不再做迁移，详见 ADR-004）
+3. 4★ → 5★ 仍是理论路径（v1 的同一遗留问题延续到 v2，但 v2 的 4★ 表达更明确"有字段争议"）
+4. 字段命名 `field_disagreements` 在实施 v2 后期二次调整：原 `inconsistent_fields` 易让 LLM 误认为"字段存在不一致（可能是 ICD vs HLR）"，改为 `field_disagreements`（**字段级裁判间分歧**）后，语义更明确；Step 0 的"两类不一致"区分也补强了 prompt 鲁棒性
+
+#### 下一步建议
+
+1. docker compose build backend 后跑 `python tests/e2e/test_use_case_5_five_star_rating.py` 验证 e2e 用例
+2. 用 `故障注入1.0.docx` 重跑管线，验证 5 档分布是否改善（应看到 5★/4★/3★/2★ 都出现，1★ 少见）
+4. 后续 Issue 可考虑前端 UI 适配 v2 字段显示（field_disagreements + cited_fields）
+
+---
+
+## 2026-08-26：V2 共识报告文案统一（零行为影响）
+
+### 任务目标
+
+把共识 Word 报告（`consensus_word_generator.py`）的展示文案按方案 B 命名风格统一——`star_levels` 4 档标签简明化 + 清理 v1 `evidence_alignment` 残留描述 + 明细表"共识"列与"星级分布"小节口径对齐。判定规则与数据契约均不变。
+
+### 完成内容
+
+1. **"星级分布"小节 4 档标签简化**：star_levels 由长描述改为方案 B 简明命名——5★ → "完全无争议"、4★ → "一致有争议"、3★ → "多数一致"、2★ → "多数有争议"。"说明"列同步按 v2 字段类型语义重写（4★ 明确"含辅助字段"）。
+2. **"处置建议"列表清理 v1 残留**：删除 "evidence 强 / 一般"、"反对方 evidence 弱" 等 v1 描述，改用星级分布小节口径（"完全无争议 / 一致有争议 / 多数一致 / 多数有争议 / 分歧·单源·失效"）。
+3. **明细表"共识"列 mapping 统一**：`full → 完全一致` 改为 `完全无争议`，与"星级分布"小节表头严格对齐。
+4. **`re_review.py:247` docstring 同步对齐 ADR-004 v2**：从 v1 "多数一致但 evidence 弱" 改为 v2 "多数一致但有 key 字段分歧"。
+
+### 修改文件
+
+1. `backend/app/v4/doc_generators/consensus_word_generator.py`（star_levels 数组 + suggestions 列表 + agreement_label mapping，3 处）
+2. `backend/app/v4/comparison/re_review.py`（docstring 注释 v1→v2 口径）
+
+### 验证方式
+
+1. `python -c "import ast; ast.parse(open('backend/app/v4/doc_generators/consensus_word_generator.py').read())"` 静态语法检查
+2. `sed -n '215,245p'` 复核 star_levels 新标签与说明
+3. `sed -n '298,310p'` 复核 suggestions 列表（v1 evidence 残留应已清理）
+4. `sed -n '385,387p'` 复核 agreement_label mapping（full → 完全无争议）
+5. mock 端到端跑一次管线生成 docx，目检"星级分布"小节、"处置建议"列表、"明细表共识列"三处渲染统一
+
+### 验证结果
+
+1. 静态语法检查通过
+2. star_levels / suggestions / agreement_label 三处文字片段人肉复核通过
+3. mock 端到端 docx 目检：尚未验证（需 PowerShell 手敲启动 backend）
+
+### 遗留问题
+
+1. "共识"列与"星级"列存在粗/细粒度互补——5★ + 4★ 行"共识"列均显示"完全无争议"，3★ + 2★ 行均显示"多数一致"，细分看"星级"列
+2. ADR-004 v2 文档本身无报告中文标签展示，无需更新
+3. 真实 LLM 跑 `故障注入1.0.docx` 验证 docx 渲染效果：未执行（本期仅文字层调整，行为不变）
+
+### 下一步建议
+
+1. mock 端到端跑一次，确认报告展示无回归
+2. 真实 LLM 跑 `故障注入1.0.docx`，目检 docx 三处文案统一效果
+3. 视用户反馈决定是否进一步精简"共识"列 mapping（如拆分为 star-aware：full+5★→"完全无争议"，full+4★→"一致有争议"）

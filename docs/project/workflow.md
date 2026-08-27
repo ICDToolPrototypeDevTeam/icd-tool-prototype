@@ -42,9 +42,11 @@ Step 4.5: 超时任务后台收尾（drain）
     统计: degradation.drained_late_count
     模块: pipeline.py `_drain_and_rereview()` + degradation/context.py
 
-Step 5: Review Agent 共识（含降级后处理）
-    对三模型判定结果综合复核并给出星级评价（1-5★，ADR-004）
-    5 档映射：full+strong→5★、full+moderate/weak→4★、majority+strong/moderate→3★、majority+weak→2★、split/single_source/no_consensus→1★（review LLM 仅输出 agreement_level + evidence_alignment，星档由后端 `_map_star_rating()` 计算，避免 LLM 直接选星的批次漂移）
+Step 5: Review Agent 共识（含降级后处理，ADR-004 v2 字段不一致驱动）
+    对三模型判定结果综合复核并给出星级评价（1-5★，ADR-004 v2）
+    5 档映射：full+无字段不一致→5★、full+任意字段不一致→4★、majority+无 key 字段分歧→3★、majority+有 key 字段分歧→2★、split/single_source/no_consensus→1★
+    review LLM 扫描各 provider analysis，输出结构化字段级裁判间分歧列表 field_disagreements（字段名 + category: key/non_key/vague + providers + values + detail）和 agreement_level；注意 field_disagreements **只追踪 provider 之间的判断分歧**，EoICD 与 HLR 的事实性差异（即 3 个 provider 共识识别的问题）不属于此字段范围；星档由后端 `_map_star_rating(agreement, field_disagreements)` 单维度映射（v2 较 v1 evidence_alignment 多维度方案简化为仅看 key 字段分歧）
+    key 字段白名单（12 个）：Direction / DataFormatType / BitOffset / ParameterSize / OneState / ZeroState / Label / FuncRngMin / FuncRngMax / Units / Period / SDIExpected；vague 表达（无具体字段名）不影响降级
     final_coverage_status 阈值：star ≥ 3（5★/4★/3★）取多数一致 status；star ≤ 2（2★/1★）强制「待确认」
     降级后处理：存活 provider 不足时硬上限约束（0 个 → 强制 1★ + no_consensus + 待确认；1 个 → ≤1★；2 个 → ≤2★）
     模块: comparison/review_agent.py + degradation/context.py
@@ -52,7 +54,7 @@ Step 5: Review Agent 共识（含降级后处理）
 Step 5.5: 低星复查（peer-aware 反思，5 星体系）
     对 star_rating ∈ {1, 2} 的 case，由三个 provider 各自重新评判
     1★ → 复查后可达 2★（原本分歧/单源/无共识，peer-aware 后形成 majority）
-    2★ → 复查后可达 3★（provider 重新审视反对方 evidence）
+    2★ → 复查后可达 3★（minority provider 重新审视反对方 key 字段意见，弱化立场）
     每个 provider 看到自己之前的判断（Judgment A）和 peer 的判断（Judgment B/C），触发反思纠正
     error provider 跳过：不重新查询 coverage_status="error" 的 provider，保留其 error 状态
     模块: comparison/re_review.py
@@ -116,7 +118,7 @@ DeepSeek / MiniMax / Qwen 三个模型分别独立判断「每条 HLR 需求是�
 
 ## 8. Review 共识与星级评分
 
-Review Agent 汇总三个模型的结论，对分歧处复核，给出最终判定和 1-5★ 星级（星级代表判定结果的可靠程度）。5 档映射基于 (agreement_level, evidence_alignment) 二维联合判定（详见 ADR-004）。对 1★ / 2★ case 执行低星复查（peer-aware 反思），复查后部分重跑共识。
+Review Agent 汇总三个模型的结论，对分歧处复核，给出最终判定和 1-5★ 星级（星级代表判定结果的可靠程度）。5 档映射基于 agreement_level 分档 + field_disagreements 字段类型联合判定（详见 ADR-004 v2）。review LLM 扫描各 provider analysis，输出结构化字段级裁判间分歧列表（key/non_key/vague 分类，仅追踪 provider 之间的分歧，不含 EoICD-HLR 事实性差异）；后端 `_map_star_rating()` 单维度映射：full+无字段不一致→5★、full+任意字段不一致→4★、majority+无 key 字段分歧→3★、majority+有 key 字段分歧→2★、split/single_source/no_consensus→1★。对 1★ / 2★ case 执行低星复查（peer-aware 反思），复查后部分重跑共识。
 
 ## 9. 报告生成
 
