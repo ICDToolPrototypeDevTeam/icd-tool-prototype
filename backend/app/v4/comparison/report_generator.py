@@ -174,8 +174,6 @@ def generate_consensus_reverse_report(
 
     hlr_total = match_output.total_hlr if match_output else len(consensus_out.results)
     covered = status_counts.get("covered", 0)
-    partial = status_counts.get("partial", 0)
-    missing = status_counts.get("missing", 0)
     inconsistent = status_counts.get("inconsistent", 0)
     needs_review = status_counts.get("needs_review", 0)
 
@@ -189,10 +187,6 @@ def generate_consensus_reverse_report(
         )
     if covered:
         key_findings.append(f"{covered} 条完全覆盖")
-    if partial:
-        key_findings.append(f"{partial} 条部分覆盖")
-    if missing:
-        key_findings.append(f"{missing} 条缺失")
     if inconsistent:
         key_findings.append(f"{inconsistent} 条不一致")
     if needs_review:

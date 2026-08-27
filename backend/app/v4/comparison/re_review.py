@@ -48,8 +48,8 @@ def _resolve_low_confidence_case_ids(
     """Return the set of case_id values whose star_rating is 1 or 2.
 
     5 星体系（ADR-004）：触发条件从 1★ 扩展到 ≤2★。peer-aware 复查给
-    1★（分歧/单源/无共识）一个升到 2★ 的机会，给 2★（多数一致但 evidence
-    弱）一个升到 3★ 的机会。
+    1★（三方分歧/仅单源/全部失效）一个升到 2★ 的机会，给 2★（多数共识·关键异议）
+    一个升到 3★ 的机会。
 
     Uses ``consensus_out`` when provided; otherwise reads
     ``output_dir / "consensus_results.json"`` if it exists. Returns an
@@ -242,9 +242,9 @@ def re_review_judgments(
 ) -> tuple[MultiJudgeOutput, set[str]]:
     """Re-review every low-confidence (1★/2★) case with each judging provider.
 
-    5 星体系（ADR-004 v2）：触发条件从 star_rating == 1 扩展到
+    5 星体系（ADR-004 v3 fusion）：触发条件从 star_rating == 1 扩展到
     star_rating ∈ {1, 2}。peer-aware 复查给 1★ 一个升 2★ 的机会，
-    给 2★（多数一致但有 key 字段分歧）一个升 3★ 的机会。
+    给 2★（多数共识但有关键异议）一个升 3★ 的机会。
 
     For each case in ``consensus_out`` (or ``output_dir /
     consensus_results.json``) with ``star_rating in {1, 2}``, query every

@@ -48,12 +48,12 @@ Step 4.5: 超时任务后台收尾（drain）
     统计: degradation.drained_late_count
     模块: pipeline.py `_drain_and_rereview()` + degradation/context.py
 
-Step 5: Review Agent 共识（含降级后处理，ADR-004 v2 字段不一致驱动）
-    对三模型判定结果综合复核并给出星级评价（1-5★，ADR-004 v2）
+Step 5: Review Agent 共识（含降级后处理，ADR-004 v3 fusion 两维度并行）
+    对三模型判定结果综合复核并给出星级评价（1-5★，ADR-004 v3 fusion）
     5 档映射：full+无字段不一致→5★、full+任意字段不一致→4★、majority+无 key 字段分歧→3★、majority+有 key 字段分歧→2★、split/single_source/no_consensus→1★
-    review LLM 扫描各 provider analysis，输出结构化字段级裁判间分歧列表 field_disagreements（字段名 + category: key/non_key/vague + providers + values + detail）和 agreement_level；注意 field_disagreements **只追踪 provider 之间的判断分歧**，EoICD 与 HLR 的事实性差异（即 3 个 provider 共识识别的问题）不属于此字段范围；星档由后端 `_map_star_rating(agreement, field_disagreements)` 单维度映射（v2 较 v1 evidence_alignment 多维度方案简化为仅看 key 字段分歧）
+    review LLM 扫描各 provider analysis，输出两类独立字段：(1) `inconsistent_attributes`（EoICD-HLR 事实差异，主字段，**不管 provider 是否一致都填**），渲染到 Word「不一致属性」列；(2) `field_disagreements`（provider 字段级分歧，辅助字段，仅入 JSON 不渲染）。`agreement_level` 用 v0 语义规则判定（看 analysis 语义，不只看字面 coverage_status）。星档由后端 `_map_star_rating(agreement, field_disagreements)` 单维度映射（按 5 档映射规则表）
     key 字段白名单（12 个）：Direction / DataFormatType / BitOffset / ParameterSize / OneState / ZeroState / Label / FuncRngMin / FuncRngMax / Units / Period / SDIExpected；vague 表达（无具体字段名）不影响降级
-    final_coverage_status 阈值：star ≥ 3（5★/4★/3★）取多数一致 status；star ≤ 2（2★/1★）强制「待确认」
+    final_coverage_status 阈值：star ≥ 2（5★/4★/3★/2★）取 majority 的 coverage_status；star ≤ 1（1★）强制「待确认」
     降级后处理：存活 provider 不足时硬上限约束（0 个 → 强制 1★ + no_consensus + 待确认；1 个 → ≤1★；2 个 → ≤2★）
     模块: comparison/review_agent.py + degradation/context.py
 
@@ -124,7 +124,7 @@ DeepSeek / MiniMax / Qwen 三个模型分别独立判断「每条 HLR 需求是�
 
 ## 8. Review 共识与星级评分
 
-Review Agent 汇总三个模型的结论，对分歧处复核，给出最终判定和 1-5★ 星级（星级代表判定结果的可靠程度）。5 档映射基于 agreement_level 分档 + field_disagreements 字段类型联合判定（详见 ADR-004 v2）。review LLM 扫描各 provider analysis，输出结构化字段级裁判间分歧列表（key/non_key/vague 分类，仅追踪 provider 之间的分歧，不含 EoICD-HLR 事实性差异）；后端 `_map_star_rating()` 单维度映射：full+无字段不一致→5★、full+任意字段不一致→4★、majority+无 key 字段分歧→3★、majority+有 key 字段分歧→2★、split/single_source/no_consensus→1★。对 1★ / 2★ case 执行低星复查（peer-aware 反思），复查后部分重跑共识。
+Review Agent 汇总三个模型的结论，对分歧处复核，给出最终判定和 1-5★ 星级（星级代表判定结果的可靠程度）。5 档映射基于 agreement_level 分档 + field_disagreements 字段类型联合判定（详见 ADR-004 v3 fusion）。review LLM 扫描各 provider analysis，输出两类独立字段：(1) `inconsistent_attributes`（EoICD-HLR 事实差异，主字段，不管 provider 是否一致都填），渲染到 Word「不一致属性」列；(2) `field_disagreements`（provider 字段级分歧，辅助字段，仅入 JSON）；后端 `_map_star_rating()` 单维度映射：full+无字段不一致→5★、full+任意字段不一致→4★、majority+无 key 字段分歧→3★、majority+有 key 字段分歧→2★、split/single_source/no_consensus→1★。对 1★ / 2★ case 执行低星复查（peer-aware 反思），复查后部分重跑共识。
 
 ## 9. 报告生成
 

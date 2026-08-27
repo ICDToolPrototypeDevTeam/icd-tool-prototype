@@ -8,7 +8,13 @@ import sys
 import time
 
 from app.v4.llm import get_llm
-from app.v4.models import ConsensusOutput, ConsensusResult, FieldDisagreement, MultiJudgeResult
+from app.v4.models import (
+    ConsensusOutput,
+    ConsensusResult,
+    FieldDisagreement,
+    InconsistentAttribute,
+    MultiJudgeResult,
+)
 from app.v4.prompts import load_prompt
 
 
@@ -99,9 +105,10 @@ def _call_review_api(
 ) -> ConsensusResult:
     """Call LLM and parse JSON response for consensus review.
 
-    5 星体系（ADR-004 v2）：star_rating 由 agreement_level + field_disagreements
-    联合映射；LLM 输出 field_disagreements（字段级裁判间分歧 + 类型），星档由
-    `_map_star_rating()` 计算，避免 LLM 直接选星的不稳定性。
+    5 星体系（ADR-004 v3 fusion）：star_rating 由 agreement_level +
+    field_disagreements 联合映射。LLM 另行输出 inconsistent_attributes
+    （HLR 与 ICD 的事实差异，主字段，供 Word 报告渲染），与
+    field_disagreements（provider 间字段级分歧，辅助字段）互相独立。
     """
     messages = [
         {"role": "system", "content": system_prompt},
@@ -116,13 +123,15 @@ def _call_review_api(
             data = json.loads(content)
             consistent, divergent = _derive_consensus_details(data, model_results)
             agreement = data.get("agreement_level", "split")
+            inconsistent_attributes = _parse_inconsistent_attributes(
+                data.get("inconsistent_attributes", [])
+            )
             field_disagreements = _parse_field_disagreements(
                 data.get("field_disagreements", [])
             )
-            cited_fields = list(data.get("cited_fields", []))
             star = _map_star_rating(agreement, field_disagreements)
-            # 5★/4★/3★ → 取多数一致的 coverage_status；2★/1★/split → 待确认
-            if agreement in ("full", "majority") and star >= 3:
+            # 5★/4★/3★/2★ → 取 majority 的 coverage_status；1★ → 待确认
+            if agreement in ("full", "majority") and star >= 2:
                 final_status = _majority_status(model_results, consistent)
             else:
                 final_status = "待确认"
@@ -131,8 +140,8 @@ def _call_review_api(
                 model_results=model_results,
                 agreement_level=agreement,
                 star_rating=star,
+                inconsistent_attributes=inconsistent_attributes,
                 field_disagreements=field_disagreements,
-                cited_fields=cited_fields,
                 final_coverage_status=final_status,
                 final_analysis=data.get("final_analysis", ""),
                 confidence=float(data.get("confidence", 0.5)),
@@ -153,14 +162,34 @@ def _call_review_api(
         model_results=model_results,
         agreement_level="split",
         star_rating=1,
+        inconsistent_attributes=[],
         field_disagreements=[],
-        cited_fields=[],
         final_coverage_status="待确认",
         final_analysis="Review API error after retries",
         confidence=0.0,
         consistent_agents=[],
         divergent_agents=[],
     )
+
+
+def _parse_inconsistent_attributes(raw: list) -> list[InconsistentAttribute]:
+    """Parse inconsistent_attributes (EoICD-HLR 事实差异) with defensive coercion.
+
+    LLM may return entries as dicts ({"attribute", "detail", "providers"}) or
+    bare attribute-name strings. Malformed entries are dropped silently.
+    """
+    out: list[InconsistentAttribute] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if isinstance(item, dict):
+            try:
+                out.append(InconsistentAttribute(**item))
+            except Exception:
+                continue
+        elif isinstance(item, str) and item.strip():
+            out.append(InconsistentAttribute(attribute=item.strip()))
+    return out
 
 
 def _parse_field_disagreements(raw: list) -> list[FieldDisagreement]:

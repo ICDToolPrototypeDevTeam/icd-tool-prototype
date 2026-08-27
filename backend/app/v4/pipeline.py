@@ -708,7 +708,7 @@ def _apply_degradation_review(
     for result in consensus_out.results:
         surviving = _count_surviving_providers(result.model_results)
         if surviving == 0:
-            # 所有 provider 均失败：共识输入无有效裁判，共识 LLM 在纯 error 输入上
+            # 所有 provider 均失败：共识输入全部失效，共识 LLM 在纯 error 输入上
             # 可能幻觉出高星级，强制最低置信度并转入人工审核
             if result.star_rating > ctx.config.zero_provider_star_cap:
                 result.star_rating = ctx.config.zero_provider_star_cap
