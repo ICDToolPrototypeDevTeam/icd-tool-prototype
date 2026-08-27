@@ -2,10 +2,24 @@
 """GET /api/v4/jobs/{job_id}  状态 / 结果查询。"""
 from __future__ import annotations
 
+from typing import Union
+
 from fastapi import APIRouter, HTTPException
 
-from app.api.v4.runner import _parse_progress, derive_consensus_summary, derive_mock_models, derive_outputs, V4_INTERMEDIATE_JSON
+from app.api.v4.runner import (
+    _parse_progress,
+    derive_consensus_summary,
+    derive_eoicd_hlr_counts,
+    derive_forward_outputs,
+    derive_forward_summary,
+    derive_mock_models,
+    derive_outputs,
+    V4_INTERMEDIATE_JSON,
+)
 from app.api.v4.schemas import (
+    V4ForwardJobOutputs,
+    V4ForwardJobResultResponse,
+    V4ForwardJobResultSummary,
     V4JobOutputs,
     V4JobResultResponse,
     V4JobResultSummary,
@@ -37,6 +51,7 @@ def get_v4_job_status(job_id: str):
     return V4JobStatusResponse(
         job_id=job.job_id,
         status=job.status,
+        task_type=job.task_type,
         stage=progress["stage"],
         stage_index=progress["stage_index"],
         stage_total=progress["stage_total"],
@@ -49,14 +64,12 @@ def get_v4_job_status(job_id: str):
     )
 
 
-@router.get('/jobs/{job_id}/result', response_model=V4JobResultResponse)
-def get_v4_job_result(job_id: str):
-    job = _get_job(job_id)
-    if job.status != JobStatus.COMPLETED:
-        raise HTTPException(status_code=409, detail=f'job not finished: status={job.status.value}')
+def _base_outputs_dir(job_id: str) -> Path:
+    return Path(__file__).resolve().parent.parent.parent.parent / 'output' / 'v4' / job_id / 'output'
 
-    # 反读落盘 JSON 以补全 summary（V4 router 端用；pipeline runner 已写过 result dict，本接口做兜底）
-    base_outputs_dir = Path(__file__).resolve().parent.parent.parent.parent / 'output' / 'v4' / job_id / 'output'
+
+def _reverse_result(job, base_outputs_dir: Path) -> V4JobResultResponse:
+    """组装正确性（反向）结果响应。"""
     consensus = derive_consensus_summary(base_outputs_dir)
     mock_models = derive_mock_models(base_outputs_dir)
 
@@ -89,8 +102,60 @@ def get_v4_job_result(job_id: str):
     return V4JobResultResponse(
         job_id=job.job_id,
         status=job.status,
+        task_type=job.task_type,
         summary=summary,
         outputs=job_outputs,
         mock_models=res.get('mock_models', mock_models) or [],
         errors=res.get('errors', []) or [],
     )
+
+
+def _forward_result(job, base_outputs_dir: Path) -> V4ForwardJobResultResponse:
+    """组装完整性（正向）结果响应。"""
+    outputs = derive_forward_outputs(base_outputs_dir)
+    summary = derive_forward_summary(base_outputs_dir)
+    counts = derive_eoicd_hlr_counts(base_outputs_dir)
+    res = job.result or {}
+
+    result_summary = V4ForwardJobResultSummary(
+        analysis_mode=res.get('analysis_mode', summary['analysis_mode']) or '',
+        total_blocks=int(res.get('total_blocks', summary['total_blocks']) or 0),
+        covered_direct=int(res.get('covered_direct', summary['covered_direct']) or 0),
+        covered_aggregate=int(res.get('covered_aggregate', summary['covered_aggregate']) or 0),
+        parent_referenced=int(res.get('parent_referenced', summary['parent_referenced']) or 0),
+        possible=int(res.get('possible', summary['possible']) or 0),
+        uncovered=int(res.get('uncovered', summary['uncovered']) or 0),
+        unsupported=int(res.get('unsupported', summary['unsupported']) or 0),
+        input_error=int(res.get('input_error', summary['input_error']) or 0),
+        ai_reviewed=int(res.get('ai_reviewed', summary['ai_reviewed']) or 0),
+        eoicd_count=int(res.get('eoicd_count', counts['eoicd_count']) or 0),
+        hlr_count=int(res.get('hlr_count', counts['hlr_count']) or 0),
+    )
+
+    job_outputs = V4ForwardJobOutputs(
+        forward_xlsx=outputs['forward_xlsx'],
+        forward_docx=outputs['forward_docx'],
+    )
+
+    return V4ForwardJobResultResponse(
+        job_id=job.job_id,
+        status=job.status,
+        task_type=job.task_type,
+        summary=result_summary,
+        outputs=job_outputs,
+        errors=res.get('errors', []) or [],
+    )
+
+
+@router.get('/jobs/{job_id}/result', response_model=Union[V4JobResultResponse, V4ForwardJobResultResponse])
+def get_v4_job_result(job_id: str):
+    """共用结果接口：按 job.task_type 分发到正确性 / 完整性两种响应 schema。"""
+    job = _get_job(job_id)
+    if job.status != JobStatus.COMPLETED:
+        raise HTTPException(status_code=409, detail=f'job not finished: status={job.status.value}')
+
+    base_outputs_dir = _base_outputs_dir(job_id)
+    if job.task_type == "completeness":
+        return _forward_result(job, base_outputs_dir)
+    # 默认走正确性（反向）分支，保证旧反向调用方（task_type=correctness）向后兼容
+    return _reverse_result(job, base_outputs_dir)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v4 import coverage, jobs, outputs
+from app.api.v4 import completeness, coverage, jobs, outputs
 
 
 router = APIRouter()
@@ -21,5 +21,6 @@ def v4_health():
 
 
 router.include_router(coverage.router)
+router.include_router(completeness.router)
 router.include_router(jobs.router)
 router.include_router(outputs.router)

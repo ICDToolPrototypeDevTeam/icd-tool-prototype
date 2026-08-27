@@ -78,17 +78,17 @@ V4 反向管线 pipeline（6 步）
 | `main.py`      | FastAPI 应用入口，仅 CORS + `/api/v4` 路由装载 |
 | `job_manager.py` | 内存任务状态管理（`JobStatus` / `Job` / `JobManager`） |
 | `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（后台线程 + 5 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` |
-| `v4/pipeline.py` | V4 反向管线编排（6 步），`run_reverse_pipeline` |
+| `v4/pipeline.py` | V4 管线编排：反向 `run_reverse_pipeline`（6 步）+ 正向 `run_forward_pipeline`（8 步） |
 | `v4/config.py` | V4 env 加载（DEEPSEEK_* / USE_MOCK_LLM / JUDGE_PROVIDERS）+ 业务常量 |
 | `v4/models.py` | V4 Pydantic 模型（EoICDRequirement / HLRLabel / ReverseCase / ConsensusResult 等） |
 | `v4/parsers/`  | EoICD PubSub Excel + HLR Word 解析 |
-| `v4/matching/` | HLR 标注、条目过滤、信号画像、Block 聚合、HLR 分类、反向匹配、追溯预筛选 |
-| `v4/comparison/` | 多模型裁判、Review Agent 共识、一星复查、报告生成 |
+| `v4/matching/` | HLR 标注、条目过滤、信号画像、Block 聚合、HLR 分类、反向匹配、追溯预筛选；正向 `forward_block_builder` / `forward_matcher` / `hlr_identity_index` |
+| `v4/comparison/` | 多模型裁判、Review Agent 共识、一星复查、报告生成；正向 AI 三态复核 + 覆盖合并（`coverage_reviewer`） |
 | `v4/degradation/` | Provider 健康跟踪、Case 超时、熔断、星级降级 |
-| `v4/doc_generators/` | xlsx + 单模型 docx + 共识 docx 生成 |
+| `v4/doc_generators/` | xlsx + 单模型 docx + 共识 docx 生成；正向 `forward_excel_generator` / `forward_word_generator` |
 | `v4/llm/`       | LLM 抽象层：`factory.py`（env 驱动 + mock fallback）、deepseek/minimax/qwen client、`mock_llm.py` |
-| `v4/prompts/`   | Prompt Markdown 文本资产（reverse_judge / consensus / re_review） |
-| `v4/traceability/` | 追溯表预筛选（独立零耦合模块） |
+| `v4/prompts/`   | Prompt Markdown 文本资产（reverse_judge / consensus / re_review / forward_review） |
+| `v4/traceability/` | 追溯表预筛选（独立零耦合模块）；正向 `forward_scope`（trace/full 范围构建） |
 | `output/`      | 运行时生成的输出文件存放目录                |
 
 ## 6. 前端模块划分
@@ -143,6 +143,57 @@ Step 6 报告生成
 后续标注、匹配、裁判和共识复核流程应复用解析后的结构化数据。
 ```
 
+### 7.1 正向完整性分析流程（EoICD → HLR）
+
+正向管线由 `v4/pipeline.py` 编排（`run_forward_pipeline`，与 `run_reverse_pipeline` 同文件），按 8 步组织，回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析（正确性比对）互补。复用解析后的统一输入（不重新解析）；候选召回以确定性索引为主，`label_hlrs()` 标注仅作为召回增强（可降级）。
+
+```text
+上传文件
+    ↓
+C1 解析输入（复用 v4/parsers/*）
+   HLR Word + EoICD PubSub Excel → hlr_requirements.json + eoicd_requirements.json
+    ↓
+C2 追溯范围
+   full（全量 DP/RP 业务对象）| trace（Table1 设备→ICD × Table2 设备→HLR，按 ERD 关联）
+   模块: v4/traceability/forward_scope.py
+    ↓
+C3 业务对象块聚合
+   leaf DP/RP 条目按稳定 business_object_id（Label/信号族/端口-消息）聚合 → ForwardICDBlock
+   模块: v4/matching/forward_block_builder.py
+    ↓
+C4 HLR 身份索引（确定性 + label_hlrs 召回增强）
+   hlr_classifier 正则提取 Label/信号 token/方向/分类 → 倒排 token_index；label_hlrs + enrich_all_labels 合并 AI 标注 → llm_token_index（仅召回增强，可降级，失败不影响任务）
+   模块: v4/matching/hlr_identity_index.py
+    ↓
+C5 候选召回
+   trace 模式用追溯候选；full 模式用倒排索引召回（确定性 token 优先，llm_label 仅增强），按 token 重叠数排序
+   模块: v4/matching/forward_matcher.py（candidate recall）
+    ↓
+C6 确定性覆盖判定
+   规则等级（exact_label/exact_fullname/exact_signal/parent_referenced/generic_signal/weak_signal/trace_only/no_evidence）+ 通用词约束 + llm_label 不参与 covered
+   模块: v4/matching/forward_matcher.py（deterministic judge）
+    ↓
+C7 AI 三态复核（单模型，无三模型裁判/共识）
+   needs_ai 的 possible 级对象 → covered/not_same_object/unconfirmed
+   模块: v4/comparison/coverage_reviewer.py + v4/prompts/forward_review.md
+    ↓
+C8 合并 + 报告
+   覆盖分布 + 漏写清单 + 待确认清单 → forward_coverage.json / forward_coverage.xlsx / forward_report.docx
+   模块: v4/comparison/coverage_reviewer.py（consolidate）+ v4/doc_generators/{forward_excel_generator,forward_word_generator}.py
+    ↓
+更新任务状态和输出文件路径
+```
+
+正向分析约束：
+
+```text
+正向候选召回以确定性 HLR 身份索引（hlr_classifier）为主；label_hlrs() 标注仅增强召回（llm_token_index），
+  失败时降级为纯确定性索引，且 llm_label token 绝不单独形成 covered。
+AI 三态复核采用单模型（FORWARD_REVIEW_PROVIDER），无三模型裁判/共识。
+通用信号词（STATUS/STATE/VOLTAGE/…）只在判定阶段降级，不在召回阶段过滤。
+A664 原生（A664Message 无 A429Word）标记 unsupported，不静默剔除。
+```
+
 ## 8. 模块边界约束
 
 开发时应遵守以下模块边界：
@@ -155,7 +206,8 @@ Step 6 报告生成
 6. 报告文档生成逻辑应放在 `v4/doc_generators/`；
 7. 任务状态管理应放在 `job_manager.py`，不应写入 `main.py`；
 8. 前端 API 调用应集中放在 `frontend/src/api/`；
-9. 前端组件不应直接处理后端复杂业务逻辑。
+9. 前端组件不应直接处理后端复杂业务逻辑；
+10. 正向完整性分析逻辑按功能域分布：范围 `v4/traceability/forward_scope`、块聚合/召回/判定 `v4/matching/forward_*`、AI 复核与合并 `v4/comparison/coverage_reviewer`、报告 `v4/doc_generators/forward_*`、编排 `v4/pipeline.py`；正向 AI 复核为单模型，不复用反向三模型裁判/共识。
 
 不得将文件解析、匹配、裁判、共识和报告输出混写在单个大文件中。
 
@@ -218,7 +270,7 @@ backend/app/
     ├── cli.py              # V4 CLI 入口
     ├── config.py           # V4 env 加载 + 业务常量
     ├── models.py           # V4 Pydantic 模型
-    ├── pipeline.py         # V4 反向管线编排（run_reverse_pipeline / _match_reverse_with_trace）
+    ├── pipeline.py         # V4 管线编排（run_reverse_pipeline / run_forward_pipeline）
     ├── parsers/            # EoICD Excel + HLR Word 解析
     ├── matching/           # 反向匹配、信号画像、HLR 分类、entry filter
     ├── comparison/         # multi_judge + review_agent + 报告生成

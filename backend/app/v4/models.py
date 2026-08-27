@@ -29,6 +29,7 @@ class EoICDRequirement(BaseModel):
     is_dp_ref: bool = False           # True if this is a Subscriber dp_ref attribute
     dp_ref_name: str = ""             # DP sub-signal name from pub_names (P2.4)
     signal_name: str = ""  # hierarchical signal path from Software to current layer
+    layer_path_types: list[str] = Field(default_factory=list)  # layer_type per level (Software→leaf); additive, forward-only
 
 
 class EoICDOutput(BaseModel):
@@ -266,3 +267,218 @@ class PipelineResult(BaseModel):
     judged_count: int = 0
     report_path: str = ""
     errors: list[str] = Field(default_factory=list)
+
+
+# ============================================================
+# Forward Completeness Models (EoICD → HLR)
+# ============================================================
+
+
+class ForwardIdentity(BaseModel):
+    """Standardized EoICD business identity for one ForwardICDBlock.
+
+    identity_key is the stable business_object_id, derived from protocol +
+    protocol-stable fields (NOT from traceability FullName, and NOT using hash()).
+    """
+
+    identity_key: str
+    protocol: str                     # A429 | A825 | Analog | Discrete | A664 | unknown
+    label: str = ""                   # A429 label value (e.g. "121")
+    signal_family: str = ""
+    device: str = ""                  # Software segment
+    port: str = ""                    # port / message
+    message: str = ""
+    channel: str = ""
+    signal: str = ""                  # leaf name
+
+
+class ForwardScopeItem(BaseModel):
+    """One traceability FullName resolved against parsed EoICD, with candidate HLRs.
+
+    candidate_hlr_ids keeps the RAW trace-referenced HLR ids (for audit).
+    missing_hlr_ids are the raw candidates NOT present in the uploaded HLR doc;
+    only the remaining (analyzable) ids participate in matching / AI review
+    (正向缺陷修正 #4).
+    """
+
+    icd_fullname: str
+    protocol: str = ""
+    erd_ids: list[str] = Field(default_factory=list)
+    candidate_hlr_ids: list[str] = Field(default_factory=list)
+    missing_hlr_ids: list[str] = Field(default_factory=list)
+    located_eoicd_signal_names: list[str] = Field(default_factory=list)
+
+
+class ForwardScopeOutput(BaseModel):
+    """C2 stage output: analysis scope + mode + candidate HLR set."""
+
+    generated_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    analysis_mode: str = ""           # "trace" | "full"
+    scope_source: str = ""
+    total_scope_fullnames: int = 0
+    total_candidate_hlrs: int = 0
+    scope_items: list[ForwardScopeItem] = Field(default_factory=list)
+    input_errors: list[dict] = Field(default_factory=list)  # {kind, detail}
+
+
+class IdentityToken(BaseModel):
+    """A single identity evidence token extracted from HLR text/index."""
+
+    value: str
+    normalized_value: str = ""
+    source: str = ""                  # literal | regex | glossary | synonym | mapped | llm_cache | llm_label
+    confidence: float = 1.0
+
+
+class ForwardICDBlock(BaseModel):
+    """Business-signal-level detection unit (not per-attribute)."""
+
+    business_object_id: str
+    identity: ForwardIdentity
+    dp_signal_names: list[str] = Field(default_factory=list)
+    rp_signal_names: list[str] = Field(default_factory=list)
+    aliases: list[str] = Field(default_factory=list)
+    dp_entry_ids: list[str] = Field(default_factory=list)
+    rp_entry_ids: list[str] = Field(default_factory=list)
+    variants: list[str] = Field(default_factory=list)   # A429 channels A1/A2/B1/B2
+    devices: list[str] = Field(default_factory=list)
+    trace: ForwardScopeItem | None = None
+    unsupported: bool = False         # native A664 etc.
+
+
+class ForwardBlocksOutput(BaseModel):
+    """C3 stage output."""
+
+    generated_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    analysis_mode: str = ""
+    total_blocks: int = 0
+    blocks: list[ForwardICDBlock] = Field(default_factory=list)
+
+
+class ForwardCandidatesOutput(BaseModel):
+    """C5 stage output: block_id → recalled candidate HLR ids."""
+
+    generated_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    total_blocks: int = 0
+    candidates: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class ForwardDeterministicResult(BaseModel):
+    """C6 stage per-block deterministic rule result."""
+
+    business_object_id: str
+    rule_level: str = ""              # exact_fullname | exact_signal | ... | no_evidence
+    coverage_status: str = ""         # covered_direct | covered_aggregate | parent_referenced | possible | uncovered
+    matched_hlr_ids: list[str] = Field(default_factory=list)
+    candidate_hlr_ids: list[str] = Field(default_factory=list)
+    candidate_truncated: bool = False
+    needs_ai: bool = False
+    identity_tokens: list[IdentityToken] = Field(default_factory=list)
+
+
+class ForwardDeterministicOutput(BaseModel):
+    """C6 stage output."""
+
+    generated_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    total_blocks: int = 0
+    stats: dict = Field(default_factory=dict)
+    results: list[ForwardDeterministicResult] = Field(default_factory=list)
+
+
+class ForwardAIReviewResult(BaseModel):
+    """C7 stage per-block AI three-state review."""
+
+    business_object_id: str
+    review_verdict: str = ""          # covered | not_same_object | unconfirmed
+    matched_hlr_ids: list[str] = Field(default_factory=list)
+    rejected_hlr_ids: list[str] = Field(default_factory=list)
+    identity_evidence: list[dict] = Field(default_factory=list)
+    confidence: float = 0.0
+    rationale: str = ""
+    error: str | None = None
+
+
+class ForwardAIReviewOutput(BaseModel):
+    """C7 stage raw AI review results."""
+
+    generated_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    total_reviewed: int = 0
+    stats: dict = Field(default_factory=dict)  # ai_review_total/ai_success/ai_timeout/ai_error
+    results: list[ForwardAIReviewResult] = Field(default_factory=list)
+
+
+class ForwardCoverageResult(BaseModel):
+    """Final coverage result for one ForwardICDBlock."""
+
+    business_object_id: str
+    analysis_status: str = "supported"  # supported | unsupported | input_error
+    coverage_status: str = ""           # final: covered_* | parent_referenced | possible | uncovered
+    matched_hlr_ids: list[str] = Field(default_factory=list)
+    evidence: list[IdentityToken] = Field(default_factory=list)
+    source: str = "rule"                # rule | ai
+    rule_level: str = ""
+    candidate_truncated: bool = False
+    referenced_variants: list[str] = Field(default_factory=list)
+    unconfirmed_variants: list[str] = Field(default_factory=list)
+    ai_review: ForwardAIReviewResult | None = None
+    error: str | None = None
+
+
+class ForwardCoverageOutput(BaseModel):
+    """C7/C8 final coverage result set."""
+
+    generated_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    analysis_mode: str = ""
+    scope_source: str = ""
+    stats: dict = Field(default_factory=dict)
+    unsupported: list[dict] = Field(default_factory=list)
+    input_errors: list[dict] = Field(default_factory=list)
+    # Two independent AI call counters (正向缺陷修正 #8 audit)：HLR 标签调用 +
+    # 正向三态复核调用。由 pipeline 在 consolidate 之后回填。
+    hlr_label_calls: int = 0
+    ai_review_calls: int = 0
+    results: list[ForwardCoverageResult] = Field(default_factory=list)
+
+
+class HLRIdentityEntry(BaseModel):
+    """Identity extraction for one HLR requirement.
+
+    signal_tokens are deterministic (regex / CN→EN map); llm_label_tokens are
+    AI-derived (label_hlrs + enrich_all_labels) and can ONLY enhance candidate
+    recall — they never support a covered conclusion.
+    """
+
+    hlr_id: str
+    labels: list[str] = Field(default_factory=list)          # ["L275", ...] (regex)
+    signal_tokens: list[str] = Field(default_factory=list)   # English + Chinese-mapped tokens
+    llm_label_tokens: list[str] = Field(default_factory=list)  # AI labels (source="llm_label")
+    direction: str = ""                                       # 发送 | 接收 | ""
+    signal_category: str = ""                                 # A429显式 | 模拟量 | ...
+
+
+class HLRIdentityIndex(BaseModel):
+    """C4 stage output: deterministic HLR identity + inverted token index.
+
+    token_index maps deterministic tokens; llm_token_index maps AI-derived
+    tokens (source="llm_label") that only broaden recall, never coverage.
+    """
+
+    generated_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    total_hlrs: int = 0
+    entries: dict[str, HLRIdentityEntry] = Field(default_factory=dict)
+    token_index: dict[str, list[str]] = Field(default_factory=dict)  # token -> [hlr_id] (deterministic)
+    llm_token_index: dict[str, list[str]] = Field(default_factory=dict)  # token -> [hlr_id] (llm_label)

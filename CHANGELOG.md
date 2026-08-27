@@ -2,6 +2,14 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-08-26
+
+### Added
+
+- **V4 正向完整性分析（EoICD → HLR 漏写检测）**：新增正向分析管线（解析 → 追溯范围 → 业务对象块 → 确定性 HLR 身份索引 → 候选召回 → 确定性覆盖判定 → AI 三态复核 → JSON/Excel/Word 报告），回答「EoICD 业务对象在 HLR 正文中是否漏写」，与既有反向分析（正确性比对）互补。正向分析复用确定性 HLR 身份索引（不依赖 AI 标注），AI 复核采用单模型（`FORWARD_REVIEW_PROVIDER`，默认 DeepSeek），无三模型裁判/共识。
+- **正向 API 与下载分发**：新增 `POST /api/v4/completeness-analysis`（`analysis_mode` ∈ `full`/`trace`）、`GET /api/v4/jobs/{job_id}/forward-result`、`GET /api/v4/jobs/{job_id}/outputs/forward-xlsx`、`GET /api/v4/jobs/{job_id}/outputs/forward-docx`；`Job` 新增 `task_type` 字段（`reverse`/`forward`）区分两类任务。
+- **EoICD 解析字段**：`EoICDRequirement` 新增 `layer_path_types`（层级路径类型，加性字段），供正向协议分类（A429/A825/模拟量/离散量/A664）使用，不影响反向解析计数。
+
 ## [Unreleased] - 2026-08-20
 
 ### Removed
