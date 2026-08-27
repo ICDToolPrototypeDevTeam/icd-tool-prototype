@@ -1413,3 +1413,103 @@ key 字段白名单（12 个）：Direction / DataFormatType / BitOffset / Param
 1. mock 端到端跑一次，确认报告展示无回归
 2. 真实 LLM 跑 `故障注入1.0.docx`，目检 docx 三处文案统一效果
 3. 视用户反馈决定是否进一步精简"共识"列 mapping（如拆分为 star-aware：full+5★→"完全无争议"，full+4★→"一致有争议"）
+
+## 2026-08-27：ADR-004 v3 fusion 五星体系两维度重构
+
+### 任务目标
+
+修正 ADR-004 v2 的语义错误：v2 把 `inconsistent_attributes`（EoICD-HLR 事实差异）
+改名并重定义为 `field_disagreements`（provider 间字段级分歧），导致 Word 报告
+「不一致属性」列失去数据源。恢复两者为两个独立维度。
+
+### 问题回顾
+
+用户跑真实样例后反馈：报告「判断」列显示「不一致」，但同 case 的「不一致属性」列
+显示「—」。根因是 v2 规则规定「3 个 provider 共识识别的 EoICD-HLR 差异不进
+`field_disagreements`」，而报告渲染又从 `field_disagreements` 派生「不一致属性」列 ——
+共识越好，报告越空。
+
+### 设计决策（用户确认）
+
+1. 删除 `evidence_alignment`（v2 已删，保持删除）
+2. `field_disagreements` 保留为辅助字段，仅入 JSON，不渲染到 Word 报告
+3. `agreement_level` 完全复用 v0 语义规则（看 analysis 语义，不只看字面 coverage_status）
+4. 5 档映射规则直接复用 v2（`_map_star_rating` 逻辑不变）
+
+### 完成内容
+
+1. `models.py` 新增 `InconsistentAttribute`（`attribute` / `detail` / `providers`），
+   `ConsensusResult` 新增 `inconsistent_attributes`；`FieldDisagreement` docstring
+   标注为辅助字段
+2. `consensus.md` 重写为 6 步流程（扫描 cited_fields → agreement 语义判定 →
+   提取 inconsistent_attributes → 提取 field_disagreements → final_coverage_status →
+   final_analysis/confidence），含 5 个输出示例与 `attribute` vs `field` 命名澄清
+3. `review_agent.py` 新增 `_parse_inconsistent_attributes`（dict / 裸字符串两种形态容错），
+   `_call_review_api` 同时解析两字段
+4. `consensus_word_generator.py` 「不一致属性」列直接读 `inconsistent_attributes`，
+   删除从 `field_disagreements` 派生的逻辑
+5. e2e 用例 5/6 注入两字段；`common.py` 新增 `_migrate_consensus_schema` 自动迁移旧 baseline
+
+### 修改文件
+
+1. `backend/app/v4/models.py`
+2. `backend/app/v4/prompts/consensus.md`
+3. `backend/app/v4/comparison/review_agent.py`
+4. `backend/app/v4/doc_generators/consensus_word_generator.py`
+5. `backend/tests/e2e/test_use_case_5_five_star_rating.py`
+6. `backend/tests/e2e/test_use_case_6_five_star_upgrade.py`
+7. `backend/tests/e2e/common.py`
+8. `docs/decisions/ADR-004-五星评价体系.md`
+9. `CHANGELOG.md`
+
+### 验证方式
+
+1. `docker compose build backend`
+2. `docker compose run --rm -w /app backend python tests/e2e/test_use_case_5_five_star_rating.py`
+3. `docker compose run --rm -w /app backend python tests/e2e/test_use_case_6_five_star_upgrade.py`
+4. 真实 LLM 跑 `故障注入1.0.docx`，检查 `inconsistent` case 的
+   `inconsistent_attributes` 非空 + Word 报告两列对应关系
+
+### 遗留问题
+
+1. `_map_star_rating` 仍只看 `field_disagreements`，`inconsistent_attributes` 不参与星档
+   （用户已确认为预期行为）
+2. 真实样例验证待跑
+
+## 2026-08-27: ADR-004 v3 fusion 后续——修复 surviving=2 时 LLM 误判 no_consensus
+
+### 背景
+
+v3 fusion 上线后跑 `故障注入1.0.docx`，REV-0010（FSF21000101_HLR_547）最终
+`agreement_level=no_consensus`、`star_rating=1`。排查发现 surviving=2 时降级脚本
+不覆盖 `agreement_level`（仅 cap star 到 2），而原 `consensus.md` prompt 把
+`single_source` / `no_consensus` 列为 LLM 可选值，LLM 看到 1/3 error +
+2/3 实质分歧时自主输出了 `no_consensus`，穿透到最终结果。
+
+### 修复（只做方案 A）
+
+`backend/app/v4/prompts/consensus.md`：
+- JSON schema `agreement_level` 选项从 `full|majority|split|single_source|no_consensus`
+  收窄为 `full|majority|split`
+- Step 2 严重分歧段后新增"重要"提示，明确 `single_source` / `no_consensus`
+  由后端降级脚本根据 provider 存活数自动写入，LLM 不输出
+- 重要提示段首条加相同约束
+
+`CHANGELOG.md` 同步记录（数据契约无变化）。
+
+### 不修复项
+
+- `re_review.py:328` 错误覆盖原 valid 判断（minimax 原本 `inconsistent` 被
+  error 静默替换）：属于独立数据丢失 bug，与 `no_consensus` 误判无直接因果。
+  留待后续 issue 处理。
+- `review_agent.py:_call_review_api` 接受 LLM 输出的 `no_consensus` /
+  `single_source`：prompt 改完后这两个值不会再出现，无需 post-process 防御。
+
+### 验证
+
+- 重新跑 `故障注入1.0.docx`，复查 REV-0010：
+  - `agreement_level` 应为 `split`（不再为 `no_consensus`）
+  - `star_rating` 仍为 1★（split → 1★，与原结果一致）
+  - `final_coverage_status=待确认`（一致）
+- e2e 用例 5/6 跑通（mock + 真实 LLM）
+

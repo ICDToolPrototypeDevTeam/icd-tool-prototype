@@ -37,7 +37,7 @@
 输出 JSON：
 {
   "coverage_status": "covered | inconsistent | needs_review",
-  "difference_type": "无差异 | 缺失 | 不一致 | 部分覆盖 | 需确认",
+  "difference_type": "无差异 | 不一致 | 需确认",
   "missing_points": ["..."],
   "inconsistent_points": ["..."],
   "analysis": "重新评估的详细分析",
