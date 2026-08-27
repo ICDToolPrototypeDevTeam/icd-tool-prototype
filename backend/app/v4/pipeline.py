@@ -1009,8 +1009,8 @@ def run_forward_pipeline(
     coverage.hlr_label_calls = len(hlr_labels)
     coverage.ai_review_calls = ai_review.total_reviewed
     _save_forward(coverage, output_dir / "forward_coverage.json")
-    generate_forward_excel(coverage, blocks, output_dir / "forward_coverage.xlsx")
-    generate_forward_word(coverage, blocks, output_dir / "forward_report.docx")
+    generate_forward_excel(coverage, blocks, output_dir / "EoICD至HLR正向完整性分析明细.xlsx")
+    generate_forward_word(coverage, blocks, output_dir / "EoICD至HLR正向完整性分析报告.docx")
     print(f"  Final stats: {coverage.stats}")
 
     job.update(JobStatus.COMPLETED, "Forward pipeline complete")
