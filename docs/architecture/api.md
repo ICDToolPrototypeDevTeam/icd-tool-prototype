@@ -314,8 +314,8 @@ GET /api/v4/jobs/{job_id}/outputs/forward-docx
 
 | URL 段 | 物理文件名 |
 | --- | --- |
-| `forward-xlsx` | `forward_coverage.xlsx` |
-| `forward-docx` | `forward_report.docx` |
+| `forward-xlsx` | `EoICD至HLR正向完整性分析明细.xlsx` |
+| `forward-docx` | `EoICD至HLR正向完整性分析报告.docx` |
 
 正向下载接口校验 `task_type == "completeness"`；反向下载接口校验 `task_type == "correctness"`。用错任务下载 → 404。
 

@@ -188,7 +188,7 @@ def generate_forward_word(
     for label, desc in [
         ("已覆盖", "HLR 正文中存在该 EoICD 业务对象的对应描述。"),
         ("待确认", "存在候选 HLR 但无法确定是否描述了该对象，需人工审查。"),
-        ("未覆盖（疑似漏写）", "HLR 正文中未找到该对象的对应描述，疑似漏写。"),
+        ("未覆盖", "HLR 正文中未找到该对象的对应描述，疑似漏写。"),
         ("输入异常对象", "追溯表引用的候选 HLR 全部缺失于上传的 HLR 文档，无法分析。"),
         ("不支持", "该对象的协议类型（如原生 A664）暂不支持分析。"),
     ]:
@@ -207,7 +207,7 @@ def generate_forward_word(
     for label, count in [
         ("已覆盖", len(covered)),
         ("待确认", len(pending)),
-        ("未覆盖（疑似漏写）", len(uncovered)),
+        ("未覆盖", len(uncovered)),
         ("输入异常对象", len(input_errors)),
         ("不支持", len(unsupported)),
     ]:

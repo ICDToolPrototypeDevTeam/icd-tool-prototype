@@ -21,7 +21,7 @@ _STATUS_LABELS = {
     "covered_aggregate": "已覆盖（聚合）",
     "parent_referenced": "仅父级引用",
     "possible": "待确认",
-    "uncovered": "未覆盖（疑似漏写）",
+    "uncovered": "未覆盖",
 }
 
 

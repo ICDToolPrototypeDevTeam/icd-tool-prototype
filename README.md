@@ -2,7 +2,12 @@
 
 ICD工具原型Ver4.0是一个面向EoICD源文件和软件高层需求（HLR）文件的智能化差异分析与需求生成工具。
 
-当前工具运行版本为 **V4.0**：从软件高层需求（HLR）出发，验证每条 HLR 需求是否能在 EoICD 接口定义中找到对应项（即 HLR 到 EoICD 的可追溯性），从而表明HLR是否覆盖了对应的EoICD条目，通过 DeepSeek / MiniMax / Qwen 三模型并行裁判 + Review Agent 共识复核，输出条目化清单和一致性分析报告。早期 V3.0 代码已移除（见 [ADR-002](docs/decisions/ADR-002-移除V3.md)）。
+当前工具运行版本为 **V4.0**，提供两个方向的智能化分析：
+
+- **反向（HLR→EoICD）可追溯性分析**：从软件高层需求（HLR）出发，验证每条 HLR 需求是否能在 EoICD 接口定义中找到对应项（即 HLR 到 EoICD 的可追溯性），从而表明 HLR 是否覆盖了对应的 EoICD 条目，通过 DeepSeek / MiniMax / Qwen 三模型并行裁判 + Review Agent 共识复核，输出条目化清单和一致性分析报告。
+- **正向（EoICD→HLR）完整性分析**：从 EoICD 源文件出发，检查每个业务对象（业务信号/字段）是否在 HLR 正文中被对应描述，用于识别"漏写"，输出正向完整性分析报告与明细。
+
+早期 V3.0 代码已移除（见 [ADR-002](docs/decisions/ADR-002-移除V3.md)）。
 
 ## 1. 主要功能
 
@@ -11,6 +16,8 @@ ICD工具原型Ver4.0是一个面向EoICD源文件和软件高层需求（HLR）
 - **反向匹配（含追溯表预筛选）**：根据标注线索为每条 HLR 需求寻找最可能对应的 EoICD 接口定义（Block）；支持上传追溯表预先缩小匹配范围，匹配失败时自动回退到全量匹配。
 - **三模型裁判与共识评分**：DeepSeek / MiniMax / Qwen 三模型并行独立判定，Review Agent 综合复核并给出 1-3★ 星级评分。
 - **多维度报告输出**：输出条目化清单（.xlsx）和单模型/多模型一致性分析报告（.docx），含不一致属性栏等分析明细。
+- **EoICD→HLR 完整性分析（漏写检测）**：从 EoICD 源文件出发，逐个检查业务对象（业务信号/字段）是否在 HLR 正文中被对应描述；结合确定性规则（Label 号、信号名、SDI、bit 等身份信息）与 AI 三态复核，将每个对象判定为 已覆盖 / 待确认 / 未覆盖 / 输入异常对象 / 不支持。
+- **正向报告与明细输出**：输出正向完整性分析 Word 报告（覆盖分布 + 未覆盖/待确认清单 + 自然语言原因）与 Excel 明细（分析结果 / 缺失HLR明细 / 匹配证据明细 三个 Sheet）。
 
 ## 2. 输入输出
 
@@ -23,6 +30,8 @@ ICD工具原型Ver4.0是一个面向EoICD源文件和软件高层需求（HLR）
 | EoICD Subscriber Excel | .xlsx | 与 Publisher 二选一，接收侧接口定义 |
 | 追溯 Excel | .xlsx | 选填（0-N 个），设备需求（ERD）→HLR / 设备需求（ERD）→ICD 追溯表 |
 
+> 正向完整性分析复用上述 HLR Word + EoICD Pub/Sub 作为输入；启用"追溯范围分析"时需成对上传两张追溯表（设备需求→系统ICD 追溯表、单模块需求矩阵分析表），仅传一张会报错。
+
 ### 输出
 
 | 输出文件 | 内容说明 |
@@ -32,12 +41,15 @@ ICD工具原型Ver4.0是一个面向EoICD源文件和软件高层需求（HLR）
 | `EoICD与SWHLR单模型差异分析报告_MiniMax.docx` | MiniMax 单独判定的结果（内容同上） |
 | `EoICD与SWHLR单模型差异分析报告_Qwen.docx` | Qwen 单独判定的结果（内容同上） |
 | `EoICD与SWHLR多模型差异分析报告.docx` | 汇总三个模型的判定，经 Review Agent 复核后给出最终结论与 1-3★ 星级评分 |
+| `EoICD至HLR正向完整性分析报告.docx` | 正向完整性分析结果：覆盖状态分布、未覆盖/待确认/输入异常对象清单，以及每个待确认对象的自然语言原因 |
+| `EoICD至HLR正向完整性分析明细.xlsx` | 正向完整性分析明细：分析结果 / 缺失HLR明细 / 匹配证据明细 三个 Sheet |
 
 > **报告含义**：本工具的核心是判断"每条 HLR 软件需求，是否能在 EoICD 接口定义中找到对应的接口"（即 HLR 到 EoICD 的可追溯性）。"一致性"指的就是"HLR 需求与 EoICD 接口定义之间是否对应、对应得是否一致"。3 份单模型报告是三个模型各自的独立判断，1 份多模型报告是综合三个模型结果共识度的最终结论和可靠度评分（星级）。
 
 ## 3. 处理流程
 
 ```text
+反向可追溯性分析（HLR→EoICD）：
 上传文件 → 解析输入 → HLR 需求标注 → 反向匹配（找对应接口）
          → 三模型判定（是否对应一致） → 共识复核 → 生成报告
 ```
@@ -48,6 +60,22 @@ ICD工具原型Ver4.0是一个面向EoICD源文件和软件高层需求（HLR）
 4. **三模型判定**：DeepSeek / MiniMax / Qwen 三个模型分别独立判断"每条 HLR 需求是否在 EoICD 中找到了正确对应的接口，且两者描述（数据类型、方向、范围等）是否一致"，各自给出结论。
 5. **共识复核**：由 Review Agent 汇总三个模型的结论，对分歧处复核，给出最终判定和 1-3★ 星级（星级代表判定结果的可靠程度）。
 6. **生成报告**：将以上结果整理成 1 份 xlsx（条目化清单）+ 4 份 docx（差异分析报告）。
+
+正向完整性分析（EoICD→HLR）流程：
+
+```text
+上传文件 → 解析输入 → 追溯范围判定 → 业务对象块拆分 → HLR 身份索引
+         → 候选召回 → 确定性判定 → AI 三态复核 → 汇总生成报告
+```
+
+1. **解析输入**：读取 HLR Word 与 EoICD PubSub Excel，得到结构化需求与接口信号。
+2. **追溯范围判定**：按上传的追溯表自动判定分析模式（无追溯表=全量分析，两张齐全=追溯范围分析，仅一张=报错）。
+3. **业务对象块拆分**：把 EoICD 中的业务信号/字段拆分为独立业务对象（Block）。
+4. **HLR 身份索引**：构建 HLR 正文身份索引（Label 号、信号名、SDI、bit 等），作为匹配线索。
+5. **候选召回**：为每个业务对象召回候选 HLR（含追溯表引用）。
+6. **确定性判定**：按身份信息与候选 HLR 做确定性比对，无法定论的对象进入 AI 复核。
+7. **AI 三态复核**：AI 对确定性无法定论的对象判定 covered / not_same_object / unconfirmed。
+8. **汇总生成报告**：合并确定性 + AI 结果，输出覆盖状态（已覆盖/待确认/未覆盖/输入异常对象/不支持），生成 Word + Excel 报告。
 
 详细流程说明见 [`docs/project/workflow.md`](docs/project/workflow.md)。
 
@@ -161,11 +189,11 @@ icd-tool-prototype/
 │   ├── app/
 │   │   ├── api/v4/               # V4 API 路由（router / schemas / runner / coverage / jobs / outputs）
 │   │   ├── v4/                   # V4 业务模块
-│   │   │   ├── comparison/       #   多模型裁判 + Review Agent 共识 + 一星复查 + 报告生成
+│   │   │   ├── comparison/       #   多模型裁判 + Review Agent 共识 + 一星复查 + 报告生成 + 正向覆盖汇总
 │   │   │   ├── degradation/      #   多智能体降级保护（超时、熔断、星级降级）
-│   │   │   ├── matching/         #   反向匹配（HLR 标注、信号画像、Block 聚合、HLR 分类）
+│   │   │   ├── matching/         #   反向匹配（HLR 标注、信号画像、Block 聚合）+ 正向身份索引与确定性判定
 │   │   │   ├── llm/              #   LLM 抽象层（DeepSeek / MiniMax / Qwen Client + Mock）
-│   │   │   ├── doc_generators/   #   xlsx + 单模型 docx + 共识 docx 生成
+│   │   │   ├── doc_generators/   #   xlsx + 单模型 docx + 共识 docx + 正向 Word/Excel 报告生成
 │   │   │   ├── parsers/          #   EoICD PubSub Excel + HLR Word 解析
 │   │   │   ├── traceability/     #   追溯表预筛选
 │   │   │   └── prompts/          #   V4 Prompt 文本资产
@@ -224,6 +252,7 @@ icd-tool-prototype/
 工程处于 ICD 工具 4.0 端到端原型验证阶段。
 
 - **V4.0**：已完成 HLR→EoICD 可追溯性分析全流程（6 步），三模型并行裁判 + 星级评分共识，输出 5 份产物。DeepSeek 为必填（同时用于 HLR 标注和 Review Agent），MiniMax / Qwen 为可选（未配置时从 `JUDGE_PROVIDERS` 中移除即可）。
+- **V4.0 正向完整性分析**：已完成 EoICD→HLR 完整性分析全流程（8 步），确定性规则 + AI 三态复核，输出 1 份 Word 报告 + 1 份 Excel 明细。
 - **前端**：默认使用 V4.0 界面。
 - **V3.0 旧版代码**：已移除（见 [ADR-002](docs/decisions/ADR-002-移除V3.md)）。
 

@@ -310,8 +310,8 @@ def launch_v4_pipeline(
 
 # 正向完整性分析对外输出文件（2 类；ADR-001 D7 不对外暴露中间 JSON）
 FORWARD_OUTPUT_FILES = {
-    "forward_xlsx": "forward_coverage.xlsx",
-    "forward_docx": "forward_report.docx",
+    "forward_xlsx": "EoICD至HLR正向完整性分析明细.xlsx",
+    "forward_docx": "EoICD至HLR正向完整性分析报告.docx",
 }
 
 # 正向分析内部 JSON 中间产物（分阶段落盘；仅供反读派生，不对外下载）

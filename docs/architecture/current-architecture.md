@@ -178,7 +178,7 @@ C7 AI 三态复核（单模型，无三模型裁判/共识）
    模块: v4/comparison/coverage_reviewer.py + v4/prompts/forward_review.md
     ↓
 C8 合并 + 报告
-   覆盖分布 + 漏写清单 + 待确认清单 → forward_coverage.json / forward_coverage.xlsx / forward_report.docx
+   覆盖分布 + 漏写清单 + 待确认清单 → forward_coverage.json / EoICD至HLR正向完整性分析明细.xlsx / EoICD至HLR正向完整性分析报告.docx
    模块: v4/comparison/coverage_reviewer.py（consolidate）+ v4/doc_generators/{forward_excel_generator,forward_word_generator}.py
     ↓
 更新任务状态和输出文件路径
