@@ -181,7 +181,7 @@ def _call_re_review_api(
 
     for attempt in range(3):
         try:
-            response = llm.chat(messages=messages, temperature=0.1, max_tokens=4096)
+            response = llm.chat(messages=messages, temperature=0.1, max_tokens=8192)
             content = _extract_json(response["content"])
             data = json.loads(content)
             return {
@@ -242,9 +242,9 @@ def re_review_judgments(
 ) -> tuple[MultiJudgeOutput, set[str]]:
     """Re-review every low-confidence (1★/2★) case with each judging provider.
 
-    5 星体系（ADR-004）：触发条件从 star_rating == 1 扩展到
+    5 星体系（ADR-004 v2）：触发条件从 star_rating == 1 扩展到
     star_rating ∈ {1, 2}。peer-aware 复查给 1★ 一个升 2★ 的机会，
-    给 2★（多数一致但 evidence 弱）一个升 3★ 的机会。
+    给 2★（多数一致但有 key 字段分歧）一个升 3★ 的机会。
 
     For each case in ``consensus_out`` (or ``output_dir /
     consensus_results.json``) with ``star_rating in {1, 2}``, query every

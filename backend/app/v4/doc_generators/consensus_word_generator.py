@@ -92,6 +92,12 @@ def generate_consensus_report(
     for cr in consensus_results:
         cid = cr["case_id"]
         mr = case_match_map.get(cid, {})
+        # ADR-004 v2: field_disagreements 替代 inconsistent_attributes
+        # 保留 inconsistent_attributes 作为渲染兼容字段（从 field_disagreements 派生）
+        inconsistent_attrs_for_render = [
+            {"attribute": ifd.get("field", ""), "detail": ifd.get("detail", "")}
+            for ifd in cr.get("field_disagreements", [])
+        ]
         merged.append({
             "case_id": cid,
             "hlr_id": mr.get("hlr_id", ""),
@@ -103,7 +109,9 @@ def generate_consensus_report(
             "final_analysis": cr.get("final_analysis", ""),
             "confidence": cr.get("confidence", 0),
             "model_results": cr.get("model_results", {}),
-            "inconsistent_attributes": cr.get("inconsistent_attributes", []),
+            "field_disagreements": cr.get("field_disagreements", []),
+            "cited_fields": cr.get("cited_fields", []),
+            "inconsistent_attributes": inconsistent_attrs_for_render,
             "is_no_match": False,
         })
 
@@ -208,18 +216,18 @@ def generate_consensus_report(
     star_dist = cs.get("star_distribution", {})
     avg_stars = cs.get("average_star_rating", 0)
 
-    # 5 星体系（ADR-004）：5 档独立行；1★ 由 3 个降级子类型（split/single_source/
+    # 5 星体系（ADR-004 v2）：5 档独立行；1★ 由 3 个降级子类型（split/single_source/
     # no_consensus）细分，保证降级产生的共识类型不丢计数。其它未在主表中的
     # 星级以「非常规」追加。
     star_levels = [
-        ("5", "完全一致且 evidence 强",
-         "3 个模型判断完全一致 + 互相引用具体 ICD 字段，可直接采纳"),
-        ("4", "完全一致但 evidence 一般",
-         "3 个模型判断完全一致，但 analysis 未充分引用具体 ICD 字段"),
-        ("3", "多数一致且 evidence 中上",
-         "多数模型一致 + 反对方 analysis 笼统，取多数结论"),
-        ("2", "多数一致但反对方有据",
-         "多数模型一致，但反对方 analysis 有具体 ICD 引用，建议人工复核"),
+        ("5", "完全无争议",
+         "3 个模型判断完全一致，无任何字段级别分歧，可直接采纳"),
+        ("4", "一致有争议",
+         "3 个模型判断一致，但意见分析提及字段差异（含辅助字段），可采纳但建议核对"),
+        ("3", "多数一致",
+         "多数模型一致，少数意见仅涉辅助字段或模糊表达，取多数结论"),
+        ("2", "多数有争议",
+         "多数模型一致，但少数意见涉及关键字段，需关注少数关键意见进行复查"),
     ]
     one_star_subs = [
         ("split", "分歧", "三方各持不同意见"),
@@ -288,10 +296,10 @@ def generate_consensus_report(
     # ── Suggestions ──
     doc.add_heading("处置建议", level=3)
     suggestions = [
-        f"{_star_str(5)} 星条目：完全一致且 evidence 强，可直接采纳结论。",
-        f"{_star_str(4)} 星条目：完全一致但 evidence 一般，可采纳结论。",
-        f"{_star_str(3)} 星条目：多数一致 + 反对方 evidence 弱，可采纳多数结论。",
-        f"{_star_str(2)} 星条目：多数一致但反对方有具体 ICD 引用，建议人工复核少数意见。",
+        f"{_star_str(5)} 星条目：完全无争议，可直接采纳结论。",
+        f"{_star_str(4)} 星条目：一致有争议，可采纳但建议核对字段细节。",
+        f"{_star_str(3)} 星条目：多数一致，可采纳多数结论。",
+        f"{_star_str(2)} 星条目：多数有争议，少数涉及关键字段，建议人工复核少数意见。",
         f"{_star_str(1)} 星条目（分歧）：三方各持不同意见，建议人工逐条复核并做出最终判断。",
         f"{_star_str(1)} 星条目（仅单一来源）：仅 1 个模型有效（其余模型调用失败），结论仅供参考，建议人工确认。",
         f"{_star_str(1)} 星条目（无有效裁判）：全部模型调用失败，AI 结论不可用，必须人工复核。",
@@ -375,7 +383,7 @@ def generate_consensus_report(
             if len(m["matched_profile_keys"]) > 5:
                 blocks_str += f" ... (+{len(m['matched_profile_keys']) - 5})"
 
-            agreement_label = {"full": "完全一致", "majority": "多数一致", "split": "分歧", "no_consensus": "无有效裁判", "single_source": "仅单一来源"}.get(agreement, agreement)
+            agreement_label = {"full": "完全无争议", "majority": "多数一致", "split": "分歧", "no_consensus": "无有效裁判", "single_source": "仅单一来源"}.get(agreement, agreement)
 
             # Inconsistency attributes column
             attr_list = m.get("inconsistent_attributes", [])

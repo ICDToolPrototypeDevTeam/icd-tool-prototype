@@ -8,8 +8,16 @@ import sys
 import time
 
 from app.v4.llm import get_llm
-from app.v4.models import ConsensusOutput, ConsensusResult, MultiJudgeResult
+from app.v4.models import ConsensusOutput, ConsensusResult, FieldDisagreement, MultiJudgeResult
 from app.v4.prompts import load_prompt
+
+
+# ADR-004 v2: 12 个关键字段，minority 涉及则触发 2★
+KEY_FIELDS = frozenset({
+    "Direction", "DataFormatType", "BitOffset", "ParameterSize",
+    "OneState", "ZeroState", "Label", "FuncRngMin", "FuncRngMax",
+    "Units", "Period", "SDIExpected",
+})
 
 
 def review_judgments(
@@ -91,8 +99,8 @@ def _call_review_api(
 ) -> ConsensusResult:
     """Call LLM and parse JSON response for consensus review.
 
-    5 星体系（ADR-004）：star_rating 由 agreement_level + evidence_alignment
-    联合映射；LLM 仅输出 agreement_level + evidence_alignment，星档由
+    5 星体系（ADR-004 v2）：star_rating 由 agreement_level + field_disagreements
+    联合映射；LLM 输出 field_disagreements（字段级裁判间分歧 + 类型），星档由
     `_map_star_rating()` 计算，避免 LLM 直接选星的不稳定性。
     """
     messages = [
@@ -103,13 +111,16 @@ def _call_review_api(
     for attempt in range(max_retries + 1):
         try:
             from app.v4.comparison.semantic_judge import _extract_json
-            response = llm.chat(messages=messages, temperature=0.1, max_tokens=4096)
+            response = llm.chat(messages=messages, temperature=0.1, max_tokens=8192)
             content = _extract_json(response["content"])
             data = json.loads(content)
             consistent, divergent = _derive_consensus_details(data, model_results)
             agreement = data.get("agreement_level", "split")
-            evidence = data.get("evidence_alignment", "")
-            star = _map_star_rating(agreement, evidence)
+            field_disagreements = _parse_field_disagreements(
+                data.get("field_disagreements", [])
+            )
+            cited_fields = list(data.get("cited_fields", []))
+            star = _map_star_rating(agreement, field_disagreements)
             # 5★/4★/3★ → 取多数一致的 coverage_status；2★/1★/split → 待确认
             if agreement in ("full", "majority") and star >= 3:
                 final_status = _majority_status(model_results, consistent)
@@ -120,13 +131,13 @@ def _call_review_api(
                 model_results=model_results,
                 agreement_level=agreement,
                 star_rating=star,
-                evidence_alignment=evidence,
+                field_disagreements=field_disagreements,
+                cited_fields=cited_fields,
                 final_coverage_status=final_status,
                 final_analysis=data.get("final_analysis", ""),
                 confidence=float(data.get("confidence", 0.5)),
                 consistent_agents=consistent,
                 divergent_agents=divergent,
-                inconsistent_attributes=data.get("inconsistent_attributes", []),
             )
         except (json.JSONDecodeError, KeyError, IndexError, ValueError):
             if attempt < max_retries:
@@ -142,7 +153,8 @@ def _call_review_api(
         model_results=model_results,
         agreement_level="split",
         star_rating=1,
-        evidence_alignment="",
+        field_disagreements=[],
+        cited_fields=[],
         final_coverage_status="待确认",
         final_analysis="Review API error after retries",
         confidence=0.0,
@@ -151,27 +163,52 @@ def _call_review_api(
     )
 
 
-def _map_star_rating(agreement: str, evidence: str) -> int:
-    """Map (agreement_level, evidence_alignment) to a 1-5 star rating (ADR-004).
+def _parse_field_disagreements(raw: list) -> list[FieldDisagreement]:
+    """Parse field_disagreements from LLM JSON response with defensive coercion.
+
+    LLM may return entries as:
+    - dicts: {"field": "Direction", "category": "key", ...}  → FieldDisagreement
+    - strings: "Direction"  → converted to vague FieldDisagreement (legacy/edge case)
+    Invalid entries are dropped silently.
+    """
+    out: list[FieldDisagreement] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if isinstance(item, dict):
+            try:
+                out.append(FieldDisagreement(**item))
+            except Exception:
+                # Skip malformed entries; do not fail the whole response
+                continue
+        elif isinstance(item, str) and item.strip():
+            # Legacy/edge: LLM returned bare field name string
+            out.append(FieldDisagreement(field=item.strip(), category="vague"))
+    return out
+
+
+def _map_star_rating(agreement: str, field_disagreements: list) -> int:
+    """Map (agreement_level, field_disagreements) to a 1-5 star rating (ADR-004 v2).
 
     Mapping table:
-        5★: agreement=full,  evidence=strong
-        4★: agreement=full,  evidence=moderate|weak
-        3★: agreement=majority, evidence=strong|moderate
-        2★: agreement=majority, evidence=weak
+        5★: agreement=full,                  field_disagreements 为空
+        4★: agreement=full,                  field_disagreements 非空（含 key/non_key/vague）
+        3★: agreement=majority,              field_disagreements 无 key 字段
+        2★: agreement=majority,              field_disagreements 含 ≥1 个 key 字段
         1★: agreement ∈ {split, single_source, no_consensus}
 
-    The function never raises: an unrecognised agreement_level or missing
-    evidence_alignment defaults to 1★ (low-confidence) so a malformed LLM
-    response can never inflate the rating.
+    The function never raises: an unrecognised agreement_level defaults to 1★
+    so a malformed LLM response can never inflate the rating.
     """
     a = (agreement or "").lower()
-    e = (evidence or "").lower()
+    has_key = any(getattr(f, "category", "") == "key" for f in field_disagreements)
+    has_any = bool(field_disagreements)
+    if a in ("split", "single_source", "no_consensus"):
+        return 1
     if a == "full":
-        return 5 if e == "strong" else 4
+        return 4 if has_any else 5
     if a == "majority":
-        return 3 if e in ("strong", "moderate") else 2
-    # split / single_source / no_consensus / 其它未知 agreement
+        return 2 if has_key else 3
     return 1
 
 
