@@ -24,40 +24,66 @@ _STATUS_LABELS = {
 }
 
 
+def _final_status_label(result: ForwardCoverageResult) -> str:
+    """Unified display label: unsupported / input_error use analysis_status, the
+    rest use coverage_status. 这样 Word/Excel 都能用一个「覆盖状态」列统一展示，
+    且 unsupported / input_error 不再显示为「—」。
+    """
+    if result.analysis_status == "unsupported":
+        return "不支持"
+    if result.analysis_status == "input_error":
+        return "输入异常"
+    return _STATUS_LABELS.get(result.coverage_status, result.coverage_status or "—")
+
+
+def _natural_reason(result: ForwardCoverageResult, missing_count: int) -> str:
+    """用户可读的自然语言原因，不出现 weak_signal / trace_only / not_same_object
+    等内部术语，也不展开完整缺失 HLR ID（仅数量）。
+    """
+    as_status = result.analysis_status
+    cs = result.coverage_status
+
+    if as_status == "unsupported":
+        return "该对象的协议类型（原生 A664）暂不支持分析。"
+    if as_status == "input_error":
+        return f"追溯表引用的候选 HLR 全部缺失于上传的 HLR 文档，无法分析（缺失 {missing_count} 条）。"
+
+    if cs == "uncovered":
+        if missing_count:
+            return f"HLR 正文中未找到该对象的对应描述，疑似漏写；另有 {missing_count} 条追溯候选缺失。"
+        return "HLR 正文中未找到该对象的对应描述，疑似漏写。"
+    if cs == "parent_referenced":
+        return "HLR 仅引用父级接口（端口/消息/Label），未描述具体信号，需人工确认。"
+    if cs == "possible":
+        if missing_count:
+            return f"追溯候选 HLR 缺失 {missing_count} 条，无法确认是否已覆盖。"
+        rule_level = result.rule_level
+        if rule_level == "generic_signal":
+            return "仅匹配到通用词（如 STATUS/STATE/VOLTAGE 等），无法确认是否描述该对象。"
+        if rule_level == "weak_signal":
+            return "仅匹配到单一短小片段，证据不足，无法确认是否描述该对象。"
+        if rule_level == "trace_only":
+            return "存在候选 HLR 但无文本重叠，无法确认是否描述该对象。"
+        if result.source == "ai":
+            return "AI 复核无法确认是否描述该对象，需人工审查。"
+        return "无法确认是否描述该对象，需人工审查。"
+    if cs in ("covered_direct", "covered_aggregate"):
+        return "已在 HLR 中找到该对象的对应描述。"
+    return ""
+
+
 def _coverage_detail_row(block, result: ForwardCoverageResult) -> dict:
     """Flatten a block + result into one Excel/Word row dict.
 
-    正向缺陷修正 #8：补齐审计字段 —— 设备、追溯 ERD、原始/可分析/缺失候选 HLR、
-    命中 token（来源）、候选截断、DP/RP 信号、通道变体、输入异常、AI 判定/理由/置信度。
+    只保留报告所需字段：对象身份（对象ID / 协议 / Label / 信号族 / 信号 / 设备）、
+    最终状态（覆盖状态 / 原因）、审计（匹配 HLR / 缺失 HLR 数量 / 完整缺失 HLR ID）。
+    Word 只用其中的「EoICD ID / 协议 / 信号族 / 设备 / 覆盖状态 / 原因」六列，
+    完整缺失 HLR ID 仅保留在 Excel / JSON 供审计（Word 只显示数量）。
     """
     ident = block.identity
     trace = block.trace
 
-    raw_candidates = list(trace.candidate_hlr_ids) if trace else []
     missing = list(trace.missing_hlr_ids) if trace else []
-    missing_set = set(missing)
-    analyzable_candidates = [h for h in raw_candidates if h not in missing_set] if trace else []
-
-    hit_tokens = ", ".join(
-        f"{t.value}" + (f"[{t.source}]" if t.source else "") for t in result.evidence
-    )
-
-    # 输入异常（块级）：全部候选缺失 → input_error；部分缺失 → 记录 anomaly。
-    if result.analysis_status == "input_error":
-        input_anomaly = "输入异常：全部候选HLR缺失(missing_hlr_input)"
-    elif missing:
-        input_anomaly = f"部分候选HLR缺失: {', '.join(missing)}"
-    else:
-        input_anomaly = ""
-
-    ai = result.ai_review
-    ai_verdict = ""
-    ai_confidence = ""
-    ai_rationale = ""
-    if ai is not None:
-        ai_verdict = ai.review_verdict or (ai.error or "")
-        ai_confidence = f"{ai.confidence:.2f}" if ai.confidence else ""
-        ai_rationale = ai.rationale or ""
 
     return {
         "business_object_id": result.business_object_id,
@@ -66,25 +92,13 @@ def _coverage_detail_row(block, result: ForwardCoverageResult) -> dict:
         "signal_family": ident.signal_family,
         "signal": ident.signal,
         "device": ident.device or (", ".join(block.devices) if block.devices else ""),
-        "dp_signals": ", ".join(block.dp_signal_names),
-        "rp_signals": ", ".join(block.rp_signal_names),
-        "channel_variants": ", ".join(block.variants),
-        "trace_erd": ", ".join(trace.erd_ids) if trace else "",
-        "raw_candidates": ", ".join(raw_candidates),
-        "analyzable_candidates": ", ".join(analyzable_candidates),
         "missing_candidates": ", ".join(missing),
+        "missing_count": len(missing),
         "analysis_status": result.analysis_status,
         "coverage_status": result.coverage_status,
-        "coverage_label": _STATUS_LABELS.get(result.coverage_status, result.coverage_status),
+        "coverage_label": _final_status_label(result),
+        "reason": _natural_reason(result, len(missing)),
         "matched_hlr_ids": ", ".join(result.matched_hlr_ids),
-        "hit_tokens": hit_tokens,
-        "candidate_truncated": "是" if result.candidate_truncated else "",
-        "input_anomaly": input_anomaly,
-        "ai_verdict": ai_verdict,
-        "ai_confidence": ai_confidence,
-        "ai_rationale": ai_rationale,
-        "source": result.source,
-        "rule_level": result.rule_level,
     }
 
 
@@ -116,10 +130,7 @@ def generate_forward_excel(
 
     headers = [
         "序号", "对象ID", "协议", "Label", "信号族", "信号", "设备",
-        "DP信号", "RP信号", "通道变体", "追溯ERD", "原始追溯候选HLR",
-        "可分析候选HLR", "缺失候选HLR", "覆盖状态", "分析状态", "匹配HLR",
-        "命中Token(来源)", "候选截断", "输入异常", "AI判定", "AI置信度",
-        "AI理由", "来源", "规则等级",
+        "覆盖状态", "原因", "匹配HLR", "缺失HLR数量", "缺失候选HLR",
     ]
     for col, h in enumerate(headers, 1):
         c = ws.cell(row=1, column=col, value=h)
@@ -131,19 +142,15 @@ def generate_forward_excel(
         values = [
             i, row["business_object_id"], row["protocol"], row["label"],
             row["signal_family"], row["signal"], row["device"],
-            row["dp_signals"], row["rp_signals"], row["channel_variants"],
-            row["trace_erd"], row["raw_candidates"], row["analyzable_candidates"],
-            row["missing_candidates"], row["coverage_label"], row["analysis_status"],
-            row["matched_hlr_ids"], row["hit_tokens"], row["candidate_truncated"],
-            row["input_anomaly"], row["ai_verdict"], row["ai_confidence"],
-            row["ai_rationale"], row["source"], row["rule_level"],
+            row["coverage_label"], row["reason"], row["matched_hlr_ids"],
+            row["missing_count"], row["missing_candidates"],
         ]
         for col, v in enumerate(values, 1):
             cell = ws.cell(row=i + 1, column=col, value=v)
             cell.font = cell_font
             cell.alignment = wrap_align
 
-    widths = [6, 30, 9, 9, 22, 22, 14, 20, 20, 14, 14, 20, 20, 18, 14, 10, 16, 20, 8, 20, 12, 8, 24, 8, 14]
+    widths = [6, 30, 9, 9, 24, 24, 14, 14, 46, 22, 10, 22]
     for idx, w in enumerate(widths, 1):
         col_letter = _column_letter(idx)
         ws.column_dimensions[col_letter].width = w

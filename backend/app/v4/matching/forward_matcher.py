@@ -249,6 +249,19 @@ def _device_conflict(block: ForwardICDBlock, entry: HLRIdentityEntry) -> bool:
     return not (block_devices & hlr_devices)
 
 
+def _bit_ranges_overlap(a: list[dict], b: list[dict]) -> bool:
+    """True when any bit range in `a` intersects any range in `b`."""
+    for fa in a:
+        a_start = int(fa.get("offset", 0))
+        a_end = a_start + int(fa.get("size", 1)) - 1
+        for fb in b:
+            b_start = int(fb.get("offset", 0))
+            b_end = b_start + int(fb.get("size", 1)) - 1
+            if a_start <= b_end and b_start <= a_end:
+                return True
+    return False
+
+
 def _match_level(
     block: ForwardICDBlock,
     entry: HLRIdentityEntry,
@@ -265,11 +278,18 @@ def _match_level(
       - an AI (llm_label) token alone (those never enter entry.signal_tokens).
 
     正向缺陷修正 #1：进入等级判定前先做"硬冲突"门控 —— Label 冲突 / 协议冲突 /
-    设备冲突（仅非 A429）直接降级为 not_same_object，阻止 covered 误判；并且
-    exact_signal（单 token）必须结合 label/device/port/message 之一才能支撑 covered。
+    设备冲突（仅非 A429）直接降级为 not_same_object，阻止 covered 误判。
 
-    Only entry.signal_tokens (deterministic), entry.labels (regex) and
-    entry.signal_category are read; llm_label_tokens are intentionally ignored.
+    正向统一判定规则（A429 子对象身份）：
+      - SDI：仅当 Label 级存在 >1 个不同非 N/A SDI（sdi_is_discriminator）且双方
+        都显式带 SDI 时才参与判定；SDI 不同 → not_same_object，相同 → 佐证 covered。
+      - bit：用于区分同一 Label 下的不同字段。bit 重叠 → 佐证 covered；只有业务
+        语义不同且 bit 范围不相交时才判 not_same_object（语义对应时 bit 差异交给
+        反向检查，不阻断正向 covered）。
+
+    Only entry.signal_tokens (deterministic), entry.labels (regex),
+    entry.signal_category, entry.sdi_value and entry.bit_fields are read;
+    llm_label_tokens are intentionally ignored.
     """
     ident = block.identity
     label_tok = f"L{ident.label}" if ident.label else ""
@@ -293,13 +313,11 @@ def _match_level(
 
     label_hit = bool(label_tok and label_tok in hlr_labels)
 
-    # 1. Full family / leaf verbatim, and distinctive (non-generic + compound/long).
+    # Semantic evidence (name-level), computed before SDI/bit so bit conflict can
+    # distinguish "语义对应但 bit 不同" from "语义不同且 bit 不相交".
     family_hit = bool(family and family in hlr_tokens and family not in generic_terms and _is_distinctive(family))
     leaf_hit = bool(leaf and leaf in hlr_tokens and leaf not in generic_terms and _is_distinctive(leaf))
-    if family_hit or leaf_hit:
-        return "exact_fullname"
 
-    # 2. Signal token overlap (specific vs generic) + corroborating context.
     signal_toks = _signal_tokens(block)
     specific = {t for t in signal_toks if t not in generic_terms}
     generic = {t for t in signal_toks if t in generic_terms}
@@ -309,11 +327,39 @@ def _match_level(
     p_overlap = parent & hlr_tokens
     d_overlap = _device_tokens(block) & hlr_tokens
 
-    # 3. Label + specific signal evidence → covered (label alone is NOT enough).
-    if label_hit and s_overlap:
+    # ── A429 sub-object identity: SDI / bit ──
+    sdi_match = False
+    sdi_conflict = False
+    bit_overlap = False
+    bit_disjoint = False
+    if ident.protocol.upper() == "A429":
+        if ident.sdi_is_discriminator and ident.sdi and entry.sdi_value:
+            sdi_match = ident.sdi == entry.sdi_value
+            sdi_conflict = ident.sdi != entry.sdi_value
+        if ident.bit_fields and entry.bit_fields:
+            bit_overlap = _bit_ranges_overlap(ident.bit_fields, entry.bit_fields)
+            bit_disjoint = not bit_overlap
+
+    # Hard conflict: SDI differs (only when both explicit and Label is a discriminator).
+    if sdi_conflict:
+        return "not_same_object"
+
+    semantic_corresponds = bool(family_hit or leaf_hit or s_overlap)
+    # Hard conflict: bit disjoint AND semantics differ → confirmed different field.
+    if bit_disjoint and not semantic_corresponds:
+        return "not_same_object"
+
+    # 1. Full family / leaf verbatim, and distinctive (non-generic + compound/long).
+    if family_hit or leaf_hit:
+        return "exact_fullname"
+
+    # 2. Label + identity evidence (signal overlap / bit overlap / SDI match) →
+    #    covered. A bare label alone is NOT enough.
+    identity_overlap = bool(s_overlap or bit_overlap or sdi_match)
+    if label_hit and identity_overlap:
         return "exact_label"
 
-    # 4. Specific signal overlap → covered only when unambiguous:
+    # 3. Specific signal overlap → covered only when unambiguous:
     #    - >=2 distinct specific tokens, OR
     #    - a single distinctive token corroborated by label/device/port/message.
     #    A lone distinctive token with no context (e.g. ALTITUDE/CHANGE) → weak.
@@ -325,11 +371,11 @@ def _match_level(
             return "exact_signal"
         return "weak_signal"
 
-    # 5. Label-only or parent-only reference → parent_referenced (needs AI).
+    # 4. Label-only or parent-only reference → parent_referenced (needs AI).
     if label_hit or p_overlap:
         return "parent_referenced"
 
-    # 6. Generic-only overlap → possible (generic terms can't form covered alone).
+    # 5. Generic-only overlap → possible (generic terms can't form covered alone).
     if g_overlap:
         return "generic_signal"
 
@@ -347,7 +393,8 @@ def _coverage_status_for(level: str) -> str:
 
 
 def _needs_ai_for(level: str) -> bool:
-    return level in ("parent_referenced", "generic_signal", "weak_signal", "trace_only", "not_same_object")
+    # not_same_object (确定性身份冲突) 不进入 AI：AI 不可覆盖确定性冲突（统一规则 #7）。
+    return level in ("parent_referenced", "generic_signal", "weak_signal", "trace_only")
 
 
 def _evidence_tokens(block: ForwardICDBlock, matched_entries: list[HLRIdentityEntry]) -> list[IdentityToken]:
@@ -412,11 +459,11 @@ def build_deterministic_results(
 
         # Rank every candidate HLR, keep the strongest level + its HLRs.
         # Hard-conflict candidates (not_same_object) are excluded from
-        # matched_hlr_ids; if every candidate conflicts, the block demotes to
-        # not_same_object → possible (needs AI).
+        # matched_hlr_ids.
         best_level = "none"
         best_entries: list[HLRIdentityEntry] = []
         conflict_ids: list[str] = []
+        saw_non_conflict = False
         for hid in cand_ids:
             entry = index.entries.get(hid)
             if entry is None:
@@ -425,21 +472,43 @@ def build_deterministic_results(
             if level == "not_same_object":
                 conflict_ids.append(hid)
                 continue
+            saw_non_conflict = True
             if _RANK[level] > _RANK[best_level]:
                 best_level = level
                 best_entries = [entry]
             elif _RANK[level] == _RANK[best_level] and level != "none":
                 best_entries.append(entry)
 
-        # trace_only: candidates exist but none produced any text overlap.
+        # Resolve the "no positive evidence" case: only when every ranked candidate
+        # was proven "other object" (not_same_object) do we conclude not_same_object;
+        # otherwise it is trace_only (candidates exist but no text overlap).
+        missing_ids = list(block.trace.missing_hlr_ids) if block.trace else []
         if best_level == "none":
-            if conflict_ids:
+            all_conflict = bool(conflict_ids) and not saw_non_conflict
+            if all_conflict:
                 best_level = "not_same_object"
             else:
                 best_level = "trace_only"
 
         matched_ids = [e.hlr_id for e in best_entries]
         status = _coverage_status_for(best_level)
+        needs_ai = _needs_ai_for(best_level)
+        reason = ""
+
+        # 正向统一判定规则 #6：not_same_object 的最终状态由缺失候选决定。
+        #   无缺失候选 + 全部在场候选被证明为其他对象 → uncovered（漏写）；
+        #   存在可能覆盖本对象的缺失候选 → possible（记录关键候选缺失）。
+        # 且确定性身份冲突不可被 AI 覆盖（#7），故 needs_ai=False。
+        if best_level == "not_same_object":
+            needs_ai = False
+            if missing_ids:
+                status = "possible"
+                reason = "在场候选 HLR 均被确定性规则证明为其他对象，但追溯候选缺失（未出现在上传 HLR）：" + "、".join(missing_ids)
+            else:
+                status = "uncovered"
+                reason = "在场候选 HLR 均被确定性规则证明为其他对象，判定为漏写（未覆盖）"
+        elif best_level in _COVERED_LEVELS and any(e.channel_mention for e in best_entries):
+            reason = "匹配 HLR 描述含通道位置条件（审计信息，不做实例级覆盖检查）"
 
         results.append(ForwardDeterministicResult(
             business_object_id=block.business_object_id,
@@ -448,8 +517,9 @@ def build_deterministic_results(
             matched_hlr_ids=matched_ids,
             candidate_hlr_ids=cand_ids,
             candidate_truncated=len(cand_ids) > FORWARD_AI_CANDIDATE_TOP_N,
-            needs_ai=_needs_ai_for(best_level),
+            needs_ai=needs_ai,
             identity_tokens=_evidence_tokens(block, best_entries),
+            reason=reason,
         ))
 
     stats: dict[str, int] = {}

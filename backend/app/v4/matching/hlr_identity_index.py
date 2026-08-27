@@ -29,12 +29,17 @@ import re
 from app.v4.config import CN_SIGNAL_KEYWORD_MAP
 from app.v4.matching.hlr_classifier import (
     classify_hlr,
+    extract_bit_fields,
     extract_direction,
     extract_labels,
+    extract_sdi,
 )
 from app.v4.models import HLRLabel, HLRIdentityEntry, HLRIdentityIndex, HLROutput
 
 _EN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{2,}")
+
+# Channel-condition mention (审计信息，不参与覆盖判定)：HLR 描述"通道位置 1A/1B"等。
+_CHANNEL_MENTION_RE = re.compile(r"通道|channel", re.IGNORECASE)
 
 # Tokens that are protocol/bus noise, not business signal identity.
 _NOISE_TOKENS = {
@@ -142,6 +147,9 @@ def build_hlr_identity_index(
             llm_label_tokens=llm_label_tokens,
             direction=extract_direction(text),
             signal_category=classify_hlr(text),
+            sdi_value=extract_sdi(text),
+            bit_fields=extract_bit_fields(text),
+            channel_mention=bool(_CHANNEL_MENTION_RE.search(text)),
         )
         entries[req.requirement_id] = entry
 

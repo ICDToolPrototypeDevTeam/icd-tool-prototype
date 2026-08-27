@@ -255,6 +255,7 @@ def consolidate_forward_coverage(
         status = det.coverage_status or ""
         source = "rule"
         matched = list(det.matched_hlr_ids)
+        reason = det.reason
         ai = ai_map.get(block.business_object_id)
 
         if det.needs_ai:
@@ -264,9 +265,17 @@ def consolidate_forward_coverage(
                     status = "covered_direct"
                     matched = list(ai.matched_hlr_ids)
                 elif ai.review_verdict == "not_same_object":
-                    # Only conclude `uncovered` when the AI saw the FULL candidate set
-                    # AND explicitly rejected every candidate. Otherwise keep possible.
-                    if det.candidate_truncated:
+                    # 正向统一判定规则 #6：缺失候选优先于 uncovered。即便 AI 认定在场候选
+                    # 均非本对象，只要追溯引用的候选有缺失（未出现在上传 HLR），就可能存在
+                    # 真正描述本对象的 HLR，故判 possible 并记录缺失；无缺失候选时才可判
+                    # uncovered。与确定性层 not_same_object 的收口一致。
+                    missing = list(block.trace.missing_hlr_ids) if block.trace else []
+                    if missing:
+                        status = "possible"
+                        matched = []
+                        reason = ("AI 复核认定在场候选均非本对象，但追溯候选缺失"
+                                  "（未出现在上传 HLR）：" + "、".join(missing))
+                    elif det.candidate_truncated:
                         status = "possible"
                         matched = []
                     elif set(ai.rejected_hlr_ids) >= set(det.candidate_hlr_ids):
@@ -292,6 +301,7 @@ def consolidate_forward_coverage(
             candidate_truncated=det.candidate_truncated,
             referenced_variants=list(block.variants) if status.startswith("covered") else [],
             ai_review=ai,
+            reason=reason,
         ))
 
     stats: dict[str, int] = {}

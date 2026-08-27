@@ -1,9 +1,15 @@
 # -*- coding: utf-8 -*-
 """Forward completeness Word report (Stage C8).
 
-Renders omission / uncertain / unsupported / input-error lists into
-forward_report.docx. 正向缺陷修正 #8：新增「输入异常」章节、两类 AI 调用统计，
-并在清单表补充设备 / 输入异常列。
+Renders the six-section report:
+  一、分析说明与判定规则  二、分析结果概览  三、未覆盖清单
+  四、待确认清单          五、输入异常清单  六、不支持清单
+
+后四个清单严格按最终状态分类（一个对象只进入一个清单）；「已覆盖」只在
+结果概览中统计，不单独展开。每个清单统一显示六列：
+  EoICD ID / 协议 / 信号族 / 设备 / 覆盖状态 / 原因
+原因使用自然语言（不出现 weak_signal / trace_only / not_same_object 等内部
+术语），缺失 HLR 只显示数量，完整 ID 仅保留在 Excel / JSON。
 """
 
 from __future__ import annotations
@@ -13,13 +19,29 @@ from pathlib import Path
 from app.v4.doc_generators.forward_excel_generator import _coverage_detail_row
 from app.v4.models import ForwardBlocksOutput, ForwardCoverageOutput
 
+_HEADERS = ["EoICD ID", "协议", "信号族", "设备", "覆盖状态", "原因"]
+_COL_WIDTHS_CM = [5.0, 1.8, 5.0, 3.5, 3.5, 9.0]
+
+
+def _section_of(row: dict) -> str:
+    """Map a row to its single section (mutually exclusive by final status)."""
+    if row["analysis_status"] == "unsupported":
+        return "unsupported"
+    if row["analysis_status"] == "input_error":
+        return "input_error"
+    if row["coverage_status"] == "uncovered":
+        return "uncovered"
+    if row["coverage_status"] in ("possible", "parent_referenced"):
+        return "pending"
+    return "covered"
+
 
 def generate_forward_word(
     coverage: ForwardCoverageOutput,
     blocks: ForwardBlocksOutput,
     output_path: Path,
 ) -> None:
-    """Generate the forward completeness Word report (omission + uncertain lists)."""
+    """Generate the forward completeness Word report."""
     from docx import Document
     from docx.shared import Pt, Cm, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -32,11 +54,11 @@ def generate_forward_word(
         if r.business_object_id in block_map
     ]
 
-    uncovered = [r for r in rows if r["coverage_status"] == "uncovered"]
-    uncertain = [r for r in rows if r["coverage_status"] in ("possible", "parent_referenced")]
-    unsupported = [r for r in rows if r["analysis_status"] == "unsupported"]
-    input_errors = [r for r in rows if r["analysis_status"] == "input_error"]
-    anomalies = [r for r in rows if r["input_anomaly"] and r["analysis_status"] != "input_error"]
+    covered = [r for r in rows if _section_of(r) == "covered"]
+    uncovered = [r for r in rows if _section_of(r) == "uncovered"]
+    pending = [r for r in rows if _section_of(r) == "pending"]
+    input_errors = [r for r in rows if _section_of(r) == "input_error"]
+    unsupported = [r for r in rows if _section_of(r) == "unsupported"]
 
     def set_font(cell, text, bold=False, size=9, color=None):
         cell.text = ""
@@ -56,6 +78,13 @@ def generate_forward_word(
             shd = tc.makeelement(qn("w:shd"), {qn("w:fill"): "D9E2F3", qn("w:val"): "clear"})
             tc.insert(0, shd)
 
+    def set_col_widths(table, widths_cm):
+        table.autofit = False
+        for row in table.rows:
+            for i, w in enumerate(widths_cm):
+                if i < len(row.cells):
+                    row.cells[i].width = Cm(w)
+
     def fill_table(table, headers, data, color=None):
         for i, h in enumerate(headers):
             table.rows[0].cells[i].text = h
@@ -64,12 +93,21 @@ def generate_forward_word(
             row = table.add_row()
             set_font(row.cells[0], r["business_object_id"])
             set_font(row.cells[1], r["protocol"])
-            set_font(row.cells[2], f"{r['label']} {r['signal_family']}".strip() or r["signal"])
+            set_font(row.cells[2], r["signal_family"] or r["signal"])
             set_font(row.cells[3], r["device"])
             set_font(row.cells[4], r["coverage_label"], bold=True, color=color)
-            set_font(row.cells[5], r["matched_hlr_ids"] or "—")
-            set_font(row.cells[6], r["input_anomaly"] or "—")
-            set_font(row.cells[7], r["rule_level"])
+            set_font(row.cells[5], r["reason"] or "—")
+        set_col_widths(table, _COL_WIDTHS_CM)
+
+    def add_list_section(title, description, data, color=None):
+        doc.add_heading(title, level=2)
+        doc.add_paragraph(description)
+        if data:
+            t = doc.add_table(rows=1, cols=len(_HEADERS))
+            t.style = "Table Grid"
+            fill_table(t, _HEADERS, data, color=color)
+        else:
+            doc.add_paragraph("（无）")
 
     doc = Document()
     section = doc.sections[0]
@@ -89,31 +127,42 @@ def generate_forward_word(
         f"正向三态复核调用 {coverage.ai_review_calls} 次"
     )
 
-    doc.add_heading("一、覆盖状态概览", level=2)
-    doc.add_paragraph("本报告从 EoICD 出发，检查每个业务对象在软件高层需求（HLR）正文中是否存在对应描述（漏写检测）。")
+    # ── 一、分析说明与判定规则 ──────────────────────────────────────────────
+    doc.add_heading("一、分析说明与判定规则", level=2)
+    doc.add_paragraph(
+        "本报告从 EoICD 源文件出发，检查每个业务对象（业务信号/字段）在软件高层需求（HLR）"
+        "正文中是否存在对应描述，用于识别「漏写」。判定按确定性规则与 AI 复核两层进行："
+        "先依据对象的 Label 号、信号名、SDI、bit 等身份信息与 HLR 描述做确定性比对，"
+        "确定性规则无法定论时再交由 AI 复核；当追溯表引用的候选 HLR 未出现在上传的 HLR 文档时，"
+        "优先保守处理为「待确认」，避免误报漏写。"
+    )
     for label, desc in [
-        ("已覆盖", "HLR 中存在该 EoICD 业务对象的对应描述。"),
-        ("仅父级引用", "HLR 仅引用父级接口（端口/消息/Label），未描述具体信号。"),
-        ("待确认", "存在候选但无法确定是否描述了该对象，需人工审查。"),
+        ("已覆盖", "HLR 正文中存在该 EoICD 业务对象的对应描述。"),
+        ("待确认", "存在候选 HLR 但无法确定是否描述了该对象，需人工审查。"),
         ("未覆盖（疑似漏写）", "HLR 正文中未找到该对象的对应描述，疑似漏写。"),
-        ("不支持", "该对象的协议类型（如原生 A664）暂不支持分析。"),
         ("输入异常", "追溯表引用的候选 HLR 全部缺失于上传的 HLR 文档，无法分析。"),
+        ("不支持", "该对象的协议类型（如原生 A664）暂不支持分析。"),
     ]:
         p = doc.add_paragraph()
         p.add_run(f"{label}：").bold = True
         p.add_run(desc)
+    doc.add_paragraph(
+        "清单划分说明：已覆盖只在结果概览中统计，不单独展开；未覆盖、待确认、输入异常、"
+        "不支持四个清单严格按最终状态分类，一个对象只进入其中一个清单。"
+    )
 
+    # ── 二、分析结果概览 ────────────────────────────────────────────────────
+    doc.add_heading("二、分析结果概览", level=2)
     total = len(rows)
-    covered = total - len(uncovered) - len(uncertain) - len(unsupported) - len(input_errors)
     ot = doc.add_table(rows=1, cols=3)
     ot.style = "Table Grid"
     style_header(ot, ["覆盖状态", "数量", "占比"])
     for label, count in [
-        ("已覆盖", covered),
-        ("仅父级引用/待确认", len(uncertain)),
+        ("已覆盖", len(covered)),
+        ("待确认", len(pending)),
         ("未覆盖（疑似漏写）", len(uncovered)),
-        ("不支持", len(unsupported)),
         ("输入异常", len(input_errors)),
+        ("不支持", len(unsupported)),
     ]:
         row = ot.add_row()
         pct = f"{count / total * 100:.1f}%" if total else "0%"
@@ -127,59 +176,29 @@ def generate_forward_word(
 
     doc.add_page_break()
 
-    headers = ["对象ID", "协议", "Label/信号族", "设备", "覆盖状态", "匹配HLR", "输入异常", "规则等级"]
     red = RGBColor(0xCC, 0x33, 0x00)
     orange = RGBColor(0xCC, 0x55, 0x00)
 
-    doc.add_heading("二、漏写清单（未覆盖）", level=2)
-    doc.add_paragraph(f"共 {len(uncovered)} 个 EoICD 业务对象未在 HLR 中找到对应描述。")
-    if uncovered:
-        t = doc.add_table(rows=1, cols=len(headers))
-        t.style = "Table Grid"
-        fill_table(t, headers, uncovered, color=red)
-    else:
-        doc.add_paragraph("（无）")
-
-    doc.add_heading("三、待确认清单", level=2)
-    doc.add_paragraph(f"共 {len(uncertain)} 个对象存在候选但无法确定，需人工审查。")
-    if uncertain:
-        t = doc.add_table(rows=1, cols=len(headers))
-        t.style = "Table Grid"
-        fill_table(t, headers, uncertain, color=orange)
-    else:
-        doc.add_paragraph("（无）")
-
-    doc.add_heading("四、输入异常清单", level=2)
-    doc.add_paragraph(
-        f"共 {len(input_errors)} 个对象因追溯表引用的候选 HLR 全部缺失于上传的 HLR 文档而无法分析；"
-        f"另有 {len(anomalies)} 个对象存在部分候选缺失。"
+    add_list_section(
+        "三、未覆盖清单",
+        f"共 {len(uncovered)} 个 EoICD 业务对象未在 HLR 中找到对应描述。",
+        uncovered, color=red,
     )
-    if input_errors or anomalies:
-        t = doc.add_table(rows=1, cols=3)
-        t.style = "Table Grid"
-        style_header(t, ["对象ID", "协议", "输入异常详情"])
-        for r in input_errors:
-            row = t.add_row()
-            set_font(row.cells[0], r["business_object_id"])
-            set_font(row.cells[1], r["protocol"])
-            set_font(row.cells[2], r["input_anomaly"])
-        for r in anomalies:
-            row = t.add_row()
-            set_font(row.cells[0], r["business_object_id"])
-            set_font(row.cells[1], r["protocol"])
-            set_font(row.cells[2], r["input_anomaly"])
-    else:
-        doc.add_paragraph("（无）")
-
-    if unsupported:
-        doc.add_heading("五、不支持清单", level=2)
-        doc.add_paragraph(f"共 {len(unsupported)} 个对象因协议类型暂不支持分析。")
-        t = doc.add_table(rows=1, cols=len(headers))
-        t.style = "Table Grid"
-        fill_table(t, headers, unsupported)
-    else:
-        doc.add_heading("五、不支持清单", level=2)
-        doc.add_paragraph("（无）")
+    add_list_section(
+        "四、待确认清单",
+        f"共 {len(pending)} 个对象存在候选但无法确定，需人工审查。",
+        pending, color=orange,
+    )
+    add_list_section(
+        "五、输入异常清单",
+        f"共 {len(input_errors)} 个对象因追溯表引用的候选 HLR 全部缺失于上传的 HLR 文档，无法分析。",
+        input_errors,
+    )
+    add_list_section(
+        "六、不支持清单",
+        f"共 {len(unsupported)} 个对象因协议类型暂不支持分析。",
+        unsupported,
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))

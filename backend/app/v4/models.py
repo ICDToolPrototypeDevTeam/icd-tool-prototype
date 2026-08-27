@@ -290,6 +290,10 @@ class ForwardIdentity(BaseModel):
     message: str = ""
     channel: str = ""
     signal: str = ""                  # leaf name
+    # A429 sub-object identity (正向统一判定规则). Empty means N/A or no evidence.
+    sdi: str = ""                     # block SDI value ("1"/"2"/"3"/"0"); "" if N/A or none
+    bit_fields: list[dict] = Field(default_factory=list)  # own bit ranges [{offset,size}]
+    sdi_is_discriminator: bool = False  # label has >1 distinct non-NA SDI value
 
 
 class ForwardScopeItem(BaseModel):
@@ -380,6 +384,7 @@ class ForwardDeterministicResult(BaseModel):
     candidate_truncated: bool = False
     needs_ai: bool = False
     identity_tokens: list[IdentityToken] = Field(default_factory=list)
+    reason: str = ""                  # human-readable explanation (missing candidate / channel / conflict)
 
 
 class ForwardDeterministicOutput(BaseModel):
@@ -431,6 +436,7 @@ class ForwardCoverageResult(BaseModel):
     referenced_variants: list[str] = Field(default_factory=list)
     unconfirmed_variants: list[str] = Field(default_factory=list)
     ai_review: ForwardAIReviewResult | None = None
+    reason: str = ""                  # human-readable explanation (missing candidate / channel / conflict)
     error: str | None = None
 
 
@@ -466,6 +472,10 @@ class HLRIdentityEntry(BaseModel):
     llm_label_tokens: list[str] = Field(default_factory=list)  # AI labels (source="llm_label")
     direction: str = ""                                       # 发送 | 接收 | ""
     signal_category: str = ""                                 # A429显式 | 模拟量 | ...
+    # A429 sub-object identity (正向统一判定规则). Extracted deterministically.
+    sdi_value: str = ""                                       # extracted SDI value
+    bit_fields: list[dict] = Field(default_factory=list)      # [{offset,size,text}]
+    channel_mention: bool = False                             # HLR mentions channel condition (审计信息)
 
 
 class HLRIdentityIndex(BaseModel):
