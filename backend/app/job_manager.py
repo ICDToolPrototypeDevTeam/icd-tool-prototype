@@ -12,8 +12,9 @@ class JobStatus(str, Enum):
 
 
 class Job:
-    def __init__(self):
+    def __init__(self, task_type: str = "correctness"):
         self.job_id: str = str(uuid.uuid4())
+        self.task_type: str = task_type          # "correctness" | "completeness"
         self.status: JobStatus = JobStatus.PENDING
         self.message: Optional[str] = None
         self.created_at: datetime = datetime.now(timezone.utc)
@@ -31,9 +32,9 @@ class JobManager:
     def __init__(self):
         self._jobs: dict[str, Job] = {}
 
-    def create_job(self) -> Job:
+    def create_job(self, task_type: str = "correctness") -> Job:
         """Create a new Job."""
-        job = Job()
+        job = Job(task_type=task_type)
         self._jobs[job.job_id] = job
         return job
 

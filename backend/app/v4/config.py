@@ -148,6 +148,26 @@ JUDGE_PROVIDERS = [
     if p.strip()
 ]
 
+# ——— Forward completeness analysis config ———
+FORWARD_REVIEW_PROVIDER = os.getenv("FORWARD_REVIEW_PROVIDER", "deepseek")
+FORWARD_AI_CANDIDATE_TOP_N = int(os.getenv("FORWARD_AI_CANDIDATE_TOP_N", "5"))
+FORWARD_AI_MAX_INFLIGHT = int(os.getenv("FORWARD_AI_MAX_INFLIGHT", "6"))
+FORWARD_AI_TIMEOUT = int(os.getenv("FORWARD_AI_TIMEOUT", "120"))
+
+# Low-distinction generic signal leaf terms. An exact_signal hit on one of these
+# must NOT alone support a covered conclusion — it needs Label/device/port/Message
+# or other disambiguating context (otherwise downgrade to possible).
+#
+# 正向缺陷修正 #1：ALTITUDE / OVERHEAT 也是强高频通用词（仅凭共同出现不能证明同一
+# 对象），补充进来，避免 "SFY_Cabin_Altitude..." 这类仅因 ALTITUDE/OVERHEAT 共现
+# 而误判 covered。
+FORWARD_GENERIC_SIGNAL_TERMS = {
+    "STATUS", "STATE", "VOLTAGE", "FAULT", "SPEED", "CURRENT",
+    "TEMP", "TEMPERATURE", "MODE", "POWER", "CMD", "COMMAND",
+    "POSITION", "PRESSURE", "ANGLE", "RATE", "LEVEL", "VALUE",
+    "ALTITUDE", "OVERHEAT",
+}
+
 # ——— Protocol overhead DataFormatType values (not application-layer data) ———
 PROTOCOL_DATAFORMATS = {"A429OCTLBL", "A429PARITY", "A429SDI", "A429_SSM_BNR"}
 

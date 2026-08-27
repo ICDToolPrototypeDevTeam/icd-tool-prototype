@@ -27,6 +27,7 @@ from app.v4.doc_generators.consensus_word_generator import generate_consensus_re
 from app.job_manager import Job, JobStatus
 from app.v4.matching.hlr_classifier import enrich_all_labels
 from app.v4.matching.hlr_labeler import label_hlrs
+from app.v4.llm.mock_llm import forward_label_context
 from app.v4.matching.reverse_case_builder import build_reverse_cases
 from app.v4.matching.reverse_matcher import match_reverse
 from app.v4.matching.signal_profiler import build_profiles, build_blocks, ICDBlock
@@ -34,6 +35,7 @@ from app.v4.matching.entry_filter import should_keep
 from app.v4.models import (
     ConsensusOutput,
     EoICDOutput,
+    ForwardAIReviewOutput,
     HLROutput,
     HLRLabelOutput,
     MultiJudgeOutput,
@@ -44,6 +46,22 @@ from app.v4.models import (
 from app.v4.parsers.eoicd_excel_parser import EoICDExcelParser
 from app.v4.parsers.hlr_word_parser import HLRWordParser
 from app.v4.traceability import build_trace_index, name_to_block_key
+
+
+# ── Forward completeness (EoICD → HLR) imports ────────────────────────────
+from app.v4.comparison.coverage_reviewer import (
+    consolidate_forward_coverage,
+    review_blocks_with_ai,
+)
+from app.v4.doc_generators.forward_excel_generator import generate_forward_excel
+from app.v4.doc_generators.forward_word_generator import generate_forward_word
+from app.v4.matching.forward_block_builder import build_forward_blocks
+from app.v4.matching.forward_matcher import (
+    build_deterministic_results,
+    build_forward_candidates,
+)
+from app.v4.matching.hlr_identity_index import build_hlr_identity_index
+from app.v4.traceability.forward_scope import build_forward_scope
 
 
 def _parse_eoicd(
@@ -843,4 +861,163 @@ def run_reverse_pipeline(
         match_count=len(match_result.results),
         judged_count=len(consensus_out.results),
         report_path=str(report_path),
+    )
+
+
+# ============================================================================
+# Forward completeness pipeline (EoICD → HLR)
+# ============================================================================
+
+
+def _save_forward(model, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(model.model_dump_json(indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"  Output: {path}")
+
+
+def run_forward_pipeline(
+    hlr: Path,
+    eoicd_json: Path | None,
+    publisher: Path | None,
+    subscriber: Path | None,
+    output_dir: Path,
+    job: Job,
+    analysis_mode: str = "full",
+    device_icd_trace_file: Path | None = None,
+    system_device_trace_file: Path | None = None,
+) -> PipelineResult:
+    """Run forward completeness pipeline: parse → scope → blocks → index → recall → judge → AI → report."""
+    if not (eoicd_json or publisher or subscriber):
+        raise ValueError("need eoicd (parsed JSON) or publisher/subscriber (Excel)")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # C1: parse
+    print("=" * 50)
+    print("Step 1/8: Parsing input files")
+    print("=" * 50)
+    job.update(JobStatus.RUNNING, "Step 1/8: Parsing input files")
+    if eoicd_json and eoicd_json.exists():
+        eoicd_out = EoICDOutput(**json.loads(eoicd_json.read_text(encoding="utf-8")))
+        print(f"  [skip] Using cached EoICD JSON: {eoicd_json}")
+    else:
+        eoicd_out = _parse_eoicd(publisher, subscriber, output_dir / "eoicd_requirements.json")
+    if hlr.suffix == ".json":
+        hlr_out = HLROutput(**json.loads(hlr.read_text(encoding="utf-8")))
+        print(f"  [skip] Using cached HLR JSON: {hlr}")
+    else:
+        hlr_out = _parse_hlr(hlr, output_dir / "hlr_requirements.json")
+
+    # C2: scope
+    print()
+    print("=" * 50)
+    print(f"Step 2/8: Forward scope ({analysis_mode} mode)")
+    print("=" * 50)
+    job.update(JobStatus.RUNNING, f"Step 2/8: Forward scope ({analysis_mode} mode)")
+    scope = build_forward_scope(
+        eoicd_out, hlr_out, analysis_mode,
+        device_icd_trace_file=device_icd_trace_file,
+        system_device_trace_file=system_device_trace_file,
+    )
+    _save_forward(scope, output_dir / "forward_scope.json")
+    if scope.input_errors:
+        print(f"  Input errors: {len(scope.input_errors)} (non-fatal)")
+    print(f"  Mode: {scope.analysis_mode} | scope items: {scope.total_scope_fullnames} | candidate HLRs: {scope.total_candidate_hlrs}")
+
+    # C3: blocks
+    print()
+    print("=" * 50)
+    print("Step 3/8: Building forward ICD blocks")
+    print("=" * 50)
+    job.update(JobStatus.RUNNING, "Step 3/8: Building forward ICD blocks")
+    blocks = build_forward_blocks(eoicd_out, scope)
+    _save_forward(blocks, output_dir / "forward_blocks.json")
+    print(f"  Total blocks: {blocks.total_blocks}")
+
+    # C4: HLR identity index (deterministic) + optional AI label recall enhancement.
+    # label_hlrs() is recall-only and degrades gracefully to the deterministic
+    # index on any failure — it never fails the forward task.
+    print()
+    print("=" * 50)
+    print("Step 4/8: Building HLR identity index")
+    print("=" * 50)
+    job.update(JobStatus.RUNNING, "Step 4/8: Building HLR identity index")
+    hlr_labels: dict = {}
+    try:
+        # 正向缺陷修正 #3：正向管线需要非空 llm_label tokens（召回增强），
+        # 但 label_hlrs 与反向管线共享、prompt 完全一致。进入 forward_label_context
+        # 让 mock 仅为正向返回非空标签，反向保持空标签以维持基线不变。
+        with forward_label_context():
+            hlr_labels = label_hlrs(
+                hlr_out.requirements,
+                cache_path=output_dir / "hlr_labels.json",
+            )
+        hlr_labels = enrich_all_labels(hlr_out.requirements, hlr_labels)
+    except Exception as exc:  # noqa: BLE001 — label failure must not fail the task
+        hlr_labels = {}
+        print(f"  [warn] HLR labeling skipped ({type(exc).__name__}: {exc}); "
+              f"falling back to deterministic index only")
+    index = build_hlr_identity_index(hlr_out, hlr_labels or None)
+    _save_forward(index, output_dir / "hlr_identity_index.json")
+    print(f"  HLRs indexed: {index.total_hlrs} | deterministic tokens: {len(index.token_index)} "
+          f"| llm_label tokens: {len(index.llm_token_index)}")
+    print(f"  HLR label calls: {len(hlr_labels)} (separate from forward review calls)")
+
+    # C5: candidate recall
+    print()
+    print("=" * 50)
+    print("Step 5/8: Candidate recall")
+    print("=" * 50)
+    job.update(JobStatus.RUNNING, "Step 5/8: Candidate recall")
+    candidates = build_forward_candidates(blocks, index)
+    _save_forward(candidates, output_dir / "forward_candidates.json")
+
+    # C6: deterministic judgment
+    print()
+    print("=" * 50)
+    print("Step 6/8: Deterministic coverage judgment")
+    print("=" * 50)
+    job.update(JobStatus.RUNNING, "Step 6/8: Deterministic coverage judgment")
+    deterministic = build_deterministic_results(blocks, candidates, index)
+    _save_forward(deterministic, output_dir / "forward_deterministic.json")
+    print(f"  Deterministic stats: {deterministic.stats}")
+
+    # C7: AI three-state review (degrade gracefully if model unavailable)
+    print()
+    print("=" * 50)
+    print("Step 7/8: AI three-state review")
+    print("=" * 50)
+    job.update(JobStatus.RUNNING, "Step 7/8: AI three-state review")
+    hlr_content = {r.requirement_id: r.content for r in hlr_out.requirements}
+    try:
+        ai_review = review_blocks_with_ai(blocks, deterministic, index, hlr_content)
+    except Exception as exc:  # noqa: BLE001 — model unavailable / no API key
+        ai_review = ForwardAIReviewOutput(total_reviewed=0, stats={"skipped": 1}, results=[])
+        print(f"  [warn] AI review skipped ({type(exc).__name__}: {exc}); possible-tier blocks stay 'possible'")
+    _save_forward(ai_review, output_dir / "forward_ai_review.json")
+    print(f"  Forward review calls: {ai_review.total_reviewed} (separate from HLR label calls) | stats: {ai_review.stats}")
+
+    # C8: consolidate + report
+    print()
+    print("=" * 50)
+    print("Step 8/8: Consolidating coverage + generating reports")
+    print("=" * 50)
+    job.update(JobStatus.RUNNING, "Step 8/8: Consolidating coverage + generating reports")
+    coverage = consolidate_forward_coverage(blocks, scope, deterministic, ai_review)
+    # 正向缺陷修正 #8：两类独立 AI 调用计数（标签 + 正向复核）写入最终 coverage，
+    # 供 API / Excel / Word 审计展示。
+    coverage.hlr_label_calls = len(hlr_labels)
+    coverage.ai_review_calls = ai_review.total_reviewed
+    _save_forward(coverage, output_dir / "forward_coverage.json")
+    generate_forward_excel(coverage, blocks, output_dir / "forward_coverage.xlsx")
+    generate_forward_word(coverage, blocks, output_dir / "forward_report.docx")
+    print(f"  Final stats: {coverage.stats}")
+
+    job.update(JobStatus.COMPLETED, "Forward pipeline complete")
+    covered = coverage.stats.get("covered_direct", 0) + coverage.stats.get("covered_aggregate", 0)
+    return PipelineResult(
+        parsed_count=blocks.total_blocks,
+        match_count=covered,
+        judged_count=ai_review.total_reviewed,
+        report_path=str(output_dir / "forward_coverage.json"),
     )
