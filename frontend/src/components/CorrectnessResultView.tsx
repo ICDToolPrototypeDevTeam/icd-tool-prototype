@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { CircleCheck, CircleX, CircleHelp, CircleDashed, Table2, FileText } from 'lucide-react'
+import { CircleCheck, CircleX, CircleHelp, CircleDashed, Table2, FileText, type LucideIcon } from 'lucide-react'
 import { getDownloadUrlV4, getPreviewHtmlV4 } from '../api'
 import type { V4JobResultResponse, V4DownloadKind } from '../types'
 
@@ -103,7 +103,7 @@ function PreviewCard({
   )
 }
 
-const STATUS_META: Record<string, { label: string; color: string; Icon: React.ComponentType<{ size?: number }> }> = {
+const STATUS_META: Record<string, { label: string; color: string; Icon: LucideIcon }> = {
   "已覆盖": { label: '已覆盖', color: '#2e7d32', Icon: CircleCheck },
   "不一致": { label: '不一致', color: '#c62828', Icon: CircleX },
   "待确认": { label: '待确认', color: '#e65100', Icon: CircleHelp },
@@ -131,7 +131,7 @@ function StarBar({ dist }: { dist: Record<string, number> }) {
   )
 }
 
-export default function V4ResultView({ data, jobId, onNewTask }: Props) {
+export default function CorrectnessResultView({ data, jobId, onNewTask }: Props) {
   const s = data.summary
   const statusDist = s.status_distribution || {}
   const starDist = s.star_distribution || {}

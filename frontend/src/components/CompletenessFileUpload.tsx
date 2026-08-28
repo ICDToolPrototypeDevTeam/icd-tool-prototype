@@ -1,17 +1,21 @@
 import { useRef } from 'react'
-import type { FileItem } from '../types'
+import type { FileItem, ForwardAnalysisMode } from '../types'
 import FilePreview from './FilePreview'
 
 interface Props {
   hlrWordFile: FileItem | null
   eoicdPublisherFile: FileItem | null
   eoicdSubscriberFile: FileItem | null
-  traceabilityFiles: FileItem[]
+  deviceIcdTraceFile: FileItem | null
+  systemDeviceTraceFile: FileItem | null
+  analysisMode: ForwardAnalysisMode
   selectedPreviewFile: FileItem | null
   onHlrWordChange: (file: FileItem | null) => void
   onEoicdPublisherChange: (file: FileItem | null) => void
   onEoicdSubscriberChange: (file: FileItem | null) => void
-  onTraceabilityChange: (files: FileItem[]) => void
+  onDeviceIcdTraceChange: (file: FileItem | null) => void
+  onSystemDeviceTraceChange: (file: FileItem | null) => void
+  onAnalysisModeChange: (mode: ForwardAnalysisMode) => void
   onPreviewSelect: (file: FileItem | null) => void
 }
 
@@ -32,22 +36,27 @@ function formatSize(bytes: number) {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
 }
 
-export default function V4FileUpload({
+export default function CompletenessFileUpload({
   hlrWordFile,
   eoicdPublisherFile,
   eoicdSubscriberFile,
-  traceabilityFiles,
+  deviceIcdTraceFile,
+  systemDeviceTraceFile,
+  analysisMode,
   selectedPreviewFile,
   onHlrWordChange,
   onEoicdPublisherChange,
   onEoicdSubscriberChange,
-  onTraceabilityChange,
+  onDeviceIcdTraceChange,
+  onSystemDeviceTraceChange,
+  onAnalysisModeChange,
   onPreviewSelect,
 }: Props) {
   const hlrWordInputRef = useRef<HTMLInputElement>(null)
   const publisherInputRef = useRef<HTMLInputElement>(null)
   const subscriberInputRef = useRef<HTMLInputElement>(null)
-  const traceabilityInputRef = useRef<HTMLInputElement>(null)
+  const deviceIcdTraceInputRef = useRef<HTMLInputElement>(null)
+  const systemDeviceTraceInputRef = useRef<HTMLInputElement>(null)
 
   function handleSingleFile(
     e: React.ChangeEvent<HTMLInputElement>,
@@ -59,13 +68,6 @@ export default function V4FileUpload({
       onChange(item)
       onPreviewSelect(item)
     }
-  }
-
-  function handleTraceability(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = e.target.files
-    if (!files) return
-    const items = Array.from(files).map(makeFileItem)
-    onTraceabilityChange([...traceabilityFiles, ...items])
   }
 
   function renderFileItem(
@@ -135,6 +137,22 @@ export default function V4FileUpload({
           </div>
         </div>
         <div className="card__body" style={{ height: 'calc(100% - 81px)', overflow: 'auto' }}>
+          {/* Analysis mode toggle */}
+          <div className="version-tabs" style={{ marginBottom: 20 }}>
+            <button
+              className={`version-tab ${analysisMode === 'full' ? 'version-tab--active' : ''}`}
+              onClick={() => onAnalysisModeChange('full')}
+            >
+              全量分析
+            </button>
+            <button
+              className={`version-tab ${analysisMode === 'trace' ? 'version-tab--active' : ''}`}
+              onClick={() => onAnalysisModeChange('trace')}
+            >
+              追溯范围分析
+            </button>
+          </div>
+
           {/* HLR Word (required) */}
           <div className="file-section">
             <div className="file-section__title">
@@ -171,49 +189,32 @@ export default function V4FileUpload({
               )}
           </div>
 
-          {/* Traceability files (optional, multi) */}
-          <div className="file-section">
-            <div className="file-section__title">
-              📎 追溯表 <span className="file-section__optional">选填（0-N）</span>
-            </div>
-            {traceabilityFiles.length > 0 && (
-              <div className="file-list">
-                {traceabilityFiles.map((f) => (
-                  <div
-                    key={f.id}
-                    className={`file-item ${selectedPreviewFile?.id === f.id ? 'selected' : ''}`}
-                    onClick={() => onPreviewSelect(f)}
-                  >
-                    <div className="file-item__icon">📎</div>
-                    <div className="file-item__info">
-                      <div className="file-item__name">{f.name}</div>
-                      <div className="file-item__meta">{formatSize(f.size)} · Excel</div>
-                    </div>
-                    <button
-                      className="file-item__remove"
-                      onClick={(ev) => {
-                        ev.stopPropagation()
-                        const next = traceabilityFiles.filter((x) => x.id !== f.id)
-                        onTraceabilityChange(next)
-                        if (selectedPreviewFile?.id === f.id) {
-                          onPreviewSelect(next.length > 0 ? next[0] : null)
-                        }
-                      }}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
+          {/* Trace files (trace mode only) */}
+          {analysisMode === 'trace' && (
+            <>
+              <div className="file-section">
+                <div className="file-section__title">
+                  📎 设备→ICD 追溯表 <span className="file-section__required">*追溯模式必填</span>
+                </div>
+                {renderFileItem(deviceIcdTraceFile, onDeviceIcdTraceChange, '📎')}
+                {!deviceIcdTraceFile &&
+                  renderUploadButton('上传 设备→ICD 追溯表', deviceIcdTraceInputRef, '.xlsx,.xls', (e) =>
+                    handleSingleFile(e, onDeviceIcdTraceChange)
+                  )}
               </div>
-            )}
-            {renderUploadButton(
-              '添加追溯表',
-              traceabilityInputRef,
-              '.xlsx,.xls',
-              handleTraceability,
-              true
-            )}
-          </div>
+
+              <div className="file-section">
+                <div className="file-section__title">
+                  📎 设备→高层需求 追溯表 <span className="file-section__required">*追溯模式必填</span>
+                </div>
+                {renderFileItem(systemDeviceTraceFile, onSystemDeviceTraceChange, '📎')}
+                {!systemDeviceTraceFile &&
+                  renderUploadButton('上传 设备→高层需求 追溯表', systemDeviceTraceInputRef, '.xlsx,.xls', (e) =>
+                    handleSingleFile(e, onSystemDeviceTraceChange)
+                  )}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
