@@ -175,6 +175,10 @@ class ControllerProfile:
     # candidate pool and overflowing top_k=50 with status/noise signals.
     # Defaults to False so AMS/FGMC/HSCU keep legacy union-pool semantics.
     prefilter_per_hlr: bool = False
+    # Auto-detection config: used by coverage.py _detect_system_type to
+    # identify which profile matches an uploaded HLR Word file.
+    # None means this profile does not support auto-detection.
+    auto_detect: dict | None = None
 
 
 def _to_tuple(value: Any) -> tuple:
@@ -325,4 +329,5 @@ def load_profile_from_yaml(yaml_path: Path) -> ControllerProfile:
         matcher=_parse_matcher_enhancement(data.get("matcher")),
         trace_strategy=str(data.get("trace_strategy", "profile_columns")),
         prefilter_per_hlr=bool(data.get("prefilter_per_hlr", False)),
+        auto_detect=data.get("auto_detect"),
     )

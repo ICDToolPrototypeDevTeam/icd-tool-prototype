@@ -208,3 +208,15 @@ ai_labeling:
     - "FS_Pressure"
     - "燃油温度"
     - "油箱温度"
+
+# Auto-detection: used by coverage.py _detect_system_type to identify which
+# profile matches an uploaded HLR Word file.
+auto_detect:
+  required_rows: 13
+  required_cols: 2
+  cell_patterns:
+    "0":
+      contains: "ID"
+    "1":
+      starts_with: "FGMC"
+      row: 1

@@ -12,12 +12,14 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from docx import Document
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.api.v4.runner import launch_v4_pipeline
 from app.api.v4.schemas import V4AnalyzeResponse
 from app.job_manager import job_manager
 from app.v4.parsers import registered_extensions
+from app.v4.profiles import get_registry, init_registry, _registry
 
 
 router = APIRouter()
@@ -30,8 +32,6 @@ ALLOWED_JUDGE_PROVIDERS = {"deepseek", "minimax", "qwen"}
 SUPPORTED_HLR_EXTENSIONS = frozenset(registered_extensions())
 # Issue #63 / Task 12 + Issue #74: v4 controller profile whitelist.
 # Must match the directories under ``backend/app/v4/profiles/``.
-# Each profile is responsible for declaring its own HLR parser driver /
-# matcher enhancements / trace strategy.
 ALLOWED_CONTROLLER_PROFILES = {"ams", "fgmc", "hscu", "rpdu"}
 
 # 文件名安全字符：保留中英数 + . _ - + 空格 + 各种括号（合法 FS 字符）
@@ -69,6 +69,62 @@ async def _save_upload(file: UploadFile, dest_dir: Path) -> Path:
     return dest
 
 
+def _match_auto_detect(doc: Document, auto_detect: dict) -> bool:
+    """Match a single auto_detect rule against a Word document's tables."""
+    required_rows = auto_detect.get("required_rows")
+    required_cols = auto_detect.get("required_cols")
+    cell_patterns = auto_detect.get("cell_patterns", {})
+
+    for table in doc.tables:
+        rows, cols = len(table.rows), len(table.columns)
+        if required_rows and rows != required_rows:
+            continue
+        if required_cols and cols != required_cols:
+            continue
+
+        matched = True
+        for cell_pos, pattern in cell_patterns.items():
+            row_idx = pattern.get("row", 0)
+            col_idx = int(cell_pos)
+            if row_idx >= rows or col_idx >= cols:
+                matched = False
+                break
+            cell_text = table.cell(row_idx, col_idx).text.strip()
+            # contains 匹配
+            if "contains" in pattern and pattern["contains"] not in cell_text:
+                matched = False
+                break
+            # starts_with 匹配
+            if "starts_with" in pattern and not cell_text.startswith(pattern["starts_with"]):
+                matched = False
+                break
+        if matched:
+            return True
+    return False
+
+
+def _detect_system_type(hlr_path: Path) -> str:
+    """Auto-detect HLR file system type by scanning Word tables against profile auto_detect configs.
+
+    Ensures registry is initialized before scanning (coverage.py is synchronous,
+    while init_registry() is called in the background runner thread).
+    """
+    if not _registry._profiles:
+        init_registry(Path(__file__).resolve().parents[2] / "v4" / "profiles")
+
+    doc = Document(str(hlr_path))
+    reg = get_registry()
+
+    for pid in reg.list_ids():
+        cfg = reg.get(pid)
+        ad = cfg.auto_detect
+        if not ad:
+            continue
+        if _match_auto_detect(doc, ad):
+            return pid
+    raise ValueError("无法识别 HLR 文件所属系统类型，请手动选择系统类型上传。")
+
+
 @router.post('/coverage-analysis', response_model=V4AnalyzeResponse)
 async def coverage_analysis(
     hlr_word_file: UploadFile = File(...),
@@ -78,12 +134,9 @@ async def coverage_analysis(
     use_mock_llm: bool = Form(False),
     judge_providers: list[str] = Form(default_factory=lambda: ["deepseek"]),
     enable_traceability_prefilter: bool = Form(False),
-    controller_profile: str = Form("ams"),
+    controller_profile: Optional[str] = Form(None),
 ):
     # —— 字段校验 ——
-    # Issue #74: extension whitelist comes from the parser factory, so
-    # adding a new HLR format only requires a factory registration —
-    # the API stays in sync.
     _hlr_ext = Path(hlr_word_file.filename or "").suffix.lower()
     if _hlr_ext not in SUPPORTED_HLR_EXTENSIONS:
         raise HTTPException(
@@ -109,16 +162,6 @@ async def coverage_analysis(
                     detail=f"judge_providers: unsupported provider '{p}'; allowed: deepseek, minimax, qwen",
                 )
 
-# Issue #63 / Task 12: controller_profile whitelist (fail fast before job creation)
-    if controller_profile not in ALLOWED_CONTROLLER_PROFILES:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"controller_profile: unsupported '{controller_profile}'; "
-                f"allowed: {', '.join(sorted(ALLOWED_CONTROLLER_PROFILES))}"
-            ),
-        )
-
     # —— 创建 Job 与目录（V4 路径：backend/output/v4/{job_id}/input/ + output/）——
     job = job_manager.create_job()
     job_dir = Path(__file__).resolve().parent.parent.parent.parent / 'output' / 'v4' / job.job_id
@@ -138,6 +181,21 @@ async def coverage_analysis(
             if not tf.filename.lower().endswith(".xlsx"):
                 raise HTTPException(status_code=422, detail=f"traceability file {tf.filename} must be .xlsx")
             await _save_upload(tf, trace_dir)
+
+    # —— 自动识别或校验 controller_profile ——
+    if controller_profile is None:
+        detected = _detect_system_type(hlr_path)
+        controller_profile = detected
+        print(f"自动识别系统类型: {controller_profile}")
+    else:
+        if controller_profile not in ALLOWED_CONTROLLER_PROFILES:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"controller_profile: unsupported '{controller_profile}'; "
+                    f"allowed: {', '.join(sorted(ALLOWED_CONTROLLER_PROFILES))}"
+                ),
+            )
 
     # —— 后台线程跑 V4 管线（使用 runner 的 env 保存/恢复保护） ——
     launch_v4_pipeline(

@@ -158,6 +158,17 @@ ai_labeling:
     - "FS_Pressure"
     - "HYD_Pressure"
 
+# Auto-detection: used by coverage.py _detect_system_type to identify which
+# profile matches an uploaded HLR Word file.
+auto_detect:
+  required_rows: 8
+  required_cols: 2
+  cell_patterns:
+    "0":
+      contains: "需求ID"
+    "1":
+      starts_with: "FSF29"
+
 # HLR pre-processing — rewrites symbolic LBL_<name> references in HLR
 # requirements.content to their octal-encoded EoICD form L<octal>_<name>.
 #
