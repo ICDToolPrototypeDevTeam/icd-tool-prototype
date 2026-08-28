@@ -20,7 +20,7 @@ export type V4DownloadKind =
 export interface V4JobStatusResponse {
   job_id: string
   status: 'pending' | 'running' | 'completed' | 'failed'
-  stage: 'parse' | 'label' | 'match' | 'multi_judge' | 'review' | 'report' | 'done'
+  stage: string
   stage_index: number
   stage_total: number
   case_index: number
@@ -51,5 +51,35 @@ export interface V4JobResultResponse {
     consensus_docx: boolean
   }
   mock_models: string[]
+  errors: string[]
+}
+
+// ========== V4 Forward (Completeness) Types ==========
+
+export type ForwardAnalysisMode = 'full' | 'trace'
+
+export type V4ForwardDownloadKind = 'forward-xlsx' | 'forward-docx'
+
+export interface V4ForwardJobResultResponse {
+  job_id: string
+  status: string
+  summary: {
+    analysis_mode: ForwardAnalysisMode
+    total_blocks: number
+    covered_direct: number
+    covered_aggregate: number
+    parent_referenced: number
+    possible: number
+    uncovered: number
+    unsupported: number
+    input_error: number
+    ai_reviewed: number
+    eoicd_count: number
+    hlr_count: number
+  }
+  outputs: {
+    forward_xlsx: boolean
+    forward_docx: boolean
+  }
   errors: string[]
 }
