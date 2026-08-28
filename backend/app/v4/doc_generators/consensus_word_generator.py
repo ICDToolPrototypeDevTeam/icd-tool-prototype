@@ -11,6 +11,7 @@ from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
 
 def _set_cell_font(cell, text: str, bold: bool = False, size: int = 9, color=None):
@@ -37,6 +38,59 @@ def _style_header_row(table, headers: list[str]):
             qn("w:val"): "clear",
         })
         shading.insert(0, shd)
+
+
+def _set_table_layout_fixed(table, full_width: bool = True) -> None:
+    """Lock table to fixed layout and align tblGrid with cell widths.
+
+    In autofit mode (python-docx default) Word recomputes column widths from
+    cell content; cell.width only writes tcW as a hint. Setting tblLayout=fixed
+    makes Word honor the explicit tcW/tblGrid values, so all rows render at
+    the same column widths regardless of content length.
+
+    Args:
+        full_width: When True, also set tblW to 100% page width (pct=5000) so
+            the table spans the full content area. Use for tables whose total
+            column width should fill the page (e.g. analysis detail tables).
+            When False, leave tblW as auto so total table width follows the
+            sum of column widths (use for compact tables like judgment / star
+            distribution that look stretched at full width).
+    """
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        tbl.insert(0, tblPr)
+
+    if full_width:
+        tblW = tblPr.find(qn("w:tblW"))
+        if tblW is None:
+            tblW = OxmlElement("w:tblW")
+            tblPr.append(tblW)
+        tblW.set(qn("w:w"), "5000")
+        tblW.set(qn("w:type"), "pct")
+
+    tblLayout = tblPr.find(qn("w:tblLayout"))
+    if tblLayout is None:
+        tblLayout = OxmlElement("w:tblLayout")
+        tblPr.append(tblLayout)
+    tblLayout.set(qn("w:type"), "fixed")
+
+    tblGrid = tbl.find(qn("w:tblGrid"))
+    if tblGrid is not None:
+        first_row = table.rows[0]
+        dxa_widths: list[int] = []
+        for cell in first_row.cells:
+            tcW = cell._tc.tcPr.find(qn("w:tcW"))
+            if tcW is not None and tcW.get(qn("w:type")) == "dxa":
+                dxa_widths.append(int(tcW.get(qn("w:w"))))
+
+        for gridCol in list(tblGrid):
+            tblGrid.remove(gridCol)
+        for dxa in dxa_widths:
+            gridCol = OxmlElement("w:gridCol")
+            gridCol.set(qn("w:w"), str(dxa))
+            tblGrid.append(gridCol)
 
 
 def _star_str(n: int) -> str:
@@ -236,6 +290,7 @@ def generate_consensus_report(
     for row_obj in st.rows:
         row_obj.cells[0].width = Cm(6.0)
         row_obj.cells[1].width = Cm(3.0)
+    _set_table_layout_fixed(st, full_width=False)
 
     # ── Consensus quality section ──
     doc.add_heading("星级分布", level=3)
@@ -310,9 +365,10 @@ def generate_consensus_report(
 
     for row_obj in qt.rows:
         row_obj.cells[0].width = Cm(2.5)
-        row_obj.cells[1].width = Cm(3.0)
-        row_obj.cells[2].width = Cm(2.0)
-        row_obj.cells[3].width = Cm(8.0)
+        row_obj.cells[1].width = Cm(3.1)
+        row_obj.cells[2].width = Cm(1.9)
+        row_obj.cells[3].width = Cm(8.4)
+    _set_table_layout_fixed(qt, full_width=False)
 
     # 1★ 3 个子类型行在星列合并为一个 ★☆☆☆☆ 单元格（纵向居中）
     if one_star_first_row_idx is not None and one_star_last_row_idx is not None:
@@ -385,11 +441,6 @@ def generate_consensus_report(
         table = doc.add_table(rows=1, cols=len(headers))
         table.style = "Table Grid"
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        # Set all tables to 100% page width for consistent sizing
-        _tblW = table._tbl.tblPr.find(qn('w:tblW'))
-        if _tblW is not None:
-            _tblW.set(qn('w:w'), '5000')
-            _tblW.set(qn('w:type'), 'pct')
         _style_header_row(table, headers)
 
         for m in group:
@@ -431,10 +482,11 @@ def generate_consensus_report(
                                color=RGBColor(0xCC, 0x88, 0x00))
 
         # 设置明细表列宽
-        detail_col_widths = [1.19, 5.25, 1.5, 4.5, 2.0, 10.5, 1.75, 1.39]
+        detail_col_widths = [1.18, 5.21, 1.48, 4.48, 2.11, 10.09, 1.72, 1.82]
         for row_obj in table.rows:
             for i, w in enumerate(detail_col_widths):
                 row_obj.cells[i].width = Cm(w)
+        _set_table_layout_fixed(table)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
