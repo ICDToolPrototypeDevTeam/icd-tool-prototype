@@ -18,6 +18,7 @@ from typing import Optional
 
 from app.job_manager import Job, JobStatus
 from app.v4.pipeline import run_reverse_pipeline
+from app.v4.profiles import ProfileRegistry
 
 
 # V4 输出文件路径常量（与 V4 pipeline.py 输出一致；ADR-001 §6）
@@ -182,11 +183,17 @@ def run_v4_pipeline_thread(
     trace_dir: Optional[Path],
     judge_providers: list[str],
     use_mock_llm: bool,
-    system_type: str = "hvac",
+    controller_profile: str = "ams",
 ) -> None:
     """在后台线程内跑 V4 反向管线；带 env 保存/恢复；异常 → job.status=FAILED。"""
     output_dir = job_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # —— Issue #63 / Task 12: 加载 controller_profile（runner 在 backend/app/api/v4/runner.py，
+    #     profiles 目录位于 backend/app/v4/profiles/；parents[2] 解析到 backend/app/）——
+    reg = ProfileRegistry()
+    reg.load_all(Path(__file__).resolve().parents[2] / "v4" / "profiles")
+    profile = reg.get_or_raise(controller_profile)
 
     # —— ADR-001 Issue A 修正 #2：进入线程前保存旧 env；finally 中按 None/赋值恢复 ——
     saved_judge_providers = os.environ.get("JUDGE_PROVIDERS")
@@ -208,7 +215,7 @@ def run_v4_pipeline_thread(
             output_dir=output_dir,
             job=job,
             trace_dir=trace_dir,
-            system_type=system_type,
+            profile=profile,
         )
 
         # —— 反读落盘 JSON 派生结构化字段（避免在 runner 中实现 V4 Pydantic 序列化） ——
@@ -218,7 +225,7 @@ def run_v4_pipeline_thread(
         match_stats = derive_match_summary(output_dir)
         counts = derive_eoicd_hlr_counts(output_dir)
 
-        # 拼装 job.result（仅在 V4 路由读；不进 V3 schema）
+        # 拼装 job.result
         job.result = {
             # V3 兼容字段
             "requirement_count": counts.get("hlr_count", 0),
@@ -277,12 +284,12 @@ def launch_v4_pipeline(
     trace_dir: Optional[Path],
     judge_providers: list[str],
     use_mock_llm: bool,
-    system_type: str = "hvac",
+    controller_profile: str = "ams",
 ) -> threading.Thread:
     """工厂：返回后台线程对象；前端已启动并发由 daemon 线程承载。"""
     t = threading.Thread(
         target=run_v4_pipeline_thread,
-        args=(job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir, judge_providers, use_mock_llm, system_type),
+        args=(job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir, judge_providers, use_mock_llm, controller_profile),
         daemon=True,
     )
     t.start()

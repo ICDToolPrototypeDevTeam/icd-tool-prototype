@@ -18,115 +18,38 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from app.api.v4.runner import launch_v4_pipeline
 from app.api.v4.schemas import V4AnalyzeResponse
 from app.job_manager import job_manager
+from app.v4.parsers import registered_extensions
+from app.v4.profiles import get_registry, init_registry, _registry
 
 
 router = APIRouter()
 
-
-def _detect_system_type(hlr_path: Path) -> str:
-    """Auto-detect HLR file system type using configuration-driven rules.
-
-    Reads auto_detect config from HLR_SYSTEMS and matches table patterns.
-    Returns: system_type key from HLR_SYSTEMS
-    Raises: ValueError if detection fails
-    """
-    from app.v4.config import HLR_SYSTEMS
-
-    def _match_pattern(text: str, pattern: dict) -> bool:
-        """Check if text matches the pattern rules."""
-        if "contains" in pattern and pattern["contains"] not in text:
-            return False
-        if "starts_with" in pattern and not text.startswith(pattern["starts_with"]):
-            return False
-        return True
-
-    doc = Document(str(hlr_path))
-    if len(doc.tables) < 2:
-        raise ValueError("HLR 文件表格数量不足，无法识别系统类型")
-
-    # Try each system's config
-    for system_type, config in HLR_SYSTEMS.items():
-        detect_cfg = config.get("auto_detect")
-        if not detect_cfg:
-            continue
-
-        required_rows = detect_cfg.get("required_rows")
-        required_cols = detect_cfg.get("required_cols")
-        cell_patterns = detect_cfg.get("cell_patterns", {})
-
-        for table in doc.tables:
-            rows, cols = len(table.rows), len(table.columns)
-
-            # Check dimensions
-            if required_rows and rows != required_rows:
-                continue
-            if required_cols and cols != required_cols:
-                continue
-
-            # Check cell patterns
-            matched = True
-            for cell_pos, pattern in cell_patterns.items():
-                # Support per-pattern row override
-                row_idx = pattern.get("row", 0)
-                col_idx = int(cell_pos)
-                if row_idx >= rows or col_idx >= cols:
-                    matched = False
-                    break
-                cell_text = table.cell(row_idx, col_idx).text.strip()
-                if not _match_pattern(cell_text, pattern):
-                    matched = False
-                    break
-
-            if matched:
-                return system_type
-
-    raise ValueError(
-        f"无法识别 HLR 文件所属系统类型，请手动选择系统类型上传。"
-    )
-
-
-def _validate_hlr_format(hlr_path: Path, system_type: str) -> None:
-    """Validate HLR file format matches the system configuration.
-
-    Raises: ValueError if format doesn't match
-    """
-    from app.v4.config import get_hlr_system_config
-
-    system_config = get_hlr_system_config(system_type)
-    doc = Document(str(hlr_path))
-
-    table_index = system_config["glossary_table_index"]
-    if len(doc.tables) <= table_index:
-        raise ValueError(
-            f"HLR 文件术语表位置不符合 {system_config['name']} 格式，"
-            f"请确认系统类型选择正确"
-        )
-
-    requirement_rows = system_config["requirement_rows"]
-    found_valid = False
-    for table in doc.tables[table_index + 1:]:
-        if len(table.rows) == requirement_rows and len(table.columns) == 2:
-            found_valid = True
-            break
-
-    if not found_valid:
-        raise ValueError(
-            f"HLR 文件需求表行数不符合 {system_config['name']} 格式（应为{requirement_rows}行），"
-            f"请确认系统类型选择正确"
-        )
-
-
 # ADR-001 §2 校验白名单
 ALLOWED_JUDGE_PROVIDERS = {"deepseek", "minimax", "qwen"}
+# Issue #74: HLR file extensions come from the parser factory. New
+# parsers registered in ``parsers/hlr_parser_factory.py`` are accepted
+# here without changing the API surface.
+SUPPORTED_HLR_EXTENSIONS = frozenset(registered_extensions())
+# Issue #63 / Task 12 + Issue #74: v4 controller profile whitelist.
+# Must match the directories under ``backend/app/v4/profiles/``.
+ALLOWED_CONTROLLER_PROFILES = {"ams", "fgmc", "hscu", "rpdu"}
 
-# 文件名安全字符：仅保留中英数 + . _ -
-_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._\-一-龥]")
+# 文件名安全字符：保留中英数 + . _ - + 空格 + 各种括号（合法 FS 字符）
+_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._\-一-龥\s()（）\[\]【】]")
 MAX_FILE_BYTES = 50 * 1024 * 1024          # 50 MB 单文件
 MAX_REQUEST_BYTES = 200 * 1024 * 1024      # 200 MB 总
 
 
 def _safe_filename(name: str) -> str:
     base = Path(name).name
+    # Windows + curl 中文路径会在 multipart filename 字段做 GBK-as-latin1 mojibake。
+    # 反向修复:把 latin-1 unicode 字符还原为 GBK 字节再按 GBK 解出真中文。
+    # 仅在含非 ASCII 时尝试,失败则保持原值。
+    if any(ord(c) > 127 for c in base):
+        try:
+            base = base.encode("latin-1").decode("gbk")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
     base = base.replace(" ", "_")
     cleaned = _SAFE_NAME_RE.sub("_", base)
     if not cleaned:
@@ -146,6 +69,62 @@ async def _save_upload(file: UploadFile, dest_dir: Path) -> Path:
     return dest
 
 
+def _match_auto_detect(doc: Document, auto_detect: dict) -> bool:
+    """Match a single auto_detect rule against a Word document's tables."""
+    required_rows = auto_detect.get("required_rows")
+    required_cols = auto_detect.get("required_cols")
+    cell_patterns = auto_detect.get("cell_patterns", {})
+
+    for table in doc.tables:
+        rows, cols = len(table.rows), len(table.columns)
+        if required_rows and rows != required_rows:
+            continue
+        if required_cols and cols != required_cols:
+            continue
+
+        matched = True
+        for cell_pos, pattern in cell_patterns.items():
+            row_idx = pattern.get("row", 0)
+            col_idx = int(cell_pos)
+            if row_idx >= rows or col_idx >= cols:
+                matched = False
+                break
+            cell_text = table.cell(row_idx, col_idx).text.strip()
+            # contains 匹配
+            if "contains" in pattern and pattern["contains"] not in cell_text:
+                matched = False
+                break
+            # starts_with 匹配
+            if "starts_with" in pattern and not cell_text.startswith(pattern["starts_with"]):
+                matched = False
+                break
+        if matched:
+            return True
+    return False
+
+
+def _detect_system_type(hlr_path: Path) -> str:
+    """Auto-detect HLR file system type by scanning Word tables against profile auto_detect configs.
+
+    Ensures registry is initialized before scanning (coverage.py is synchronous,
+    while init_registry() is called in the background runner thread).
+    """
+    if not _registry._profiles:
+        init_registry(Path(__file__).resolve().parents[2] / "v4" / "profiles")
+
+    doc = Document(str(hlr_path))
+    reg = get_registry()
+
+    for pid in reg.list_ids():
+        cfg = reg.get(pid)
+        ad = cfg.auto_detect
+        if not ad:
+            continue
+        if _match_auto_detect(doc, ad):
+            return pid
+    raise ValueError("无法识别 HLR 文件所属系统类型，请手动选择系统类型上传。")
+
+
 @router.post('/coverage-analysis', response_model=V4AnalyzeResponse)
 async def coverage_analysis(
     hlr_word_file: UploadFile = File(...),
@@ -155,11 +134,18 @@ async def coverage_analysis(
     use_mock_llm: bool = Form(False),
     judge_providers: list[str] = Form(default_factory=lambda: ["deepseek"]),
     enable_traceability_prefilter: bool = Form(False),
-    system_type: Optional[str] = Form(None),
+    controller_profile: Optional[str] = Form(None),
 ):
     # —— 字段校验 ——
-    if not hlr_word_file.filename.lower().endswith(".docx"):
-        raise HTTPException(status_code=422, detail="hlr_word_file must be .docx")
+    _hlr_ext = Path(hlr_word_file.filename or "").suffix.lower()
+    if _hlr_ext not in SUPPORTED_HLR_EXTENSIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"hlr_word_file extension must be one of "
+                f"{sorted(SUPPORTED_HLR_EXTENSIONS)} (got {_hlr_ext!r})"
+            ),
+        )
 
     if eoicd_publisher_file is None and eoicd_subscriber_file is None:
         raise HTTPException(status_code=422, detail="at least one of eoicd_publisher_file or eoicd_subscriber_file is required")
@@ -176,8 +162,8 @@ async def coverage_analysis(
                     detail=f"judge_providers: unsupported provider '{p}'; allowed: deepseek, minimax, qwen",
                 )
 
-    # —— 创建 V4 Kind Job 与目录（V4 路径：backend/output/v4/{job_id}/input/ + output/）——
-    job = job_manager.create_job(kind="v4")
+    # —— 创建 Job 与目录（V4 路径：backend/output/v4/{job_id}/input/ + output/）——
+    job = job_manager.create_job()
     job_dir = Path(__file__).resolve().parent.parent.parent.parent / 'output' / 'v4' / job.job_id
     input_dir = job_dir / 'input'
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -196,20 +182,20 @@ async def coverage_analysis(
                 raise HTTPException(status_code=422, detail=f"traceability file {tf.filename} must be .xlsx")
             await _save_upload(tf, trace_dir)
 
-    # —— 确定系统类型 ——
-    if system_type is None:
-        detected_type = _detect_system_type(hlr_path)
-        system_type = detected_type
-        print(f"自动识别系统类型: {system_type}")
+    # —— 自动识别或校验 controller_profile ——
+    if controller_profile is None:
+        detected = _detect_system_type(hlr_path)
+        controller_profile = detected
+        print(f"自动识别系统类型: {controller_profile}")
     else:
-        if system_type not in ("hvac", "fuel", "hscu"):
-            raise HTTPException(status_code=422, detail=f"Unsupported system_type: {system_type}")
-
-    # —— 验证 HLR 文件格式 ——
-    try:
-        _validate_hlr_format(hlr_path, system_type)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        if controller_profile not in ALLOWED_CONTROLLER_PROFILES:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"controller_profile: unsupported '{controller_profile}'; "
+                    f"allowed: {', '.join(sorted(ALLOWED_CONTROLLER_PROFILES))}"
+                ),
+            )
 
     # —— 后台线程跑 V4 管线（使用 runner 的 env 保存/恢复保护） ——
     launch_v4_pipeline(
@@ -221,7 +207,7 @@ async def coverage_analysis(
         trace_dir=trace_dir,
         judge_providers=judge_providers,
         use_mock_llm=use_mock_llm,
-        system_type=system_type,
+        controller_profile=controller_profile,
     )
 
     return V4AnalyzeResponse(

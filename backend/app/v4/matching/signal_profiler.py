@@ -71,8 +71,8 @@ class SignalProfile:
     """Clustered EoICD entries sharing the same signal Label / leaf name.
 
     All entries in a profile share a Label number or signal semantic identity.
-    Matching is done once per profile; results are then expanded back to
-    per-attribute ComparisonCases.
+    Profiles are aggregated into ICDBlocks (by label + signal_family) for
+    HLR → EoICD reverse matching.
     """
 
     profile_key: str                     # "L214" | "SPEED" etc.

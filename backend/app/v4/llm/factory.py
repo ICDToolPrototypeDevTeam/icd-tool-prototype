@@ -85,21 +85,3 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
     raise ValueError(
         f"Unknown provider: {provider!r}, available: deepseek, minimax, qwen"
     )
-
-
-def get_available_providers() -> list[str]:
-    """Return providers whose API keys are configured in env.
-
-    Used for auto-degradation: if only 1 provider is available,
-    skip review agent (no consensus needed).
-    """
-    key_map = {
-        "deepseek": "DEEPSEEK_API_KEY",
-        "minimax": "MINIMAX_API_KEY",
-        "qwen": "QWEN_API_KEY",
-    }
-    available = []
-    for provider, env_key in key_map.items():
-        if os.getenv(env_key):
-            available.append(provider)
-    return available

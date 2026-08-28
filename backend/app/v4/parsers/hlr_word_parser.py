@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """HLR Word parser — extracts software high-level requirements from .docx tables.
 
-This parser is config-driven: it accepts a per-system configuration dict from
-``app.v4.config.get_hlr_system_config`` so the same code can parse multiple
-HLR layouts (e.g. ``hvac`` and ``fuel``) without hard-coded row/column
-positions.
+Profile-driven: field names, table positions, and non-requirement filtering
+are all controlled by ControllerProfile.hlr_parser. AMS and FGMC are both
+supported via profiles/{ams,fgmc}/config.yaml.
 """
 
 from __future__ import annotations
@@ -14,52 +13,146 @@ from pathlib import Path
 from docx import Document  # type: ignore
 
 from app.v4.models import HLRGlossaryEntry, HLROutput, HLRRequirement
+from app.v4.profiles.base import ControllerProfile
 
 
 def _cell_text(table, row: int, col: int) -> str:
-    """Extract stripped text from a table cell. Return empty string on error."""
+    """Extract stripped text from a table cell."""
     try:
         return table.cell(row, col).text.strip()
     except (IndexError, AttributeError):
         return ""
 
 
+def _build_field_map_index(
+    field_map: dict[str, tuple[str, ...]],
+) -> dict[str, str]:
+    """Reverse index: header text (lowercased) -> standard field name."""
+    index: dict[str, str] = {}
+    for std_field, headers in field_map.items():
+        for h in headers:
+            index[h.strip().lower()] = std_field
+    return index
+
+
+def _extract_requirement(
+    table,
+    field_index: dict[str, str],
+    source_name: str,
+    filter_non_requirement: bool,
+    non_requirement_value: str,
+    skip_when_empty: bool,
+    non_requirement_field_aliases: tuple[str, ...] = ("is_requirement",),
+) -> HLRRequirement | None:
+    """Extract one HLRRequirement from a table by matching row headers.
+
+    Returns None if the row should be skipped (empty id, or
+    filter_non_requirement=True with the indicator column marked '否').
+    """
+    # First pass: build a dict of {std_field: row_value} by reading row 0 (header)
+    # then row 1 (value).  For multi-row tables the same pattern is repeated.
+    rows_data: dict[str, str] = {}
+    is_requirement_value: str | None = None
+
+    for r in range(len(table.rows)):
+        header = _cell_text(table, r, 0)
+        if not header:
+            continue
+        header_lower = header.lower()
+        std_field = field_index.get(header_lower)
+        if std_field is None:
+            continue
+        value = _cell_text(table, r, 1)
+        rows_data[std_field] = value
+
+        # Track the is-requirement indicator.  The std_field name must be
+        # one of the configured aliases (default: "is_requirement").  No
+        # hardcoded Chinese-literal fallback — controllers that use a
+        # different column name must declare it in field_map and add the
+        # std_field to non_requirement_field_aliases in their profile.
+        if std_field in non_requirement_field_aliases:
+            is_requirement_value = value
+
+    # Apply filter_non_requirement
+    if filter_non_requirement:
+        # If the table doesn't have an is_requirement column, keep it
+        # (don't drop tables that lack the field)
+        if is_requirement_value is not None:
+            if is_requirement_value.strip() == non_requirement_value:
+                return None
+
+    # Skip rows with empty id (e.g., template rows)
+    req_id = rows_data.get("id", "")
+    if skip_when_empty and not req_id:
+        return None
+
+    return HLRRequirement(
+        requirement_id=req_id,
+        content=rows_data.get("content", ""),
+        object_type=rows_data.get("object_type", ""),
+        is_derived=rows_data.get("is_derived", ""),
+        rationale=rows_data.get("rationale", ""),
+        is_safety_related=rows_data.get("is_safety_related", ""),
+        verification_method=rows_data.get("verification_method", ""),
+        implementation_method=rows_data.get("implementation", ""),
+        source_file=source_name,
+        code=rows_data.get("code", ""),
+        source=rows_data.get("source", ""),
+        covered_ids=rows_data.get("covered_ids", ""),
+        notes=rows_data.get("notes", ""),
+        input_data=rows_data.get("input_data", ""),
+        output_data=rows_data.get("output_data", ""),
+    )
+
+
 class HLRWordParser:
     """Parse a Software HLR Word document into structured requirements.
 
-    The first table is treated as the glossary (3 columns:
-    abbreviation, English full name, Chinese description).
-    Subsequent tables are expected to be requirement tables
-    (configurable row count, 2 columns).
+    Field mapping, glossary position, and non-requirement filtering
+    are all driven by the injected ControllerProfile.
     """
 
-    def __init__(self, source_path: Path, system_config: dict):
+    def __init__(self, source_path: Path, profile: ControllerProfile):
         self.source_path = source_path
         self.source_name = source_path.name
-        self.system_config = system_config
-        self.doc = Document(str(source_path))
+        self.profile = profile
+        self.cfg = profile.hlr_parser
 
     def parse(self) -> HLROutput:
-        """Main entry point."""
-        # 使用配置解析术语表（-1表示无术语表）
-        glossary_table_index = self.system_config.get("glossary_table_index")
-        glossary = []
-        if glossary_table_index is not None and glossary_table_index >= 0:
-            glossary = self._parse_glossary(
-                table_index=glossary_table_index,
-                cols=self.system_config["glossary_cols"],
-            )
+        """Main entry point. Parse the Word document and return HLROutput."""
+        doc = Document(str(self.source_path))
+        tables = doc.tables
 
-        # 解析需求表
+        glossary: list[HLRGlossaryEntry] = []
         requirements: list[HLRRequirement] = []
-        req_rows = self.system_config["requirement_rows"]
 
-        for table in self.doc.tables[1:]:  # 跳过术语表
-            if len(table.rows) == req_rows and len(table.columns) == 2:
-                req = self._extract_requirement(table)
-                # 过滤掉 is_requirement=False 的非需求条目
-                if req is not None and req.requirement_id:
-                    requirements.append(req)
+        field_index = _build_field_map_index(self.cfg.field_map)
+
+        # Glossary: tables[cfg.glossary_table_index]
+        glossary_idx = self.cfg.glossary_table_index
+        if (
+            len(tables) > glossary_idx
+            and len(tables[glossary_idx].columns) >= 3
+        ):
+            glossary = self._parse_glossary(tables[glossary_idx])
+
+        # Requirement tables: everything after the glossary table
+        for table in tables[glossary_idx + 1:]:
+            if len(table.rows) < self.cfg.requirement_table_min_rows:
+                continue
+            if len(table.columns) < 2:
+                continue
+            req = _extract_requirement(
+                table,
+                field_index,
+                self.source_name,
+                filter_non_requirement=self.cfg.filter_non_requirement,
+                non_requirement_value=self.cfg.non_requirement_value,
+                skip_when_empty=self.cfg.skip_requirement_when_empty,
+                non_requirement_field_aliases=self.cfg.non_requirement_field_aliases,
+            )
+            if req is not None:
+                requirements.append(req)
 
         return HLROutput(
             source_file=self.source_name,
@@ -68,15 +161,14 @@ class HLRWordParser:
             glossary=glossary,
         )
 
-    def _parse_glossary(self, table_index: int, cols: int) -> list[HLRGlossaryEntry]:
-        """根据配置解析术语表"""
-        if table_index >= len(self.doc.tables):
-            return []
-        table = self.doc.tables[table_index]
-        if len(table.columns) < cols:
-            return []
+    @staticmethod
+    def _parse_glossary(table) -> list[HLRGlossaryEntry]:
+        """Parse the glossary table (3 columns).
+
+        First row is the header: 缩写, 英文全名, 中文说明
+        """
         entries: list[HLRGlossaryEntry] = []
-        for r in range(1, min(len(table.rows), 50)):
+        for r in range(1, len(table.rows)):
             abbr = _cell_text(table, r, 0)
             eng = _cell_text(table, r, 1)
             chn = _cell_text(table, r, 2)
@@ -89,71 +181,3 @@ class HLRWordParser:
                     )
                 )
         return entries
-
-    def _extract_requirement(self, table) -> HLRRequirement | None:
-        """根据配置动态提取需求字段
-
-        需求表为2列结构(列0=字段名, 列1=值)
-
-        如果 is_requirement=False（非需求条目），返回 None 由调用方过滤
-        """
-        field_rows = self.system_config["field_rows"]
-
-        # 提取各字段(值在列1)
-        requirement_id = _cell_text(table, field_rows["requirement_id"], 1)
-        content = _cell_text(table, field_rows["content"], 1)
-
-        # is_requirement 特殊处理
-        is_req_row = field_rows["is_requirement"]
-        is_req_cell = _cell_text(table, is_req_row, 1)
-        if self.system_config.get("is_requirement_is_boolean"):
-            is_requirement = is_req_cell.lower() in ("是", "true", "yes")
-        else:
-            is_requirement = is_req_cell == self.system_config.get("is_requirement_value")
-
-        # 如果不是需求条目，返回 None 由调用方过滤
-        if not is_requirement:
-            return None
-
-        # object_type: 优先使用 object_type_value 配置
-        if "object_type_value" in self.system_config:
-            object_type = self.system_config["object_type_value"]
-        else:
-            object_type = _cell_text(table, field_rows["content"], 0)
-
-        # is_derived
-        is_derived_cell = _cell_text(table, field_rows["is_derived"], 1)
-        if self.system_config.get("is_derived_is_boolean"):
-            is_derived = "是" if is_derived_cell.lower() in ("是", "true", "yes") else "否"
-        else:
-            is_derived = is_derived_cell
-
-        # rationale
-        rationale = _cell_text(table, field_rows["rationale"], 1)
-
-        # is_safety_related
-        is_safety_cell = _cell_text(table, field_rows["is_safety_related"], 1)
-        is_safety_related = (
-            is_safety_cell.lower() in ("是", "true", "yes") if is_safety_cell else False
-        )
-
-        # verification_method
-        verification_method = _cell_text(table, field_rows["verification_method"], 1)
-
-        # implementation_method(可能为空)
-        impl_row = field_rows.get("implementation_method")
-        implementation_method = (
-            _cell_text(table, impl_row, 1) if impl_row is not None else ""
-        )
-
-        return HLRRequirement(
-            requirement_id=requirement_id,
-            content=content,
-            object_type=object_type,
-            is_derived=is_derived,
-            rationale=rationale,
-            is_safety_related=str(is_safety_related),
-            verification_method=verification_method,
-            implementation_method=implementation_method,
-            source_file=self.source_name,
-        )

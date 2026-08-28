@@ -1,42 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Report generator: aggregates judgment results into a DifferenceReport."""
+"""Report generator: aggregates consensus results into a reverse coverage report."""
 
 from __future__ import annotations
 
 from app.v4.models import (
     ConsensusOutput,
-    ConsensusResult,
-    DifferenceReport,
-    JudgmentResult,
     ReverseJudgmentResult,
     ReverseJudgmentOutput,
     ReverseMatchOutput,
-    HLRCoverageResult,
 )
-
-
-def generate_report(
-    judgments: list[JudgmentResult],
-) -> DifferenceReport:
-    """Aggregate judgments into a structured difference report.
-
-    - Computes statistics per coverage_status
-    - Filters out 'covered' items from the differences list
-    """
-    stats: dict[str, int] = {}
-    for j in judgments:
-        status = j.coverage_status or "unknown"
-        stats[status] = stats.get(status, 0) + 1
-
-    differences = [
-        j for j in judgments if j.coverage_status != "covered"
-    ]
-
-    return DifferenceReport(
-        total_cases=len(judgments),
-        statistics=stats,
-        differences=differences,
-    )
 
 
 def generate_reverse_report(

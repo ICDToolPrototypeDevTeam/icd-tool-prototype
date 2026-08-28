@@ -52,15 +52,22 @@ class EoICDOutput(BaseModel):
 class HLRRequirement(BaseModel):
     """A single requirement from the HLR Word document."""
 
-    requirement_id: str
-    content: str
-    object_type: str
-    is_derived: str
-    rationale: str
-    is_safety_related: str
-    verification_method: str
-    implementation_method: str
-    source_file: str
+    requirement_id: str = ""
+    content: str = ""
+    object_type: str = ""
+    is_derived: str = ""
+    rationale: str = ""
+    is_safety_related: str = ""
+    verification_method: str = ""
+    implementation_method: str = ""
+    source_file: str = ""
+    # FGMC 引入的新字段（AMS 全部 default ""，向后兼容）
+    code: str = ""
+    source: str = ""
+    covered_ids: str = ""
+    notes: str = ""
+    input_data: str = ""
+    output_data: str = ""
 
 
 class HLRGlossaryEntry(BaseModel):
@@ -129,77 +136,6 @@ class HLROutput(BaseModel):
     total_count: int
     requirements: list[HLRRequirement]
     glossary: list[HLRGlossaryEntry]
-
-
-# ============================================================
-# Matching & Comparison Models
-# ============================================================
-
-
-class MatchCandidate(BaseModel):
-    """A single HLR candidate matched to an EoICD requirement."""
-
-    hlr_id: str
-    hlr_content: str
-    rationale: str = ""  # HLR rationale for context
-    score: float
-    match_source: str = "unified"  # was: "rule"|"alias"|"bm25"|"merged"
-    matched_fields: list[str] = Field(default_factory=list)  # dimension-level details
-
-
-class ComparisonCase(BaseModel):
-    """One EoICD requirement paired with its Top-K HLR candidates for AI judgment."""
-
-    case_id: str                       # "CMP-0001"
-    eoicd_requirement: dict            # selected fields: ird_id, description, bus_type, side, source
-    candidates: list[MatchCandidate]   # Top-K, sorted by score desc
-    match_evidence: dict = Field(default_factory=dict)  # aggregate match summary
-
-
-class JudgmentResult(BaseModel):
-    """AI judgment output for a single ComparisonCase."""
-
-    case_id: str
-    coverage_status: str = ""          # "covered" | "inconsistent" | "needs_review" | "无匹配" (match-layer)
-    matched_hlr_ids: list[str] = Field(default_factory=list)
-    difference_type: str = ""          # 无差异 | 缺失 | 不一致 | 部分覆盖 | 需确认
-    missing_points: list[str] = Field(default_factory=list)
-    inconsistent_points: list[str] = Field(default_factory=list)
-    analysis: str = ""
-    suggested_action: str = ""
-    confidence: float = 0.0
-
-
-class DifferenceReport(BaseModel):
-    """Final difference report."""
-
-    generated_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
-    total_cases: int = 0
-    statistics: dict[str, int] = Field(default_factory=dict)
-    differences: list[JudgmentResult] = Field(default_factory=list)
-
-
-class MatchOutput(BaseModel):
-    """Intermediate output from matching stage (for JSON persistence)."""
-
-    generated_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
-    total_cases: int
-    top_k: int
-    cases: list[ComparisonCase]
-
-
-class JudgmentOutput(BaseModel):
-    """Intermediate output from judging stage (for JSON persistence)."""
-
-    generated_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
-    total_cases: int
-    results: list[JudgmentResult]
 
 
 # ============================================================
@@ -283,20 +219,6 @@ class ReverseCase(BaseModel):
 # ============================================================
 # Consensus & Pipeline Models (Phase 1 architecture scaffolding)
 # ============================================================
-
-
-class AgentJudgment(BaseModel):
-    """单个对比 agent 的输出。替代现有 MultiJudgeResult.judgments 中的裸 dict。"""
-
-    agent_name: str = ""           # "deepseek" | "minimax" | "qwen"
-    coverage_status: str = ""      # covered|partial|missing|inconsistent|needs_review|error
-    difference_type: str = ""
-    missing_points: list[str] = Field(default_factory=list)
-    inconsistent_points: list[str] = Field(default_factory=list)
-    analysis: str = ""
-    suggested_action: str = ""
-    confidence: float = 0.0
-    raw_response: str = ""
 
 
 class MultiJudgeResult(BaseModel):

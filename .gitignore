@@ -49,6 +49,7 @@ backend/tests/
 
 .remember/
 docs/superpowers/
+.superpowers/
 
 # Local test documents and skill references
 
@@ -75,3 +76,7 @@ input_doc_file/
 # Issue draft files
 
 issues_file/
+
+# Personal notes
+
+notes/

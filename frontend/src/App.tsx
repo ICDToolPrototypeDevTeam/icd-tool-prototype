@@ -30,7 +30,7 @@ export default function App() {
   const [v4SubscriberFile, setV4SubscriberFile] = useState<FileItem | null>(null)
   const [v4TraceabilityFiles, setV4TraceabilityFiles] = useState<FileItem[]>([])
   const [v4SelectedPreviewFile, setV4SelectedPreviewFile] = useState<FileItem | null>(null)
-  const [v4SystemType, setV4SystemType] = useState<string>('')
+  const [v4ControllerProfile, setV4ControllerProfile] = useState<string>('')
 
   // Health checks
   useEffect(() => {
@@ -56,7 +56,7 @@ export default function App() {
     setV4SubscriberFile(null)
     setV4TraceabilityFiles([])
     setV4SelectedPreviewFile(null)
-    setV4SystemType('')
+    setV4ControllerProfile('')
   }
 
   // Workflow step classes
@@ -93,7 +93,7 @@ export default function App() {
     if (v4HlrWordFile.file) formData.append('hlr_word_file', v4HlrWordFile.file)
     if (v4PublisherFile?.file) formData.append('eoicd_publisher_file', v4PublisherFile.file)
     if (v4SubscriberFile?.file) formData.append('eoicd_subscriber_file', v4SubscriberFile.file)
-    if (v4SystemType) formData.append('system_type', v4SystemType)
+    if (v4ControllerProfile) formData.append('controller_profile', v4ControllerProfile)
 
     if (v4TraceabilityFiles.length > 0) {
       v4TraceabilityFiles.forEach((f) => {
@@ -225,8 +225,8 @@ export default function App() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
               <span style={{ fontSize: 14, color: '#555' }}>系统类型：</span>
               <select
-                value={v4SystemType}
-                onChange={(e) => setV4SystemType(e.target.value)}
+                value={v4ControllerProfile}
+                onChange={(e) => setV4ControllerProfile(e.target.value)}
                 style={{
                   padding: '6px 12px',
                   borderRadius: 6,
@@ -236,8 +236,8 @@ export default function App() {
                 }}
               >
                 <option value="">自动识别</option>
-                <option value="hvac">环控系统</option>
-                <option value="fuel">燃油系统</option>
+                <option value="ams">环控系统</option>
+                <option value="fgmc">燃油系统</option>
                 <option value="hscu">液压系统</option>
               </select>
               <span style={{ fontSize: 12, color: '#888' }}>（默认自动识别，可手动选择）</span>

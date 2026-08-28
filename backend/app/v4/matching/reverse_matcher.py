@@ -37,10 +37,41 @@ from app.v4.models import (
     HLRRequirement,
     EoICDRequirement,
 )
+from app.v4.profiles.base import ControllerProfile, MatcherEnhancementConfig
 
 # ── Scoring constants ────────────────────────────────────────────────
 
-_TOP_K = 20  # max blocks per HLR passed to Agent
+_TOP_K_DEFAULT = 20  # default max blocks per HLR passed to Agent
+_TOP_K = _TOP_K_DEFAULT  # backward-compat alias for any external importer
+
+# Dimensions whose values contribute to the numeric total. Diagnostic
+# tags (``direction_conflict`` / ``direction_softened_for_exact_signal``)
+# are clamped to 1 and intentionally NOT summed.
+_NUMERIC_DIMS = ("signal_name", "direction", "bit_field", "sdi", "data_type", "device_bus")
+
+# Common Chinese suffixes that occasionally append to otherwise-Latin
+# signal tokens in HLR text (e.g. ``EDP_TCB_STATUS_034状态``). Only
+# consulted when ``MatcherEnhancementConfig.enable_cn_suffix_strip`` is
+# True (RPDU).
+_CN_SUFFIX_RE = re.compile(
+    r'(状态|命令|值|位|信号|参数|数据|量|参数值|状态位)$'
+)
+
+# Matches 3+ digit sequences in HLR text, optionally preceded by a
+# signal-context prefix (e.g. ``EDP_TCB_STATUS_034`` → ``034``). Used
+# for signal-number exact-match bonus (RPDU only).
+_SIGNAL_NUM_RE = re.compile(
+    r'(?:状态|信号|参数|变量|Data|Port|编号|名称|cmd|fault|bit|通道|状态位|参数值)?'
+    r'[_]?'
+    r'(\d{3,})'
+    r'(?![A-Za-z])',
+    re.IGNORECASE,
+)
+
+# Numbers too common in bus/rate context to count as signal numbers.
+_SIGNAL_NUM_BLACKLIST = frozenset({
+    "200", "664", "429", "100", "500", "1000", "000", "255", "128",
+})
 
 # Score tiering: blocks are classified into 3 tiers based on total score
 # and the number of active (non-zero) dimensions.
@@ -156,14 +187,31 @@ def build_hlr_profile(hlr: HLRRequirement, lbl: HLRLabel) -> HLRMatchProfile:
 _SPECIFICITY_DIGIT_SUFFIX_RE = re.compile(r'^(?P<alpha>[A-Za-z_]+?)(?P<digit>\d+)$')
 
 
-def _classify_keyword_specificity(kw: str) -> str:
+def _strip_cn_suffix(text: str) -> str:
+    """Strip a single common Chinese suffix token from the tail.
+
+    Used by RPDU only (when ``enable_cn_suffix_strip=True``) so that
+    ``EDP_TCB_STATUS_034状态`` becomes ``edp_tcb_status_034`` for
+    boundary matching. Strips at most one suffix so an over-eager match
+    doesn't eat unrelated text.
+    """
+    return _CN_SUFFIX_RE.sub('', text)
+
+
+def _classify_keyword_specificity(kw: str, strip_cn_suffix: bool = False) -> str:
     """Classify an HLR signal keyword by specificity to control matching.
 
     Returns 'precise' (long alpha + digit, like AFTEFAN1),
             'moderate' (shorter alpha + digit, like BBSOV1),
             'generic' (no digit suffix or very short).
+
+    When ``strip_cn_suffix`` is True (RPDU), Chinese suffixes such as
+    "状态" are stripped first so that ``EDP_TCB_STATUS_034状态`` is
+    correctly classified as 'precise'.
     """
     kw_clean = kw.strip()
+    if strip_cn_suffix:
+        kw_clean = _strip_cn_suffix(kw_clean)
     m = _SPECIFICITY_DIGIT_SUFFIX_RE.match(kw_clean)
     if not m:
         return 'generic'
@@ -176,12 +224,23 @@ def _classify_keyword_specificity(kw: str) -> str:
     return 'generic'
 
 
-def _boundary_match(kw: str, text: str) -> bool:
+def _boundary_match(
+    kw: str,
+    text: str,
+    strip_cn_suffix: bool = False,
+) -> bool:
     """Check if keyword matches at token boundaries in text.
 
     Prevents cross-contamination: 'AFTEFAN1' matches 'AFTEFAN1_HW_FAULT'
     but NOT 'AFTEFAN2_HW_FAULT' (different numeric suffix).
+
+    When ``strip_cn_suffix`` is True (RPDU), common Chinese suffixes are
+    stripped from both keyword and text before matching so that
+    ``EDP_TCB_STATUS_034`` can match ``EDP_TCB_STATUS_034状态``.
     """
+    if strip_cn_suffix:
+        kw = _strip_cn_suffix(kw)
+        text = _strip_cn_suffix(text)
     kw_lower = kw.lower()
     text_lower = text.lower()
     if text_lower == kw_lower:
@@ -230,11 +289,21 @@ def _has_named_component(text: str) -> bool:
 def _score_block(
     hlr_prof: HLRMatchProfile,
     block: ICDBlock,
+    enhancements: MatcherEnhancementConfig | None = None,
 ) -> tuple[int, dict[str, int]]:
     """Score a single ICDBlock against an HLR across 6 dimensions.
 
     Returns (total_score, dimension_scores).
+
+    ``enhancements`` (RPDU profile only) toggles three optional scoring
+    augmentations; when ``None`` or all flags False the result is
+    byte-identical to the legacy scorer used by AMS/FGMC/HSCU.
     """
+    if enhancements is None:
+        enhancements = MatcherEnhancementConfig()
+    strip_cn = enhancements.enable_cn_suffix_strip
+    direction_soft = enhancements.enable_direction_soft_on_exact_signal
+    sig_num_bonus = enhancements.enable_signal_number_bonus
     syn = _get_synonym_lookup()
     dims: dict[str, int] = {}
 
@@ -274,13 +343,14 @@ def _score_block(
         kw = kw_raw.lower()
         if len(kw) < 3:
             continue
-        specificity = _classify_keyword_specificity(kw)
+        specificity = _classify_keyword_specificity(kw, strip_cn_suffix=strip_cn)
         if specificity == 'precise':
-            if _boundary_match(kw, family_lower):
-                signal_overlap.add(kw)
+            if _boundary_match(kw, family_lower, strip_cn_suffix=strip_cn):
+                signal_overlap.add(kw if not strip_cn else _strip_cn_suffix(kw))
         else:
-            if kw in family_lower or family_lower in kw:
-                signal_overlap.add(kw)
+            kw_eff = _strip_cn_suffix(kw) if strip_cn else kw
+            if kw_eff in family_lower or family_lower in kw_eff:
+                signal_overlap.add(kw_eff)
 
     # Device substring match with specificity control
     for dev in hlr_prof.devices:
@@ -291,9 +361,11 @@ def _score_block(
             # Extract precise components and boundary-match each individually
             for match in _PRECISE_COMPONENT_RE.finditer(dev_lower):
                 component = match.group().lower()
-                specificity = _classify_keyword_specificity(component)
+                specificity = _classify_keyword_specificity(
+                    component, strip_cn_suffix=strip_cn
+                )
                 if specificity == 'precise':
-                    if _boundary_match(component, family_lower):
+                    if _boundary_match(component, family_lower, strip_cn_suffix=strip_cn):
                         signal_overlap.add(component)
                 else:
                     # Moderate/generic: substring match (e.g. 'bbsov1' in 'fwdbbbsov1_fc')
@@ -305,6 +377,25 @@ def _score_block(
 
     dims["signal_name"] = min(30, len(signal_overlap) * 8)
 
+    # ── 1b. Signal-number exact-match bonus (RPDU only) ──
+    # HLR content like "EDP_TCB_STATUS_034状态" hides the trailing 3-digit
+    # number behind a Chinese suffix; the regular boundary matcher
+    # misses it. Extract 3+ digit sequences from the HLR body, filter
+    # protocol-constant noise, and award +10/number that also appears
+    # in the block's signal_family. Saturation: signal_name already
+    # capped at 30; bonus raises the cap proportionally.
+    if sig_num_bonus:
+        hlr_signal_numbers = {
+            m.group(1) for m in _SIGNAL_NUM_RE.finditer(hlr_prof.content)
+        } - _SIGNAL_NUM_BLACKLIST
+        if hlr_signal_numbers:
+            family_nums = set(re.findall(r'\d{3,}', family_lower))
+            matched_nums = hlr_signal_numbers & family_nums
+            if matched_nums:
+                dims["signal_name"] = min(
+                    30, dims["signal_name"] + len(matched_nums) * 10
+                )
+
     # ── 2. Direction match (15pts) ──
     hlr_dir = hlr_prof.extracted_direction
     block_dir = block.direction
@@ -314,7 +405,18 @@ def _score_block(
         elif block_dir == "发送/接收":
             dims["direction"] = 8
         else:
-            dims["direction"] = 0
+            # Direction contradiction.  When the HLR's signal name already
+            # matched the block exactly (signal_name saturated at 30), this
+            # is often an injected-fault or doc typo, not a "wrong target".
+            # Don't let the 15pt gap bury it below direction-coincident noise
+            # before the AI judge reviews the inconsistency. Apportion a
+            # mid value (8) instead, and tag the candidate so downstream
+            # stages can surface the conflict (RPDU only).
+            if direction_soft and dims.get("signal_name", 0) >= 30:
+                dims["direction"] = 8
+                dims["direction_softened_for_exact_signal"] = 1
+            else:
+                dims["direction"] = 0
     else:
         dims["direction"] = 0
 
@@ -412,20 +514,30 @@ def _score_block(
     )
     dims["device_bus"] = (5 if bus_match else 0) + min(5, len(dev_overlap) * 2)
 
-    total = sum(dims.values())
+    total = sum(dims.get(k, 0) for k in _NUMERIC_DIMS)
     return total, dims
 
 
 def _apply_hard_gates(
     hlr_prof: HLRMatchProfile,
     scored: list[tuple[int, dict[str, int], ICDBlock]],
+    enhancements: MatcherEnhancementConfig | None = None,
 ) -> list[tuple[int, dict[str, int], ICDBlock]]:
     """Remove blocks that fail definitive-contradiction gates.
 
     These gates are conservative — they only fire when the evidence is
     unambiguous.  Removing a correct block is worse than keeping noise,
     so each gate has a high bar for activation.
+
+    When ``enhancements.enable_direction_soft_on_exact_signal`` is True
+    (RPDU), Gate 1 retains direction-contradiction candidates whose
+    ``signal_name`` dimension already matched exactly — those are tagged
+    ``direction_conflict`` so the AI judge can review the inconsistency
+    instead of the block being silently dropped.
     """
+    if enhancements is None:
+        enhancements = MatcherEnhancementConfig()
+    direction_soft = enhancements.enable_direction_soft_on_exact_signal
     hlr_dir = hlr_prof.extracted_direction.strip()
     hlr_sdi = hlr_prof.sdi_value.strip()
     cat = hlr_prof.signal_category
@@ -437,12 +549,30 @@ def _apply_hard_gates(
     filtered: list[tuple[int, dict[str, int], ICDBlock]] = []
     for total, dims, block in scored:
         # —— Gate 1: Direction contradiction ——
-        if dir_gate_active:
+        if dir_gate_active and hlr_dir in ("发送", "接收"):
             block_dir = block.direction
-            if hlr_dir == "发送" and block_dir == "接收":
-                continue
-            if hlr_dir == "接收" and block_dir == "发送":
-                continue
+            dir_conflict = hlr_dir == "发送" and block_dir == "接收"
+            dir_conflict = dir_conflict or (
+                hlr_dir == "接收" and block_dir == "发送"
+            )
+            if dir_conflict:
+                # 信号名已精确命中的 block，方向矛盾不剔除——
+                # 这是注入故障/文档笔误，应保留并标记不一致让上层甄别。
+                sn_score = dims.get("signal_name", 0)
+                if direction_soft and (
+                    sn_score >= 30 or (sn_score > 0 and block_dir == "发送/接收")
+                ):
+                    # direction 已在 _score_block 为精确命中矛盾信号给 8 分，
+                    # 保留该分值；仅叠加不一致标记供语义层甄别。重算 total。
+                    if dims.get("direction_softened_for_exact_signal"):
+                        total = sum(dims.get(k, 0) for k in _NUMERIC_DIMS)
+                    dims["direction_conflict"] = 1
+                    dims["hlr_direction"] = hlr_dir
+                    dims["icd_direction"] = block_dir
+                    filtered.append((total, dims, block))
+                    continue
+                else:
+                    continue  # 方向矛盾且信号名未命中，仍视为噪声剔除
 
         # —— Gate 2: SDI contradiction ——
         # Only gate when block has an explicit SDI but none match HLR's SDI.
@@ -476,6 +606,7 @@ def _apply_hard_gates(
 
 def _filter_sn_zero_within_label(
     scored: list[tuple[int, dict[str, int], ICDBlock]],
+    enhancements: MatcherEnhancementConfig | None = None,
 ) -> list[tuple[int, dict[str, int], ICDBlock]]:
     """Remove sn=0 blocks from labels that already have sn>0 blocks.
 
@@ -483,8 +614,15 @@ def _filter_sn_zero_within_label(
     blocks under the same label are almost certainly noise (e.g. FWDBBSOV2
     mixed in with FWDBBSOV1 matches).  Labels where ALL blocks have sn=0
     are kept as-is — no better alternative exists.
+
+    When RPDU's ``enable_direction_soft_on_exact_signal`` is enabled,
+    direction-conflict candidates are sorted to the front so the AI
+    judge sees them above direction-coincident noise.
     """
     from collections import defaultdict
+    if enhancements is None:
+        enhancements = MatcherEnhancementConfig()
+    direction_soft = enhancements.enable_direction_soft_on_exact_signal
     by_label: dict[str, list[tuple[int, dict[str, int], ICDBlock]]] = defaultdict(list)
     for total, dims, block in scored:
         by_label[block.label or block.block_key].append((total, dims, block))
@@ -497,22 +635,42 @@ def _filter_sn_zero_within_label(
         else:
             result.extend(entries)
 
-    result.sort(key=lambda x: x[0], reverse=True)
+    if direction_soft:
+        # direction_conflict 优先保留在前面，便于 AI judge 复核。
+        result.sort(
+            key=lambda x: (
+                0 if x[1].get("direction_conflict") else 1,
+                -x[0],
+            )
+        )
+    else:
+        result.sort(key=lambda x: x[0], reverse=True)
     return result
 
 
 def _score_and_rank_blocks(
     hlr_prof: HLRMatchProfile,
     candidates: list[ICDBlock],
+    enhancements: MatcherEnhancementConfig | None = None,
 ) -> list[tuple[int, dict[str, int], ICDBlock]]:
     """Score blocks, apply hard gates, sort desc, return top results."""
     scored: list[tuple[int, dict[str, int], ICDBlock]] = []
     for block in candidates:
-        total, dims = _score_block(hlr_prof, block)
+        total, dims = _score_block(hlr_prof, block, enhancements=enhancements)
         if total >= _MIN_SCORE_THRESHOLD:
             scored.append((total, dims, block))
     scored.sort(key=lambda x: x[0], reverse=True)
-    scored = _apply_hard_gates(hlr_prof, scored)
+    scored = _apply_hard_gates(hlr_prof, scored, enhancements=enhancements)
+    if enhancements and enhancements.enable_direction_soft_on_exact_signal:
+        # 排序保底：方向矛盾但信号名精确命中的 block 代表「注入故障/文档笔误」
+        # 的可疑点，必须置于顶层候选，避免被方向一致(+15)的无关噪声挤出 Top-K，
+        # 从而让上层语义甄别能捕获需求方向与 ICD 方向的不一致。
+        scored.sort(
+            key=lambda x: (
+                0 if x[1].get("direction_conflict") else 1,
+                -x[0],
+            )
+        )
     return scored
 
 
@@ -522,6 +680,7 @@ def _score_and_rank_blocks(
 def _match_path1_label(
     hlr_prof: HLRMatchProfile,
     block_index: dict[str, ICDBlock],
+    enhancements: MatcherEnhancementConfig | None = None,
 ) -> list[tuple[int, dict[str, int], ICDBlock]]:
     """Path 1: A429显式 — Stage 1 label-prefix filter → Stage 2 block scoring."""
     candidates: list[ICDBlock] = []
@@ -535,29 +694,32 @@ def _match_path1_label(
             if key.startswith(prefix):
                 candidates.append(block)
 
-    return _score_and_rank_blocks(hlr_prof, candidates)
+    return _score_and_rank_blocks(hlr_prof, candidates, enhancements=enhancements)
 
 
 def _match_path_semantic(
     hlr_prof: HLRMatchProfile,
     block_index: dict[str, ICDBlock],
+    enhancements: MatcherEnhancementConfig | None = None,
 ) -> list[tuple[int, dict[str, int], ICDBlock]]:
     """Paths 2/3/4: score all non-label blocks with optional bus filter."""
     candidates: list[ICDBlock] = []
     for key, block in block_index.items():
-        # Skip label-based blocks (those go through Path 1)
-        if block.label:
+        # Skip label-based blocks UNLESS this is A429隐式, which may
+        # semantically map to a block that has a Label (RPDU only).
+        if block.label and hlr_prof.signal_category != "A429隐式":
             continue
-        # Bus filter
-        if not (
+        # Bus filter (required for A429隐式; soft for 模拟量/离散量)
+        bus_overlap = (
             block.bus_aliases_set & hlr_prof.bus_types
             or block.bus_types & hlr_prof.bus_types
-        ):
-            if hlr_prof.signal_category == "A429隐式":
-                continue  # Path 4 requires bus match
+        )
+        if hlr_prof.signal_category == "A429隐式":
+            if not bus_overlap:
+                continue  # A429隐式 requires bus match
         candidates.append(block)
 
-    return _score_and_rank_blocks(hlr_prof, candidates)
+    return _score_and_rank_blocks(hlr_prof, candidates, enhancements=enhancements)
 
 
 # ── Match evidence ──────────────────────────────────────────────────
@@ -567,8 +729,11 @@ def _build_match_evidence(
     hlr_prof: HLRMatchProfile,
     scored: list[tuple[int, dict[str, int], ICDBlock]],
     match_type: str,
+    enhancements: MatcherEnhancementConfig | None = None,
 ) -> dict:
     """Build match_evidence dict with dimension-level score breakdown + block details."""
+    if enhancements is None:
+        enhancements = MatcherEnhancementConfig()
     evidence: dict = {
         "match_type": match_type,
         "signal_category": hlr_prof.signal_category,
@@ -592,6 +757,23 @@ def _build_match_evidence(
             "channel_count": block.channel_count,
         })
 
+    # Direction-contradiction aggregation (RPDU only). Bubble these up
+    # to the surface so the UI / summary can show them without digging
+    # into each top_score's dimensions dict.
+    if enhancements.enable_direction_soft_on_exact_signal:
+        direction_conflicts: list[dict] = []
+        for total, dims, block in scored:
+            if dims.get("direction_conflict"):
+                direction_conflicts.append({
+                    "block_key": block.block_key,
+                    "signal_family": block.signal_family,
+                    "total": total,
+                    "hlr_direction": dims.get("hlr_direction"),
+                    "icd_direction": dims.get("icd_direction"),
+                })
+        if direction_conflicts:
+            evidence["direction_conflicts"] = direction_conflicts
+
     return evidence
 
 
@@ -610,6 +792,7 @@ def match_reverse(
     hlr_reqs: list[HLRRequirement],
     hlr_labels: dict[str, HLRLabel],
     eoicd_reqs: list[EoICDRequirement],
+    profile: ControllerProfile | None = None,
 ) -> ReverseMatchOutput:
     """Reverse matching: HLR → EoICD ICD blocks (matching only, no judgment).
 
@@ -617,7 +800,15 @@ def match_reverse(
     2. Build EoICD signal profiles, group into ICDBlocks
     3. For each HLR: 4-path routing → Stage 1 coarse filter → Stage 2 6-dim scoring
     4. Output match results with dimension-level evidence
+
+    ``profile`` (Issue #74) is the active controller profile. Its
+    ``profile.matcher`` carries four opt-in scoring flags (RPDU enables
+    them all; AMS/FGMC/HSCU keep all False by default → byte-identical to
+    pre-#74 behaviour). ``profile=None`` falls back to ``MatcherEnhancementConfig()``
+    with all flags off.
     """
+    enhancements = profile.matcher if profile is not None else MatcherEnhancementConfig()
+
     eoicd_kept = [req for req in eoicd_reqs if should_keep(req)]
     eoicd_profiles = build_profiles(eoicd_kept)
     blocks = build_blocks(eoicd_profiles)
@@ -647,13 +838,13 @@ def match_reverse(
         # ── Route to matching path ──
         path = ""
         if cat == "A429显式" and hlr_prof.labels:
-            scored = _match_path1_label(hlr_prof, block_index)
+            scored = _match_path1_label(hlr_prof, block_index, enhancements=enhancements)
             path = "精确匹配"
         elif cat in ("模拟量", "离散量"):
-            scored = _match_path_semantic(hlr_prof, block_index)
+            scored = _match_path_semantic(hlr_prof, block_index, enhancements=enhancements)
             path = "语义匹配"
         elif cat == "A429隐式":
-            scored = _match_path_semantic(hlr_prof, block_index)
+            scored = _match_path_semantic(hlr_prof, block_index, enhancements=enhancements)
             path = "语义匹配"
         else:
             path = ""
@@ -667,7 +858,13 @@ def match_reverse(
         if scored:
             top_total, top_dims, _ = scored[0]
             top_signal_name = top_dims.get("signal_name", 0)
-            active_dims = sum(1 for v in top_dims.values() if v > 0)
+            active_dims = sum(
+                1 for v in top_dims.values()
+                # Issue #74: ``direction_conflict`` is a string tag (RPDU only).
+                # Skip non-numeric values so the count is strictly the 6 scoring
+                # dimensions with non-zero contribution.
+                if isinstance(v, (int, float)) and v > 0
+            )
 
             if top_total >= _HIGH_SCORE_THRESHOLD and active_dims >= _MIN_ACTIVE_DIMS and top_signal_name > 0:
                 match_type = "已匹配"
@@ -689,10 +886,10 @@ def match_reverse(
                     # sort by score desc, so AI has signal context even for weak matches
                     raw_scored: list[tuple[int, dict[str, int], ICDBlock]] = []
                     for block in label_blocks:
-                        total, dims = _score_block(hlr_prof, block)
+                        total, dims = _score_block(hlr_prof, block, enhancements=enhancements)
                         raw_scored.append((total, dims, block))
                     raw_scored.sort(key=lambda x: x[0], reverse=True)
-                    raw_scored = _apply_hard_gates(hlr_prof, raw_scored)
+                    raw_scored = _apply_hard_gates(hlr_prof, raw_scored, enhancements=enhancements)
                     scored = raw_scored
                     break
             match_type = "待确定" if has_label_in_eoicd else "无匹配"
@@ -700,8 +897,12 @@ def match_reverse(
             match_type = "无匹配"
 
         # Top-K limit + post-filter
-        top_scored = scored[:_TOP_K]
-        top_scored = _filter_sn_zero_within_label(top_scored)
+        # Issue #74: ``enhancements.top_k`` is the per-profile candidate
+        # window (RPDU=50; AMS/FGMC/HSCU default=20). ``_TOP_K`` is kept
+        # as a backward-compat constant for external importers but no
+        # longer used at runtime here.
+        top_scored = scored[:enhancements.top_k]
+        top_scored = _filter_sn_zero_within_label(top_scored, enhancements=enhancements)
 
         # Clear blocks when match_type is 无匹配
         if match_type == "无匹配":
@@ -710,7 +911,7 @@ def match_reverse(
         matched_blocks = [block for _, _, block in top_scored]
 
         # ── Build match evidence ──
-        match_evidence = _build_match_evidence(hlr_prof, top_scored, match_type)
+        match_evidence = _build_match_evidence(hlr_prof, top_scored, match_type, enhancements=enhancements)
         # Store the original path for context
         if path:
             match_evidence["match_path"] = path

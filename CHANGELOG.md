@@ -1,6 +1,85 @@
 # 变更记录
 
-本文档记录 ICD工具原型Ver2.0 的版本级变化。
+本文档记录 ICD工具原型 的版本级变化。
+
+## [Unreleased] - 2026-08-26
+
+### Fixed
+
+- **RPDU per-HLR 追溯预过滤池（Issue #74 修复）**：新增 `ControllerProfile.prefilter_per_hlr: bool`（默认 `False`）和 `pipeline.match_reverse_per_hlr()`。RPDU profile 显式声明 `prefilter_per_hlr: true`，每个 traceable HLR 只在自己的 traced EoICD block 集合上跑 reverse match，避免其他 HLR 引入的 LRM / 状态类信号淹没 `Heater_Group_*_RPDU_ESW_CMD` 这类目标信号。修复前 HLR_052331 top-50 全是 LRM 状态信号，修复后 14 个 `Heater_Group_*` ESW_CMD 候选。AMS/FGMC/HSCU profile 不声明该字段自动回落到 `False`，仍走原有 union-pool 路径，行为字节一致。
+
+- **FGMC 追溯表 HLR ID 字段映射冲突**：`profiles/fgmc/config.yaml` 的 `hlr_parser.field_map` 中 `id` 和 `code` 两个 std_field 同时声明了 header 文本 `需求编号`，被 `_build_field_map_index` 的反向 dict 索引机制覆盖（`code` 后注册赢），导致 docx row 1 的正式 HLR 编号（`FGMC_OFP_CSCI_HLR_005906`）落到 `code` 字段、docx row 0 的内部编号（`1781`）落到 `id` 字段。修复：`id` 首位加入 `需求编号`，`code` 列表移除 `需求编号`（保留 `RequirementCode` 作为 legacy alias）。
+
+- **FGMC Table 1 sheet 选择冲突**：`需求与ICD追溯表_FGMC_裁剪.xlsx` 含 9 张 sheet，其中 `接口基线表_EoICD_old_待删除`（旧表，标记删除）和 `待填_需求接口追溯表`（当前使用）并存。原 `by_name_keywords` 列表把模糊关键词 `接口基线` 放在 `待填_需求接口追溯表` 之前，导致 `_select_sheet` 选到了已废弃 sheet，Table 1 只产出 2 个 ERD。修复：把 `待填_需求接口追溯表` 移至关键词列表首位，并删除过宽的 `接口基线` 模糊关键词。
+
+## [Unreleased] - 2026-08-20
+
+### Removed
+
+- 移除 V3 旧版代码与依赖：后端顶层 `crew/` / `merge/` / `scoring/` / `docx/` / `parsers/` / `llm/` / `prompts/` / `skills/` / `pipeline.py` / `models.py` 及 `api/v3/` 路由全部删除；`requirements.txt` 移除 `crewai` / `litellm`。详见 ADR-002。
+- 移除 `Job.kind` 字段与 V3/V4 跨版本分派逻辑（ADR-002 D3）；`JobStatus` 枚举迁入 `job_manager.py`。
+- 移除 V4 冗余代码：早期正向原型（`run_forward_pipeline`、`comparison/case_builder.py`、`matching/{candidate_matcher,text_matcher,unified_matcher}.py`、`prompts/forward_judge.md` 及配套正向模型/config 常量与 CLI 命令 `match`/`judge`/`report`/`analyze`）与旧单模型反向 CLI（`reverse-judge`/`reverse-report` 及 `judge_reverse_cases`/`generate_reverse_report`）。详见 ADR-003。
+
+### Changed
+
+- FastAPI 入口仅保留 `/api/v4` 命名空间；旧 `/api/health`、`/api/eoicd/analyze`、`/api/jobs/*` 全部移除（现返 404）。
+- 前端移除 V3 上传 / 状态 / 结果组件与 `api/index.ts`、`types.ts` 中的 V3 符号；仅保留 V4 界面。
+- 文档同步：`README.md`、`docs/architecture/*`、`docs/project/*`、`backend/.env.example` 移除 V3 表述；新增 ADR-002；ADR-001 标记 Partially Superseded。
+- 新增 ADR-003（移除 V4 早期正向原型与旧单模型反向 CLI）；ADR-002 D4 标记由 ADR-003 取代；`docs/architecture/current-architecture.md` 同步更新 prompts 资产清单与 ADR 引用。
+
+## [Unreleased] - 2026-08-21
+
+### Added
+
+- **drain 任务数上限**：新增 `DEGRADATION_DRAIN_MAX_TASKS`（默认 60）配置，超过上限的超时任务被 cancel（未执行的取消，已执行的结果丢弃），防止极端场景下 drain 任务无限堆积。
+- **任务提交限流**：新增 `DEGRADATION_MAX_INFLIGHT`（默认 6）配置，信号量控制同时提交到线程池的任务数，超限任务在 submit 前阻塞等待，从源头限制并发。新增 e2e 用例3b（drain_max_tasks 上限验证）。
+
+## [Unreleased] - 2026-08-19
+
+### Added
+
+- **case 级超时后台收尾（drain）**：Step 4 多智能体裁判改为线程池执行（concurrent.futures），超时的裁判任务不再取消丢弃，而是转入后台线程池继续执行；Step 4.5 在总预算（`DEGRADATION_DRAIN_BUDGET`，默认 300s）内统一收尾，迟到的有效结果替换 TIMEOUT 占位后进入共识，慢但有效的输出不再被舍掉。新增 `degradation.drained_late_count` 统计与 e2e 用例3（慢 provider 收尾验证）。
+
+## [Unreleased] - 2026-08-25
+
+### Added
+
+- **RPDU 多控制器适配合并（Issue #74）**：新增 `rpdu` controller profile，支持远程功率分配单元的 Excel 格式 HLR 输入、header 自适应追溯解析、4 项反向匹配增强（中文后缀剥离、方向软约束带 conflict 标记、信号编号加分、`top_k=50`）。
+- **profile 扩展维度**：V4 profile schema 新增三个 profile 维度的扩展点（HLR 解析驱动 `hlr_parser_driver.driver` / 追溯策略 `trace_strategy` / 匹配增强 `matcher`），所有新增字段全部默认关闭 → AMS/FGMC/HSCU 行为字节不变。
+- **HLR 解析工厂**：新增 `create_hlr_parser(source_path, profile=)`，按扩展名分发到 `HLRWordParser`（.docx，默认）或 `HLRExcelParser`（.xlsx，RPDU）。
+- **API HLR 扩展名校验**：`POST /api/v4/coverage-analysis` 的 HLR 文件扩展名校验改为基于 `parsers.registered_extensions()` 工厂白名单，支持 .docx 和 .xlsx；新增解析器只需在工厂注册，API 自动同步。
+
+### Changed
+
+- `backend/app/api/v4/coverage.py` 白名单加入 `"rpdu"`；错误消息改为动态列出支持列表。
+- `backend/app/v4/pipeline.py`：`_parse_hlr` 改用 `create_hlr_parser` 工厂；Step 3 两条路径全部透传 `profile=` 给 `build_trace_index` 和 `match_reverse`。
+
+## [Unreleased] - 2026-08-24
+
+### Changed
+
+- **HSCU HLR 预处理 hook 适配新文档结构**：`profiles/hscu/hooks.py` 表格解析从固定位置改为自动识别。`_identify_label_tables()` 按启发式（≥ 3 列 + ≥ 2 行 + 至少一行同时含 LBL cell 和 ≥ 2 位数字 octal cell）扫描所有 table，识别 HSCU 新文档中同时存在的 Table[0]（RDCU1 入站 11 行 × 8 列，含 `_R1` 后缀）和 Table[8]（HSCU 出站 12 行 × 4 列，无 `_R1`）两张 LBL 总览表，全部合并入 mapping。`_extract_row_mapping()` 改为行内扫描，定位 LBL cell 和 octal cell 时不再假设固定列偏移。
+- **Hook 扩展支持 RDCU1 catalog col 5 多行信号名称**：8 列 RDCU1 catalog 的 col 5（信号名称列）每个 cell 多行，每行是一个独立 signal name 由同 octal 承载（如 `LBL_ABV1_RPDU_R1 → 51` 承载 `ABV1_CB_CLOSED_RPDU_R1`、`ABV1_LOAD_VOLT_AVAIL_RPDU_R1` 等 12 个信号）。新增 `_extract_signal_names()` 把这些裸 signal 名作为额外 mapping key，让 HSCU HLR 中以裸名形式引用 RDCU1 signal 的需求（023194、022645）也能命中 EoICD 块。
+- **Hook 输出 octal 左填充 3 位**：ARINC-429 八进制是 3 位（000-377），EoICD block key 始终为 3 位形式。HSCU catalog 常省略前导 0（如 `74`、`51`），hook 生成 alias 时统一 `zfill(3)` 避免 Stage1 prefix filter (`L<label>/` vs `L<3位>`) 失配。同时 `_looks_like_octal_cell()` 把长度下限从 3 位降到 2 位以接受省略前导 0 的 octal，但仍拒绝单数字以避免与 SDI（`0/1/2/3`）混淆。
+- **`pipeline._parse_hlr()` 临时暴露完整 source_file 给 hook**：`HLRWordParser.parse()` 把 `result.source_file` 存为 basename，hook 用 `Path(source_file).exists()` 在 backend cwd 下找不到文件导致 auto_parse 静默失败。`_parse_hlr()` 在调用 hook 前临时把 `result.source_file` 切到完整 `input_path`，hook 调用结束后恢复 basename — JSON 输出和 AMS/FGMC 行为一致仍保留 basename。
+
+### Verified
+
+- HSCU E2E（job `a54aab93`，真实 LLM）：`hlr_已匹配=4, hlr_待确定=2, hlr_无匹配=4`，6/10 HLR 拿到 EoICD block key。新文档中 023194（ABV1_LOAD_VOLT_AVAIL_RPDU_R1）从「无匹配」升级到「待确定」。
+- AMS（job `082b4a48`）+ FGMC（job `ed36e75c`）回归：`hlr_requirements.json` 中 0 个 alias annotation（auto_parse 默认 False 不被触发），匹配数不变。
+
+## [Unreleased] - 2026-08-21
+
+### Added
+
+- **Profile HLR 预处理 Hook 机制**：`ControllerProfile` 新增 `HLRPreprocessConfig` 配置段（`enabled` + `extra_mappings` + `auto_parse_hlr_table_0` + `apply_to_fields`）。`profiles/__init__.py` 新增 `apply_hlr_preprocess_hook()` 通用调用入口，通过 `importlib` 动态加载各 profile 的 `preprocess_hlr_requirements()` 函数。`pipeline._parse_hlr()` 在 HLR Word 解析后、写 JSON 前调用 hook，让改写后的内容对下游 AI 标注、分类、匹配可见。
+- **HSCU LBL→L<octal> 别名追加 hook（`profiles/hscu/hooks.py`）**：HSCU HLR 文本使用符号化标签名（`LBL_DIS_00_SYS1`），而 EoICD PubSub 块以八进制编码（`L145_DIS_00_SYS1_T1A`）。Hook 通过 YAML `extra_mappings` 配置映射，按 per-token 范围追加 `（亦称：L<octal>_<NAME>）` 别名，让 AI 标注器在两种形式间识别，从而让反向匹配 Stage1 的 prefix filter 能命中 EoICD 块。规则：仅对实际出现且已映射的 LBL token 追加、自动剥离 `_SSM` 后缀、占位值跳过、幂等。
+- **HSCU 当前映射 1 个（`LBL_DIS_00_SYS1` → `145`）**：job `39f938f5`（真实 LLM）HSCU E2E：matched_count `0 → 1`，unmatched `10 → 9`。补全 4 个映射后预期 ~6/10 matched。
+
+### Changed
+
+- 不修改 `reverse_matcher.py` / `hlr_classifier.py` / `hlr_labeler.py` / `trace_parser.py`。
+- AMS / FGMC profile 不受影响：`hlr_preprocess.enabled` 默认为 `False`。
 
 ## [Unreleased] - 2026-08-12
 
@@ -295,4 +374,55 @@
 - **共识报告星级分布表**：删除 1★ 主行（需人工复核），仅保留 3 个子类型行（分歧/仅单一来源/无有效裁判）；★☆☆ 显示在首个子行星列并纵向合并 3 行；子类型标签加粗、与主行格式统一。
 - **共识明细表共识列标签映射**：新增 `no_consensus → 无有效裁判`、`single_source → 仅单一来源`。
 - **降级配置**：`DegradationConfig` 新增 `zero_provider_star_cap=1`、`zero_provider_agreement="no_consensus"` 默认值。
+
+## [Unreleased] - 2026-08-19：V4 反向管线多控制器 Profile 化（Issue #63）
+
+### Added
+
+- **Controller Profile 子包**：新增 `backend/app/v4/profiles/`，`base.py` 定义 `ControllerProfile` + 4 个 Config dataclass（`HLRParserConfig` / `TraceabilityConfig` / `ClassifierKeywords` / `AILabelingConfig`），`__init__.py` 提供 `ProfileRegistry` 单例。profile 配置以 `profiles/{id}/config.yaml` 声明，新控制器可通过新增目录接入，无需改动业务代码。
+- **AMS profile（默认）**：从现状代码 1:1 抽取，行为与 Issue A 完全一致，向后兼容。
+- **FGMC profile（燃油测量管理计算机）**：术语表位于 `tables[1]`、需求表 ≥12 行、支持"是否为需求"= "否" 行过滤、追溯表用 glob 模式（`*追溯*.xlsx` / `*矩阵分析*.xlsx`）、燃油域分类关键词与 AI 标注示例。
+- **API 新增 `controller_profile` 字段**：`POST /api/v4/coverage-analysis` 新增 form 字段，默认 `ams`，白名单 `{ams, fgmc}`，非法值在创建任务前返回 422。
+- **CLI 新增 `--controller-profile`**：`label` / `reverse` / `reverse-analyze` 三个子命令支持，`choices=["ams","fgmc"]`，默认 `ams`。
+- **Profile 单元测试**：新增 `backend/app/v4/tests/profiles/`，覆盖 registry / models / HLR parser / classifier / labeler / 追溯表 / pipeline 共 24 个用例。
+
+### Changed
+
+- `HLRWordParser` / `trace_parser` / `hlr_classifier` / `hlr_labeler` 改为 profile-driven，profile 由 pipeline 统一注入，不再依赖模块级硬编码常量；未传 profile 时退化为 AMS 默认行为。
+- `HLRRequirement` 模型扩展 6 个 optional 字段（`code` / `source` / `covered_ids` / `notes` / `input_data` / `output_data`），供 FGMC 需求表使用；AMS 侧保持为空不影响既有输出。
+
+### Fixed
+
+- V4 不再硬编码 AMS 专属的追溯表中文文件名、sheet 名、HLR 表行数阈值和字段名；接入新控制器不再需要修改 parser / matcher 源码。
+
+## [Unreleased] - 2026-08-20：V4 HSCU 控制器 Profile 接入（Issue #63 续）
+
+### Added
+
+- **HSCU profile（液压系统控制单元）**：新增 `backend/app/v4/profiles/hscu/` 子包，含 `__init__.py` / `config.yaml` / `hooks.py` / `README.md`。基于现有 AMS / FGMC profile 模式，无需改动业务代码即可接入。
+- **HSCU 适配要点**（与 AMS / FGMC 差异）：
+  - HLR 字段映射：HSCU 需求表行标签用 `需求正文` 而非 `需求中文`（其他控制器均为 `需求中文`）；术语表位于 `tables[0]`，需求表 ≥ 8 行。
+  - 无 `is_requirement` 列：HSCU 需求表中没有"是否需求"列，`filter_non_requirement` 关闭；其他控制器中 AMS 默认开启，FGMC 通过 `filter_non_requirement: true` + 匹配 "否" 过滤。
+  - 追溯表 T1：glob 模式 `附件1*需求*ICD*.xlsx`（AMS 用精确中文文件名，FGMC 用 `*追溯*.xlsx`）；sheet 名匹配关键词 `待填_需求接口追溯表`。
+  - 追溯表 T2：glob 模式 `*液压*单模块需求矩阵*.xlsx`，`data_start_row: 2`（跳过当前需求文档 / 下层需求文档合并行 + 列标题行）。
+- **API `controller_profile` 白名单扩展**：`POST /api/v4/coverage-analysis` form 字段 `controller_profile` 白名单由 `{ams, fgmc}` 扩展为 `{ams, fgmc, hscu}`，非法值仍返回 422。
+- **HSCU 测试文档**：在 `backend/app/v4/profiles/hscu/README.md` 中记录 HSCU 与 AMS / FGMC 的差异、T1 sheet 名纠正（`待填_需求接口追溯表` 而非 `需求_设备接口追溯表`）和 `data_start_row` 含义。
+
+### Changed
+
+- `backend/app/api/v4/coverage.py` `ALLOWED_CONTROLLER_PROFILES` 集合加入 `"hscu"`，错误信息更新为 `allowed: ams, fgmc, hscu`。
+- `docs/architecture/api.md` §13.2 `controller_profile` 字段白名单由 `{ams, fgmc}` 改为 `{ams, fgmc, hscu}`，§13.6 错误响应同步更新。
+- `docs/project/scope.md` §8.2.1 profile 表新增 `hscu` 行，描述 HSCU 适用控制器 / 术语表位置 / HLR 需求表结构 / 追溯表文件名。
+- `docs/architecture/current-architecture.md` profiles 目录树新增 `hscu/` 节点。
+
+### Fixed
+
+- **HSCU T1 sheet 名配置纠正**：最初错误将 T1 sheet 名配置为 `需求_设备接口追溯表`，通过对 `wb.sheetnames` 做 codepoint inspection 后改为 `待填_需求接口追溯表`（HSCU 实际 sheet 名），与 trace_parser `by_name_keywords` 匹配逻辑对齐。
+- **HSCU 早期误诊的 GBK mojibake 修复已删除**：首次接入时误判 HSCU T1 xlsx 存在 GBK-as-UTF-8 mojibake，引入 `_xlsx_mojibake.py` 工具 + 在 `TraceabilityTableConfig` 加 `repair_gbk_mojibake` 字段 + 在 `trace_parser._read_table1/2` 加 `_maybe_heal()` 调用。经 codepoint 校验 HSCU 文件实际为干净 UTF-8，"mojibake" 现象是 Windows console 无法渲染某些 CJK 字符所致。按 debug-rules.md "最小修改原则" 全部回退删除，无 mojibake 相关代码残留。
+
+### Notes
+
+- HSCU E2E 已通过 mock LLM 验证：job `dd0790ed` 跑通完整 6 步管线，4 类 DOCX 输出齐全，HLR 解析 10 条 / 追溯匹配 15 条。
+- HSCU 0/10 反向匹配：当前 HSCU HLR 信号关键词（如 `HYD_xxx` / `LBL_xxx`）在提供的 EoICD 样例文件中未出现（样例仅含 AHMU `AIRCRAFT_STATUS` 信号），属测试数据问题，非 profile 问题。
+- AMS / FGMC 回归验证通过：AMS job `a335bce9`（~60s）+ FGMC job `67e745b9`（<5s）均产出 4 DOCX，无回归。
 

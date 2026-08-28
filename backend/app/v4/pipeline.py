@@ -1,25 +1,24 @@
 # -*- coding: utf-8 -*-
-"""Pipeline orchestration: forward and reverse analysis workflows."""
+"""Pipeline orchestration: reverse analysis workflow."""
 
 from __future__ import annotations
 
-import asyncio
+import concurrent.futures
 import json
 import sys
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from app.v4.comparison.case_builder import build_cases
 from app.v4.comparison.multi_judge import (
-    _judge_with_provider,
+    _judge_with_provider_sync,
     _load_reverse_prompt,
-    judge_with_panel,
 )
-from app.v4.comparison.report_generator import generate_report, generate_consensus_reverse_report
+from app.v4.comparison.report_generator import generate_consensus_reverse_report
 from app.v4.comparison.re_review import re_review_judgments
 from app.v4.comparison.review_agent import review_judgments, _build_summary
-from app.v4.comparison.semantic_judge import judge_cases
-from app.v4.config import DEEPSEEK_MODEL, JUDGE_PROVIDERS
+from app.v4.config import JUDGE_PROVIDERS
 from app.v4.degradation import DegradationConfig, DegradationContext
 from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.v4.doc_generators.excel_generator import generate_eoicd_excel
@@ -37,17 +36,38 @@ from app.v4.models import (
     EoICDOutput,
     HLROutput,
     HLRLabelOutput,
-    JudgmentOutput,
-    MatchOutput,
     MultiJudgeOutput,
     PipelineResult,
     ReverseJudgmentOutput,
     ReverseMatchOutput,
-    ConsensusOutput,
 )
 from app.v4.parsers.eoicd_excel_parser import EoICDExcelParser
-from app.v4.parsers.hlr_word_parser import HLRWordParser
+from app.v4.parsers import create_hlr_parser
+from app.v4.profiles.base import ControllerProfile, TraceabilityConfig
+from app.v4.profiles import apply_hlr_preprocess_hook
 from app.v4.traceability import build_trace_index, name_to_block_key
+
+
+def _resolve_profile(profile: ControllerProfile | None) -> ControllerProfile:
+    """Return the provided profile, or fall back to the registry's AMS default.
+
+    Centralizes registry lookup so that callers passing ``profile=None`` get
+    byte-identical behaviour to pre-#63 code (AMS defaults). Raises a clear
+    RuntimeError if neither is available.
+    """
+    if profile is not None:
+        return profile
+    from app.v4.profiles import init_registry, get_registry
+
+    reg_dir = Path(__file__).resolve().parent / "profiles"
+    try:
+        init_registry(reg_dir)
+        return get_registry().get_or_raise("ams")
+    except Exception as e:
+        raise RuntimeError(
+            "No profile provided and default AMS profile not found. "
+            "Pass profile=... explicitly or initialize the registry."
+        ) from e
 
 
 def _parse_eoicd(
@@ -86,11 +106,41 @@ def _parse_eoicd(
     return result
 
 
-def _parse_hlr(input_path: Path, output_path: Path, system_config: dict) -> HLROutput:
-    """Parse the HLR Word document."""
-    print(f"Parsing HLR: {input_path} (system: {system_config['name']})")
-    parser = HLRWordParser(input_path, system_config)
+def _parse_hlr(
+    input_path: Path,
+    output_path: Path,
+    profile: ControllerProfile | None = None,
+) -> HLROutput:
+    """Parse the HLR input file.
+
+    The parser is selected by extension via ``create_hlr_parser``:
+
+      - ``.docx`` -> ``HLRWordParser`` (AMS/FGMC/HSCU; profile-driven field map).
+      - ``.xlsx`` -> ``HLRExcelParser`` (RPDU; fixed column mapping A/B/C from row 3).
+
+    When ``profile`` is ``None`` the registry's AMS default is used (so that
+    pre-#63 callers get byte-identical output).
+    """
+    print(f"Parsing HLR: {input_path}")
+    resolved = _resolve_profile(profile)
+    parser = create_hlr_parser(input_path, profile=resolved)
     result: HLROutput = parser.parse()
+
+    # Profile-specific HLR content rewrite (e.g. HSCU LBL_X → L<octal>_X
+    # alias annotations). No-op for profiles that don't declare
+    # hlr_preprocess.enabled. Mutates ``result.requirements[i].content``
+    # in-place so the persisted JSON reflects the rewritten text.
+    #
+    # HSCU's hook needs to re-open the source Word to auto-parse the LBL
+    # catalog table; ``HLRWordParser`` only stored the basename in
+    # ``result.source_file``, which fails ``Path(...).exists()`` in the
+    # backend cwd. Temporarily expose the full input path for the hook
+    # call, then restore the basename so the persisted JSON keeps the
+    # same display value (avoids changing AMS/FGMC behaviour).
+    _saved_source_file = result.source_file
+    result.source_file = str(input_path)
+    rewritten = apply_hlr_preprocess_hook(resolved, result)
+    result.source_file = _saved_source_file
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
@@ -101,106 +151,9 @@ def _parse_hlr(input_path: Path, output_path: Path, system_config: dict) -> HLRO
     print(f"  Output: {output_path}")
     print(f"  Requirements: {result.total_count}")
     print(f"  Glossary entries: {len(result.glossary)}")
+    if rewritten:
+        print(f"  HLR preprocess: {rewritten} requirement(s) rewritten by profile hook")
     return result
-
-
-def run_forward_pipeline(
-    publisher: Path | None,
-    subscriber: Path | None,
-    hlr: Path,
-    output_dir: Path,
-    top_k: int,
-    limit: int,
-    job: Job,
-) -> PipelineResult:
-    """Run forward pipeline: parse → label → match → judge → report."""
-    job.update(JobStatus.RUNNING, "Step 1/4: Parsing input files")
-
-    # Step 1: Parse
-    print("=" * 50)
-    print("Step 1/4: Parsing input files")
-    print("=" * 50)
-    eoicd_out = None
-    if publisher or subscriber:
-        eoicd_out = _parse_eoicd(
-            publisher, subscriber,
-            output_dir / "eoicd_requirements.json",
-        )
-    hlr_out = _parse_hlr(hlr, output_dir / "hlr_requirements.json")
-
-    if not eoicd_out or not hlr_out:
-        raise RuntimeError("Need both EoICD and HLR data for analysis")
-
-    # Step 1.5: HLR Labeling
-    print()
-    print("=" * 50)
-    print("Step 1.5/4: HLR AI labeling")
-    print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 1.5/4: HLR AI labeling")
-    labels_cache = output_dir / "hlr_labels.json"
-    hlr_labels = label_hlrs(hlr_out.requirements, cache_path=labels_cache)
-    print(f"  HLRs labeled: {len(hlr_labels)}")
-
-    # Step 2: Match
-    print()
-    print("=" * 50)
-    print(f"Step 2/4: Candidate matching (top_k={top_k}, limit={limit or 'all'})")
-    print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 2/4: Candidate matching")
-    cases = build_cases(
-        eoicd_out.requirements,
-        hlr_out.requirements,
-        top_k=top_k,
-        limit=limit,
-        hlr_labels=hlr_labels,
-        enriched_output_path=output_dir / "enriched_queries.json",
-        profiles_output_path=output_dir / "profiles.json",
-    )
-    match_out = MatchOutput(total_cases=len(cases), top_k=top_k, cases=cases)
-    (output_dir / "matched_cases.json").write_text(
-        match_out.model_dump_json(indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    print(f"  Matched cases: {len(cases)}")
-
-    # Step 3: Judge
-    print()
-    print("=" * 50)
-    print(f"Step 3/4: AI judging ({len(cases)} cases, model={DEEPSEEK_MODEL})")
-    print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 3/4: AI judging")
-    results = judge_cases(cases)
-    judge_out = JudgmentOutput(total_cases=len(results), results=results)
-    (output_dir / "judgment_results.json").write_text(
-        judge_out.model_dump_json(indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    # Step 4: Report
-    print()
-    print("=" * 50)
-    print("Step 4/4: Generating report")
-    print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 4/4: Generating report")
-    report = generate_report(results)
-    report_path = output_dir / "difference_report.json"
-    report_path.write_text(
-        report.model_dump_json(indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    print(f"  Total: {report.total_cases}")
-    print(f"  Stats: {report.statistics}")
-    print(f"  Differences: {len(report.differences)}")
-    print()
-    print("Pipeline complete.")
-
-    job.update(JobStatus.COMPLETED, "Forward pipeline complete")
-    return PipelineResult(
-        parsed_count=len(eoicd_out.requirements),
-        match_count=len(cases),
-        judged_count=len(results),
-        report_path=str(report_path),
-    )
 
 
 def _count_match_types(results: list) -> dict[str, int]:
@@ -209,6 +162,52 @@ def _count_match_types(results: list) -> dict[str, int]:
     for r in results:
         counts[r.match_type] = counts.get(r.match_type, 0) + 1
     return counts
+
+
+def match_reverse_per_hlr(
+    hlr_requirements: list,
+    hlr_labels: dict,
+    per_hlr_eoicd: dict[str, list],
+    profile: ControllerProfile | None = None,
+) -> ReverseMatchOutput:
+    """Run reverse matching per-HLR with a per-HLR EoICD subset.
+
+    Each HLR is matched against its own EoICD subset, not a global union.
+    This is the correct semantics for traceability-based prefiltering:
+    HLR_A should not see HLR_B's traced blocks (Issue #74).
+
+    ``profile`` is forwarded to each per-HLR ``match_reverse`` call so RPDU's
+    four matcher enhancements (Chinese-suffix stripping, direction-soft
+    matching, signal-number bonus, top_k=50) still apply.
+    """
+    from app.v4.matching.reverse_matcher import match_reverse as _match_reverse
+
+    all_results: list = []
+    for hlr in hlr_requirements:
+        eoicd_subset = per_hlr_eoicd.get(hlr.requirement_id, [])
+        single_hlr_labels = (
+            {hlr.requirement_id: hlr_labels[hlr.requirement_id]}
+            if hlr.requirement_id in hlr_labels
+            else {}
+        )
+        out = _match_reverse(
+            [hlr],
+            single_hlr_labels,
+            eoicd_subset,
+            profile=profile,
+        )
+        all_results.extend(out.results)
+
+    total_hlr = len(hlr_requirements)
+    total_eoicd = sum(len(v) for v in per_hlr_eoicd.values())
+    stats = _count_match_types(all_results)
+    return ReverseMatchOutput(
+        total_hlr=total_hlr,
+        total_eoicd_profiles=total_eoicd,
+        stats=stats,
+        results=all_results,
+        eoicd_unmatched_profile_keys=[],
+    )
 
 
 def _merge_reverse_match_outputs(
@@ -254,15 +253,27 @@ def _match_reverse_with_trace(
     hlr_labels: dict,
     eoicd_requirements: list,
     trace_dir: Path,
-    trace_config: dict | None = None,
+    trace_cfg: TraceabilityConfig,
+    profile: ControllerProfile | None = None,
 ) -> ReverseMatchOutput:
     """Run reverse matching with traceability-based pre-filtering.
 
     Splits HLRs into:
       - Group A (has trace data): match against filtered EoICD subset
       - Group B (no trace data): fallback to full EoICD matching
+
+    ``trace_cfg`` is required (Task 7 made the second arg to
+    ``build_trace_index`` non-optional). Callers resolve it from a profile
+    (via ``_resolve_profile``) so AMS defaults keep working.
+
+    ``profile`` (Issue #74) is forwarded to ``build_trace_index`` so the
+    ``header_adaptive`` trace strategy activates for RPDU, and to each
+    ``match_reverse`` call so RPDU's enhancements (Chinese-suffix stripping,
+    direction-soft matching, signal-number bonus, top-k=50) are applied.
+    ``profile=None`` keeps the AMS default behaviour (byte-identical to
+    pre-#63 / pre-#74 code).
     """
-    trace_index = build_trace_index(trace_dir, trace_config)
+    trace_index = build_trace_index(trace_dir, trace_cfg, profile=profile)
     print(f"  Traced HLRs: {trace_index.total_hlrs_traced}")
     print(f"  ERDs: {trace_index.total_erds}")
     print(f"  ICD FullNames: {trace_index.total_icd_fullnames}")
@@ -272,12 +283,16 @@ def _match_reverse_with_trace(
     group_a_hlrs: list = []
     group_b_hlrs: list = []
     all_traced_block_keys: set[str] = set()
+    # Issue #74 (RPDU): per-HLR traced block sets so each HLR only sees its
+    # own traced blocks, not the global union of all HLRs' blocks.
+    hlr_traced_blocks: dict[str, set[str]] = {}
 
     for hlr in hlr_requirements:
         traced_blocks = trace_index.hlr_to_blocks.get(hlr.requirement_id)
         if traced_blocks:
             group_a_hlrs.append(hlr)
             all_traced_block_keys.update(traced_blocks)
+            hlr_traced_blocks[hlr.requirement_id] = traced_blocks
         else:
             group_b_hlrs.append(hlr)
 
@@ -288,19 +303,52 @@ def _match_reverse_with_trace(
     group_a_ids = {h.requirement_id for h in group_a_hlrs}
     group_b_ids = {h.requirement_id for h in group_b_hlrs}
 
+    # Issue #74 (RPDU): opt-in per-HLR prefilter pool. AMS/FGMC/HSCU keep
+    # legacy union-pool semantics (``profile.prefilter_per_hlr`` defaults
+    # to False).
+    use_per_hlr = bool(profile and getattr(profile, "prefilter_per_hlr", False))
+
     # Group A: filtered EoICD
     if group_a_hlrs:
-        filtered_eoicd = []
-        for req in eoicd_requirements:
-            bk = name_to_block_key(req.signal_name)
-            if bk in all_traced_block_keys:
-                filtered_eoicd.append(req)
-        print(f"  Filtered EoICD: {len(filtered_eoicd)} / {len(eoicd_requirements)} entries")
-        result_a = match_reverse(
-            group_a_hlrs,
-            {k: v for k, v in hlr_labels.items() if k in group_a_ids},
-            filtered_eoicd,
-        )
+        if use_per_hlr:
+            # Per-HLR filtered EoICD: each HLR sees only its own traced
+            # blocks. Prevents unrelated blocks (from other HLRs sharing
+            # the same EoICD) from polluting top_k=50 with status/noise.
+            per_hlr_filtered: dict[str, list] = {}
+            for hlr_id, traced_bks in hlr_traced_blocks.items():
+                per_hlr_filtered[hlr_id] = [
+                    req for req in eoicd_requirements
+                    if (bk := name_to_block_key(req.signal_name)) in traced_bks
+                ]
+            total_filtered = sum(len(v) for v in per_hlr_filtered.values())
+            print(
+                f"  Per-HLR filtered EoICD total: {total_filtered} / "
+                f"{len(eoicd_requirements)} entries"
+            )
+            result_a = match_reverse_per_hlr(
+                group_a_hlrs,
+                {k: v for k, v in hlr_labels.items() if k in group_a_ids},
+                per_hlr_filtered,
+                profile=profile,
+            )
+        else:
+            # Legacy union-pool (AMS/FGMC/HSCU): all Group A HLRs share one
+            # filtered EoICD subset built from the union of traced blocks.
+            filtered_eoicd = []
+            for req in eoicd_requirements:
+                bk = name_to_block_key(req.signal_name)
+                if bk in all_traced_block_keys:
+                    filtered_eoicd.append(req)
+            print(
+                f"  Filtered EoICD: {len(filtered_eoicd)} / "
+                f"{len(eoicd_requirements)} entries"
+            )
+            result_a = match_reverse(
+                group_a_hlrs,
+                {k: v for k, v in hlr_labels.items() if k in group_a_ids},
+                filtered_eoicd,
+                profile=profile,
+            )
         print(f"  Group A stats: {result_a.stats}")
 
         # Per-HLR fallback: if prefilter matching produced "无匹配" for
@@ -317,6 +365,7 @@ def _match_reverse_with_trace(
                 fallback_hlrs,
                 {k: v for k, v in hlr_labels.items() if k in fallback_ids},
                 eoicd_requirements,
+                profile=profile,
             )
             # Replace the failed results with fallback results
             fb_map = {r.hlr_id: r for r in result_fb.results}
@@ -336,6 +385,7 @@ def _match_reverse_with_trace(
             group_b_hlrs,
             {k: v for k, v in hlr_labels.items() if k in group_b_ids},
             eoicd_requirements,
+            profile=profile,
         )
         print(f"  Group B stats: {result_b.stats}")
     else:
@@ -361,14 +411,15 @@ def _match_reverse_with_trace(
 # ── Degradation helpers ────────────────────────────────────
 
 
-async def _judge_case_with_timeout(
+def _judge_case_with_timeout(
     case,
     providers: list[str],
     system_prompt: str,
     ceiling: float,
     extra_wait: float,
-) -> tuple[dict[str, dict], bool]:
-    """Run all providers in parallel with fixed extra-wait timeout.
+    executor: ThreadPoolExecutor,
+) -> tuple[dict[str, dict], bool, list[tuple[str, Future]]]:
+    """Run all providers in parallel with fixed extra-wait timeout (thread version).
 
     Waits for providers one-by-one (FIRST_COMPLETED). Once 2 valid (non-error)
     completions are collected, sets a fixed deadline for the remaining:
@@ -378,14 +429,19 @@ async def _judge_case_with_timeout(
     Before 2 valid samples, uses *ceiling* as the fallback timeout.
     Fast errors (connection refused, etc.) are excluded from valid_times
     so they do not pollute the formula.
+
+    Timed-out tasks are NOT cancelled: they keep running in the shared drain
+    executor, and the caller joins them after Step 4 via _drain_and_rereview()
+    so late-but-valid outputs are not wasted.
     """
-    start = time.monotonic()
-    tasks = {
-        asyncio.create_task(_judge_with_provider(case, p, system_prompt)): p
+    futures = {
+        _submit_with_gate(executor, _judge_with_provider_sync, case, p, system_prompt): p
         for p in providers
     }
+    # start 计时放在 submit 之后，避免信号量阻塞时间吃掉超时预算
+    start = time.monotonic()
 
-    pending = set(tasks.keys())
+    pending = set(futures.keys())
     results: dict[str, dict] = {}
     valid_times: list[float] = []   # elapsed times of non-error completions
     had_timeout = False
@@ -400,38 +456,80 @@ async def _judge_case_with_timeout(
         remaining = deadline - time.monotonic()
 
         if remaining <= 0:
-            for t in pending:
-                t.cancel()
-                results[tasks[t]] = make_error_judgment(
-                    tasks[t], "adaptive timeout", "TIMEOUT"
+            for f in pending:
+                results[futures[f]] = make_error_judgment(
+                    futures[f], "adaptive timeout", "TIMEOUT"
                 )
             had_timeout = True
             break
 
-        done, pending = await asyncio.wait(
-            pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
+        done, pending = concurrent.futures.wait(
+            pending, timeout=remaining, return_when=concurrent.futures.FIRST_COMPLETED,
         )
 
-        for t in done:
+        for f in done:
             elapsed = time.monotonic() - start
-            p = tasks[t]
-            if t.exception():
-                exc = t.exception()
+            p = futures[f]
+            try:
+                result = f.result()
+            except Exception as exc:
                 results[p] = make_error_judgment(
                     p, str(exc), classify_exception(exc) if exc else "UNKNOWN"
                 )
             else:
-                result = t.result()
                 results[p] = result
                 if result.get("coverage_status") != "error":
                     valid_times.append(elapsed)
 
-    return results, had_timeout
+    # Timed-out futures are handed back for draining; results already hold
+    # their TIMEOUT placeholders.
+    timed_out = [(futures[f], f) for f in pending]
+    return results, had_timeout, timed_out
 
 
 def _is_failure(judgment: dict) -> bool:
     """Check if a judgment dict represents a failure (error or very low confidence)."""
     return judgment.get("coverage_status") == "error"
+
+
+_drain_executor: ThreadPoolExecutor | None = None
+
+
+def _get_drain_executor() -> ThreadPoolExecutor:
+    """Shared background executor for timed-out judgments (process-wide)."""
+    global _drain_executor
+    if _drain_executor is None:
+        _drain_executor = ThreadPoolExecutor(
+            max_workers=DegradationConfig.from_env().drain_max_workers,
+            thread_name_prefix="degradation-drain",
+        )
+    return _drain_executor
+
+
+_inflight_sema: threading.Semaphore | None = None
+
+
+def _get_inflight_sema() -> threading.Semaphore:
+    """Gate limiting tasks submitted to executor simultaneously (process-wide)."""
+    global _inflight_sema
+    if _inflight_sema is None:
+        _inflight_sema = threading.Semaphore(
+            DegradationConfig.from_env().max_inflight
+        )
+    return _inflight_sema
+
+
+def _submit_with_gate(executor: ThreadPoolExecutor, fn, *args) -> Future:
+    """Submit fn to executor, blocking until an inflight slot is available.
+
+    The semaphore is released when the future completes (success or failure).
+    This prevents unbounded task accumulation when many cases are queued.
+    """
+    sema = _get_inflight_sema()
+    sema.acquire()
+    future = executor.submit(fn, *args)
+    future.add_done_callback(lambda _: sema.release())
+    return future
 
 
 def _judge_with_degradation(
@@ -441,16 +539,18 @@ def _judge_with_degradation(
 ) -> MultiJudgeOutput:
     """Judge cases with provider health tracking, timeout, and circuit breaking.
 
-    Replaces direct judge_with_panel() call. Handles:
+    Handles:
     - Skipping providers marked unhealthy
-    - Case-level timeout via asyncio.wait
+    - Case-level timeout via concurrent.futures.wait
     - Recording per-provider failures for circuit breaker
+    - Handing timed-out judgments to ctx.drain for background finishing
     """
     from app.v4.models import MultiJudgeOutput, MultiJudgeResult
 
     system_prompt = _load_reverse_prompt()
     total = len(cases)
     results: list[MultiJudgeResult] = []
+    executor = _get_drain_executor()
 
     for idx, case in enumerate(cases):
         healthy = ctx.filter_healthy(providers)
@@ -462,15 +562,25 @@ def _judge_with_degradation(
         }
 
         # Parallel judge with adaptive timeout
-        gathered, had_timeout = asyncio.run(
-            _judge_case_with_timeout(
-                case, healthy, system_prompt,
-                ceiling=ctx.config.case_total_timeout,
-                extra_wait=ctx.config.extra_wait,
-            )
+        gathered, had_timeout, timed_out = _judge_case_with_timeout(
+            case, healthy, system_prompt,
+            ceiling=ctx.config.case_total_timeout,
+            extra_wait=ctx.config.extra_wait,
+            executor=executor,
         )
         if had_timeout:
             ctx.record_case_timeout()
+            for p, f in timed_out:
+                if len(ctx.drain) < ctx.config.drain_max_tasks:
+                    ctx.drain.append((case.case_id, p, f))
+                else:
+                    cancelled = f.cancel()
+                    print(
+                        f"  [degradation] drain limit ({ctx.config.drain_max_tasks}) reached, "
+                        f"discarding {case.case_id} {p}"
+                        f"{' (cancelled)' if cancelled else ' (already running)'}",
+                        file=sys.stderr,
+                    )
 
         # Update health per provider from actual results
         for provider, judgment in gathered.items():
@@ -499,6 +609,65 @@ def _judge_with_degradation(
         providers=providers,
         results=results,
     )
+
+
+def _drain_and_rereview(
+    multi_out: MultiJudgeOutput,
+    ctx: DegradationContext,
+    budget: float,
+) -> tuple[MultiJudgeOutput, set[str]]:
+    """Join timed-out judgments (Step 4.5) and apply late results.
+
+    Waits up to *budget* seconds for every future in ctx.drain. Late results
+    replace the TIMEOUT placeholder in the case's judgments so Step 5
+    consensus sees final judgments. Late valid results reset the provider's
+    failure counter; late errors keep the counter as-is (the TIMEOUT
+    placeholder already counted one failure).
+    """
+    if not ctx.drain:
+        return multi_out, set()
+
+    futures = [f for _, _, f in ctx.drain]
+    done, _ = concurrent.futures.wait(futures, timeout=budget)
+
+    case_map = {r.case_id: r for r in multi_out.results}
+    updated: set[str] = set()
+
+    for case_id, provider, future in ctx.drain:
+        if future not in done:
+            continue
+        mjr = case_map.get(case_id)
+        if mjr is None:
+            continue
+        old = mjr.judgments.get(provider, {})
+        if old.get("coverage_status") != "error":
+            # 不是 TIMEOUT 占位（已有真实结果），不覆盖
+            continue
+        try:
+            result = future.result()
+        except Exception as exc:
+            result = make_error_judgment(
+                provider, str(exc), classify_exception(exc) if exc else "UNKNOWN"
+            )
+        mjr.judgments[provider] = result
+        if result.get("coverage_status") != "error":
+            updated.add(case_id)
+            ctx.record_success(provider)
+            ctx.record_drained_late()
+            print(
+                f"  [degradation] drain: {case_id} {provider} late result "
+                f"applied ({result.get('coverage_status', '?')})",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"  [degradation] drain: {case_id} {provider} late result "
+                f"is also error ({result.get('analysis', '')[:60]})",
+                file=sys.stderr,
+            )
+
+    ctx.drain.clear()
+    return multi_out, updated
 
 
 def _count_surviving_providers(judgments: dict[str, dict]) -> int:
@@ -587,19 +756,25 @@ def run_reverse_pipeline(
     output_dir: Path,
     job: Job,
     trace_dir: Path | None = None,
-    system_type: str = "hvac",
+    profile: ControllerProfile | None = None,
 ) -> PipelineResult:
     """Run reverse pipeline: parse → label → match → judge → report.
 
     If trace_dir is provided, enables traceability-based pre-filtering
     to narrow the EoICD search space before reverse matching.
-    system_type selects the HLR system config (default "hvac").
+
+    ``profile`` (Task 10, Issue #63) is threaded into every profile-aware
+    consumer: ``HLRWordParser``, ``label_hlrs``, ``enrich_all_labels``, and
+    ``build_trace_index``. ``None`` falls back to the registry's AMS default
+    so pre-#63 callers keep byte-identical output.
     """
     if not (eoicd_json or publisher or subscriber):
         raise ValueError("need eoicd (parsed JSON) or publisher/subscriber (Excel)")
 
-    from app.v4.config import get_hlr_system_config
-    system_config = get_hlr_system_config(system_type)
+    # Resolve profile once (loads AMS from registry if profile=None). Done
+    # eagerly so any registry/load error surfaces before the long-running
+    # parse/label steps.
+    resolved_profile = _resolve_profile(profile)
 
     # Step 1: Parse
     print("=" * 50)
@@ -625,7 +800,7 @@ def run_reverse_pipeline(
         hlr_out = _parse_hlr(
             hlr,
             output_dir / "hlr_requirements.json",
-            system_config,
+            profile=resolved_profile,
         )
 
     # Step 1: EoICD itemization Excel
@@ -639,8 +814,16 @@ def run_reverse_pipeline(
     print("=" * 50)
     job.update(JobStatus.RUNNING, "Step 2/6: HLR AI labeling")
     labels_cache = output_dir / "hlr_labels.json"
-    hlr_labels = label_hlrs(hlr_out.requirements, cache_path=labels_cache)
-    hlr_labels = enrich_all_labels(hlr_out.requirements, hlr_labels)
+    hlr_labels = label_hlrs(
+        hlr_out.requirements,
+        cache_path=labels_cache,
+        profile=resolved_profile,
+    )
+    hlr_labels = enrich_all_labels(
+        hlr_out.requirements,
+        hlr_labels,
+        keywords=resolved_profile.classifier_keywords,
+    )
     print(f"  HLRs labeled: {len(hlr_labels)}")
 
     # Step 3: Reverse match
@@ -650,14 +833,13 @@ def run_reverse_pipeline(
         print(f"Step 3/6: Traceability-filtered reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")
         print("=" * 50)
         job.update(JobStatus.RUNNING, "Step 3/6: Traceability-filtered reverse matching")
-        from app.v4.config import get_traceability_config
-        trace_config = get_traceability_config(system_type)
         match_result = _match_reverse_with_trace(
             hlr_out.requirements,
             hlr_labels,
             eoicd_out.requirements,
             trace_dir,
-            trace_config,
+            resolved_profile.traceability,
+            profile=resolved_profile,
         )
     else:
         print(f"Step 3/6: Reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")
@@ -667,6 +849,7 @@ def run_reverse_pipeline(
             hlr_out.requirements,
             hlr_labels,
             eoicd_out.requirements,
+            profile=resolved_profile,
         )
     match_path = output_dir / "reverse_matches.json"
     match_path.write_text(
@@ -692,6 +875,23 @@ def run_reverse_pipeline(
     job.update(JobStatus.RUNNING, "Step 4/6: Multi-agent judging")
     ctx = DegradationContext(config=DegradationConfig.from_env())
     multi_out = _judge_with_degradation(cases, JUDGE_PROVIDERS, ctx)
+
+    # Step 4.5: Drain timed-out judgments — late-but-valid outputs are kept
+    # and replace their TIMEOUT placeholders before consensus runs.
+    if ctx.drain:
+        print()
+        print("=" * 50)
+        print(f"Step 4.5/6: Draining {len(ctx.drain)} timed-out judgments "
+              f"(budget {ctx.config.drain_budget:.0f}s)")
+        print("=" * 50)
+        multi_out, drained_ids = _drain_and_rereview(
+            multi_out, ctx, ctx.config.drain_budget
+        )
+        print(f"  Late results applied to {len(drained_ids)} case(s): "
+              f"{sorted(drained_ids) if drained_ids else 'none'}")
+    else:
+        drained_ids = set()
+
     multi_path = output_dir / "multi_judge_results.json"
     multi_path.write_text(
         multi_out.model_dump_json(indent=2, ensure_ascii=False),
