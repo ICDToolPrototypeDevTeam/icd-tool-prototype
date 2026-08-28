@@ -92,6 +92,72 @@
 - **`ConsensusResult.evidence_alignment`**：新增字段（默认 ""），老 mock 数据缺失可视为 ""；review LLM 不再输出 `star_rating`，仅输出 `agreement_level` + `evidence_alignment`，由后端按映射规则算星。**该字段在 v2 中已完全移除**。
 - 老 `consensus_results.json` 不存在跨版本兼容，老数据需重新跑管线。v2 提供迁移脚本回填关键字段。
 
+## [Unreleased] - 2026-08-28
+
+### Changed
+
+- **Step 5.5 re-review per-case 内并行**：re-review 阶段两层串行循环（先 case、后 provider）改为 per-case gather：每个 case 内部的 3 个 provider 调用一次性 submit 到 Step 4 共享的 `_get_drain_executor()` 线程池（通过 `_submit_with_gate()` 走信号量闸门），用 `concurrent.futures.wait` + `FIRST_COMPLETED` 在固定 `case_total_timeout` ceiling 内收集结果，单 case wall time 从 `sum(providers)` 降到 `max(providers)`。复用 Step 4 已有的 `_get_drain_executor` / `_get_inflight_sema` / `_submit_with_gate` / `make_error_judgment` / `classify_exception` 基础设施，**对外契约零变化**（`re_review_results.json` schema、`re_review_judgments()` 入参返回、`multi_judge_results.json` 落盘时机不变）；仅内部执行模型从串行改为并行。
+
+### Fixed
+
+- **minimax re-review JSON 解析失败**：`semantic_judge.py::_extract_json` 在 minimax 返回内容以 ```json fence 开头、但前面带 markdown 分析段时，无法从 fence 内提取 JSON，导致 `JSONDecodeError`，所有 minimax re-review 调用落入 `coverage_status="error"`。修复：增加 else 分支——text 不以 ``` 开头时，先在 text 内用正则 `r'```(?:json)?\s*\n?(\{.*?\})\s*\n?```'` 搜索 ```json fence 并提取其中的 `{...}`；找不到再退到找首个 `{`。think 块剥离、markdown fence 移除、JSON 截断修复逻辑均不变。
+
+## [Unreleased] - 2026-08-27
+
+### Changed
+
+- **5 星评价体系重构（ADR-004 v3 fusion：两维度并行）**：修正 v2 把「EoICD-HLR 事实差异」与「provider 间字段级分歧」混为一谈的语义错误。v2 上线后真实样例暴露：Word 报告「判断」列显示「不一致」而「不一致属性」列大面积显示「—」，因为 3 个 provider 对同一 EoICD-HLR 差异往往共识识别，按 v2 规则不进 `field_disagreements`，渲染源为空。v3 fusion 恢复 `inconsistent_attributes`（语义回到 v0/v1：HLR 与 ICD 实际不符的 EoICD 属性，**不管 provider 是否一致都填**），结构为 `{attribute, detail, providers}`，作为 Word 报告「不一致属性」列的唯一数据源；`field_disagreements`（provider 间分歧，v2 设计）保留但降为辅助字段，**仅入 JSON、不再渲染**。`agreement_level` 明确按 v0 语义规则判定（看 analysis 语义，不只看字面 coverage_status）。5 档星档映射规则不变（`_map_star_rating(agreement, field_disagreements)`），复查触发条件 `{1, 2}` 不变。详见 ADR-004。
+
+### Breaking Change
+
+- **`ConsensusResult.inconsistent_attributes`**：**恢复**为 `list[InconsistentAttribute]`（`{attribute, detail, providers}`），语义 = EoICD-HLR 事实差异。
+- **`ConsensusResult.field_disagreements`**：字段保留、结构不变，但不再作为 Word 报告渲染源。
+- **`ConsensusResult.evidence_alignment`**：保持删除（v2 起）。
+- **旧 baseline 兼容**：`backend/tests/e2e/common.py:_migrate_consensus_schema` 在拷贝 baseline 时自动补齐缺失的 `inconsistent_attributes` / `field_disagreements`（并把 v0/v1 的字符串形态转为 dict），无需重新生成 baseline。
+- **`consensus.md` 移除 `single_source` / `no_consensus` 描述**：prompt 中不再出现这两个值，LLM 只能输出 `full` / `majority` / `split`。这两个值由后端降级脚本根据 provider 存活数自动写入（surviving=1 → `single_source`、surviving=0 → `no_consensus`）。修复 surviving=2 时 LLM 误判 `no_consensus` 穿透到最终结果的盲区。数据契约无变化，后端解析照旧。
+- **`ConsensusResult.cited_fields: list[str]` 完全移除**：v2 引入的字段（列出所有被 provider analysis 引用的字段名）始终未被消费（不进入 Word 渲染、不被任何业务逻辑使用），仅作为调试占位字段。删除后 prompt 无需让 LLM 输出该数组，节省 token；`models.py` / `review_agent.py` / `consensus_word_generator.py` / e2e 注入逻辑同步清理。已存 baseline JSON 中的 `cited_fields` 字段会被 Pydantic 静默忽略（`extra="ignore"` 默认行为），不需迁移。
+- **`final_coverage_status` 阈值扩展**：v2 设计 `2★ → 强制「待确认」` 会让 majority provider 已达成共识的判断被吞（少数意见仅关 key 字段却让整条 case 看起来"毫无信息"），改为 2★ 取 majority coverage_status。复盘链路：`review_agent.py:134` 阈值 `star >= 3` 放宽到 `star >= 2`；2★ case 从 Word 报告「待确认」组迁到 majority 的实际组（covered/inconsistent/needs_review），但 `field_disagreements` 仍记录少数 key 字段反对意见。复查触发条件 `{1, 2}` 不变（仍由 `star_rating` 驱动）。e2e 用例5断言同步调整。
+- **5 星档位命名正式化（方案 Y：共识轴 + 异议子档）**：v3 fusion 上线后旧命名"完全无争议 / 一致有争议 / 多数一致 / 多数有争议"存在两处歧义——(1) 「一致有争议」自相矛盾，「争议」易与 HLR-ICD 实际差异混淆；(2) 1★ 子档「分歧 / 仅单一来源 / 无有效裁判」口语化。重构后命名锚定到「共识」轴，4 主档：「完全共识（5★）/ 完全共识·字段异议（4★）/ 多数共识（3★）/ 多数共识·关键异议（2★）」；1★ 三降级子类型独立正式化：「三方分歧（split）/ 仅单源（single_source）/ 全部失效（no_consensus）」；fallback 标签仍兜底为「降级」。三档颜色映射不变（5★ 绿 / 4★·3★ 黄 / 2★·1★ 红）。受影响文案：`consensus_word_generator.py` 的 `_map_consensus_label` / `star_levels` / `one_star_subs` / `suggestions` 4 处（共 7 个标签字面量）；`prompts/consensus.md` 的 4 行档位描述；`re_review.py` 2 处 docstring；`docs/project/workflow.md` 的 final_coverage_status 阈值描述同步对齐。判断逻辑（`_map_star_rating` / 阈值规则 / 复查触发）完全不变，仅 UI 文字调整。
+
+## [Unreleased] - 2026-08-26
+
+### Changed
+
+- **V2 共识报告文案统一（零行为影响）**：`consensus_word_generator.py` 3 处文字层面对齐方案 B 命名风格——"星级分布"小节 4 档标签改为"完全无争议 / 一致有争议 / 多数一致 / 多数有争议"；"处置建议"列表清理 v1 `evidence_alignment` 残留（"evidence 强 / 一般 / 反对方 evidence 弱"），改用星级分布小节口径；明细表"共识"列 `full → 完全一致` 改为 `完全无争议`，与"星级分布"小节表头对齐。判定规则与数据契约均未变，仅 UI 文字调整。`re_review.py:247` docstring 同步从 v1 "多数一致但 evidence 弱"改为 v2 "多数一致但有 key 字段分歧"，保持与 ADR-004 v2 口径一致。
+
+## [Unreleased] - 2026-08-24
+
+### Changed
+
+- **5 星评价体系重构（ADR-004 v2：字段不一致驱动）**：V4 反向管线 Step 5 Review Agent 由 v1 的 `evidence_alignment` 多维度方案重构为「字段类型驱动的单维度映射」。review LLM 改为扫描 3 provider 的 analysis 文本输出结构化字段级**裁判间分歧**列表 `field_disagreements: list[{field, category, providers, values, detail}]`（注意：仅追踪 provider 之间的判断分歧，EoICD-HLR 事实性差异由各 provider 自己的 analysis 承载），后端 `_map_star_rating(agreement, field_disagreements)` 按 agreement_level 分档 + 是否有 key 字段分歧映射到 5 档星评。映射规则：full+无字段不一致→5★、full+任意字段不一致→4★、majority+无 key 字段分歧→3★、majority+有 key 字段分歧→2★（触发复查）、split/single_source/no_consensus→1★。key 字段白名单（12 个）：Direction / DataFormatType / BitOffset / ParameterSize / OneState / ZeroState / Label / FuncRngMin / FuncRngMax / Units / Period / SDIExpected。vague 表达（无具体字段名）不影响降级。Prompt 增加 Step 0 明确区分「EoICD-HLR 事实性不一致」与「裁判间意见分歧」两类语义。e2e 用例5/6 同步重构注入策略。详见 ADR-004。
+
+### Breaking Change
+
+- **`ConsensusResult.evidence_alignment`**：**完全移除**（无软删除），保留 1 个版本。
+- **`ConsensusResult.inconsistent_attributes`**：删除（合并到 `field_disagreements`，后者带 `category` 分类）。
+- **`ConsensusResult.field_disagreements: list[FieldDisagreement]`**：新增字段（Pydantic Literal 类型 `category ∈ {key, non_key, vague}`）。
+- **`ConsensusResult.cited_fields: list[str]`**：新增字段，列出所有被 provider 引用的字段名（vague 案例为空数组）。
+- **e2e_baseline 需重新生成**：旧 v1 baseline（含 `evidence_alignment`）无法被 pydantic 解析；直接跑基线管线产出 v2 JSON 即可，无迁移脚本。
+
+## [Unreleased] - 2026-08-23
+
+### Added
+
+- **5 星评价体系（ADR-004 v1，已被 v2 替代）**：V4 反向管线 Step 5 Review Agent 升级为 5 档星评（5★/4★/3★/2★/1★），新增 `evidence_alignment` 字段（strong/moderate/weak）由 review LLM 自评 evidence 强度，后端按 `(agreement_level, evidence_alignment)` 二维映射到 5 档星评，避免 LLM 直接选星的批次漂移。映射规则：full+strong→5★、full+moderate/weak→4★、majority+strong/moderate→3★、majority+weak→2★、split/single_source/no_consensus→1★。新增 e2e 用例5（`backend/tests/e2e/test_use_case_5_five_star_rating.py`）。**该版本在真实 LLM 跑 `故障注入1.0.docx` 暴露根本性问题（5 档分布失衡：仅 5★/3★ 触发），2026-08-24 由 v2 字段不一致方案替代**。
+
+### Changed
+
+- **Step 5.5 一星复查触发条件扩展**：`_resolve_low_confidence_case_ids` 触发条件从 `star_rating == 1` 扩展到 `star_rating ∈ {1, 2}`，peer-aware 复查给 2★（多数一致但 evidence 弱）一个升到 3★ 的机会。
+- **共识报告星级分布表**：从「3 主行 + 3 子行」扩展为「4 主行（5★/4★/3★/2★）+ 3 子行（1★ 三降级子类型）」，`_star_str` 渲染 0-5 共 6 档（含无匹配 0 颗）。
+- **`final_coverage_status` 阈值**：5★/4★/3★（star ≥ 3）取多数一致的 coverage_status；2★/1★ 强制「待确认」，防止 majority+weak 的低 evidence 共识被当成业务结论采纳。v2 阈值未变。
+
+### Breaking Change
+
+- **`ConsensusResult.star_rating`**：类型注解从 `1-3` 扩展到 `1-5`（数据契约变化）。
+- **`star_distribution` summary 字段**：键从 `{1, 2, 3}` 扩展为 `{1, 2, 3, 4, 5}`，前端读取要兼容。
+- **`ConsensusResult.evidence_alignment`**：新增字段（默认 ""），老 mock 数据缺失可视为 ""；review LLM 不再输出 `star_rating`，仅输出 `agreement_level` + `evidence_alignment`，由后端按映射规则算星。**该字段在 v2 中已完全移除**。
+- 老 `consensus_results.json` 不存在跨版本兼容，老数据需重新跑管线。v2 提供迁移脚本回填关键字段。
+
 ## [Unreleased] - 2026-08-20
 
 ### Removed
