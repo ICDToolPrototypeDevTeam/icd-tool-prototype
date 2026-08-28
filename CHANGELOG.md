@@ -2,6 +2,20 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-08-26
+
+### Added
+
+- **V4 正向完整性分析（EoICD → HLR 漏写检测）**：新增正向分析管线（解析 → 追溯范围 → 业务对象块 → 确定性 HLR 身份索引 → 候选召回 → 确定性覆盖判定 → AI 三态复核 → JSON/Excel/Word 报告），回答「EoICD 业务对象在 HLR 正文中是否漏写」，与既有反向分析（正确性比对）互补。正向分析复用确定性 HLR 身份索引（不依赖 AI 标注），AI 复核采用单模型（`FORWARD_REVIEW_PROVIDER`，默认 DeepSeek），无三模型裁判/共识。
+- **正向 API 与下载分发**：新增 `POST /api/v4/completeness-analysis`（`analysis_mode` ∈ `full`/`trace`）、`GET /api/v4/jobs/{job_id}/forward-result`、`GET /api/v4/jobs/{job_id}/outputs/forward-xlsx`、`GET /api/v4/jobs/{job_id}/outputs/forward-docx`；`Job` 新增 `task_type` 字段（`reverse`/`forward`）区分两类任务。
+- **EoICD 解析字段**：`EoICDRequirement` 新增 `layer_path_types`（层级路径类型，加性字段），供正向协议分类（A429/A825/模拟量/离散量/A664）使用，不影响反向解析计数。
+
+## [Unreleased] - 2026-08-27
+
+### Changed
+
+- **正向判定统一规则（业务信号/字段颗粒度）**：正向覆盖判定固定为「EoICD 业务信号/字段是否在 HLR 中被描述」，不扩展到通道/设备副本/冗余来源/接口实例的逐一覆盖检查。A429 子对象身份仅在证据可靠时参与判定：SDI 仅当该 Label 存在 >1 个不同非 N/A SDI 值（`sdi_is_discriminator`）且双方显式带 SDI 时用作区分依据；bit 通过结构化关系（叶子自身 BitOffsetWithinDS，或 dp_ref 子字段名与叶名对应）推导，不依据 DataFormatType/ParameterSize 做「排除 BOOL / 优先 BNR」等类型推断，推导不可靠则不留 bit 证据。缺失候选统一收口：在场候选均被确定性规则证明为其他对象时，若存在追溯缺失候选（未出现在上传 HLR）判 `possible` 并记录缺失，无缺失候选才判 `uncovered`。确定性身份冲突（名称/Label/SDI/bit 充分时）不可被 AI 覆盖，语义无法确定性确认时仍进入 AI 复核。正向结果新增 `reason` 字段（缺失候选 / 通道条件审计信息）。反向管线和反向基线保持不变。
+
 ## [Unreleased] - 2026-08-20
 
 ### Removed
