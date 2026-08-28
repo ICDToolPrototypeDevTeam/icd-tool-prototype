@@ -63,6 +63,7 @@ Step 5.5: 低星复查（peer-aware 反思，5 星体系）
     2★ → 复查后可达 3★（minority provider 重新审视反对方 key 字段意见，弱化立场）
     每个 provider 看到自己之前的判断（Judgment A）和 peer 的判断（Judgment B/C），触发反思纠正
     error provider 跳过：不重新查询 coverage_status="error" 的 provider，保留其 error 状态
+    并发模型：per-case 内并行 3 个 provider——每个 case 一次性 submit 到 Step 4 共享的 drain executor（`_get_drain_executor()` + `_submit_with_gate()`），用 `concurrent.futures.wait` + `FIRST_COMPLETED` 在 `case_total_timeout` ceiling 内 gather；case 维度仍串行。单 case wall time = `max(providers)`（非 `sum(providers)`）。复用 Step 4 的 `_get_drain_executor` / `_get_inflight_sema` / `_submit_with_gate` / `make_error_judgment` / `classify_exception` 基础设施，无新引入组件。
     模块: comparison/re_review.py
 
 Step 5.6: 部分共识重跑（含降级后处理）
