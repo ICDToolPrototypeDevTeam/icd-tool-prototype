@@ -23,6 +23,20 @@ def _extract_json(text: str) -> str:
         if lines and lines[-1].startswith("```"):
             lines = lines[:-1]
         text = "\n".join(lines).strip()
+    else:
+        # text 不以 ``` 开头（minimax re-review 场景）：```json fence 前可能有
+        # 大段 markdown 分析。先在 text 内部搜索 ```json fence，提取其中的 {...}；
+        # 若没有 fence，再退到找首个 { 的位置。
+        fence_match = re.search(
+            r'```(?:json)?\s*\n?(\{.*?\})\s*\n?```',
+            text, flags=re.DOTALL,
+        )
+        if fence_match:
+            text = fence_match.group(1).strip()
+        else:
+            brace_idx = text.find("{")
+            if brace_idx > 0:
+                text = text[brace_idx:]
     # Repair truncated JSON: close unterminated strings and missing braces
     if text and text[0] == "{":
         # Count unescaped quotes — if odd, the last string is unterminated

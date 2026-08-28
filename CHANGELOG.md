@@ -2,6 +2,16 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-08-28
+
+### Changed
+
+- **Step 5.5 re-review per-case 内并行**：re-review 阶段两层串行循环（先 case、后 provider）改为 per-case gather：每个 case 内部的 3 个 provider 调用一次性 submit 到 Step 4 共享的 `_get_drain_executor()` 线程池（通过 `_submit_with_gate()` 走信号量闸门），用 `concurrent.futures.wait` + `FIRST_COMPLETED` 在固定 `case_total_timeout` ceiling 内收集结果，单 case wall time 从 `sum(providers)` 降到 `max(providers)`。复用 Step 4 已有的 `_get_drain_executor` / `_get_inflight_sema` / `_submit_with_gate` / `make_error_judgment` / `classify_exception` 基础设施，**对外契约零变化**（`re_review_results.json` schema、`re_review_judgments()` 入参返回、`multi_judge_results.json` 落盘时机不变）；仅内部执行模型从串行改为并行。
+
+### Fixed
+
+- **minimax re-review JSON 解析失败**：`semantic_judge.py::_extract_json` 在 minimax 返回内容以 ```json fence 开头、但前面带 markdown 分析段时，无法从 fence 内提取 JSON，导致 `JSONDecodeError`，所有 minimax re-review 调用落入 `coverage_status="error"`。修复：增加 else 分支——text 不以 ``` 开头时，先在 text 内用正则 `r'```(?:json)?\s*\n?(\{.*?\})\s*\n?```'` 搜索 ```json fence 并提取其中的 `{...}`；找不到再退到找首个 `{`。think 块剥离、markdown fence 移除、JSON 截断修复逻辑均不变。
+
 ## [Unreleased] - 2026-08-27
 
 ### Changed
