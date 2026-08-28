@@ -7,6 +7,7 @@
 ### Changed
 
 - **Step 5.5 re-review per-case 内并行**：re-review 阶段两层串行循环（先 case、后 provider）改为 per-case gather：每个 case 内部的 3 个 provider 调用一次性 submit 到 Step 4 共享的 `_get_drain_executor()` 线程池（通过 `_submit_with_gate()` 走信号量闸门），用 `concurrent.futures.wait` + `FIRST_COMPLETED` 在固定 `case_total_timeout` ceiling 内收集结果，单 case wall time 从 `sum(providers)` 降到 `max(providers)`。复用 Step 4 已有的 `_get_drain_executor` / `_get_inflight_sema` / `_submit_with_gate` / `make_error_judgment` / `classify_exception` 基础设施，**对外契约零变化**（`re_review_results.json` schema、`re_review_judgments()` 入参返回、`multi_judge_results.json` 落盘时机不变）；仅内部执行模型从串行改为并行。
+- **AMSC 通用协议特征 covered 判定规则（reverse_judge.md）**：在 `prompts/reverse_judge.md` 的「审查方法」之后新增「AMSC 通用协议特征 covered 判定说明（空气管理系统控制器专用）」章节，给出 AMSC 项目背景下判定「协议级 covered」的 3 个同时满足条件（HLR 描述协议级实现 / 不引用 AMSC 具体信号名 / 符合协议标准要求）+ 3 个判定示例（SDI 位 → covered、奇偶校验 → covered、fan RPM 解算 → needs_review）。作用域暂设为全局（fgmc / hscu 等其他 profile 同样适用，但 AMSC 关键词不命中时无实际影响）。
 
 ### Fixed
 
