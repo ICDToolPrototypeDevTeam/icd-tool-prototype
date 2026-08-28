@@ -6,7 +6,6 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import sys
-import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -20,6 +19,7 @@ from app.v4.comparison.re_review import re_review_judgments
 from app.v4.comparison.review_agent import review_judgments, _build_summary
 from app.v4.config import JUDGE_PROVIDERS
 from app.v4.degradation import DegradationConfig, DegradationContext
+from app.v4.degradation.concurrency import _get_drain_executor, _submit_with_gate
 from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.v4.doc_generators.excel_generator import generate_eoicd_excel
 from app.v4.doc_generators.word_generator import generate_consistency_report
@@ -336,46 +336,6 @@ def _judge_case_with_timeout(
 def _is_failure(judgment: dict) -> bool:
     """Check if a judgment dict represents a failure (error or very low confidence)."""
     return judgment.get("coverage_status") == "error"
-
-
-_drain_executor: ThreadPoolExecutor | None = None
-
-
-def _get_drain_executor() -> ThreadPoolExecutor:
-    """Shared background executor for timed-out judgments (process-wide)."""
-    global _drain_executor
-    if _drain_executor is None:
-        _drain_executor = ThreadPoolExecutor(
-            max_workers=DegradationConfig.from_env().drain_max_workers,
-            thread_name_prefix="degradation-drain",
-        )
-    return _drain_executor
-
-
-_inflight_sema: threading.Semaphore | None = None
-
-
-def _get_inflight_sema() -> threading.Semaphore:
-    """Gate limiting tasks submitted to executor simultaneously (process-wide)."""
-    global _inflight_sema
-    if _inflight_sema is None:
-        _inflight_sema = threading.Semaphore(
-            DegradationConfig.from_env().max_inflight
-        )
-    return _inflight_sema
-
-
-def _submit_with_gate(executor: ThreadPoolExecutor, fn, *args) -> Future:
-    """Submit fn to executor, blocking until an inflight slot is available.
-
-    The semaphore is released when the future completes (success or failure).
-    This prevents unbounded task accumulation when many cases are queued.
-    """
-    sema = _get_inflight_sema()
-    sema.acquire()
-    future = executor.submit(fn, *args)
-    future.add_done_callback(lambda _: sema.release())
-    return future
 
 
 def _judge_with_degradation(

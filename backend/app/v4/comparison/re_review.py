@@ -19,13 +19,21 @@ the post-review state.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import sys
 import time
+from concurrent.futures import FIRST_COMPLETED, Future
 from pathlib import Path
 
 from app.v4.comparison.semantic_judge import _extract_json
 from app.v4.config import JUDGE_PROVIDERS
+from app.v4.degradation.config import DegradationConfig
+from app.v4.degradation.concurrency import (
+    _get_drain_executor,
+    _submit_with_gate,
+)
+from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.v4.llm import get_llm
 from app.v4.models import (
     ConsensusOutput,
@@ -228,6 +236,36 @@ def _call_re_review_api(
     }
 
 
+def _call_one_re_review(
+    case: ReverseCase,
+    original_judgments: dict[str, dict],
+    provider: str,
+    system_prompt: str,
+) -> dict:
+    """Sync wrapper for one provider's re-review call.
+
+    Thread-pool-friendly: pure function over its inputs, no shared mutable
+    state. The caller (re_review_judgments) submits this via _submit_with_gate
+    so concurrent invocations of the same provider LLM client are safe.
+    """
+    my_judgment = original_judgments.get(provider, {}) or {}
+    other_judgments = [
+        j for p, j in original_judgments.items() if p != provider
+    ]
+    user_prompt = _build_re_review_user_prompt(
+        case=case,
+        my_judgment=my_judgment,
+        other_judgments=other_judgments,
+    )
+    llm = get_llm(provider)
+    return _call_re_review_api(
+        llm=llm,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        agent_name=provider,
+    )
+
+
 # ============================================================
 # 4. Top-level entry point
 # ============================================================
@@ -295,37 +333,65 @@ def re_review_judgments(
         # Re-query every provider (or the subset that has a recorded
         # judgment in this case). A provider missing from
         # ``original_judgments`` is skipped — it was never part of this
-        # case's panel.
+        # case's panel. Providers whose original judgment errored are
+        # also skipped — their error status is meaningful and should not
+        # be overwritten.
+        active_providers: list[str] = [
+            p for p in providers
+            if p in original_judgments
+            and (original_judgments.get(p, {}) or {}).get("coverage_status") != "error"
+        ]
+
+        # Per-case parallel submit (ADR-perf: re-review 3 provider wall
+        # time dropped from sum → max). Reuses the Step 4 executor +
+        # inflight semaphore so concurrent re-review tasks share the same
+        # backpressure gate as multi-agent.
+        executor = _get_drain_executor()
+        cfg = DegradationConfig.from_env()
+        futures: dict[Future, str] = {
+            _submit_with_gate(
+                executor,
+                _call_one_re_review,
+                case,
+                original_judgments,
+                p,
+                system_prompt,
+            ): p
+            for p in active_providers
+        }
+
+        # Fixed ceiling per case (no adaptive "wait for 2 valid then
+        # extra" — re-review needs every provider's fresh judgment to
+        # replace the original, so timeout should force-quit stragglers
+        # rather than hold the case hostage).
+        deadline = time.monotonic() + cfg.case_total_timeout
         new_judgments: dict[str, dict] = dict(original_judgments)
-        for provider in providers:
-            if provider not in original_judgments:
-                continue
-            my_judgment = original_judgments.get(provider, {}) or {}
-            # Skip providers that errored in the original judgment — their
-            # error status is meaningful and should not be overwritten.
-            if my_judgment.get("coverage_status") == "error":
-                continue
-            other_judgments = [
-                j for p, j in original_judgments.items() if p != provider
-            ]
-
-            user_prompt = _build_re_review_user_prompt(
-                case=case,
-                my_judgment=my_judgment,
-                other_judgments=other_judgments,
+        pending = set(futures.keys())
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                for f in pending:
+                    p = futures[f]
+                    new_judgments[p] = make_error_judgment(
+                        p, "re-review timeout", "TIMEOUT"
+                    )
+                break
+            done, pending = concurrent.futures.wait(
+                pending, timeout=remaining, return_when=FIRST_COMPLETED
             )
-
-            llm = get_llm(provider)
-            new_judgment = _call_re_review_api(
-                llm=llm,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                agent_name=provider,
-            )
-            # Always stamp the provider name explicitly — guards against an
-            # LLM echoing a different ``agent_name`` in its JSON.
-            new_judgment["agent_name"] = provider
-            new_judgments[provider] = new_judgment
+            for f in done:
+                p = futures[f]
+                try:
+                    nj = f.result()
+                except Exception as exc:  # noqa: BLE001 — broad on purpose
+                    new_judgments[p] = make_error_judgment(
+                        p, f"re-review error: {exc}", classify_exception(exc)
+                    )
+                else:
+                    # Always stamp the provider name explicitly — guards
+                    # against an LLM echoing a different ``agent_name``.
+                    nj["agent_name"] = p
+                    new_judgments[p] = nj
 
         mjr.judgments = new_judgments
 
@@ -340,7 +406,7 @@ def re_review_judgments(
 
         print(
             f"  [re-review] {case_id}: re-reviewed "
-            f"{len([p for p in providers if p in original_judgments])} providers",
+            f"{len(active_providers)} providers",
             file=sys.stderr,
         )
 

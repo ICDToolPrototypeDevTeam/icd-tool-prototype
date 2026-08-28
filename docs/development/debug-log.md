@@ -821,3 +821,90 @@ fixed
 1. **通用能力应放在最底层**：截断重试本质是 API 调用保障，与网络超时重试同级，应放在 client 层而非业务层。
 2. **点状修补会制造盲区**：`_chat_with_truncation_retry` 覆盖了 judge/review 但漏了 labeler，导致 labeler 成为唯一无截断保护的调用方。
 3. **开启思考模式后 `max_tokens` 预算需要更宽裕**：think block 消耗不可预测，初始 `max_tokens` 建议 ≥ 4096。
+
+---
+
+## BUG-20260828-001：minimax re-review 返回 markdown 分析 + ```json fence 时 JSON 解析失败
+
+### 状态
+
+verified
+
+### 发现日期
+
+2026-08-28
+
+### 关联 Issue / PR
+
+- 无（用户口头反馈）
+
+### 问题现象
+
+跑 `故障注入-test-minimax_api_error.docx` 时，Step 5.5 re-review 阶段 minimax 的 judgment 在 `re_review_results.json` 中始终为 `coverage_status="error"`、`analysis="API error after retries: Expecting value: line 1 column 1 (char 0)"`。deepseek / qwen 在同 case 上正常返回有效 JSON，只有 minimax 报错。导致最终 consensus 的 minimax 维度缺失，少数意见复核的可靠性下降。
+
+### 复现方式
+
+1. `docker compose up backend`
+2. `curl -X POST /api/v4/coverage-analysis` 上传 `故障注入-test-minimax_api_error.docx` + EoICD Pub/Sub Excel，`judge_providers=minimax/deepseek/qwen`
+3. 等 Step 5 完成 → Step 5.5 re-review 触发
+4. 查看 `backend/output/v4/{job_id}/output/re_review_results.json`，minimax 的 re_review_judgments 为 error
+
+### 影响范围
+
+- `backend/app/v4/comparison/semantic_judge.py::_extract_json`：仅 re-review 路径（`_call_re_review_api` 调用）触发
+- 不影响 multi-judge（`_call_judge_api`）和 review agent（`_call_review_api`），因为这两种调用 minimax 的 content 始终以 ```json fence 开头
+
+### 原因分析
+
+定位经过多轮：
+
+1. **第一轮假设（错误）**：minimax 返回 HTTP 200 + empty body。验证后排除——通过 `minimax_client.py` 临时 debug print 抓到 raw response 是有 content 的（`[minimax raw] content='<think>...'`，10KB+）。
+2. **第二轮定位**：raw content 形如 `<long <think> block>...</think>\n\n<markdown 分析段>\n\n```json\n{...JSON...}\n````。`_extract_json` 的 fence 检查逻辑只处理 `text.startswith("```")` 的情况；当 text 以 `<think>` 或 markdown 段落开头时直接跳到「找首个 `{`」，由于分析段中常出现零散花括号（中文括号、表格分隔），截取的不是 JSON 起点，导致 `json.loads` 失败。
+3. **真实根因**：minimax re-review 调用 system prompt 较短 + 用户 prompt 中带反思规则，minimax 倾向于先输出大段 markdown 分析再附加 JSON，与 multi-judge（system prompt 强制 JSON 输出）行为不同。`_extract_json` 没有处理「先分析后 fence」这种 markdown 排版。
+
+### 修复方案
+
+按最小修改原则，**仅**给 `_extract_json` 增加 else 分支——text 不以 ``` 开头时，先在 text 内部用非贪婪正则搜索 ```json fence 并提取其中的 `{...}`：
+
+```python
+else:
+    # text 不以 ``` 开头（minimax re-review 场景）：```json fence 前可能有
+    # 大段 markdown 分析。先在 text 内部搜索 ```json fence，提取其中的 {...}；
+    # 若没有 fence，再退到找首个 { 的位置。
+    fence_match = re.search(
+        r'```(?:json)?\s*\n?(\{.*?\})\s*\n?```',
+        text, flags=re.DOTALL,
+    )
+    if fence_match:
+        text = fence_match.group(1).strip()
+    else:
+        brace_idx = text.find("{")
+        if brace_idx > 0:
+            text = text[brace_idx:]
+```
+
+think 块剥离、markdown fence 移除（以 ``` 开头场景）、JSON 截断修复均保留不动。
+
+### 修改文件
+
+1. `backend/app/v4/comparison/semantic_judge.py`
+
+### 验证方式
+
+1. `docker compose build backend` 重新构建
+2. 跑两次 `故障注入-test-minimax_api_error.docx`（job `a57a5e68` 和 `0416ddf6`），均应正常完成 Step 5.5/5.6/6
+3. 检查两次的 `re_review_results.json` 中 minimax 不再为 `error`，而是返回完整 judgment（`coverage_status` / `difference_type` / `missing_points` / `inconsistent_points` / `analysis` / `confidence` / `suggested_action` 全字段非空）
+
+### 验证结果
+
+已验证通过。job `a57a5e68` 和 `0416ddf6` 均正常完成，minimax re-review 返回 `coverage_status="inconsistent"` / `difference_type="不一致"` / `confidence=0.85`，与 qwen / deepseek 的判断进入共识计算。
+
+修复完成后清理：
+- `backend/app/v4/llm/minimax_client.py` 临时 debug print（成功路径 + 异常路径）全部移除
+- `backend/debug_minimax_rereview.py`（独立调试脚本，201 行）删除
+
+### 经验总结
+
+1. **不同 prompt 模板下同一 provider 行为可能差异显著**：minimax 在 multi-judge（system prompt 强制 JSON）下返回纯 fence JSON，在 re-review（system prompt 短、prompt 鼓励反思）下返回「先 markdown 分析 + 后 fence JSON」。任何 JSON 解析逻辑都应假设 provider 不按预期排版。
+2. **LLM 临时 debug print 必须覆盖 try/except 两路径**：本次修复前最初只成功路径 print，异常路径无 raw body，导致 `requests.RequestException` 抛出时无法定位是 empty body 还是其他问题。修复后两个路径都 print，才确认是 HTTP 200 + 有 content + JSON 解析失败。
+3. **非贪婪正则 + `re.DOTALL` 是 fence 提取的最低成本方案**：re-review 的 markdown 分析段可能含有零散 `{`（表格、数学公式），`re.findall` 非贪婪 + DOTALL 即可正确锚定 ```json fence 内 JSON 起点。
