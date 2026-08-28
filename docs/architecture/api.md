@@ -20,11 +20,14 @@ API 设计应遵守以下原则：
 | ---------------------------------------------- | ------ | ------------------------------- |
 | `/api/v4/health`                               | `GET`  | 后端健康检查                          |
 | `/api/v4/coverage-analysis`                    | `POST` | 上传输入文件并创建 V4 反向管线任务               |
+| `/api/v4/completeness-analysis`                | `POST` | 上传输入文件并创建 V4 正向完整性分析任务            |
 | `/api/v4/jobs/{job_id}`                        | `GET`  | 查询任务状态                          |
-| `/api/v4/jobs/{job_id}/result`                 | `GET`  | 查询任务处理结果摘要                      |
+| `/api/v4/jobs/{job_id}/result`                 | `GET`  | 查询任务处理结果摘要（按 `task_type` 分发正确性/完整性两种 schema） |
 | `/api/v4/jobs/{job_id}/outputs/eoicd-xlsx`     | `GET`  | 下载 EoICD 条目化清单（xlsx）      |
 | `/api/v4/jobs/{job_id}/outputs/consensus-docx` | `GET`  | 下载多模型共识差异分析报告（docx）            |
 | `/api/v4/jobs/{job_id}/outputs/consistency/{model}` | `GET`  | 下载单模型差异分析报告（docx）           |
+| `/api/v4/jobs/{job_id}/outputs/forward-xlsx`   | `GET`  | 下载正向完整性分析明细表（xlsx）            |
+| `/api/v4/jobs/{job_id}/outputs/forward-docx`   | `GET`  | 下载正向完整性分析报告（docx）            |
 
 `{model}` ∈ `{deepseek, minimax, qwen}`。
 
@@ -234,3 +237,112 @@ V4 `input/traceability/` 子目录用于 `enable_traceability_prefilter=true` �
 7. 修改错误响应结构。
 
 如未来本文档内容与 `backend/app/api/v4/*.py` 不一致，**以代码为准**并在本文件回写差异。
+
+## 12. 正向完整性分析接口（EoICD → HLR）
+
+正向完整性分析回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析（HLR → EoICD 正确性比对）互补。正向任务在 `Job` 中以 `task_type == "completeness"` 区分（反向为 `"correctness"`）；`GET /jobs/{id}/result` 按 `task_type` 分发到正确性/完整性两种响应 schema。
+
+### 12.1 创建正向分析任务
+
+```text
+POST /api/v4/completeness-analysis
+Content-Type: multipart/form-data
+```
+
+请求字段（multipart）：
+
+| 字段 | 类型 | 必填 | 含义 |
+| --- | --- | --- | --- |
+| `hlr_word_file` | UploadFile (.docx) | 是 | HLR Word 文档 |
+| `eoicd_publisher_file` | UploadFile (.xlsx) | 二选一 | EoICD Publisher PubSub Excel |
+| `eoicd_subscriber_file` | UploadFile (.xlsx) | 二选一 | EoICD Subscriber PubSub Excel |
+| `analysis_mode` | str (form) | 否（默认 `full`） | `full`（全量）或 `trace`（追溯范围） |
+| `device_icd_trace_file` | UploadFile (.xlsx) | trace 模式必填 | 表1：设备→ICD 追溯表 |
+| `system_device_trace_file` | UploadFile (.xlsx) | trace 模式必填 | 表2：设备→高层需求追溯表 |
+| `use_mock_llm` | bool (form) | 否（默认 false） | 是否走 mock |
+
+`analysis_mode` 不在 `{full, trace}` → 422；trace 模式缺任意一张追溯表 → 422。
+
+预期返回（V4AnalyzeResponse，与反向共用）：
+
+```json
+{
+  "job_id": "<uuid>",
+  "status": "pending",
+  "message": "V4 正向完整性分析任务已创建"
+}
+```
+
+### 12.2 查询正向结果摘要（共用 `/result`，按 `task_type` 分发）
+
+```text
+GET /api/v4/jobs/{job_id}/result
+```
+
+正向任务（`task_type == "completeness"`）与反向任务（`task_type == "correctness"`）共用同一 `/result`，后端按 `task_type` 返回 `V4ForwardJobResultResponse` 或 `V4JobResultResponse`。仅当 `status == completed` 时返回 200，否则 409。
+
+预期返回（V4ForwardJobResultResponse）：
+
+```json
+{
+  "job_id": "<uuid>",
+  "status": "completed",
+  "summary": {
+    "analysis_mode": "full",
+    "total_blocks": 1568,
+    "covered_direct": 450,
+    "covered_aggregate": 0,
+    "parent_referenced": 192,
+    "possible": 509,
+    "uncovered": 417,
+    "unsupported": 0,
+    "input_error": 0,
+    "ai_reviewed": 701,
+    "eoicd_count": 122674,
+    "hlr_count": 32
+  },
+  "outputs": {
+    "forward_xlsx": true,
+    "forward_docx": true
+  },
+  "errors": []
+}
+```
+
+### 12.3 下载正向输出
+
+```text
+GET /api/v4/jobs/{job_id}/outputs/forward-xlsx
+GET /api/v4/jobs/{job_id}/outputs/forward-docx
+```
+
+| URL 段 | 物理文件名 |
+| --- | --- |
+| `forward-xlsx` | `EoICD至HLR正向完整性分析明细.xlsx` |
+| `forward-docx` | `EoICD至HLR正向完整性分析报告.docx` |
+
+正向下载接口校验 `task_type == "completeness"`；反向下载接口校验 `task_type == "correctness"`。用错任务下载 → 404。
+
+### 12.4 正向 JSON 中间产物（不暴露）
+
+正向管线分阶段落盘，以下 JSON 仅保留在 `backend/output/v4/{job_id}/output/` 内，不对外下载：
+
+- `forward_scope.json`（C2 追溯范围）
+- `forward_blocks.json`（C3 业务对象块）
+- `hlr_identity_index.json`（C4 HLR 身份索引：确定性 token + `label_hlrs()` 召回增强的 llm_label token）
+- `forward_candidates.json`（C5 候选召回）
+- `forward_deterministic.json`（C6 确定性判定）
+- `forward_ai_review.json`（C7 AI 三态复核）
+- `forward_coverage.json`（C8 最终覆盖结果）
+
+### 12.5 正向错误响应
+
+| 场景 | HTTP |
+| --- | --- |
+| `hlr_word_file` 缺失或非 .docx | 422 |
+| pub/sub Excel 都没传 | 422 |
+| 任意 Excel / 追溯表非 .xlsx | 422 |
+| `analysis_mode` 不在 `{full, trace}` | 422 |
+| trace 模式缺追溯表 | 422 |
+| 任务 `running`/`failed` 时调 `/result` | 409 |
+| 正向 xlsx/docx 未生成时下载 | 404 |

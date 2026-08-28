@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.job_manager import Job, JobStatus
-from app.v4.pipeline import run_reverse_pipeline
+from app.v4.pipeline import run_forward_pipeline, run_reverse_pipeline
 from app.v4.profiles import ProfileRegistry
 
 
@@ -47,13 +47,23 @@ MOCK_ONLY_PROVIDERS = {"minimax", "qwen"}
 def _parse_progress(message: Optional[str]) -> dict:
     """从 pipeline 写到 job.message 的字符串中解析 stage / case index。
 
-    V4 pipeline.py 输出格式（统一 6 步）：
+    V4 pipeline.py 输出格式（反向 6 步 / 正向 8 步）：
+      反向（correctness，6 步）：
       - "Step 1/6: Parsing input files"
       - "Step 2/6: HLR AI labeling"
       - "Step 3/6: Reverse matching ..."
       - "Step 4/6: Multi-agent judging ..."
       - "Step 5/6: Review agent consensus ..."
       - "Step 6/6: Generating report"
+      正向（completeness，8 步）：
+      - "Step 1/8: Parsing input files"
+      - "Step 2/8: Forward scope"
+      - "Step 3/8: Building forward ICD blocks"
+      - "Step 4/8: Building HLR identity index"
+      - "Step 5/8: Candidate recall"
+      - "Step 6/8: Deterministic coverage judgment"
+      - "Step 7/8: AI three-state review"
+      - "Step 8/8: Consolidating coverage + generating reports"
     """
     out = {"stage": "", "stage_index": None, "stage_total": None, "case_index": None, "case_total": None}
     if not message:
@@ -63,18 +73,26 @@ def _parse_progress(message: Optional[str]) -> dict:
         out["stage_index"] = int(float(m.group(1)))
         out["stage_total"] = int(m.group(2))
         si = out["stage_index"]
-        if si == 1:
-            out["stage"] = "parse"
-        elif si == 2:
-            out["stage"] = "label"
-        elif si == 3:
-            out["stage"] = "match"
-        elif si == 4:
-            out["stage"] = "multi_judge"
-        elif si == 5:
-            out["stage"] = "review"
-        elif si == 6:
-            out["stage"] = "report"
+        if out["stage_total"] == 8:
+            # 正向完整性分析（8 步）
+            stage_names = {
+                1: "parse", 2: "scope", 3: "blocks", 4: "identity_index",
+                5: "candidate_recall", 6: "deterministic", 7: "ai_review", 8: "report",
+            }
+            out["stage"] = stage_names.get(si, "")
+        else:
+            if si == 1:
+                out["stage"] = "parse"
+            elif si == 2:
+                out["stage"] = "label"
+            elif si == 3:
+                out["stage"] = "match"
+            elif si == 4:
+                out["stage"] = "multi_judge"
+            elif si == 5:
+                out["stage"] = "review"
+            elif si == 6:
+                out["stage"] = "report"
     m2 = re.search(r"\((\d+)\s*cases", message)
     if m2:
         out["case_total"] = int(m2.group(1))
@@ -290,6 +308,176 @@ def launch_v4_pipeline(
     t = threading.Thread(
         target=run_v4_pipeline_thread,
         args=(job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir, judge_providers, use_mock_llm, controller_profile),
+        daemon=True,
+    )
+    t.start()
+    return t
+
+
+# ============================================================
+# Forward completeness (EoICD → HLR)
+# ============================================================
+
+# 正向完整性分析对外输出文件（2 类；ADR-001 D7 不对外暴露中间 JSON）
+FORWARD_OUTPUT_FILES = {
+    "forward_xlsx": "EoICD至HLR正向完整性分析明细.xlsx",
+    "forward_docx": "EoICD至HLR正向完整性分析报告.docx",
+}
+
+# 正向分析内部 JSON 中间产物（分阶段落盘；仅供反读派生，不对外下载）
+FORWARD_INTERMEDIATE_JSON = {
+    "forward_coverage": "forward_coverage.json",
+    "forward_scope": "forward_scope.json",
+    "forward_blocks": "forward_blocks.json",
+    "hlr_identity_index": "hlr_identity_index.json",
+    "forward_candidates": "forward_candidates.json",
+    "forward_deterministic": "forward_deterministic.json",
+    "forward_ai_review": "forward_ai_review.json",
+}
+
+
+def derive_forward_outputs(output_dir: Path) -> dict:
+    """检查正向完整性分析两个对外文件是否存在。"""
+    return {k: (output_dir / filename).exists() for k, filename in FORWARD_OUTPUT_FILES.items()}
+
+
+def derive_forward_summary(output_dir: Path) -> dict:
+    """反读 forward_coverage.json 提取覆盖分布 + AI 复核计数。"""
+    out = {
+        "analysis_mode": "",
+        "total_blocks": 0,
+        "covered_direct": 0,
+        "covered_aggregate": 0,
+        "parent_referenced": 0,
+        "possible": 0,
+        "uncovered": 0,
+        "unsupported": 0,
+        "input_error": 0,
+        "ai_reviewed": 0,
+    }
+    coverage_p = output_dir / FORWARD_INTERMEDIATE_JSON["forward_coverage"]
+    if coverage_p.exists():
+        try:
+            data = json.loads(coverage_p.read_text(encoding="utf-8"))
+            out["analysis_mode"] = data.get("analysis_mode", "") or ""
+            stats = data.get("stats", {}) or {}
+            for key in (
+                "covered_direct", "covered_aggregate", "parent_referenced",
+                "possible", "uncovered", "unsupported", "input_error",
+            ):
+                try:
+                    out[key] = int(stats.get(key, 0))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    blocks_p = output_dir / FORWARD_INTERMEDIATE_JSON["forward_blocks"]
+    if blocks_p.exists():
+        try:
+            data = json.loads(blocks_p.read_text(encoding="utf-8"))
+            out["total_blocks"] = int(data.get("total_blocks", 0))
+        except Exception:
+            pass
+    ai_p = output_dir / FORWARD_INTERMEDIATE_JSON["forward_ai_review"]
+    if ai_p.exists():
+        try:
+            data = json.loads(ai_p.read_text(encoding="utf-8"))
+            out["ai_reviewed"] = int(data.get("total_reviewed", 0))
+        except Exception:
+            pass
+    return out
+
+
+def run_forward_pipeline_thread(
+    job: Job,
+    job_dir: Path,
+    hlr_path: Path,
+    publisher_path: Optional[Path],
+    subscriber_path: Optional[Path],
+    analysis_mode: str,
+    device_icd_trace_file: Optional[Path],
+    system_device_trace_file: Optional[Path],
+    use_mock_llm: bool,
+) -> None:
+    """在后台线程内跑 V4 正向完整性管线；带 env 保存/恢复；异常 → FAILED。"""
+    output_dir = job_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_use_mock_llm = os.environ.get("USE_MOCK_LLM")
+    try:
+        if use_mock_llm is not None:
+            os.environ["USE_MOCK_LLM"] = "1" if use_mock_llm else "0"
+
+        job.update(JobStatus.RUNNING, "Step 1/8: Parsing input files")
+
+        result = run_forward_pipeline(
+            hlr=hlr_path,
+            eoicd_json=None,
+            publisher=publisher_path,
+            subscriber=subscriber_path,
+            output_dir=output_dir,
+            job=job,
+            analysis_mode=analysis_mode,
+            device_icd_trace_file=device_icd_trace_file,
+            system_device_trace_file=system_device_trace_file,
+        )
+
+        outputs = derive_forward_outputs(output_dir)
+        summary = derive_forward_summary(output_dir)
+        counts = derive_eoicd_hlr_counts(output_dir)
+
+        job.result = {
+            **outputs,
+            "analysis_mode": summary["analysis_mode"],
+            "total_blocks": summary["total_blocks"],
+            "covered_direct": summary["covered_direct"],
+            "covered_aggregate": summary["covered_aggregate"],
+            "parent_referenced": summary["parent_referenced"],
+            "possible": summary["possible"],
+            "uncovered": summary["uncovered"],
+            "unsupported": summary["unsupported"],
+            "input_error": summary["input_error"],
+            "ai_reviewed": summary["ai_reviewed"],
+            "eoicd_count": counts.get("eoicd_count", 0),
+            "hlr_count": counts.get("hlr_count", 0),
+            "errors": [],
+        }
+        job.update(JobStatus.COMPLETED, "V4 forward pipeline complete")
+    except Exception as e:
+        job.result = {
+            "forward_xlsx": (output_dir / FORWARD_OUTPUT_FILES["forward_xlsx"]).exists(),
+            "forward_docx": (output_dir / FORWARD_OUTPUT_FILES["forward_docx"]).exists(),
+            "analysis_mode": analysis_mode,
+            "total_blocks": 0,
+            "errors": [f"{type(e).__name__}: {e}"],
+        }
+        job.update(JobStatus.FAILED, f"V4 forward pipeline failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+    finally:
+        if saved_use_mock_llm is None:
+            os.environ.pop("USE_MOCK_LLM", None)
+        else:
+            os.environ["USE_MOCK_LLM"] = saved_use_mock_llm
+
+
+def launch_forward_pipeline(
+    job: Job,
+    job_dir: Path,
+    hlr_path: Path,
+    publisher_path: Optional[Path],
+    subscriber_path: Optional[Path],
+    analysis_mode: str,
+    device_icd_trace_file: Optional[Path],
+    system_device_trace_file: Optional[Path],
+    use_mock_llm: bool,
+) -> threading.Thread:
+    """工厂：返回正向后台线程对象。"""
+    t = threading.Thread(
+        target=run_forward_pipeline_thread,
+        args=(
+            job, job_dir, hlr_path, publisher_path, subscriber_path,
+            analysis_mode, device_icd_trace_file, system_device_trace_file, use_mock_llm,
+        ),
         daemon=True,
     )
     t.start()

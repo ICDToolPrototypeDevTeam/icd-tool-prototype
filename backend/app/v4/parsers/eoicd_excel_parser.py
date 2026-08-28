@@ -220,6 +220,8 @@ def _extract_layer_requirements(
         if not signal_name:
             continue
 
+        layer_path_types = [l.layer_type for l in layers[:idx + 1]]
+
         for attr_name, attr_value in layer_vals.items():
             if is_excluded(attr_name):
                 continue
@@ -256,6 +258,7 @@ def _extract_layer_requirements(
                     source=source_label,
                     is_dp_ref=is_dp_ref,
                     signal_name=signal_name,
+                    layer_path_types=layer_path_types,
                 )
             )
 
@@ -603,6 +606,7 @@ class EoICDExcelParser:
                                     is_dp_ref=True,
                                     dp_ref_name=layer_name,
                                     signal_name=rp_signal_name,
+                                    layer_path_types=[l.layer_type for l in sub_layers],
                                 ))
 
                     for req in reqs:
@@ -659,6 +663,7 @@ class EoICDExcelParser:
                                             source=source_label,
                                             is_dp_ref=False,
                                             signal_name=dp_signal_name,
+                                            layer_path_types=[l.layer_type for l in pub_layers[:idx + 1]],
                                         )
                                     )
                                     sheet_raw += 1
@@ -701,6 +706,7 @@ class EoICDExcelParser:
                                                 source=source_label,
                                                 is_dp_ref=True,
                                                 signal_name=signal_name,
+                                                layer_path_types=[l.layer_type for l in pub_layers],
                                             )
                                         )
                                         sheet_raw += 1

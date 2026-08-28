@@ -1,16 +1,11 @@
-import { useState, useEffect } from 'react'
-import V4FileUpload from './components/V4FileUpload'
-import ProcessingView from './components/ProcessingView'
-import V4ResultView from './components/V4ResultView'
-import {
-  analyzeFilesV4,
-  getJobStatusV4,
-  getJobResultV4,
-  checkV4Health,
-} from './api'
-import type { PageState, FileItem, V4JobResultResponse } from './types'
+import { NavLink, Routes, Route } from 'react-router-dom'
+import { useV4Health } from './hooks/useV4Health'
+import LandingPage from './pages/LandingPage'
+import CorrectnessPage from './pages/CorrectnessPage'
+import CompletenessPage from './pages/CompletenessPage'
 
 export default function App() {
+  const { isOnline, v4Online } = useV4Health()
   const [pageState, setPageState] = useState<PageState>('upload')
   const [progress, setProgress] = useState('已提交，等待开始')
   const [v4ResultData, setV4ResultData] = useState<V4JobResultResponse | null>(null)
@@ -170,6 +165,35 @@ export default function App() {
             <div className="header__subtitle">ICD Tool Platform</div>
           </div>
         </div>
+
+        <nav className="header__nav">
+          <NavLink
+            to="/"
+            end
+            className={({ isActive }) =>
+              `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
+            }
+          >
+            工具入口
+          </NavLink>
+          <NavLink
+            to="/correctness"
+            className={({ isActive }) =>
+              `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
+            }
+          >
+            正确性分析
+          </NavLink>
+          <NavLink
+            to="/completeness"
+            className={({ isActive }) =>
+              `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
+            }
+          >
+            完整性分析
+          </NavLink>
+        </nav>
+
         <div className="header__status">
           <div className={`status-dot ${(!isOnline || !v4Online) ? 'status-dot--offline' : ''}`} />
           <span>{!isOnline ? '服务离线' : !v4Online ? 'V4 服务不可用' : '在线服务'}</span>
@@ -178,6 +202,11 @@ export default function App() {
 
       {/* Main */}
       <main className="main">
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/correctness" element={<CorrectnessPage />} />
+          <Route path="/completeness" element={<CompletenessPage />} />
+        </Routes>
         {/* Workflow Steps */}
         <div className="workflow">
           <div className={`step ${getStepClass(1)}`}>
@@ -285,10 +314,10 @@ export default function App() {
         <div className="footer__left">
           <img src="/logo2.jpg" alt="AVIC" className="footer__logo-img" />
           <span className="footer__divider">|</span>
-          <span>中航工业民机机载系统工程中心有限公司</span>
+          <span>中航民机机载系统有限公司</span>
         </div>
         <div className="footer__right">
-          <span>© 2026 中航工业民机机载系统工程中心有限公司</span>
+          <span>© 2026 中航民机机载系统有限公司</span>
         </div>
       </footer>
     </div>

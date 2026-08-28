@@ -44,6 +44,7 @@ class V4JobStatusResponse(BaseModel):
 
     job_id: str
     status: JobStatus
+    task_type: str = "correctness"
     stage: str = ""
     stage_index: Optional[int] = None
     stage_total: Optional[int] = None
@@ -92,7 +93,48 @@ class V4JobResultResponse(BaseModel):
 
     job_id: str
     status: JobStatus
+    task_type: str = "correctness"
     summary: V4JobResultSummary
     outputs: V4JobOutputs
     mock_models: list[str]
+    errors: list[str]
+
+
+# ============================================================================
+# 正向完整性分析（EoICD → HLR）结果接口响应
+# ============================================================================
+
+
+class V4ForwardJobOutputs(BaseModel):
+    """正向完整性分析输出文件存在性布尔（2 类对外）。"""
+
+    forward_xlsx: bool
+    forward_docx: bool
+
+
+class V4ForwardJobResultSummary(BaseModel):
+    """V4 正向完整性分析结果摘要。"""
+
+    analysis_mode: str = ""
+    total_blocks: int = 0
+    covered_direct: int = 0
+    covered_aggregate: int = 0
+    parent_referenced: int = 0
+    possible: int = 0
+    uncovered: int = 0
+    unsupported: int = 0
+    input_error: int = 0
+    ai_reviewed: int = 0
+    eoicd_count: int = 0
+    hlr_count: int = 0
+
+
+class V4ForwardJobResultResponse(BaseModel):
+    """GET /api/v4/jobs/{job_id}/result（task_type=completeness）响应。"""
+
+    job_id: str
+    status: JobStatus
+    task_type: str = "completeness"
+    summary: V4ForwardJobResultSummary
+    outputs: V4ForwardJobOutputs
     errors: list[str]

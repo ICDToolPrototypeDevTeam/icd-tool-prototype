@@ -163,7 +163,7 @@ async def coverage_analysis(
                 )
 
     # —— 创建 Job 与目录（V4 路径：backend/output/v4/{job_id}/input/ + output/）——
-    job = job_manager.create_job()
+    job = job_manager.create_job(task_type="correctness")
     job_dir = Path(__file__).resolve().parent.parent.parent.parent / 'output' / 'v4' / job.job_id
     input_dir = job_dir / 'input'
     input_dir.mkdir(parents=True, exist_ok=True)

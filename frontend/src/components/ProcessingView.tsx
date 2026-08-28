@@ -15,6 +15,13 @@ const STAGE_LABELS: Record<string, string> = {
   review: '共识复核',
   report: '报告生成',
   done: '完成',
+  // 正向（完整性分析）8 步
+  scope: '追溯范围',
+  blocks: '构建业务对象块',
+  identity_index: '构建HLR身份索引',
+  candidate_recall: '候选召回',
+  deterministic: '确定性判定',
+  ai_review: 'AI三态复核',
 }
 
 export default function ProcessingView({
