@@ -27,8 +27,32 @@ from pathlib import Path
 
 from app.v4.profiles.base import (
     ControllerProfile,
+    SheetMatchConfig,
     TraceabilityConfig,
     TraceabilityTableConfig,
+)
+
+
+# AMS 默认 cfg：作为不传 cfg 时的兼容基线（与 profiles/ams/config.yaml 字节一致）。
+# 适用于 forward_scope.py 这类尚未迁移到 profile-driven 的旧调用方；
+# 反向管线 build_trace_index() 显式传 cfg.table1/table2，不走这里。
+_DEFAULT_TABLE1_CFG = TraceabilityTableConfig(
+    filename_patterns=("设备需求与系统ICD追溯表.xlsx",),
+    sheet_match=SheetMatchConfig(
+        by_name_keywords=("设备_设备接口追溯表",),
+        fallback_index=1,
+    ),
+    columns={"erd": 3, "icd_fullname": 7},
+)
+_DEFAULT_TABLE2_CFG = TraceabilityTableConfig(
+    filename_patterns=("单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx",),
+    sheet_match=SheetMatchConfig(
+        by_name_keywords=("Sheet1",),
+        fallback_index=0,
+    ),
+    columns={"erd": 0, "hlr": 3, "module": 4},
+    skip_module=("EICD",),
+    data_start_row=4,
 )
 
 
@@ -106,12 +130,17 @@ def _select_sheet(wb, cfg: TraceabilityTableConfig):
 
 
 def _read_table2_erd_to_hlr(
-    fpath: Path, cfg: TraceabilityTableConfig
+    fpath: Path, cfg: TraceabilityTableConfig | None = None,
 ) -> dict[str, list[str]]:
     """Read Table 2 (parent<->HLR matrix) to build parent -> HLR mapping.
 
     Returns: {parent_id: [hlr_id, ...]}
+
+    If ``cfg`` is None the AMS default (``_DEFAULT_TABLE2_CFG``) is used,
+    matching the pre-#63 hardcoded column layout. The reverse pipeline
+    (``build_trace_index``) always passes ``cfg.table2`` explicitly.
     """
+    cfg = cfg or _DEFAULT_TABLE2_CFG
     import openpyxl
 
     erd_to_hlr: dict[str, list[str]] = defaultdict(list)
@@ -161,9 +190,15 @@ def _read_table2_erd_to_hlr(
 
 
 def _read_table1_erd_to_icd(
-    fpath: Path, cfg: TraceabilityTableConfig
+    fpath: Path, cfg: TraceabilityTableConfig | None = None,
 ) -> dict[str, list[str]]:
-    """Read Table 1 (ERD<->ICD mapping) to build parent -> ICD FullName mapping."""
+    """Read Table 1 (ERD<->ICD mapping) to build parent -> ICD FullName mapping.
+
+    If ``cfg`` is None the AMS default (``_DEFAULT_TABLE1_CFG``) is used,
+    matching the pre-#63 hardcoded column layout. The reverse pipeline
+    (``build_trace_index``) always passes ``cfg.table1`` explicitly.
+    """
+    cfg = cfg or _DEFAULT_TABLE1_CFG
     import openpyxl
 
     erd_to_icd: dict[str, list[str]] = defaultdict(list)

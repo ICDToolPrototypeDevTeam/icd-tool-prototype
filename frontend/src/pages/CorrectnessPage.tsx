@@ -15,6 +15,9 @@ export default function CorrectnessPage() {
   const [subscriberFile, setSubscriberFile] = useState<FileItem | null>(null)
   const [traceabilityFiles, setTraceabilityFiles] = useState<FileItem[]>([])
   const [selectedPreviewFile, setSelectedPreviewFile] = useState<FileItem | null>(null)
+  // Reverse-pipeline only: AMS / FGMC / HSCU / RPDU controller profile.
+  // Forward (Completeness) analysis does not use this selector.
+  const [v4ControllerProfile, setV4ControllerProfile] = useState<string>('')
 
   function handleStart() {
     if (!hlrWordFile) {
@@ -30,6 +33,7 @@ export default function CorrectnessPage() {
     if (hlrWordFile.file) formData.append('hlr_word_file', hlrWordFile.file)
     if (publisherFile?.file) formData.append('eoicd_publisher_file', publisherFile.file)
     if (subscriberFile?.file) formData.append('eoicd_subscriber_file', subscriberFile.file)
+    if (v4ControllerProfile) formData.append('controller_profile', v4ControllerProfile)
 
     if (traceabilityFiles.length > 0) {
       traceabilityFiles.forEach((f) => {
@@ -74,6 +78,30 @@ export default function CorrectnessPage() {
             }}
             onPreviewSelect={setSelectedPreviewFile}
           />
+          {/* Controller Profile selector — reverse pipeline only.
+              Matches backend ALLOWED_CONTROLLER_PROFILES in
+              backend/app/api/v4/coverage.py: ams / fgmc / hscu / rpdu. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 16, marginBottom: 16 }}>
+            <span style={{ fontSize: 14, color: '#555' }}>系统类型：</span>
+            <select
+              value={v4ControllerProfile}
+              onChange={(e) => setV4ControllerProfile(e.target.value)}
+              style={{
+                padding: '6px 12px',
+                borderRadius: 6,
+                border: '1px solid #ddd',
+                fontSize: 14,
+                minWidth: 160,
+              }}
+            >
+              <option value="">自动识别</option>
+              <option value="ams">环控系统 (AMS)</option>
+              <option value="fgmc">燃油系统 (FGMC)</option>
+              <option value="hscu">液压系统 (HSCU)</option>
+              <option value="rpdu">远程功率分配单元 (RPDU)</option>
+            </select>
+            <span style={{ fontSize: 12, color: '#888' }}>（默认自动识别；仅影响反向管线）</span>
+          </div>
           <div className="action-bar">
             <button className="btn btn--secondary btn--large" onClick={handleReset}>
               清空全部
