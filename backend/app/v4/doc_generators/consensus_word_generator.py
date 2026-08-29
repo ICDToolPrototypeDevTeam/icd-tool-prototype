@@ -482,7 +482,7 @@ def generate_consensus_report(
                                color=RGBColor(0xCC, 0x88, 0x00))
 
         # 设置明细表列宽
-        detail_col_widths = [1.18, 5.21, 1.48, 4.48, 2.11, 10.09, 1.72, 1.82]
+        detail_col_widths = [1.18, 4.61, 1.46, 5.1, 2.11, 9.93, 1.76, 1.93]
         for row_obj in table.rows:
             for i, w in enumerate(detail_col_widths):
                 row_obj.cells[i].width = Cm(w)

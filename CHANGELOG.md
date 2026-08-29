@@ -6,7 +6,7 @@
 
 ### Changed
 
-- **共识报告 docx 列宽锁定（fixed layout + full_width 区分）**：`consensus_word_generator.py` 新增 `_set_table_layout_fixed(table, full_width=True)` helper，给 3 张表（判定分布 / 星级分布 / 分析明细）加 `<w:tblLayout w:type="fixed"/>` 并同步 `<w:tblGrid>` 到首行 tcW，让 cell.width 真正生效不再被 Word autofit 按内容撑开。判定 / 星级分布表调用时 `full_width=False`（tblW 保持 auto，按内容算总宽，不再被强制拉到 100% 页宽）；分析明细表调用时 `full_width=True` 默认（占满 100% 页宽保持原行为）。分析明细表 cm 值同步微调：列 5「不一致属性」2.0→2.11、列 6「分析摘要」10.5→10.09、列 8「星级」1.39→1.82，其余 5 列微调 ±0.02-0.06。判定规则、数据契约、对外 API、下载文件均无变化。
+- **共识报告 docx 列宽锁定（fixed layout + full_width 区分）**：`consensus_word_generator.py` 新增 `_set_table_layout_fixed(table, full_width=True)` helper，给 3 张表（判定分布 / 星级分布 / 分析明细）加 `<w:tblLayout w:type="fixed"/>` 并同步 `<w:tblGrid>` 到首行 tcW，让 cell.width 真正生效不再被 Word autofit 按内容撑开。判定 / 星级分布表调用时 `full_width=False`（tblW 保持 auto，按内容算总宽，不再被强制拉到 100% 页宽）；分析明细表调用时 `full_width=True` 默认（占满 100% 页宽保持原行为）。分析明细表 cm 值调整：列 2「SWHLR ID」5.25→4.61、列 4「ICD Block」4.5→5.1、列 5「不一致属性」2.0→2.11、列 6「分析摘要」10.5→9.93、列 8「星级」1.39→1.93，其余 3 列微调 ±0.02。判定规则、数据契约、对外 API、下载文件均无变化。
 
 ## [Unreleased] - 2026-08-28
 

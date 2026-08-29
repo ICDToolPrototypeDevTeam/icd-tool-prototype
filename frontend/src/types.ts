@@ -42,6 +42,7 @@ export interface V4JobResultResponse {
     star_distribution: Record<string, number>
     status_distribution: Record<string, number>
     average_star_rating: number
+    agreement_distribution?: Record<string, number>
   }
   outputs: {
     eoicd_xlsx: boolean

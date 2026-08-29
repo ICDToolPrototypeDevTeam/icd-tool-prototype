@@ -2320,3 +2320,206 @@ v3 fusion 上线后跑 `故障注入1.0.docx`，REV-0010（FSF21000101_HLR_547�
   - `final_coverage_status=待确认`（一致）
 - e2e 用例 5/6 跑通（mock + 真实 LLM）
 
+
+---
+
+## 2026-08-27：ADR-004 v3 fusion 五星体系两维度重构
+
+### 任务目标
+
+修正 ADR-004 v2 的语义错误：把 `inconsistent_attributes`（EoICD-HLR 事实差异）错误重定义为 `field_disagreements`（provider 间分歧），导致 Word「不一致属性」列失去数据源。恢复两者为两个独立维度。
+
+### 完成内容
+
+1. `models.py` 新增 `InconsistentAttribute`（attribute / detail / providers），`ConsensusResult` 新增 `inconsistent_attributes`；`FieldDisagreement` docstring 标注为辅助字段
+2. `consensus.md` 重写为 6 步流程 + 5 个输出示例，明确 `attribute`（事实差异）vs `field`（裁判分歧）命名
+3. `review_agent.py` 新增 `_parse_inconsistent_attributes` 容错解析（dict / 裸字符串）
+4. `consensus_word_generator.py`「不一致属性」列直接读 `inconsistent_attributes`，删除从 `field_disagreements` 派生逻辑
+5. e2e 用例 5/6 注入两字段；`common.py` 新增 `_migrate_consensus_schema` 自动迁移旧 baseline
+
+### 修改文件
+
+1. `backend/app/v4/models.py`
+2. `backend/app/v4/prompts/consensus.md`
+3. `backend/app/v4/comparison/review_agent.py`
+4. `backend/app/v4/doc_generators/consensus_word_generator.py`
+5. `backend/tests/e2e/test_use_case_5_five_star_rating.py` / `test_use_case_6_five_star_upgrade.py` / `common.py`
+6. `docs/decisions/ADR-004-五星评价体系.md`
+7. `CHANGELOG.md`
+
+### 验证方式
+
+1. `docker compose build backend`
+2. 容器内跑用例 5/6（mock + 真实 LLM）
+3. 真实 LLM 跑 `故障注入1.0.docx`，检查 `inconsistent` case 的 `inconsistent_attributes` 非空
+
+### 验证结果
+
+语法 + mock 用例通过；真实样例验证待跑。
+
+### 遗留问题
+
+`_map_star_rating` 仍只看 `field_disagreements`，`inconsistent_attributes` 不参与星档（用户确认预期）。
+
+### 下一步建议
+
+真实 LLM 跑 `故障注入1.0.docx` 端到端验证两列对应关系。
+
+---
+
+## 2026-08-27：五档命名正式化（Plan Y）
+
+### 任务目标
+
+ADR-004 v3 fusion 上线后，5 档中文命名仍停留在方案 A 描述式长串，与报告「星级分布」小节口径不一致。本次按 Plan Y 把 5 档命名正式化为可对外宣讲的标准短语。
+
+### 完成内容
+
+1. 5 档标准命名：完全共识 / 完全共识·字段异议 / 多数共识 / 多数共识·关键异议 / 三方分歧·仅单源·全部失效
+2. `consensus_word_generator.py` `star_levels` 表的"星级"列 / "说明"列 / "处置建议"列全部按新命名更新
+3. 明细表"共识"列 mapping 同步刷新（与"星级分布"小节口径严格对齐）
+
+### 修改文件
+
+1. `backend/app/v4/doc_generators/consensus_word_generator.py`（3 处文案统一）
+2. `docs/decisions/ADR-004-五星评价体系.md`（命名口径章节）
+
+### 验证方式
+
+1. `python -c "import ast; ..."` 静态语法
+2. mock 跑管线生成 docx，目检"星级分布"小节 + 明细表"共识"列 + 处置建议三处文案统一
+
+### 验证结果
+
+静态检查通过；mock docx 目检待跑。
+
+### 遗留问题
+
+无。
+
+### 下一步建议
+
+真实样例 docx 目检确认命名在不同 HLR 样本下的稳定性。
+
+---
+
+## 2026-08-28 Issue #88：AMSC 总线通用协议 covered 判定规则新增
+
+### 任务目标
+
+AMSC 项目 HLR 描述总线协议（ARINC 429 / A825 / A664）通用级特征时，常因 V4 反向 judge 误判为 needs_review。本次按"覆盖协议级特征 → covered"的判定规则新增 prompt 章节。
+
+### 完成内容
+
+1. `reverse_judge.md` 新增「AMSC 通用协议特征 covered 判定说明（空气管理系统控制器专用）」段落
+2. 列出 covered 判定 3 个同时满足条件：协议级实现为内容主体、未引用具体 ICD 信号名 / bit 偏移 / Label 号、实现逻辑符合协议标准
+3. 给出 covered / needs_review 判定示例（SDI 位编码、奇偶校验 → covered；具体信号位解算 → needs_review）
+4. `CHANGELOG.md` 同步条目
+
+### 修改文件
+
+1. `backend/app/v4/prompts/reverse_judge.md`（新增段落）
+2. `CHANGELOG.md`
+
+### 验证方式
+
+1. 准备 AMSC 项目 HLR + EoICD 样本，混合「协议级特征」与「具体信号实现」两类 HLR
+2. 跑通管线，确认协议级特征 → covered，引用具体信号 → needs_review
+3. 非 AMSC 项目 HLR 输入回归
+
+### 验证结果
+
+尚未端到端验证（本次仅 prompt 落盘）。
+
+### 遗留问题
+
+未引入 CAN / 1553B 等其他总线协议的同类规则。
+
+### 下一步建议
+
+观察 AMSC 真实样本下 covered 命中率提升效果；后续按需扩展更多总线协议规则。
+
+---
+
+## 2026-08-28 Issue #89：re-review per-case 并行 + minimax JSON 解析修复
+
+### 任务目标
+
+两个独立修复合并提交：(1) minimax re-review 返回"先长 `<think>` 块 + 后 ```json fence"版式导致 `json.loads` 失败，case 被误标 `coverage_status="error"`；(2) re_review 顶层 case 串行执行成为墙钟瓶颈，需改为 case 维度并发。
+
+### 完成内容
+
+1. **minimax JSON 解析修复**：`semantic_judge._extract_json` 增加 else 分支，非贪婪正则搜索 ```json fence 并提取内含 JSON
+2. **re_review 并行化改造**：
+   - case 维度并发：re_review 顶层从 `for case_id in sorted(...)` 串行改为"提交 + 收集 + 统一等待"批模式，复用 `_submit_with_gate` / inflight 信号量原语
+   - per-case deadline 语义：从"硬墙钟"改为"per-case 软超时 + 全局批上限"混合约束
+   - audit 写入统一：`re_review_results.json` 与 `multi_judge_results.json` 在批结束时统一序列化，避免并发写文件冲突
+3. 文档同步：`debug-log.md` 补充 BUG-20260828-001 复盘；`CHANGELOG.md` 新增两条目
+
+### 修改文件
+
+1. `backend/app/v4/comparison/semantic_judge.py`（`_extract_json` else 分支）
+2. `backend/app/v4/pipeline.py`（re_review 并行化）
+3. `docs/development/debug-log.md`（BUG-20260828-001 复盘）
+4. `CHANGELOG.md`
+
+### 验证方式
+
+1. `docker compose build backend`
+2. 真实样本 `故障注入2.0 - 副本.docx` 跑通管线
+   - minimax re-review 返回完整 judgment（不再误标 error）
+   - 总墙钟耗时与改造前同输入对比，case 间实现并行
+3. 降级场景回归（surviving=1/2/全部 error 三种组合）
+
+### 验证结果
+
+端到端用例全 PASS；降级行为不变。
+
+### 遗留问题
+
+无。
+
+### 下一步建议
+
+观察真实管线总墙钟耗时改善幅度，校准 `DEGRADATION_EXTRA_WAIT` / `DEGRADATION_DRAIN_BUDGET`。
+
+---
+
+## 2026-08-29 Issue #90：V4 共识 docx 列宽锁定与 5 星适配微调
+
+### 任务目标
+
+Word 模板列宽此前依赖旧 `tblW` 写入方式，存在按内容长度跑版风险。本次新增 `_set_table_layout_fixed()` helper 锁定 fixed layout 模式，并按 5 星体系扩展后调整列宽。
+
+### 完成内容
+
+1. 新增 `_set_table_layout_fixed(table, full_width)`：锁定 fixed layout，对齐 tblGrid 与 cell 宽度，避免 Word 自动重算
+2. 顶部统计表与星级分布表应用 fixed layout（紧凑表格，`full_width=False`，宽度由列宽之和决定）
+3. 明细表沿用 100% 页宽，统一由 helper 处理
+4. 星级分布表列宽微调适配 5 档 + 3 个子类型 + 平均星级
+5. 明细表 8 列列宽微调，适配「不一致属性」列新增后的内容分布
+
+### 修改文件
+
+1. `backend/app/v4/doc_generators/consensus_word_generator.py`（`_set_table_layout_fixed` + 3 处调用点）
+
+### 验证方式
+
+1. `docker compose build backend`
+2. 真实样本 `故障注入2.0 - 副本.docx` + Publisher + Subscriber 跑通管线
+3. Word 打开 docx，确认：
+   - 各表列宽与模板一致，不随内容跑版
+   - 5 档 + 1★ 三个子类型 + 平均星级布局正常
+   - 明细表 8 列（含不一致属性列）宽度合理
+
+### 验证结果
+
+端到端验证通过；多组样本回归无跑版。
+
+### 遗留问题
+
+无。
+
+### 下一步建议
+
+前端表格列宽在「V4 五星评价体系前端适配」Issue 中同步调整。

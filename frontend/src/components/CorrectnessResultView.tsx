@@ -110,16 +110,29 @@ const STATUS_META: Record<string, { label: string; color: string; Icon: LucideIc
   "无匹配": { label: '无匹配', color: '#6a1b9a', Icon: CircleDashed },
 }
 
-function StarBar({ dist }: { dist: Record<string, number> }) {
+function StarBar({
+  dist,
+  agreementDist,
+}: {
+  dist: Record<string, number>
+  agreementDist?: Record<string, number>
+}) {
   const total = Object.values(dist).reduce((a, b) => a + b, 0) || 1
+
+  const oneStarCount = agreementDist
+    ? (agreementDist.split || 0) +
+      (agreementDist.single_source || 0) +
+      (agreementDist.no_consensus || 0)
+    : (dist['1'] || 0)
+
   return (
     <div className="star-bar">
-      {[3, 2, 1].map((star) => {
-        const count = dist[String(star)] || 0
+      {[5, 4, 3, 2, 1].map((star) => {
+        const count = star === 1 ? oneStarCount : (dist[String(star)] || 0)
         const pct = Math.round((count / total) * 100)
         return (
           <div key={star} className="star-bar__item">
-            <span className="star-bar__label">{'★'.repeat(star)}{'☆'.repeat(3 - star)}</span>
+            <span className="star-bar__label">{'★'.repeat(star)}{'☆'.repeat(5 - star)}</span>
             <div className="star-bar__track">
               <div className="star-bar__fill" style={{ width: `${pct}%` }} />
             </div>
@@ -168,7 +181,7 @@ export default function CorrectnessResultView({ data, jobId, onNewTask }: Props)
             平均星级 <strong>{s.average_star_rating?.toFixed(1)}</strong>
           </span>
         </div>
-        <StarBar dist={starDist} />
+        <StarBar dist={starDist} agreementDist={s.agreement_distribution} />
       </div>
 
       {/* Preview cards grid */}
