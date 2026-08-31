@@ -1,0 +1,134 @@
+profile:
+  id: ams
+  display_name: 空气管理系统控制器 (AMS)
+  version: 1.0
+
+hlr_parser:
+  glossary_table_index: 0
+  requirement_table_min_rows: 8
+  filter_non_requirement: false
+  field_map:
+    id: ["需求ID"]
+    content: ["需求中文"]
+    object_type: ["对象类型"]
+    is_derived: ["是否衍生"]
+    rationale: ["基本原理"]
+    is_safety_related: ["安全相关"]
+    verification_method: ["验证方法"]
+    implementation: ["实现方法"]
+
+classifier_keywords:
+  analog:
+    - "ADC"
+    - "模拟量"
+    - "电压"
+    - "电流"
+    - "传感器"
+    - "采样"
+    - "量程"
+    - "[Vv]oltage"
+    - "[Cc]urrent"
+    - "[Ss]ensor"
+    - "A/D"
+    - "AD转换"
+    - "ADCIN"
+  discrete:
+    - "微动"
+    - "开关"
+    - "[Tt]rue"
+    - "[Ff]alse"
+    - "故障"
+    - "跳变"
+    - "触点"
+    - "离散量"
+    - "开关量"
+    - "BOOL"
+    - "BOOLEAN"
+    - "DISCRETE"
+    - "状态位"
+    - "有效位"
+  bus:
+    - "CAN"
+    - "A825"
+    - "A664"
+    - "A429"
+    - "AFDX"
+    - "总线"
+    - "ARINC"
+    - "通信"
+    - "接收"
+    - "发送"
+    - "写入"
+    - "采集"
+    - "解析"
+  direction_send:
+    - "发送"
+    - "写入"
+    - "输出"
+    - "上报"
+    - "发布"
+    - "驱动"
+    - "设置"
+    - "控制"
+  direction_receive:
+    - "接收"
+    - "采集"
+    - "解析"
+    - "获取"
+    - "读取"
+    - "监测"
+    - "判断"
+    - "检测"
+    - "输入"
+
+traceability:
+  table1:
+    filename_patterns:
+      - "设备需求与系统ICD追溯表.xlsx"
+    sheet_match:
+      by_name_keywords:
+        - "设备_设备接口追溯表"
+      fallback_index: 1
+    columns:
+      erd: 3
+      icd_fullname: 7
+  table2:
+    filename_patterns:
+      - "单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx"
+    sheet_match:
+      by_name_keywords:
+        - "Sheet1"
+      fallback_index: 0
+    columns:
+      erd: 0
+      hlr: 3
+      module: 4
+    skip_module:
+      - "EICD"
+    # Sheet1 has 2 header rows: row 1 ('当前需求文档/下层需求文档')
+    # and row 2 ('需求ID/模块名称/...'); data starts at row 4.
+    data_start_row: 4
+
+ai_labeling:
+  device_examples:
+    - "风扇"
+    - "RFAN"
+    - "FCM"
+    - "ADC"
+  signal_examples:
+    - "速度"
+    - "SPEED"
+    - "RPM"
+    - "温度"
+    - "状态"
+
+# Auto-detection: used by coverage.py _detect_system_type to identify which
+# profile matches an uploaded HLR Word file.
+auto_detect:
+  required_rows: 8
+  required_cols: 2
+  cell_patterns:
+    "0":
+      contains: "需求ID"
+    "1":
+      starts_with: "FSF21"

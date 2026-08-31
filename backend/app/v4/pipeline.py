@@ -6,7 +6,6 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import sys
-import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -20,6 +19,7 @@ from app.v4.comparison.re_review import re_review_judgments
 from app.v4.comparison.review_agent import review_judgments, _build_summary
 from app.v4.config import JUDGE_PROVIDERS
 from app.v4.degradation import DegradationConfig, DegradationContext
+from app.v4.degradation.concurrency import _get_drain_executor, _submit_with_gate
 from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.v4.doc_generators.excel_generator import generate_eoicd_excel
 from app.v4.doc_generators.word_generator import generate_consistency_report
@@ -44,7 +44,9 @@ from app.v4.models import (
     ReverseMatchOutput,
 )
 from app.v4.parsers.eoicd_excel_parser import EoICDExcelParser
-from app.v4.parsers.hlr_word_parser import HLRWordParser
+from app.v4.parsers import create_hlr_parser
+from app.v4.profiles.base import ControllerProfile, TraceabilityConfig
+from app.v4.profiles import apply_hlr_preprocess_hook
 from app.v4.traceability import build_trace_index, name_to_block_key
 
 
@@ -62,6 +64,28 @@ from app.v4.matching.forward_matcher import (
 )
 from app.v4.matching.hlr_identity_index import build_hlr_identity_index
 from app.v4.traceability.forward_scope import build_forward_scope
+
+
+def _resolve_profile(profile: ControllerProfile | None) -> ControllerProfile:
+    """Return the provided profile, or fall back to the registry's AMS default.
+
+    Centralizes registry lookup so that callers passing ``profile=None`` get
+    byte-identical behaviour to pre-#63 code (AMS defaults). Raises a clear
+    RuntimeError if neither is available.
+    """
+    if profile is not None:
+        return profile
+    from app.v4.profiles import init_registry, get_registry
+
+    reg_dir = Path(__file__).resolve().parent / "profiles"
+    try:
+        init_registry(reg_dir)
+        return get_registry().get_or_raise("ams")
+    except Exception as e:
+        raise RuntimeError(
+            "No profile provided and default AMS profile not found. "
+            "Pass profile=... explicitly or initialize the registry."
+        ) from e
 
 
 def _parse_eoicd(
@@ -100,11 +124,41 @@ def _parse_eoicd(
     return result
 
 
-def _parse_hlr(input_path: Path, output_path: Path) -> HLROutput:
-    """Parse the HLR Word document."""
+def _parse_hlr(
+    input_path: Path,
+    output_path: Path,
+    profile: ControllerProfile | None = None,
+) -> HLROutput:
+    """Parse the HLR input file.
+
+    The parser is selected by extension via ``create_hlr_parser``:
+
+      - ``.docx`` -> ``HLRWordParser`` (AMS/FGMC/HSCU; profile-driven field map).
+      - ``.xlsx`` -> ``HLRExcelParser`` (RPDU; fixed column mapping A/B/C from row 3).
+
+    When ``profile`` is ``None`` the registry's AMS default is used (so that
+    pre-#63 callers get byte-identical output).
+    """
     print(f"Parsing HLR: {input_path}")
-    parser = HLRWordParser(input_path)
+    resolved = _resolve_profile(profile)
+    parser = create_hlr_parser(input_path, profile=resolved)
     result: HLROutput = parser.parse()
+
+    # Profile-specific HLR content rewrite (e.g. HSCU LBL_X → L<octal>_X
+    # alias annotations). No-op for profiles that don't declare
+    # hlr_preprocess.enabled. Mutates ``result.requirements[i].content``
+    # in-place so the persisted JSON reflects the rewritten text.
+    #
+    # HSCU's hook needs to re-open the source Word to auto-parse the LBL
+    # catalog table; ``HLRWordParser`` only stored the basename in
+    # ``result.source_file``, which fails ``Path(...).exists()`` in the
+    # backend cwd. Temporarily expose the full input path for the hook
+    # call, then restore the basename so the persisted JSON keeps the
+    # same display value (avoids changing AMS/FGMC behaviour).
+    _saved_source_file = result.source_file
+    result.source_file = str(input_path)
+    rewritten = apply_hlr_preprocess_hook(resolved, result)
+    result.source_file = _saved_source_file
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
@@ -115,6 +169,8 @@ def _parse_hlr(input_path: Path, output_path: Path) -> HLROutput:
     print(f"  Output: {output_path}")
     print(f"  Requirements: {result.total_count}")
     print(f"  Glossary entries: {len(result.glossary)}")
+    if rewritten:
+        print(f"  HLR preprocess: {rewritten} requirement(s) rewritten by profile hook")
     return result
 
 
@@ -124,6 +180,52 @@ def _count_match_types(results: list) -> dict[str, int]:
     for r in results:
         counts[r.match_type] = counts.get(r.match_type, 0) + 1
     return counts
+
+
+def match_reverse_per_hlr(
+    hlr_requirements: list,
+    hlr_labels: dict,
+    per_hlr_eoicd: dict[str, list],
+    profile: ControllerProfile | None = None,
+) -> ReverseMatchOutput:
+    """Run reverse matching per-HLR with a per-HLR EoICD subset.
+
+    Each HLR is matched against its own EoICD subset, not a global union.
+    This is the correct semantics for traceability-based prefiltering:
+    HLR_A should not see HLR_B's traced blocks (Issue #74).
+
+    ``profile`` is forwarded to each per-HLR ``match_reverse`` call so RPDU's
+    four matcher enhancements (Chinese-suffix stripping, direction-soft
+    matching, signal-number bonus, top_k=50) still apply.
+    """
+    from app.v4.matching.reverse_matcher import match_reverse as _match_reverse
+
+    all_results: list = []
+    for hlr in hlr_requirements:
+        eoicd_subset = per_hlr_eoicd.get(hlr.requirement_id, [])
+        single_hlr_labels = (
+            {hlr.requirement_id: hlr_labels[hlr.requirement_id]}
+            if hlr.requirement_id in hlr_labels
+            else {}
+        )
+        out = _match_reverse(
+            [hlr],
+            single_hlr_labels,
+            eoicd_subset,
+            profile=profile,
+        )
+        all_results.extend(out.results)
+
+    total_hlr = len(hlr_requirements)
+    total_eoicd = sum(len(v) for v in per_hlr_eoicd.values())
+    stats = _count_match_types(all_results)
+    return ReverseMatchOutput(
+        total_hlr=total_hlr,
+        total_eoicd_profiles=total_eoicd,
+        stats=stats,
+        results=all_results,
+        eoicd_unmatched_profile_keys=[],
+    )
 
 
 def _merge_reverse_match_outputs(
@@ -169,14 +271,27 @@ def _match_reverse_with_trace(
     hlr_labels: dict,
     eoicd_requirements: list,
     trace_dir: Path,
+    trace_cfg: TraceabilityConfig,
+    profile: ControllerProfile | None = None,
 ) -> ReverseMatchOutput:
     """Run reverse matching with traceability-based pre-filtering.
 
     Splits HLRs into:
       - Group A (has trace data): match against filtered EoICD subset
       - Group B (no trace data): fallback to full EoICD matching
+
+    ``trace_cfg`` is required (Task 7 made the second arg to
+    ``build_trace_index`` non-optional). Callers resolve it from a profile
+    (via ``_resolve_profile``) so AMS defaults keep working.
+
+    ``profile`` (Issue #74) is forwarded to ``build_trace_index`` so the
+    ``header_adaptive`` trace strategy activates for RPDU, and to each
+    ``match_reverse`` call so RPDU's enhancements (Chinese-suffix stripping,
+    direction-soft matching, signal-number bonus, top-k=50) are applied.
+    ``profile=None`` keeps the AMS default behaviour (byte-identical to
+    pre-#63 / pre-#74 code).
     """
-    trace_index = build_trace_index(trace_dir)
+    trace_index = build_trace_index(trace_dir, trace_cfg, profile=profile)
     print(f"  Traced HLRs: {trace_index.total_hlrs_traced}")
     print(f"  ERDs: {trace_index.total_erds}")
     print(f"  ICD FullNames: {trace_index.total_icd_fullnames}")
@@ -186,12 +301,16 @@ def _match_reverse_with_trace(
     group_a_hlrs: list = []
     group_b_hlrs: list = []
     all_traced_block_keys: set[str] = set()
+    # Issue #74 (RPDU): per-HLR traced block sets so each HLR only sees its
+    # own traced blocks, not the global union of all HLRs' blocks.
+    hlr_traced_blocks: dict[str, set[str]] = {}
 
     for hlr in hlr_requirements:
         traced_blocks = trace_index.hlr_to_blocks.get(hlr.requirement_id)
         if traced_blocks:
             group_a_hlrs.append(hlr)
             all_traced_block_keys.update(traced_blocks)
+            hlr_traced_blocks[hlr.requirement_id] = traced_blocks
         else:
             group_b_hlrs.append(hlr)
 
@@ -202,19 +321,52 @@ def _match_reverse_with_trace(
     group_a_ids = {h.requirement_id for h in group_a_hlrs}
     group_b_ids = {h.requirement_id for h in group_b_hlrs}
 
+    # Issue #74 (RPDU): opt-in per-HLR prefilter pool. AMS/FGMC/HSCU keep
+    # legacy union-pool semantics (``profile.prefilter_per_hlr`` defaults
+    # to False).
+    use_per_hlr = bool(profile and getattr(profile, "prefilter_per_hlr", False))
+
     # Group A: filtered EoICD
     if group_a_hlrs:
-        filtered_eoicd = []
-        for req in eoicd_requirements:
-            bk = name_to_block_key(req.signal_name)
-            if bk in all_traced_block_keys:
-                filtered_eoicd.append(req)
-        print(f"  Filtered EoICD: {len(filtered_eoicd)} / {len(eoicd_requirements)} entries")
-        result_a = match_reverse(
-            group_a_hlrs,
-            {k: v for k, v in hlr_labels.items() if k in group_a_ids},
-            filtered_eoicd,
-        )
+        if use_per_hlr:
+            # Per-HLR filtered EoICD: each HLR sees only its own traced
+            # blocks. Prevents unrelated blocks (from other HLRs sharing
+            # the same EoICD) from polluting top_k=50 with status/noise.
+            per_hlr_filtered: dict[str, list] = {}
+            for hlr_id, traced_bks in hlr_traced_blocks.items():
+                per_hlr_filtered[hlr_id] = [
+                    req for req in eoicd_requirements
+                    if (bk := name_to_block_key(req.signal_name)) in traced_bks
+                ]
+            total_filtered = sum(len(v) for v in per_hlr_filtered.values())
+            print(
+                f"  Per-HLR filtered EoICD total: {total_filtered} / "
+                f"{len(eoicd_requirements)} entries"
+            )
+            result_a = match_reverse_per_hlr(
+                group_a_hlrs,
+                {k: v for k, v in hlr_labels.items() if k in group_a_ids},
+                per_hlr_filtered,
+                profile=profile,
+            )
+        else:
+            # Legacy union-pool (AMS/FGMC/HSCU): all Group A HLRs share one
+            # filtered EoICD subset built from the union of traced blocks.
+            filtered_eoicd = []
+            for req in eoicd_requirements:
+                bk = name_to_block_key(req.signal_name)
+                if bk in all_traced_block_keys:
+                    filtered_eoicd.append(req)
+            print(
+                f"  Filtered EoICD: {len(filtered_eoicd)} / "
+                f"{len(eoicd_requirements)} entries"
+            )
+            result_a = match_reverse(
+                group_a_hlrs,
+                {k: v for k, v in hlr_labels.items() if k in group_a_ids},
+                filtered_eoicd,
+                profile=profile,
+            )
         print(f"  Group A stats: {result_a.stats}")
 
         # Per-HLR fallback: if prefilter matching produced "无匹配" for
@@ -231,6 +383,7 @@ def _match_reverse_with_trace(
                 fallback_hlrs,
                 {k: v for k, v in hlr_labels.items() if k in fallback_ids},
                 eoicd_requirements,
+                profile=profile,
             )
             # Replace the failed results with fallback results
             fb_map = {r.hlr_id: r for r in result_fb.results}
@@ -250,6 +403,7 @@ def _match_reverse_with_trace(
             group_b_hlrs,
             {k: v for k, v in hlr_labels.items() if k in group_b_ids},
             eoicd_requirements,
+            profile=profile,
         )
         print(f"  Group B stats: {result_b.stats}")
     else:
@@ -354,46 +508,6 @@ def _judge_case_with_timeout(
 def _is_failure(judgment: dict) -> bool:
     """Check if a judgment dict represents a failure (error or very low confidence)."""
     return judgment.get("coverage_status") == "error"
-
-
-_drain_executor: ThreadPoolExecutor | None = None
-
-
-def _get_drain_executor() -> ThreadPoolExecutor:
-    """Shared background executor for timed-out judgments (process-wide)."""
-    global _drain_executor
-    if _drain_executor is None:
-        _drain_executor = ThreadPoolExecutor(
-            max_workers=DegradationConfig.from_env().drain_max_workers,
-            thread_name_prefix="degradation-drain",
-        )
-    return _drain_executor
-
-
-_inflight_sema: threading.Semaphore | None = None
-
-
-def _get_inflight_sema() -> threading.Semaphore:
-    """Gate limiting tasks submitted to executor simultaneously (process-wide)."""
-    global _inflight_sema
-    if _inflight_sema is None:
-        _inflight_sema = threading.Semaphore(
-            DegradationConfig.from_env().max_inflight
-        )
-    return _inflight_sema
-
-
-def _submit_with_gate(executor: ThreadPoolExecutor, fn, *args) -> Future:
-    """Submit fn to executor, blocking until an inflight slot is available.
-
-    The semaphore is released when the future completes (success or failure).
-    This prevents unbounded task accumulation when many cases are queued.
-    """
-    sema = _get_inflight_sema()
-    sema.acquire()
-    future = executor.submit(fn, *args)
-    future.add_done_callback(lambda _: sema.release())
-    return future
 
 
 def _judge_with_degradation(
@@ -554,7 +668,7 @@ def _apply_degradation_review(
     for result in consensus_out.results:
         surviving = _count_surviving_providers(result.model_results)
         if surviving == 0:
-            # 所有 provider 均失败：共识输入无有效裁判，共识 LLM 在纯 error 输入上
+            # 所有 provider 均失败：共识输入全部失效，共识 LLM 在纯 error 输入上
             # 可能幻觉出高星级，强制最低置信度并转入人工审核
             if result.star_rating > ctx.config.zero_provider_star_cap:
                 result.star_rating = ctx.config.zero_provider_star_cap
@@ -620,14 +734,25 @@ def run_reverse_pipeline(
     output_dir: Path,
     job: Job,
     trace_dir: Path | None = None,
+    profile: ControllerProfile | None = None,
 ) -> PipelineResult:
     """Run reverse pipeline: parse → label → match → judge → report.
 
     If trace_dir is provided, enables traceability-based pre-filtering
     to narrow the EoICD search space before reverse matching.
+
+    ``profile`` (Task 10, Issue #63) is threaded into every profile-aware
+    consumer: ``HLRWordParser``, ``label_hlrs``, ``enrich_all_labels``, and
+    ``build_trace_index``. ``None`` falls back to the registry's AMS default
+    so pre-#63 callers keep byte-identical output.
     """
     if not (eoicd_json or publisher or subscriber):
         raise ValueError("need eoicd (parsed JSON) or publisher/subscriber (Excel)")
+
+    # Resolve profile once (loads AMS from registry if profile=None). Done
+    # eagerly so any registry/load error surfaces before the long-running
+    # parse/label steps.
+    resolved_profile = _resolve_profile(profile)
 
     # Step 1: Parse
     print("=" * 50)
@@ -650,7 +775,11 @@ def run_reverse_pipeline(
         hlr_data = json.loads(hlr.read_text(encoding="utf-8"))
         hlr_out = HLROutput(**hlr_data)
     else:
-        hlr_out = _parse_hlr(hlr, output_dir / "hlr_requirements.json")
+        hlr_out = _parse_hlr(
+            hlr,
+            output_dir / "hlr_requirements.json",
+            profile=resolved_profile,
+        )
 
     # Step 1: EoICD itemization Excel
     eoicd_json_path = output_dir / "eoicd_requirements.json"
@@ -663,8 +792,16 @@ def run_reverse_pipeline(
     print("=" * 50)
     job.update(JobStatus.RUNNING, "Step 2/6: HLR AI labeling")
     labels_cache = output_dir / "hlr_labels.json"
-    hlr_labels = label_hlrs(hlr_out.requirements, cache_path=labels_cache)
-    hlr_labels = enrich_all_labels(hlr_out.requirements, hlr_labels)
+    hlr_labels = label_hlrs(
+        hlr_out.requirements,
+        cache_path=labels_cache,
+        profile=resolved_profile,
+    )
+    hlr_labels = enrich_all_labels(
+        hlr_out.requirements,
+        hlr_labels,
+        keywords=resolved_profile.classifier_keywords,
+    )
     print(f"  HLRs labeled: {len(hlr_labels)}")
 
     # Step 3: Reverse match
@@ -679,6 +816,8 @@ def run_reverse_pipeline(
             hlr_labels,
             eoicd_out.requirements,
             trace_dir,
+            resolved_profile.traceability,
+            profile=resolved_profile,
         )
     else:
         print(f"Step 3/6: Reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")
@@ -688,6 +827,7 @@ def run_reverse_pipeline(
             hlr_out.requirements,
             hlr_labels,
             eoicd_out.requirements,
+            profile=resolved_profile,
         )
     match_path = output_dir / "reverse_matches.json"
     match_path.write_text(
@@ -760,15 +900,15 @@ def run_reverse_pipeline(
     print(f"  Summary: {consensus_out.summary}")
     print(f"  Degradation: {consensus_data['degradation']}")
 
-    # Step 5.5: Re-review one-star cases (AFTER first consensus to know which are one-star)
+    # Step 5.5: Re-review low-confidence cases (1★/2★, ADR-004)
     print()
     print("=" * 50)
-    print("Step 5.5/6: Re-review one-star cases")
+    print("Step 5.5/6: Re-review low-confidence cases (1★/2★)")
     print("=" * 50)
-    job.update(JobStatus.RUNNING, "Step 5.5/6: Re-review one-star cases")
+    job.update(JobStatus.RUNNING, "Step 5.5/6: Re-review low-confidence cases")
     multi_out, re_reviewed_ids = re_review_judgments(
         multi_out=multi_out,
-        consensus_out=consensus_out,  # pass in-memory consensus_out for one-star detection
+        consensus_out=consensus_out,
         cases=cases,
         output_dir=output_dir,
         providers=frozen_providers,

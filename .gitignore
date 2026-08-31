@@ -49,6 +49,7 @@ backend/tests/
 
 .remember/
 docs/superpowers/
+.superpowers/
 
 # Local test documents and skill references
 

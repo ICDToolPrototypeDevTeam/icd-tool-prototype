@@ -8,8 +8,22 @@ import sys
 import time
 
 from app.v4.llm import get_llm
-from app.v4.models import ConsensusOutput, ConsensusResult, MultiJudgeResult
+from app.v4.models import (
+    ConsensusOutput,
+    ConsensusResult,
+    FieldDisagreement,
+    InconsistentAttribute,
+    MultiJudgeResult,
+)
 from app.v4.prompts import load_prompt
+
+
+# ADR-004 v2: 12 个关键字段，minority 涉及则触发 2★
+KEY_FIELDS = frozenset({
+    "Direction", "DataFormatType", "BitOffset", "ParameterSize",
+    "OneState", "ZeroState", "Label", "FuncRngMin", "FuncRngMax",
+    "Units", "Period", "SDIExpected",
+})
 
 
 def review_judgments(
@@ -89,7 +103,13 @@ def _call_review_api(
     model_results: dict[str, dict],
     max_retries: int = 2,
 ) -> ConsensusResult:
-    """Call LLM and parse JSON response for consensus review."""
+    """Call LLM and parse JSON response for consensus review.
+
+    5 星体系（ADR-004 v3 fusion）：star_rating 由 agreement_level +
+    field_disagreements 联合映射。LLM 另行输出 inconsistent_attributes
+    （HLR 与 ICD 的事实差异，主字段，供 Word 报告渲染），与
+    field_disagreements（provider 间字段级分歧，辅助字段）互相独立。
+    """
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -98,13 +118,19 @@ def _call_review_api(
     for attempt in range(max_retries + 1):
         try:
             from app.v4.comparison.semantic_judge import _extract_json
-            response = llm.chat(messages=messages, temperature=0.1, max_tokens=4096)
+            response = llm.chat(messages=messages, temperature=0.1, max_tokens=8192)
             content = _extract_json(response["content"])
             data = json.loads(content)
             consistent, divergent = _derive_consensus_details(data, model_results)
             agreement = data.get("agreement_level", "split")
-            star = int(data.get("star_rating", 1))
-            # 3★/2★ → 取多数一致的 coverage_status；1★/split → 待确认
+            inconsistent_attributes = _parse_inconsistent_attributes(
+                data.get("inconsistent_attributes", [])
+            )
+            field_disagreements = _parse_field_disagreements(
+                data.get("field_disagreements", [])
+            )
+            star = _map_star_rating(agreement, field_disagreements)
+            # 5★/4★/3★/2★ → 取 majority 的 coverage_status；1★ → 待确认
             if agreement in ("full", "majority") and star >= 2:
                 final_status = _majority_status(model_results, consistent)
             else:
@@ -114,12 +140,13 @@ def _call_review_api(
                 model_results=model_results,
                 agreement_level=agreement,
                 star_rating=star,
+                inconsistent_attributes=inconsistent_attributes,
+                field_disagreements=field_disagreements,
                 final_coverage_status=final_status,
                 final_analysis=data.get("final_analysis", ""),
                 confidence=float(data.get("confidence", 0.5)),
                 consistent_agents=consistent,
                 divergent_agents=divergent,
-                inconsistent_attributes=data.get("inconsistent_attributes", []),
             )
         except (json.JSONDecodeError, KeyError, IndexError, ValueError):
             if attempt < max_retries:
@@ -135,12 +162,83 @@ def _call_review_api(
         model_results=model_results,
         agreement_level="split",
         star_rating=1,
+        inconsistent_attributes=[],
+        field_disagreements=[],
         final_coverage_status="待确认",
         final_analysis="Review API error after retries",
         confidence=0.0,
         consistent_agents=[],
         divergent_agents=[],
     )
+
+
+def _parse_inconsistent_attributes(raw: list) -> list[InconsistentAttribute]:
+    """Parse inconsistent_attributes (EoICD-HLR 事实差异) with defensive coercion.
+
+    LLM may return entries as dicts ({"attribute", "detail", "providers"}) or
+    bare attribute-name strings. Malformed entries are dropped silently.
+    """
+    out: list[InconsistentAttribute] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if isinstance(item, dict):
+            try:
+                out.append(InconsistentAttribute(**item))
+            except Exception:
+                continue
+        elif isinstance(item, str) and item.strip():
+            out.append(InconsistentAttribute(attribute=item.strip()))
+    return out
+
+
+def _parse_field_disagreements(raw: list) -> list[FieldDisagreement]:
+    """Parse field_disagreements from LLM JSON response with defensive coercion.
+
+    LLM may return entries as:
+    - dicts: {"field": "Direction", "category": "key", ...}  → FieldDisagreement
+    - strings: "Direction"  → converted to vague FieldDisagreement (legacy/edge case)
+    Invalid entries are dropped silently.
+    """
+    out: list[FieldDisagreement] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if isinstance(item, dict):
+            try:
+                out.append(FieldDisagreement(**item))
+            except Exception:
+                # Skip malformed entries; do not fail the whole response
+                continue
+        elif isinstance(item, str) and item.strip():
+            # Legacy/edge: LLM returned bare field name string
+            out.append(FieldDisagreement(field=item.strip(), category="vague"))
+    return out
+
+
+def _map_star_rating(agreement: str, field_disagreements: list) -> int:
+    """Map (agreement_level, field_disagreements) to a 1-5 star rating (ADR-004 v2).
+
+    Mapping table:
+        5★: agreement=full,                  field_disagreements 为空
+        4★: agreement=full,                  field_disagreements 非空（含 key/non_key/vague）
+        3★: agreement=majority,              field_disagreements 无 key 字段
+        2★: agreement=majority,              field_disagreements 含 ≥1 个 key 字段
+        1★: agreement ∈ {split, single_source, no_consensus}
+
+    The function never raises: an unrecognised agreement_level defaults to 1★
+    so a malformed LLM response can never inflate the rating.
+    """
+    a = (agreement or "").lower()
+    has_key = any(getattr(f, "category", "") == "key" for f in field_disagreements)
+    has_any = bool(field_disagreements)
+    if a in ("split", "single_source", "no_consensus"):
+        return 1
+    if a == "full":
+        return 4 if has_any else 5
+    if a == "majority":
+        return 2 if has_key else 3
+    return 1
 
 
 def _majority_status(
@@ -192,13 +290,14 @@ _STATUS_CN = {"covered": "已覆盖", "inconsistent": "不一致", "needs_review
 
 
 def _build_summary(results: list[ConsensusResult]) -> dict:
-    """Aggregate review statistics."""
-    star_dist = {"1": 0, "2": 0, "3": 0}
+    """Aggregate review statistics (5-key star_distribution, ADR-004)."""
+    star_dist = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
     agreement_dist: dict[str, int] = {}
     status_dist: dict[str, int] = {}
 
     for r in results:
-        star_dist[str(r.star_rating)] = star_dist.get(str(r.star_rating), 0) + 1
+        key = str(r.star_rating) if r.star_rating in (1, 2, 3, 4, 5) else "1"
+        star_dist[key] += 1
         agreement_dist[r.agreement_level] = agreement_dist.get(r.agreement_level, 0) + 1
         cn = _STATUS_CN.get(r.final_coverage_status, r.final_coverage_status)
         status_dist[cn] = status_dist.get(cn, 0) + 1
@@ -213,7 +312,7 @@ def _build_summary(results: list[ConsensusResult]) -> dict:
         "star_distribution": star_dist,
         "agreement_distribution": agreement_dist,
         "status_distribution": status_dist,
-        "average_star_rating": round(avg_stars, 1),
+        "average_star_rating": round(avg_stars, 2),
     }
 
 

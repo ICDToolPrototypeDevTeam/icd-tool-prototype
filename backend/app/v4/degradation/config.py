@@ -19,6 +19,8 @@ class DegradationConfig:
     max_inflight: int = 6                  # max tasks submitted to executor simultaneously
     consecutive_fail_threshold: int = 3     # N consecutive failures → unhealthy
     unhealthy_ttl: float = 300.0            # seconds, auto-recovery TTL
+    # 5 星体系（ADR-004）：star cap 上限 1-5。0/1/2 存活时硬上限分别 1/1/2。
+    # 3 存活时不限制（用户确认不加 confidence cap）。
     zero_provider_star_cap: int = 1          # max stars when 0 providers alive
     zero_provider_agreement: str = "no_consensus"
     single_provider_star_cap: int = 1        # max stars when 1 provider alive

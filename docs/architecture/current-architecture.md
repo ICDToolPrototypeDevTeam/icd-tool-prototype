@@ -272,6 +272,29 @@ backend/app/
     ├── models.py           # V4 Pydantic 模型
     ├── pipeline.py         # V4 管线编排（run_reverse_pipeline / run_forward_pipeline）
     ├── parsers/            # EoICD Excel + HLR Word 解析
+    ├── profiles/           # Controller profile registry（Issue #63 引入）
+    │   ├── __init__.py     # ProfileRegistry 单例 + init_registry / get_registry
+    │   ├── base.py         # ControllerProfile + 4 个 Config dataclass
+    │   ├── ams/            # AMS profile（默认；从现状代码 1:1 抽取，向后兼容）
+    │   │   ├── __init__.py
+    │   │   ├── config.yaml # HLR 字段映射 / 分类关键词 / 追溯表配置 / AI 标注示例
+    │   │   ├── hooks.py    # profile 专属可选钩子
+    │   │   └── README.md
+    │   └── fgmc/           # FGMC profile（燃油测量管理计算机）
+    │       ├── __init__.py
+    │       ├── config.yaml
+    │       ├── hooks.py
+    │       └── README.md
+    │   └── hscu/           # HSCU profile（液压系统控制单元）
+    │       ├── __init__.py
+    │       ├── config.yaml
+    │       ├── hooks.py
+    │       └── README.md
+    │   └── rpdu/           # RPDU profile（远程功率分配单元，Issue #74 多控制器适配）
+    │       ├── __init__.py
+    │       ├── config.yaml
+    │       ├── hooks.py
+    │       └── README.md
     ├── matching/           # 反向匹配、信号画像、HLR 分类、entry filter
     ├── comparison/         # multi_judge + review_agent + 报告生成
     ├── doc_generators/     # xlsx + 3 类 docx 生成

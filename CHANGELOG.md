@@ -2,6 +2,40 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-08-29
+
+### Changed
+
+- **共识报告 docx 列宽锁定（fixed layout + full_width 区分）**：`consensus_word_generator.py` 新增 `_set_table_layout_fixed(table, full_width=True)` helper，给 3 张表（判定分布 / 星级分布 / 分析明细）加 `<w:tblLayout w:type="fixed"/>` 并同步 `<w:tblGrid>` 到首行 tcW，让 cell.width 真正生效不再被 Word autofit 按内容撑开。判定 / 星级分布表调用时 `full_width=False`（tblW 保持 auto，按内容算总宽，不再被强制拉到 100% 页宽）；分析明细表调用时 `full_width=True` 默认（占满 100% 页宽保持原行为）。分析明细表 cm 值调整：列 2「SWHLR ID」5.25→4.61、列 4「ICD Block」4.5→5.1、列 5「不一致属性」2.0→2.11、列 6「分析摘要」10.5→9.93、列 8「星级」1.39→1.93，其余 3 列微调 ±0.02。判定规则、数据契约、对外 API、下载文件均无变化。
+
+## [Unreleased] - 2026-08-28
+
+### Changed
+
+- **Step 5.5 re-review per-case 内并行**：re-review 阶段两层串行循环（先 case、后 provider）改为 per-case gather：每个 case 内部的 3 个 provider 调用一次性 submit 到 Step 4 共享的 `_get_drain_executor()` 线程池（通过 `_submit_with_gate()` 走信号量闸门），用 `concurrent.futures.wait` + `FIRST_COMPLETED` 在固定 `case_total_timeout` ceiling 内收集结果，单 case wall time 从 `sum(providers)` 降到 `max(providers)`。复用 Step 4 已有的 `_get_drain_executor` / `_get_inflight_sema` / `_submit_with_gate` / `make_error_judgment` / `classify_exception` 基础设施，**对外契约零变化**（`re_review_results.json` schema、`re_review_judgments()` 入参返回、`multi_judge_results.json` 落盘时机不变）；仅内部执行模型从串行改为并行。
+- **AMSC 通用协议特征 covered 判定规则（reverse_judge.md）**：在 `prompts/reverse_judge.md` 的「审查方法」之后新增「AMSC 通用协议特征 covered 判定说明（空气管理系统控制器专用）」章节，给出 AMSC 项目背景下判定「协议级 covered」的 3 个同时满足条件（HLR 描述协议级实现 / 不引用 AMSC 具体信号名 / 符合协议标准要求）+ 3 个判定示例（SDI 位 → covered、奇偶校验 → covered、fan RPM 解算 → needs_review）。作用域暂设为全局（fgmc / hscu 等其他 profile 同样适用，但 AMSC 关键词不命中时无实际影响）。
+
+### Fixed
+
+- **minimax re-review JSON 解析失败**：`semantic_judge.py::_extract_json` 在 minimax 返回内容以 ```json fence 开头、但前面带 markdown 分析段时，无法从 fence 内提取 JSON，导致 `JSONDecodeError`，所有 minimax re-review 调用落入 `coverage_status="error"`。修复：增加 else 分支——text 不以 ``` 开头时，先在 text 内用正则 `r'```(?:json)?\s*\n?(\{.*?\})\s*\n?```'` 搜索 ```json fence 并提取其中的 `{...}`；找不到再退到找首个 `{`。think 块剥离、markdown fence 移除、JSON 截断修复逻辑均不变。
+
+## [Unreleased] - 2026-08-27
+
+### Changed
+
+- **5 星评价体系重构（ADR-004 v3 fusion：两维度并行）**：修正 v2 把「EoICD-HLR 事实差异」与「provider 间字段级分歧」混为一谈的语义错误。v2 上线后真实样例暴露：Word 报告「判断」列显示「不一致」而「不一致属性」列大面积显示「—」，因为 3 个 provider 对同一 EoICD-HLR 差异往往共识识别，按 v2 规则不进 `field_disagreements`，渲染源为空。v3 fusion 恢复 `inconsistent_attributes`（语义回到 v0/v1：HLR 与 ICD 实际不符的 EoICD 属性，**不管 provider 是否一致都填**），结构为 `{attribute, detail, providers}`，作为 Word 报告「不一致属性」列的唯一数据源；`field_disagreements`（provider 间分歧，v2 设计）保留但降为辅助字段，**仅入 JSON、不再渲染**。`agreement_level` 明确按 v0 语义规则判定（看 analysis 语义，不只看字面 coverage_status）。5 档星档映射规则不变（`_map_star_rating(agreement, field_disagreements)`），复查触发条件 `{1, 2}` 不变。详见 ADR-004。
+
+### Breaking Change
+
+- **`ConsensusResult.inconsistent_attributes`**：**恢复**为 `list[InconsistentAttribute]`（`{attribute, detail, providers}`），语义 = EoICD-HLR 事实差异。
+- **`ConsensusResult.field_disagreements`**：字段保留、结构不变，但不再作为 Word 报告渲染源。
+- **`ConsensusResult.evidence_alignment`**：保持删除（v2 起）。
+- **旧 baseline 兼容**：`backend/tests/e2e/common.py:_migrate_consensus_schema` 在拷贝 baseline 时自动补齐缺失的 `inconsistent_attributes` / `field_disagreements`（并把 v0/v1 的字符串形态转为 dict），无需重新生成 baseline。
+- **`consensus.md` 移除 `single_source` / `no_consensus` 描述**：prompt 中不再出现这两个值，LLM 只能输出 `full` / `majority` / `split`。这两个值由后端降级脚本根据 provider 存活数自动写入（surviving=1 → `single_source`、surviving=0 → `no_consensus`）。修复 surviving=2 时 LLM 误判 `no_consensus` 穿透到最终结果的盲区。数据契约无变化，后端解析照旧。
+- **`ConsensusResult.cited_fields: list[str]` 完全移除**：v2 引入的字段（列出所有被 provider analysis 引用的字段名）始终未被消费（不进入 Word 渲染、不被任何业务逻辑使用），仅作为调试占位字段。删除后 prompt 无需让 LLM 输出该数组，节省 token；`models.py` / `review_agent.py` / `consensus_word_generator.py` / e2e 注入逻辑同步清理。已存 baseline JSON 中的 `cited_fields` 字段会被 Pydantic 静默忽略（`extra="ignore"` 默认行为），不需迁移。
+- **`final_coverage_status` 阈值扩展**：v2 设计 `2★ → 强制「待确认」` 会让 majority provider 已达成共识的判断被吞（少数意见仅关 key 字段却让整条 case 看起来"毫无信息"），改为 2★ 取 majority coverage_status。复盘链路：`review_agent.py:134` 阈值 `star >= 3` 放宽到 `star >= 2`；2★ case 从 Word 报告「待确认」组迁到 majority 的实际组（covered/inconsistent/needs_review），但 `field_disagreements` 仍记录少数 key 字段反对意见。复查触发条件 `{1, 2}` 不变（仍由 `star_rating` 驱动）。e2e 用例5断言同步调整。
+- **5 星档位命名正式化（方案 Y：共识轴 + 异议子档）**：v3 fusion 上线后旧命名"完全无争议 / 一致有争议 / 多数一致 / 多数有争议"存在两处歧义——(1) 「一致有争议」自相矛盾，「争议」易与 HLR-ICD 实际差异混淆；(2) 1★ 子档「分歧 / 仅单一来源 / 无有效裁判」口语化。重构后命名锚定到「共识」轴，4 主档：「完全共识（5★）/ 完全共识·字段异议（4★）/ 多数共识（3★）/ 多数共识·关键异议（2★）」；1★ 三降级子类型独立正式化：「三方分歧（split）/ 仅单源（single_source）/ 全部失效（no_consensus）」；fallback 标签仍兜底为「降级」。三档颜色映射不变（5★ 绿 / 4★·3★ 黄 / 2★·1★ 红）。受影响文案：`consensus_word_generator.py` 的 `_map_consensus_label` / `star_levels` / `one_star_subs` / `suggestions` 4 处（共 7 个标签字面量）；`prompts/consensus.md` 的 4 行档位描述；`re_review.py` 2 处 docstring；`docs/project/workflow.md` 的 final_coverage_status 阈值描述同步对齐。判断逻辑（`_map_star_rating` / 阈值规则 / 复查触发）完全不变，仅 UI 文字调整。
+
 ## [Unreleased] - 2026-08-26
 
 ### Added
@@ -15,6 +49,121 @@
 ### Changed
 
 - **正向判定统一规则（业务信号/字段颗粒度）**：正向覆盖判定固定为「EoICD 业务信号/字段是否在 HLR 中被描述」，不扩展到通道/设备副本/冗余来源/接口实例的逐一覆盖检查。A429 子对象身份仅在证据可靠时参与判定：SDI 仅当该 Label 存在 >1 个不同非 N/A SDI 值（`sdi_is_discriminator`）且双方显式带 SDI 时用作区分依据；bit 通过结构化关系（叶子自身 BitOffsetWithinDS，或 dp_ref 子字段名与叶名对应）推导，不依据 DataFormatType/ParameterSize 做「排除 BOOL / 优先 BNR」等类型推断，推导不可靠则不留 bit 证据。缺失候选统一收口：在场候选均被确定性规则证明为其他对象时，若存在追溯缺失候选（未出现在上传 HLR）判 `possible` 并记录缺失，无缺失候选才判 `uncovered`。确定性身份冲突（名称/Label/SDI/bit 充分时）不可被 AI 覆盖，语义无法确定性确认时仍进入 AI 复核。正向结果新增 `reason` 字段（缺失候选 / 通道条件审计信息）。反向管线和反向基线保持不变。
+
+## [Unreleased] - 2026-08-26
+
+### Fixed
+
+- **RPDU per-HLR 追溯预过滤池（Issue #74 修复）**：新增 `ControllerProfile.prefilter_per_hlr: bool`（默认 `False`）和 `pipeline.match_reverse_per_hlr()`。RPDU profile 显式声明 `prefilter_per_hlr: true`，每个 traceable HLR 只在自己的 traced EoICD block 集合上跑 reverse match，避免其他 HLR 引入的 LRM / 状态类信号淹没 `Heater_Group_*_RPDU_ESW_CMD` 这类目标信号。修复前 HLR_052331 top-50 全是 LRM 状态信号，修复后 14 个 `Heater_Group_*` ESW_CMD 候选。AMS/FGMC/HSCU profile 不声明该字段自动回落到 `False`，仍走原有 union-pool 路径，行为字节一致。
+
+- **FGMC 追溯表 HLR ID 字段映射冲突**：`profiles/fgmc/config.yaml` 的 `hlr_parser.field_map` 中 `id` 和 `code` 两个 std_field 同时声明了 header 文本 `需求编号`，被 `_build_field_map_index` 的反向 dict 索引机制覆盖（`code` 后注册赢），导致 docx row 1 的正式 HLR 编号（`FGMC_OFP_CSCI_HLR_005906`）落到 `code` 字段、docx row 0 的内部编号（`1781`）落到 `id` 字段。修复：`id` 首位加入 `需求编号`，`code` 列表移除 `需求编号`（保留 `RequirementCode` 作为 legacy alias）。
+
+- **FGMC Table 1 sheet 选择冲突**：`需求与ICD追溯表_FGMC_裁剪.xlsx` 含 9 张 sheet，其中 `接口基线表_EoICD_old_待删除`（旧表，标记删除）和 `待填_需求接口追溯表`（当前使用）并存。原 `by_name_keywords` 列表把模糊关键词 `接口基线` 放在 `待填_需求接口追溯表` 之前，导致 `_select_sheet` 选到了已废弃 sheet，Table 1 只产出 2 个 ERD。修复：把 `待填_需求接口追溯表` 移至关键词列表首位，并删除过宽的 `接口基线` 模糊关键词。
+
+## [Unreleased] - 2026-08-26
+
+### Changed
+
+- **V2 共识报告文案统一（零行为影响）**：`consensus_word_generator.py` 3 处文字层面对齐方案 B 命名风格——"星级分布"小节 4 档标签改为"完全无争议 / 一致有争议 / 多数一致 / 多数有争议"；"处置建议"列表清理 v1 `evidence_alignment` 残留（"evidence 强 / 一般 / 反对方 evidence 弱"），改用星级分布小节口径；明细表"共识"列 `full → 完全一致` 改为 `完全无争议`，与"星级分布"小节表头对齐。判定规则与数据契约均未变，仅 UI 文字调整。`re_review.py:247` docstring 同步从 v1 "多数一致但 evidence 弱"改为 v2 "多数一致但有 key 字段分歧"，保持与 ADR-004 v2 口径一致。
+
+## [Unreleased] - 2026-08-24
+
+### Changed
+
+- **5 星评价体系重构（ADR-004 v2：字段不一致驱动）**：V4 反向管线 Step 5 Review Agent 由 v1 的 `evidence_alignment` 多维度方案重构为「字段类型驱动的单维度映射」。review LLM 改为扫描 3 provider 的 analysis 文本输出结构化字段级**裁判间分歧**列表 `field_disagreements: list[{field, category, providers, values, detail}]`（注意：仅追踪 provider 之间的判断分歧，EoICD-HLR 事实性差异由各 provider 自己的 analysis 承载），后端 `_map_star_rating(agreement, field_disagreements)` 按 agreement_level 分档 + 是否有 key 字段分歧映射到 5 档星评。映射规则：full+无字段不一致→5★、full+任意字段不一致→4★、majority+无 key 字段分歧→3★、majority+有 key 字段分歧→2★（触发复查）、split/single_source/no_consensus→1★。key 字段白名单（12 个）：Direction / DataFormatType / BitOffset / ParameterSize / OneState / ZeroState / Label / FuncRngMin / FuncRngMax / Units / Period / SDIExpected。vague 表达（无具体字段名）不影响降级。Prompt 增加 Step 0 明确区分「EoICD-HLR 事实性不一致」与「裁判间意见分歧」两类语义。e2e 用例5/6 同步重构注入策略。详见 ADR-004。
+
+### Breaking Change
+
+- **`ConsensusResult.evidence_alignment`**：**完全移除**（无软删除），保留 1 个版本。
+- **`ConsensusResult.inconsistent_attributes`**：删除（合并到 `field_disagreements`，后者带 `category` 分类）。
+- **`ConsensusResult.field_disagreements: list[FieldDisagreement]`**：新增字段（Pydantic Literal 类型 `category ∈ {key, non_key, vague}`）。
+- **`ConsensusResult.cited_fields: list[str]`**：新增字段，列出所有被 provider 引用的字段名（vague 案例为空数组）。
+- **e2e_baseline 需重新生成**：旧 v1 baseline（含 `evidence_alignment`）无法被 pydantic 解析；直接跑基线管线产出 v2 JSON 即可，无迁移脚本。
+
+## [Unreleased] - 2026-08-23
+
+### Added
+
+- **5 星评价体系（ADR-004 v1，已被 v2 替代）**：V4 反向管线 Step 5 Review Agent 升级为 5 档星评（5★/4★/3★/2★/1★），新增 `evidence_alignment` 字段（strong/moderate/weak）由 review LLM 自评 evidence 强度，后端按 `(agreement_level, evidence_alignment)` 二维映射到 5 档星评，避免 LLM 直接选星的批次漂移。映射规则：full+strong→5★、full+moderate/weak→4★、majority+strong/moderate→3★、majority+weak→2★、split/single_source/no_consensus→1★。新增 e2e 用例5（`backend/tests/e2e/test_use_case_5_five_star_rating.py`）。**该版本在真实 LLM 跑 `故障注入1.0.docx` 暴露根本性问题（5 档分布失衡：仅 5★/3★ 触发），2026-08-24 由 v2 字段不一致方案替代**。
+
+### Changed
+
+- **Step 5.5 一星复查触发条件扩展**：`_resolve_low_confidence_case_ids` 触发条件从 `star_rating == 1` 扩展到 `star_rating ∈ {1, 2}`，peer-aware 复查给 2★（多数一致但 evidence 弱）一个升到 3★ 的机会。
+- **共识报告星级分布表**：从「3 主行 + 3 子行」扩展为「4 主行（5★/4★/3★/2★）+ 3 子行（1★ 三降级子类型）」，`_star_str` 渲染 0-5 共 6 档（含无匹配 0 颗）。
+- **`final_coverage_status` 阈值**：5★/4★/3★（star ≥ 3）取多数一致的 coverage_status；2★/1★ 强制「待确认」，防止 majority+weak 的低 evidence 共识被当成业务结论采纳。v2 阈值未变。
+
+### Breaking Change
+
+- **`ConsensusResult.star_rating`**：类型注解从 `1-3` 扩展到 `1-5`（数据契约变化）。
+- **`star_distribution` summary 字段**：键从 `{1, 2, 3}` 扩展为 `{1, 2, 3, 4, 5}`，前端读取要兼容。
+- **`ConsensusResult.evidence_alignment`**：新增字段（默认 ""），老 mock 数据缺失可视为 ""；review LLM 不再输出 `star_rating`，仅输出 `agreement_level` + `evidence_alignment`，由后端按映射规则算星。**该字段在 v2 中已完全移除**。
+- 老 `consensus_results.json` 不存在跨版本兼容，老数据需重新跑管线。v2 提供迁移脚本回填关键字段。
+
+## [Unreleased] - 2026-08-28
+
+### Changed
+
+- **Step 5.5 re-review per-case 内并行**：re-review 阶段两层串行循环（先 case、后 provider）改为 per-case gather：每个 case 内部的 3 个 provider 调用一次性 submit 到 Step 4 共享的 `_get_drain_executor()` 线程池（通过 `_submit_with_gate()` 走信号量闸门），用 `concurrent.futures.wait` + `FIRST_COMPLETED` 在固定 `case_total_timeout` ceiling 内收集结果，单 case wall time 从 `sum(providers)` 降到 `max(providers)`。复用 Step 4 已有的 `_get_drain_executor` / `_get_inflight_sema` / `_submit_with_gate` / `make_error_judgment` / `classify_exception` 基础设施，**对外契约零变化**（`re_review_results.json` schema、`re_review_judgments()` 入参返回、`multi_judge_results.json` 落盘时机不变）；仅内部执行模型从串行改为并行。
+
+### Fixed
+
+- **minimax re-review JSON 解析失败**：`semantic_judge.py::_extract_json` 在 minimax 返回内容以 ```json fence 开头、但前面带 markdown 分析段时，无法从 fence 内提取 JSON，导致 `JSONDecodeError`，所有 minimax re-review 调用落入 `coverage_status="error"`。修复：增加 else 分支——text 不以 ``` 开头时，先在 text 内用正则 `r'```(?:json)?\s*\n?(\{.*?\})\s*\n?```'` 搜索 ```json fence 并提取其中的 `{...}`；找不到再退到找首个 `{`。think 块剥离、markdown fence 移除、JSON 截断修复逻辑均不变。
+
+## [Unreleased] - 2026-08-27
+
+### Changed
+
+- **5 星评价体系重构（ADR-004 v3 fusion：两维度并行）**：修正 v2 把「EoICD-HLR 事实差异」与「provider 间字段级分歧」混为一谈的语义错误。v2 上线后真实样例暴露：Word 报告「判断」列显示「不一致」而「不一致属性」列大面积显示「—」，因为 3 个 provider 对同一 EoICD-HLR 差异往往共识识别，按 v2 规则不进 `field_disagreements`，渲染源为空。v3 fusion 恢复 `inconsistent_attributes`（语义回到 v0/v1：HLR 与 ICD 实际不符的 EoICD 属性，**不管 provider 是否一致都填**），结构为 `{attribute, detail, providers}`，作为 Word 报告「不一致属性」列的唯一数据源；`field_disagreements`（provider 间分歧，v2 设计）保留但降为辅助字段，**仅入 JSON、不再渲染**。`agreement_level` 明确按 v0 语义规则判定（看 analysis 语义，不只看字面 coverage_status）。5 档星档映射规则不变（`_map_star_rating(agreement, field_disagreements)`），复查触发条件 `{1, 2}` 不变。详见 ADR-004。
+
+### Breaking Change
+
+- **`ConsensusResult.inconsistent_attributes`**：**恢复**为 `list[InconsistentAttribute]`（`{attribute, detail, providers}`），语义 = EoICD-HLR 事实差异。
+- **`ConsensusResult.field_disagreements`**：字段保留、结构不变，但不再作为 Word 报告渲染源。
+- **`ConsensusResult.evidence_alignment`**：保持删除（v2 起）。
+- **旧 baseline 兼容**：`backend/tests/e2e/common.py:_migrate_consensus_schema` 在拷贝 baseline 时自动补齐缺失的 `inconsistent_attributes` / `field_disagreements`（并把 v0/v1 的字符串形态转为 dict），无需重新生成 baseline。
+- **`consensus.md` 移除 `single_source` / `no_consensus` 描述**：prompt 中不再出现这两个值，LLM 只能输出 `full` / `majority` / `split`。这两个值由后端降级脚本根据 provider 存活数自动写入（surviving=1 → `single_source`、surviving=0 → `no_consensus`）。修复 surviving=2 时 LLM 误判 `no_consensus` 穿透到最终结果的盲区。数据契约无变化，后端解析照旧。
+- **`ConsensusResult.cited_fields: list[str]` 完全移除**：v2 引入的字段（列出所有被 provider analysis 引用的字段名）始终未被消费（不进入 Word 渲染、不被任何业务逻辑使用），仅作为调试占位字段。删除后 prompt 无需让 LLM 输出该数组，节省 token；`models.py` / `review_agent.py` / `consensus_word_generator.py` / e2e 注入逻辑同步清理。已存 baseline JSON 中的 `cited_fields` 字段会被 Pydantic 静默忽略（`extra="ignore"` 默认行为），不需迁移。
+- **`final_coverage_status` 阈值扩展**：v2 设计 `2★ → 强制「待确认」` 会让 majority provider 已达成共识的判断被吞（少数意见仅关 key 字段却让整条 case 看起来"毫无信息"），改为 2★ 取 majority coverage_status。复盘链路：`review_agent.py:134` 阈值 `star >= 3` 放宽到 `star >= 2`；2★ case 从 Word 报告「待确认」组迁到 majority 的实际组（covered/inconsistent/needs_review），但 `field_disagreements` 仍记录少数 key 字段反对意见。复查触发条件 `{1, 2}` 不变（仍由 `star_rating` 驱动）。e2e 用例5断言同步调整。
+- **5 星档位命名正式化（方案 Y：共识轴 + 异议子档）**：v3 fusion 上线后旧命名"完全无争议 / 一致有争议 / 多数一致 / 多数有争议"存在两处歧义——(1) 「一致有争议」自相矛盾，「争议」易与 HLR-ICD 实际差异混淆；(2) 1★ 子档「分歧 / 仅单一来源 / 无有效裁判」口语化。重构后命名锚定到「共识」轴，4 主档：「完全共识（5★）/ 完全共识·字段异议（4★）/ 多数共识（3★）/ 多数共识·关键异议（2★）」；1★ 三降级子类型独立正式化：「三方分歧（split）/ 仅单源（single_source）/ 全部失效（no_consensus）」；fallback 标签仍兜底为「降级」。三档颜色映射不变（5★ 绿 / 4★·3★ 黄 / 2★·1★ 红）。受影响文案：`consensus_word_generator.py` 的 `_map_consensus_label` / `star_levels` / `one_star_subs` / `suggestions` 4 处（共 7 个标签字面量）；`prompts/consensus.md` 的 4 行档位描述；`re_review.py` 2 处 docstring；`docs/project/workflow.md` 的 final_coverage_status 阈值描述同步对齐。判断逻辑（`_map_star_rating` / 阈值规则 / 复查触发）完全不变，仅 UI 文字调整。
+
+## [Unreleased] - 2026-08-26
+
+### Changed
+
+- **V2 共识报告文案统一（零行为影响）**：`consensus_word_generator.py` 3 处文字层面对齐方案 B 命名风格——"星级分布"小节 4 档标签改为"完全无争议 / 一致有争议 / 多数一致 / 多数有争议"；"处置建议"列表清理 v1 `evidence_alignment` 残留（"evidence 强 / 一般 / 反对方 evidence 弱"），改用星级分布小节口径；明细表"共识"列 `full → 完全一致` 改为 `完全无争议`，与"星级分布"小节表头对齐。判定规则与数据契约均未变，仅 UI 文字调整。`re_review.py:247` docstring 同步从 v1 "多数一致但 evidence 弱"改为 v2 "多数一致但有 key 字段分歧"，保持与 ADR-004 v2 口径一致。
+
+## [Unreleased] - 2026-08-24
+
+### Changed
+
+- **5 星评价体系重构（ADR-004 v2：字段不一致驱动）**：V4 反向管线 Step 5 Review Agent 由 v1 的 `evidence_alignment` 多维度方案重构为「字段类型驱动的单维度映射」。review LLM 改为扫描 3 provider 的 analysis 文本输出结构化字段级**裁判间分歧**列表 `field_disagreements: list[{field, category, providers, values, detail}]`（注意：仅追踪 provider 之间的判断分歧，EoICD-HLR 事实性差异由各 provider 自己的 analysis 承载），后端 `_map_star_rating(agreement, field_disagreements)` 按 agreement_level 分档 + 是否有 key 字段分歧映射到 5 档星评。映射规则：full+无字段不一致→5★、full+任意字段不一致→4★、majority+无 key 字段分歧→3★、majority+有 key 字段分歧→2★（触发复查）、split/single_source/no_consensus→1★。key 字段白名单（12 个）：Direction / DataFormatType / BitOffset / ParameterSize / OneState / ZeroState / Label / FuncRngMin / FuncRngMax / Units / Period / SDIExpected。vague 表达（无具体字段名）不影响降级。Prompt 增加 Step 0 明确区分「EoICD-HLR 事实性不一致」与「裁判间意见分歧」两类语义。e2e 用例5/6 同步重构注入策略。详见 ADR-004。
+
+### Breaking Change
+
+- **`ConsensusResult.evidence_alignment`**：**完全移除**（无软删除），保留 1 个版本。
+- **`ConsensusResult.inconsistent_attributes`**：删除（合并到 `field_disagreements`，后者带 `category` 分类）。
+- **`ConsensusResult.field_disagreements: list[FieldDisagreement]`**：新增字段（Pydantic Literal 类型 `category ∈ {key, non_key, vague}`）。
+- **`ConsensusResult.cited_fields: list[str]`**：新增字段，列出所有被 provider 引用的字段名（vague 案例为空数组）。
+- **e2e_baseline 需重新生成**：旧 v1 baseline（含 `evidence_alignment`）无法被 pydantic 解析；直接跑基线管线产出 v2 JSON 即可，无迁移脚本。
+
+## [Unreleased] - 2026-08-23
+
+### Added
+
+- **5 星评价体系（ADR-004 v1，已被 v2 替代）**：V4 反向管线 Step 5 Review Agent 升级为 5 档星评（5★/4★/3★/2★/1★），新增 `evidence_alignment` 字段（strong/moderate/weak）由 review LLM 自评 evidence 强度，后端按 `(agreement_level, evidence_alignment)` 二维映射到 5 档星评，避免 LLM 直接选星的批次漂移。映射规则：full+strong→5★、full+moderate/weak→4★、majority+strong/moderate→3★、majority+weak→2★、split/single_source/no_consensus→1★。新增 e2e 用例5（`backend/tests/e2e/test_use_case_5_five_star_rating.py`）。**该版本在真实 LLM 跑 `故障注入1.0.docx` 暴露根本性问题（5 档分布失衡：仅 5★/3★ 触发），2026-08-24 由 v2 字段不一致方案替代**。
+
+### Changed
+
+- **Step 5.5 一星复查触发条件扩展**：`_resolve_low_confidence_case_ids` 触发条件从 `star_rating == 1` 扩展到 `star_rating ∈ {1, 2}`，peer-aware 复查给 2★（多数一致但 evidence 弱）一个升到 3★ 的机会。
+- **共识报告星级分布表**：从「3 主行 + 3 子行」扩展为「4 主行（5★/4★/3★/2★）+ 3 子行（1★ 三降级子类型）」，`_star_str` 渲染 0-5 共 6 档（含无匹配 0 颗）。
+- **`final_coverage_status` 阈值**：5★/4★/3★（star ≥ 3）取多数一致的 coverage_status；2★/1★ 强制「待确认」，防止 majority+weak 的低 evidence 共识被当成业务结论采纳。v2 阈值未变。
+
+### Breaking Change
+
+- **`ConsensusResult.star_rating`**：类型注解从 `1-3` 扩展到 `1-5`（数据契约变化）。
+- **`star_distribution` summary 字段**：键从 `{1, 2, 3}` 扩展为 `{1, 2, 3, 4, 5}`，前端读取要兼容。
+- **`ConsensusResult.evidence_alignment`**：新增字段（默认 ""），老 mock 数据缺失可视为 ""；review LLM 不再输出 `star_rating`，仅输出 `agreement_level` + `evidence_alignment`，由后端按映射规则算星。**该字段在 v2 中已完全移除**。
+- 老 `consensus_results.json` 不存在跨版本兼容，老数据需重新跑管线。v2 提供迁移脚本回填关键字段。
 
 ## [Unreleased] - 2026-08-20
 
@@ -43,6 +192,47 @@
 ### Added
 
 - **case 级超时后台收尾（drain）**：Step 4 多智能体裁判改为线程池执行（concurrent.futures），超时的裁判任务不再取消丢弃，而是转入后台线程池继续执行；Step 4.5 在总预算（`DEGRADATION_DRAIN_BUDGET`，默认 300s）内统一收尾，迟到的有效结果替换 TIMEOUT 占位后进入共识，慢但有效的输出不再被舍掉。新增 `degradation.drained_late_count` 统计与 e2e 用例3（慢 provider 收尾验证）。
+
+## [Unreleased] - 2026-08-25
+
+### Added
+
+- **RPDU 多控制器适配合并（Issue #74）**：新增 `rpdu` controller profile，支持远程功率分配单元的 Excel 格式 HLR 输入、header 自适应追溯解析、4 项反向匹配增强（中文后缀剥离、方向软约束带 conflict 标记、信号编号加分、`top_k=50`）。
+- **profile 扩展维度**：V4 profile schema 新增三个 profile 维度的扩展点（HLR 解析驱动 `hlr_parser_driver.driver` / 追溯策略 `trace_strategy` / 匹配增强 `matcher`），所有新增字段全部默认关闭 → AMS/FGMC/HSCU 行为字节不变。
+- **HLR 解析工厂**：新增 `create_hlr_parser(source_path, profile=)`，按扩展名分发到 `HLRWordParser`（.docx，默认）或 `HLRExcelParser`（.xlsx，RPDU）。
+- **API HLR 扩展名校验**：`POST /api/v4/coverage-analysis` 的 HLR 文件扩展名校验改为基于 `parsers.registered_extensions()` 工厂白名单，支持 .docx 和 .xlsx；新增解析器只需在工厂注册，API 自动同步。
+
+### Changed
+
+- `backend/app/api/v4/coverage.py` 白名单加入 `"rpdu"`；错误消息改为动态列出支持列表。
+- `backend/app/v4/pipeline.py`：`_parse_hlr` 改用 `create_hlr_parser` 工厂；Step 3 两条路径全部透传 `profile=` 给 `build_trace_index` 和 `match_reverse`。
+
+## [Unreleased] - 2026-08-24
+
+### Changed
+
+- **HSCU HLR 预处理 hook 适配新文档结构**：`profiles/hscu/hooks.py` 表格解析从固定位置改为自动识别。`_identify_label_tables()` 按启发式（≥ 3 列 + ≥ 2 行 + 至少一行同时含 LBL cell 和 ≥ 2 位数字 octal cell）扫描所有 table，识别 HSCU 新文档中同时存在的 Table[0]（RDCU1 入站 11 行 × 8 列，含 `_R1` 后缀）和 Table[8]（HSCU 出站 12 行 × 4 列，无 `_R1`）两张 LBL 总览表，全部合并入 mapping。`_extract_row_mapping()` 改为行内扫描，定位 LBL cell 和 octal cell 时不再假设固定列偏移。
+- **Hook 扩展支持 RDCU1 catalog col 5 多行信号名称**：8 列 RDCU1 catalog 的 col 5（信号名称列）每个 cell 多行，每行是一个独立 signal name 由同 octal 承载（如 `LBL_ABV1_RPDU_R1 → 51` 承载 `ABV1_CB_CLOSED_RPDU_R1`、`ABV1_LOAD_VOLT_AVAIL_RPDU_R1` 等 12 个信号）。新增 `_extract_signal_names()` 把这些裸 signal 名作为额外 mapping key，让 HSCU HLR 中以裸名形式引用 RDCU1 signal 的需求（023194、022645）也能命中 EoICD 块。
+- **Hook 输出 octal 左填充 3 位**：ARINC-429 八进制是 3 位（000-377），EoICD block key 始终为 3 位形式。HSCU catalog 常省略前导 0（如 `74`、`51`），hook 生成 alias 时统一 `zfill(3)` 避免 Stage1 prefix filter (`L<label>/` vs `L<3位>`) 失配。同时 `_looks_like_octal_cell()` 把长度下限从 3 位降到 2 位以接受省略前导 0 的 octal，但仍拒绝单数字以避免与 SDI（`0/1/2/3`）混淆。
+- **`pipeline._parse_hlr()` 临时暴露完整 source_file 给 hook**：`HLRWordParser.parse()` 把 `result.source_file` 存为 basename，hook 用 `Path(source_file).exists()` 在 backend cwd 下找不到文件导致 auto_parse 静默失败。`_parse_hlr()` 在调用 hook 前临时把 `result.source_file` 切到完整 `input_path`，hook 调用结束后恢复 basename — JSON 输出和 AMS/FGMC 行为一致仍保留 basename。
+
+### Verified
+
+- HSCU E2E（job `a54aab93`，真实 LLM）：`hlr_已匹配=4, hlr_待确定=2, hlr_无匹配=4`，6/10 HLR 拿到 EoICD block key。新文档中 023194（ABV1_LOAD_VOLT_AVAIL_RPDU_R1）从「无匹配」升级到「待确定」。
+- AMS（job `082b4a48`）+ FGMC（job `ed36e75c`）回归：`hlr_requirements.json` 中 0 个 alias annotation（auto_parse 默认 False 不被触发），匹配数不变。
+
+## [Unreleased] - 2026-08-21
+
+### Added
+
+- **Profile HLR 预处理 Hook 机制**：`ControllerProfile` 新增 `HLRPreprocessConfig` 配置段（`enabled` + `extra_mappings` + `auto_parse_hlr_table_0` + `apply_to_fields`）。`profiles/__init__.py` 新增 `apply_hlr_preprocess_hook()` 通用调用入口，通过 `importlib` 动态加载各 profile 的 `preprocess_hlr_requirements()` 函数。`pipeline._parse_hlr()` 在 HLR Word 解析后、写 JSON 前调用 hook，让改写后的内容对下游 AI 标注、分类、匹配可见。
+- **HSCU LBL→L<octal> 别名追加 hook（`profiles/hscu/hooks.py`）**：HSCU HLR 文本使用符号化标签名（`LBL_DIS_00_SYS1`），而 EoICD PubSub 块以八进制编码（`L145_DIS_00_SYS1_T1A`）。Hook 通过 YAML `extra_mappings` 配置映射，按 per-token 范围追加 `（亦称：L<octal>_<NAME>）` 别名，让 AI 标注器在两种形式间识别，从而让反向匹配 Stage1 的 prefix filter 能命中 EoICD 块。规则：仅对实际出现且已映射的 LBL token 追加、自动剥离 `_SSM` 后缀、占位值跳过、幂等。
+- **HSCU 当前映射 1 个（`LBL_DIS_00_SYS1` → `145`）**：job `39f938f5`（真实 LLM）HSCU E2E：matched_count `0 → 1`，unmatched `10 → 9`。补全 4 个映射后预期 ~6/10 matched。
+
+### Changed
+
+- 不修改 `reverse_matcher.py` / `hlr_classifier.py` / `hlr_labeler.py` / `trace_parser.py`。
+- AMS / FGMC profile 不受影响：`hlr_preprocess.enabled` 默认为 `False`。
 
 ## [Unreleased] - 2026-08-12
 
@@ -337,4 +527,55 @@
 - **共识报告星级分布表**：删除 1★ 主行（需人工复核），仅保留 3 个子类型行（分歧/仅单一来源/无有效裁判）；★☆☆ 显示在首个子行星列并纵向合并 3 行；子类型标签加粗、与主行格式统一。
 - **共识明细表共识列标签映射**：新增 `no_consensus → 无有效裁判`、`single_source → 仅单一来源`。
 - **降级配置**：`DegradationConfig` 新增 `zero_provider_star_cap=1`、`zero_provider_agreement="no_consensus"` 默认值。
+
+## [Unreleased] - 2026-08-19：V4 反向管线多控制器 Profile 化（Issue #63）
+
+### Added
+
+- **Controller Profile 子包**：新增 `backend/app/v4/profiles/`，`base.py` 定义 `ControllerProfile` + 4 个 Config dataclass（`HLRParserConfig` / `TraceabilityConfig` / `ClassifierKeywords` / `AILabelingConfig`），`__init__.py` 提供 `ProfileRegistry` 单例。profile 配置以 `profiles/{id}/config.yaml` 声明，新控制器可通过新增目录接入，无需改动业务代码。
+- **AMS profile（默认）**：从现状代码 1:1 抽取，行为与 Issue A 完全一致，向后兼容。
+- **FGMC profile（燃油测量管理计算机）**：术语表位于 `tables[1]`、需求表 ≥12 行、支持"是否为需求"= "否" 行过滤、追溯表用 glob 模式（`*追溯*.xlsx` / `*矩阵分析*.xlsx`）、燃油域分类关键词与 AI 标注示例。
+- **API 新增 `controller_profile` 字段**：`POST /api/v4/coverage-analysis` 新增 form 字段，默认 `ams`，白名单 `{ams, fgmc}`，非法值在创建任务前返回 422。
+- **CLI 新增 `--controller-profile`**：`label` / `reverse` / `reverse-analyze` 三个子命令支持，`choices=["ams","fgmc"]`，默认 `ams`。
+- **Profile 单元测试**：新增 `backend/app/v4/tests/profiles/`，覆盖 registry / models / HLR parser / classifier / labeler / 追溯表 / pipeline 共 24 个用例。
+
+### Changed
+
+- `HLRWordParser` / `trace_parser` / `hlr_classifier` / `hlr_labeler` 改为 profile-driven，profile 由 pipeline 统一注入，不再依赖模块级硬编码常量；未传 profile 时退化为 AMS 默认行为。
+- `HLRRequirement` 模型扩展 6 个 optional 字段（`code` / `source` / `covered_ids` / `notes` / `input_data` / `output_data`），供 FGMC 需求表使用；AMS 侧保持为空不影响既有输出。
+
+### Fixed
+
+- V4 不再硬编码 AMS 专属的追溯表中文文件名、sheet 名、HLR 表行数阈值和字段名；接入新控制器不再需要修改 parser / matcher 源码。
+
+## [Unreleased] - 2026-08-20：V4 HSCU 控制器 Profile 接入（Issue #63 续）
+
+### Added
+
+- **HSCU profile（液压系统控制单元）**：新增 `backend/app/v4/profiles/hscu/` 子包，含 `__init__.py` / `config.yaml` / `hooks.py` / `README.md`。基于现有 AMS / FGMC profile 模式，无需改动业务代码即可接入。
+- **HSCU 适配要点**（与 AMS / FGMC 差异）：
+  - HLR 字段映射：HSCU 需求表行标签用 `需求正文` 而非 `需求中文`（其他控制器均为 `需求中文`）；术语表位于 `tables[0]`，需求表 ≥ 8 行。
+  - 无 `is_requirement` 列：HSCU 需求表中没有"是否需求"列，`filter_non_requirement` 关闭；其他控制器中 AMS 默认开启，FGMC 通过 `filter_non_requirement: true` + 匹配 "否" 过滤。
+  - 追溯表 T1：glob 模式 `附件1*需求*ICD*.xlsx`（AMS 用精确中文文件名，FGMC 用 `*追溯*.xlsx`）；sheet 名匹配关键词 `待填_需求接口追溯表`。
+  - 追溯表 T2：glob 模式 `*液压*单模块需求矩阵*.xlsx`，`data_start_row: 2`（跳过当前需求文档 / 下层需求文档合并行 + 列标题行）。
+- **API `controller_profile` 白名单扩展**：`POST /api/v4/coverage-analysis` form 字段 `controller_profile` 白名单由 `{ams, fgmc}` 扩展为 `{ams, fgmc, hscu}`，非法值仍返回 422。
+- **HSCU 测试文档**：在 `backend/app/v4/profiles/hscu/README.md` 中记录 HSCU 与 AMS / FGMC 的差异、T1 sheet 名纠正（`待填_需求接口追溯表` 而非 `需求_设备接口追溯表`）和 `data_start_row` 含义。
+
+### Changed
+
+- `backend/app/api/v4/coverage.py` `ALLOWED_CONTROLLER_PROFILES` 集合加入 `"hscu"`，错误信息更新为 `allowed: ams, fgmc, hscu`。
+- `docs/architecture/api.md` §13.2 `controller_profile` 字段白名单由 `{ams, fgmc}` 改为 `{ams, fgmc, hscu}`，§13.6 错误响应同步更新。
+- `docs/project/scope.md` §8.2.1 profile 表新增 `hscu` 行，描述 HSCU 适用控制器 / 术语表位置 / HLR 需求表结构 / 追溯表文件名。
+- `docs/architecture/current-architecture.md` profiles 目录树新增 `hscu/` 节点。
+
+### Fixed
+
+- **HSCU T1 sheet 名配置纠正**：最初错误将 T1 sheet 名配置为 `需求_设备接口追溯表`，通过对 `wb.sheetnames` 做 codepoint inspection 后改为 `待填_需求接口追溯表`（HSCU 实际 sheet 名），与 trace_parser `by_name_keywords` 匹配逻辑对齐。
+- **HSCU 早期误诊的 GBK mojibake 修复已删除**：首次接入时误判 HSCU T1 xlsx 存在 GBK-as-UTF-8 mojibake，引入 `_xlsx_mojibake.py` 工具 + 在 `TraceabilityTableConfig` 加 `repair_gbk_mojibake` 字段 + 在 `trace_parser._read_table1/2` 加 `_maybe_heal()` 调用。经 codepoint 校验 HSCU 文件实际为干净 UTF-8，"mojibake" 现象是 Windows console 无法渲染某些 CJK 字符所致。按 debug-rules.md "最小修改原则" 全部回退删除，无 mojibake 相关代码残留。
+
+### Notes
+
+- HSCU E2E 已通过 mock LLM 验证：job `dd0790ed` 跑通完整 6 步管线，4 类 DOCX 输出齐全，HLR 解析 10 条 / 追溯匹配 15 条。
+- HSCU 0/10 反向匹配：当前 HSCU HLR 信号关键词（如 `HYD_xxx` / `LBL_xxx`）在提供的 EoICD 样例文件中未出现（样例仅含 AHMU `AIRCRAFT_STATUS` 信号），属测试数据问题，非 profile 问题。
+- AMS / FGMC 回归验证通过：AMS job `a335bce9`（~60s）+ FGMC job `67e745b9`（<5s）均产出 4 DOCX，无回归。
 

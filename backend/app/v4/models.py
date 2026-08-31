@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -53,15 +53,22 @@ class EoICDOutput(BaseModel):
 class HLRRequirement(BaseModel):
     """A single requirement from the HLR Word document."""
 
-    requirement_id: str
-    content: str
-    object_type: str
-    is_derived: str
-    rationale: str
-    is_safety_related: str
-    verification_method: str
-    implementation_method: str
-    source_file: str
+    requirement_id: str = ""
+    content: str = ""
+    object_type: str = ""
+    is_derived: str = ""
+    rationale: str = ""
+    is_safety_related: str = ""
+    verification_method: str = ""
+    implementation_method: str = ""
+    source_file: str = ""
+    # FGMC 引入的新字段（AMS 全部 default ""，向后兼容）
+    code: str = ""
+    source: str = ""
+    covered_ids: str = ""
+    notes: str = ""
+    input_data: str = ""
+    output_data: str = ""
 
 
 class HLRGlossaryEntry(BaseModel):
@@ -182,7 +189,7 @@ class ReverseJudgmentResult(BaseModel):
     match_evidence: dict = Field(default_factory=dict)
     # ── Agent judgment ──
     coverage_status: str = ""          # "covered" | "inconsistent" | "needs_review" | "无匹配" (match-layer) | "error" (失败兜底)
-    difference_type: str = ""          # 无差异 | 缺失 | 不一致 | 部分覆盖 | 需确认
+    difference_type: str = ""          # 无差异 | 不一致 | 需确认
     missing_points: list[str] = Field(default_factory=list)
     inconsistent_points: list[str] = Field(default_factory=list)
     analysis: str = ""
@@ -233,19 +240,56 @@ class MultiJudgeOutput(BaseModel):
     results: list[MultiJudgeResult] = Field(default_factory=list)
 
 
+class InconsistentAttribute(BaseModel):
+    """EoICD-HLR 事实差异字段（ADR-004 v3 fusion 主字段）。
+
+    review LLM 扫描各 provider 的 analysis / inconsistent_points，提取
+    HLR 与 ICD 之间存在事实不一致的具体 EoICD 属性。不**管 3 个 provider
+    是否对同一字段达成共识，只要 HLR 描述与 ICD 定义不符即填入。
+    用于 Word 报告"判断"列与"不一致属性"列。
+    """
+
+    attribute: str                  # EoICD 属性名（英文，如 "Direction"）
+    detail: str = ""                # 一句话说明不一致内容
+    providers: list[str] = Field(default_factory=list)  # 识别出该差异的 provider（审计用）
+
+
+class FieldDisagreement(BaseModel):
+    """字段级 provider 间意见分歧（ADR-004 v3 fusion 辅助字段）。
+
+    review LLM 对比各 provider 的判断/值，提取对同一字段给出不同结论的条目。
+    与 InconsistentAttribute 完全独立：本结构只描述 provider 之间的分歧，
+    不描述 EoICD-HLR 之间的差异。仅入 JSON，不渲染到 Word 报告"判断"列。
+    """
+
+    field: str                                         # 字段名（如 "Direction"）
+    category: Literal["key", "non_key", "vague"]      # 字段类型（ADR-004 v2/v3）
+    providers: list[str] = Field(default_factory=list)  # 涉及哪些 provider
+    values: list[str] = Field(default_factory=list)      # 各 provider 给出的值
+    detail: str = ""                                      # 一句话说明
+
+
 class ConsensusResult(BaseModel):
-    """共识复核结果（Phase 2-3，Review Agent 输出）。"""
+    """共识复核结果（Phase 2-3，Review Agent 输出）。
+
+    5 星体系（ADR-004 v3 fusion）：
+    - star_rating ∈ {1, 2, 3, 4, 5}；由 agreement_level（v0 语义规则）+
+      field_disagreements 联合映射（见 review_agent._map_star_rating）。
+    - inconsistent_attributes 列出 HLR 与 ICD 事实差异字段（主字段），用于报告渲染。
+    - field_disagreements 列出 provider 之间字段级别的分歧（辅助字段，仅入 JSON）。
+    """
 
     case_id: str
     model_results: dict[str, dict] = Field(default_factory=dict)
     agreement_level: str = ""     # "full" | "majority" | "split" | "single_source" | "no_consensus" (降级覆写)
-    star_rating: int = 0          # 1-3
+    star_rating: int = 0          # 1-5（ADR-004 v3 fusion；老 1-3 体系）
+    inconsistent_attributes: list[InconsistentAttribute] = Field(default_factory=list)
+    field_disagreements: list[FieldDisagreement] = Field(default_factory=list)
     final_coverage_status: str = ""
     final_analysis: str = ""
     confidence: float = 0.0
     consistent_agents: list[str] = Field(default_factory=list)
     divergent_agents: list[str] = Field(default_factory=list)
-    inconsistent_attributes: list[dict] = Field(default_factory=list)
 
 
 class ConsensusOutput(BaseModel):

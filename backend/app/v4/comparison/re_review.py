@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """One-star re-review: Step 7.5 of the V4 pipeline.
 
-Reviews the cases that the consensus step (Step 8) flagged with
-``star_rating == 1`` by re-querying each of the three judging providers
-with a peer-aware prompt: each provider sees its own previous judgment
-labeled as "Judgment A" and the other two as "Judgment B" / "Judgment C",
-then reconsiders the case and outputs a fresh structured JSON.
+Reviews the cases that the consensus step (Step 8) flagged with low
+confidence (``star_rating in {1, 2}`` in the 5-star system, ADR-004;
+previously ``star_rating == 1`` in the 3-star system) by re-querying each
+of the three judging providers with a peer-aware prompt: each provider
+sees its own previous judgment labeled as "Judgment A" and the other two
+as "Judgment B" / "Judgment C", then reconsiders the case and outputs a
+fresh structured JSON.
 
 The re-reviewed judgments replace the originals in the
 ``MultiJudgeResult.judgments`` dict; the original judgments are preserved
@@ -17,13 +19,21 @@ the post-review state.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import sys
 import time
+from concurrent.futures import FIRST_COMPLETED, Future
 from pathlib import Path
 
 from app.v4.comparison.semantic_judge import _extract_json
 from app.v4.config import JUDGE_PROVIDERS
+from app.v4.degradation.config import DegradationConfig
+from app.v4.degradation.concurrency import (
+    _get_drain_executor,
+    _submit_with_gate,
+)
+from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.v4.llm import get_llm
 from app.v4.models import (
     ConsensusOutput,
@@ -35,22 +45,26 @@ from app.v4.prompts import load_prompt
 
 
 # ============================================================
-# 1. Identify one-star cases
+# 1. Identify low-confidence cases (5-star system, ADR-004)
 # ============================================================
 
 
-def _resolve_one_star_case_ids(
+def _resolve_low_confidence_case_ids(
     consensus_out: ConsensusOutput | None,
     output_dir: Path,
 ) -> set[str]:
-    """Return the set of case_id values whose star_rating is 1.
+    """Return the set of case_id values whose star_rating is 1 or 2.
+
+    5 星体系（ADR-004）：触发条件从 1★ 扩展到 ≤2★。peer-aware 复查给
+    1★（三方分歧/仅单源/全部失效）一个升到 2★ 的机会，给 2★（多数共识·关键异议）
+    一个升到 3★ 的机会。
 
     Uses ``consensus_out`` when provided; otherwise reads
     ``output_dir / "consensus_results.json"`` if it exists. Returns an
-    empty set when neither source yields any one-star cases.
+    empty set when neither source yields any low-confidence cases.
     """
     if consensus_out is not None:
-        return {r.case_id for r in consensus_out.results if r.star_rating == 1}
+        return {r.case_id for r in consensus_out.results if r.star_rating in (1, 2)}
 
     consensus_path = output_dir / "consensus_results.json"
     if not consensus_path.exists():
@@ -64,7 +78,7 @@ def _resolve_one_star_case_ids(
     return {
         r["case_id"]
         for r in data.get("results", [])
-        if isinstance(r, dict) and r.get("star_rating") == 1
+        if isinstance(r, dict) and r.get("star_rating") in (1, 2)
     }
 
 
@@ -175,7 +189,7 @@ def _call_re_review_api(
 
     for attempt in range(3):
         try:
-            response = llm.chat(messages=messages, temperature=0.1, max_tokens=4096)
+            response = llm.chat(messages=messages, temperature=0.1, max_tokens=8192)
             content = _extract_json(response["content"])
             data = json.loads(content)
             return {
@@ -222,6 +236,36 @@ def _call_re_review_api(
     }
 
 
+def _call_one_re_review(
+    case: ReverseCase,
+    original_judgments: dict[str, dict],
+    provider: str,
+    system_prompt: str,
+) -> dict:
+    """Sync wrapper for one provider's re-review call.
+
+    Thread-pool-friendly: pure function over its inputs, no shared mutable
+    state. The caller (re_review_judgments) submits this via _submit_with_gate
+    so concurrent invocations of the same provider LLM client are safe.
+    """
+    my_judgment = original_judgments.get(provider, {}) or {}
+    other_judgments = [
+        j for p, j in original_judgments.items() if p != provider
+    ]
+    user_prompt = _build_re_review_user_prompt(
+        case=case,
+        my_judgment=my_judgment,
+        other_judgments=other_judgments,
+    )
+    llm = get_llm(provider)
+    return _call_re_review_api(
+        llm=llm,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        agent_name=provider,
+    )
+
+
 # ============================================================
 # 4. Top-level entry point
 # ============================================================
@@ -233,11 +277,15 @@ def re_review_judgments(
     cases: list[ReverseCase],
     output_dir: Path,
     providers: list[str] | None = None,
-) -> MultiJudgeOutput:
-    """Re-review every one-star case with each judging provider.
+) -> tuple[MultiJudgeOutput, set[str]]:
+    """Re-review every low-confidence (1★/2★) case with each judging provider.
+
+    5 星体系（ADR-004 v3 fusion）：触发条件从 star_rating == 1 扩展到
+    star_rating ∈ {1, 2}。peer-aware 复查给 1★ 一个升 2★ 的机会，
+    给 2★（多数共识但有关键异议）一个升 3★ 的机会。
 
     For each case in ``consensus_out`` (or ``output_dir /
-    consensus_results.json``) with ``star_rating == 1``, query every
+    consensus_results.json``) with ``star_rating in {1, 2}``, query every
     provider in ``providers`` (default :data:`JUDGE_PROVIDERS`) with a
     peer-aware user prompt and replace that provider's entry in the
     case's ``judgments`` dict. Original judgments are preserved under
@@ -248,13 +296,13 @@ def re_review_judgments(
     Returns the updated ``multi_out`` (the same object passed in, mutated
     in place) so callers can chain it with downstream steps.
 
-    A no-op when no one-star cases are present.
+    A no-op when no low-confidence cases are present.
     """
     if providers is None:
         providers = JUDGE_PROVIDERS
 
-    one_star_ids = _resolve_one_star_case_ids(consensus_out, output_dir)
-    if not one_star_ids:
+    low_confidence_ids = _resolve_low_confidence_case_ids(consensus_out, output_dir)
+    if not low_confidence_ids:
         return multi_out, set()
 
     # 当 multi_out=None 时从 output_dir 加载
@@ -272,7 +320,7 @@ def re_review_judgments(
     re_review_meta: list[dict] = []
     re_reviewed_count = 0
 
-    for case_id in sorted(one_star_ids):
+    for case_id in sorted(low_confidence_ids):
         mjr = mjr_map.get(case_id)
         case = case_map.get(case_id)
         if mjr is None or case is None:
@@ -285,37 +333,65 @@ def re_review_judgments(
         # Re-query every provider (or the subset that has a recorded
         # judgment in this case). A provider missing from
         # ``original_judgments`` is skipped — it was never part of this
-        # case's panel.
+        # case's panel. Providers whose original judgment errored are
+        # also skipped — their error status is meaningful and should not
+        # be overwritten.
+        active_providers: list[str] = [
+            p for p in providers
+            if p in original_judgments
+            and (original_judgments.get(p, {}) or {}).get("coverage_status") != "error"
+        ]
+
+        # Per-case parallel submit (ADR-perf: re-review 3 provider wall
+        # time dropped from sum → max). Reuses the Step 4 executor +
+        # inflight semaphore so concurrent re-review tasks share the same
+        # backpressure gate as multi-agent.
+        executor = _get_drain_executor()
+        cfg = DegradationConfig.from_env()
+        futures: dict[Future, str] = {
+            _submit_with_gate(
+                executor,
+                _call_one_re_review,
+                case,
+                original_judgments,
+                p,
+                system_prompt,
+            ): p
+            for p in active_providers
+        }
+
+        # Fixed ceiling per case (no adaptive "wait for 2 valid then
+        # extra" — re-review needs every provider's fresh judgment to
+        # replace the original, so timeout should force-quit stragglers
+        # rather than hold the case hostage).
+        deadline = time.monotonic() + cfg.case_total_timeout
         new_judgments: dict[str, dict] = dict(original_judgments)
-        for provider in providers:
-            if provider not in original_judgments:
-                continue
-            my_judgment = original_judgments.get(provider, {}) or {}
-            # Skip providers that errored in the original judgment — their
-            # error status is meaningful and should not be overwritten.
-            if my_judgment.get("coverage_status") == "error":
-                continue
-            other_judgments = [
-                j for p, j in original_judgments.items() if p != provider
-            ]
-
-            user_prompt = _build_re_review_user_prompt(
-                case=case,
-                my_judgment=my_judgment,
-                other_judgments=other_judgments,
+        pending = set(futures.keys())
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                for f in pending:
+                    p = futures[f]
+                    new_judgments[p] = make_error_judgment(
+                        p, "re-review timeout", "TIMEOUT"
+                    )
+                break
+            done, pending = concurrent.futures.wait(
+                pending, timeout=remaining, return_when=FIRST_COMPLETED
             )
-
-            llm = get_llm(provider)
-            new_judgment = _call_re_review_api(
-                llm=llm,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                agent_name=provider,
-            )
-            # Always stamp the provider name explicitly — guards against an
-            # LLM echoing a different ``agent_name`` in its JSON.
-            new_judgment["agent_name"] = provider
-            new_judgments[provider] = new_judgment
+            for f in done:
+                p = futures[f]
+                try:
+                    nj = f.result()
+                except Exception as exc:  # noqa: BLE001 — broad on purpose
+                    new_judgments[p] = make_error_judgment(
+                        p, f"re-review error: {exc}", classify_exception(exc)
+                    )
+                else:
+                    # Always stamp the provider name explicitly — guards
+                    # against an LLM echoing a different ``agent_name``.
+                    nj["agent_name"] = p
+                    new_judgments[p] = nj
 
         mjr.judgments = new_judgments
 
@@ -330,7 +406,7 @@ def re_review_judgments(
 
         print(
             f"  [re-review] {case_id}: re-reviewed "
-            f"{len([p for p in providers if p in original_judgments])} providers",
+            f"{len(active_providers)} providers",
             file=sys.stderr,
         )
 
@@ -343,7 +419,7 @@ def re_review_judgments(
     re_review_path.write_text(
         json.dumps(
             {
-                "total_one_star_cases": len(one_star_ids),
+                "total_low_confidence_cases": len(low_confidence_ids),
                 "re_reviewed_cases": re_reviewed_count,
                 "results": re_review_meta,
             },

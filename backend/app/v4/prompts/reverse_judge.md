@@ -21,6 +21,21 @@ ICD 是接口定义权威来源，HLR 是软件对 ICD 的实现。
    - HLR 明确写出的声明与 ICD 存在矛盾 → inconsistent（不一致）
    - ICD Block 与该 HLR 不相关，或 HLR 描述的是软件内部逻辑/计算/状态转换而非 ICD 接口实现 → needs_review（待确认）
 
+## AMSC 通用协议特征 covered 判定说明（空气管理系统控制器专用）
+
+适用情形：在 AMSC（Air Management System Controller，空气管理系统控制器）项目背景下，部分 HLR 描述的是 AMSC 所用总线协议标准（ARINC 429 / A825 / A664）本身保证的通用级特征，而非 AMSC 具体接口信号的 ICD 定义。AMSC 关注的接口信号示例包括：风扇 RPM、舱温/管路温度、活门状态、压气机状态等。
+
+判定为 covered（由协议标准保证）的 3 个同时满足条件：
+1. HLR 核心内容是 AMSC 所用总线的协议级实现（如 SDI/SSM 位编码、奇偶校验位、协议帧打包/解包），而非 AMSC 具体接口信号（风扇 RPM、舱温、活门状态等）的实现
+2. HLR 文本中不引用任何 AMSC 具体 ICD 信号名（风扇/活门/温度等）、bit 偏移、Label 号、信号状态定义
+3. HLR 描述的实现逻辑符合该协议的标准要求（无矛盾表述）
+
+判定示例：
+- HLR "ARINC 429 SDI 位（bit8/bit9）应根据通道位置写入固定数据" → covered
+  （ARINC 429 协议级特征，由协议标准保证正确性，与 AMSC 具体 ICD 信号无关）
+- HLR "ARINC 429 奇偶校验位应设置为奇校验" → covered
+- HLR "对接收的 A429 字 bit11-26 进行风扇 RPM 解算" → needs_review（涉及 AMSC 具体信号位定义，需对照 ICD 比对）
+
 ## 输出格式
 
 严格 JSON：

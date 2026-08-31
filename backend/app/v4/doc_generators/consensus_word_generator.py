@@ -11,6 +11,7 @@ from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
 
 def _set_cell_font(cell, text: str, bold: bool = False, size: int = 9, color=None):
@@ -39,9 +40,105 @@ def _style_header_row(table, headers: list[str]):
         shading.insert(0, shd)
 
 
+def _set_table_layout_fixed(table, full_width: bool = True) -> None:
+    """Lock table to fixed layout and align tblGrid with cell widths.
+
+    In autofit mode (python-docx default) Word recomputes column widths from
+    cell content; cell.width only writes tcW as a hint. Setting tblLayout=fixed
+    makes Word honor the explicit tcW/tblGrid values, so all rows render at
+    the same column widths regardless of content length.
+
+    Args:
+        full_width: When True, also set tblW to 100% page width (pct=5000) so
+            the table spans the full content area. Use for tables whose total
+            column width should fill the page (e.g. analysis detail tables).
+            When False, leave tblW as auto so total table width follows the
+            sum of column widths (use for compact tables like judgment / star
+            distribution that look stretched at full width).
+    """
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        tbl.insert(0, tblPr)
+
+    if full_width:
+        tblW = tblPr.find(qn("w:tblW"))
+        if tblW is None:
+            tblW = OxmlElement("w:tblW")
+            tblPr.append(tblW)
+        tblW.set(qn("w:w"), "5000")
+        tblW.set(qn("w:type"), "pct")
+
+    tblLayout = tblPr.find(qn("w:tblLayout"))
+    if tblLayout is None:
+        tblLayout = OxmlElement("w:tblLayout")
+        tblPr.append(tblLayout)
+    tblLayout.set(qn("w:type"), "fixed")
+
+    tblGrid = tbl.find(qn("w:tblGrid"))
+    if tblGrid is not None:
+        first_row = table.rows[0]
+        dxa_widths: list[int] = []
+        for cell in first_row.cells:
+            tcW = cell._tc.tcPr.find(qn("w:tcW"))
+            if tcW is not None and tcW.get(qn("w:type")) == "dxa":
+                dxa_widths.append(int(tcW.get(qn("w:w"))))
+
+        for gridCol in list(tblGrid):
+            tblGrid.remove(gridCol)
+        for dxa in dxa_widths:
+            gridCol = OxmlElement("w:gridCol")
+            gridCol.set(qn("w:w"), str(dxa))
+            tblGrid.append(gridCol)
+
+
 def _star_str(n: int) -> str:
-    """Render star rating as visual string: ★★★ (3), ★★☆ (2), ★☆☆ (1)."""
-    return "★" * n + "☆" * (3 - n)
+    """Render star rating as visual string (5-star system, ADR-004).
+
+    Examples:
+        5 → ★★★★★
+        4 → ★★★★☆
+        3 → ★★★☆☆
+        2 → ★★☆☆☆
+        1 → ★☆☆☆☆
+        0 → ☆☆☆☆☆ (无匹配等不参与星评的 case)
+    """
+    n = max(0, min(5, int(n)))
+    return "★" * n + "☆" * (5 - n)
+
+
+def _map_consensus_label(stars: int, agreement: str) -> tuple[str, "RGBColor | None"]:
+    """Map (stars, agreement) to (共识列文案, 颜色) — 与顶部"星级分布"表口径一致。
+
+    3 档颜色（基于"采纳安全度"）：
+    - 绿 (0x00, 0x80, 0x00)：5★ 完全共识 → 可直接采纳
+    - 黄 (0xCC, 0x88, 0x00)：4★/3★ 有提醒但仍可采纳（4★ 完全共识·字段异议 / 3★ 多数共识）
+    - 红 (0xCC, 0x00, 0x00)：2★/1★ 需关注或人工复核
+
+    与顶部"星级分布"小节 (line 218-227) 的 5 档标签口径一致；1★ 3 个降级子类型
+    按 agreement_level 区分（split → 三方分歧 / single_source → 仅单源 /
+    no_consensus → 全部失效）。
+    """
+    GREEN = RGBColor(0x00, 0x80, 0x00)
+    YELLOW = RGBColor(0xCC, 0x88, 0x00)
+    RED = RGBColor(0xCC, 0x00, 0x00)
+    if stars == 5:
+        return ("完全共识", GREEN)
+    if stars == 4:
+        return ("完全共识·字段异议", YELLOW)
+    if stars == 3:
+        return ("多数共识", YELLOW)
+    if stars == 2:
+        return ("多数共识·关键异议", RED)
+    if stars == 1:
+        one_star_labels = {
+            "split": ("三方分歧", RED),
+            "single_source": ("仅单源", RED),
+            "no_consensus": ("全部失效", RED),
+        }
+        return one_star_labels.get(agreement, ("降级", RED))
+    return ("—", None)
 
 
 def generate_consensus_report(
@@ -82,6 +179,8 @@ def generate_consensus_report(
     for cr in consensus_results:
         cid = cr["case_id"]
         mr = case_match_map.get(cid, {})
+        # ADR-004 v3 fusion: inconsistent_attributes 为主字段（EoICD-HLR 事实差异，
+        # 渲染到"不一致属性"列）；field_disagreements 仅入 JSON，不渲染
         merged.append({
             "case_id": cid,
             "hlr_id": mr.get("hlr_id", ""),
@@ -93,6 +192,7 @@ def generate_consensus_report(
             "final_analysis": cr.get("final_analysis", ""),
             "confidence": cr.get("confidence", 0),
             "model_results": cr.get("model_results", {}),
+            "field_disagreements": cr.get("field_disagreements", []),
             "inconsistent_attributes": cr.get("inconsistent_attributes", []),
             "is_no_match": False,
         })
@@ -111,7 +211,7 @@ def generate_consensus_report(
                 "agreement_level": "",
                 "star_rating": 0,
                 "final_coverage_status": "无匹配",
-                "final_analysis": "匹配层未找到对应EoICD信号",
+                "final_analysis": mr.get("summary") or "匹配层未找到对应EoICD信号",
                 "confidence": 0,
                 "model_results": {},
                 "inconsistent_attributes": [],
@@ -190,6 +290,7 @@ def generate_consensus_report(
     for row_obj in st.rows:
         row_obj.cells[0].width = Cm(6.0)
         row_obj.cells[1].width = Cm(3.0)
+    _set_table_layout_fixed(st, full_width=False)
 
     # ── Consensus quality section ──
     doc.add_heading("星级分布", level=3)
@@ -198,17 +299,23 @@ def generate_consensus_report(
     star_dist = cs.get("star_distribution", {})
     avg_stars = cs.get("average_star_rating", 0)
 
-    # 3★/2★ 主行按星级计数（star_distribution）；1★ 无独立主行，直接以 3 个子类型行
-    # 呈现（agreement_distribution），保证降级产生的共识类型（仅单一来源/无有效裁判）
-    # 与非常规星级不丢计数；主行与子行均默认渲染（0 条时也显示）
+    # 5 星体系（ADR-004 v2）：5 档独立行；1★ 由 3 个降级子类型（split/single_source/
+    # no_consensus）细分，保证降级产生的共识类型不丢计数。其它未在主表中的
+    # 星级以「非常规」追加。
     star_levels = [
-        ("3", "完全一致", "3 个模型判断完全一致，可直接采纳"),
-        ("2", "多数一致", "2/3模型一致，需关注少数意见中是否有被忽略的证据"),
+        ("5", "完全共识",
+         "3 个模型判断完全一致，无字段级别分歧"),
+        ("4", "完全共识·字段异议",
+         "3 个模型判断一致，分析文本提及字段差异"),
+        ("3", "多数共识",
+         "多数模型判断一致，少数意见仅涉及辅助字段或模糊表达"),
+        ("2", "多数共识·关键异议",
+         "多数模型判断一致，少数意见涉及关键字段"),
     ]
     one_star_subs = [
-        ("split", "分歧", "三方各持不同意见"),
-        ("single_source", "仅单一来源", "仅 1 个模型有效，结论仅供参考"),
-        ("no_consensus", "无有效裁判", "全部模型调用失败，AI 结论不可用"),
+        ("split", "三方分歧", "3 个模型各持不同意见"),
+        ("single_source", "仅单源", "仅 1 个模型有效，其余调用失败"),
+        ("no_consensus", "全部失效", "全部模型调用失败"),
     ]
 
     qt = doc.add_table(rows=1, cols=4)
@@ -224,7 +331,7 @@ def generate_consensus_report(
         _set_cell_font(row.cells[2], f"{count} 条")
         _set_cell_font(row.cells[3], desc)
 
-    # 1★ 子类型行：标签格式与主行一致（加粗、默认颜色）；首行星列放 ★☆☆ 后纵向合并
+    # 1★ 子类型行：标签格式与主行一致（加粗、默认颜色）；首行星列放 ★☆☆☆☆ 后纵向合并
     one_star_first_row_idx: int | None = None
     one_star_last_row_idx: int | None = None
     for i, (agr_key, sub_label, sub_desc) in enumerate(one_star_subs):
@@ -240,7 +347,7 @@ def generate_consensus_report(
         one_star_last_row_idx = len(qt.rows) - 1
 
     for star_key in sorted(
-        (k for k in star_dist if k not in ("1", "2", "3")),
+        (k for k in star_dist if k not in {"1", "2", "3", "4", "5"}),
         key=lambda k: int(k) if k.isdigit() else 999,
     ):
         count = star_dist.get(star_key, 0)
@@ -254,15 +361,16 @@ def generate_consensus_report(
 
     row = qt.add_row()
     _set_cell_font(row.cells[1], "平均星级", bold=True)
-    _set_cell_font(row.cells[2], f"{avg_stars:.1f}", bold=True)
+    _set_cell_font(row.cells[2], f"{avg_stars:.2f}", bold=True)
 
     for row_obj in qt.rows:
         row_obj.cells[0].width = Cm(2.5)
-        row_obj.cells[1].width = Cm(3.0)
-        row_obj.cells[2].width = Cm(2.0)
-        row_obj.cells[3].width = Cm(8.0)
+        row_obj.cells[1].width = Cm(3.1)
+        row_obj.cells[2].width = Cm(1.9)
+        row_obj.cells[3].width = Cm(8.4)
+    _set_table_layout_fixed(qt, full_width=False)
 
-    # 1★ 3 个子类型行在星列合并为一个 ★☆☆ 单元格（纵向居中）
+    # 1★ 3 个子类型行在星列合并为一个 ★☆☆☆☆ 单元格（纵向居中）
     if one_star_first_row_idx is not None and one_star_last_row_idx is not None:
         merged_cell = qt.cell(one_star_first_row_idx, 0).merge(qt.cell(one_star_last_row_idx, 0))
         merged_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
@@ -272,11 +380,13 @@ def generate_consensus_report(
     # ── Suggestions ──
     doc.add_heading("处置建议", level=3)
     suggestions = [
-        f"{_star_str(3)} 星条目：模型完全一致，可直接采纳结论。",
-        f"{_star_str(2)} 星条目：多数模型一致，需关注少数意见中是否有被忽略的证据。",
-        f"{_star_str(1)} 星条目（分歧）：三方各持不同意见，建议人工逐条复核并做出最终判断。",
-        f"{_star_str(1)} 星条目（仅单一来源）：仅 1 个模型有效（其余模型调用失败），结论仅供参考，建议人工确认。",
-        f"{_star_str(1)} 星条目（无有效裁判）：全部模型调用失败，AI 结论不可用，必须人工复核。",
+        f"{_star_str(5)} 星条目：完全共识，可直接采纳结论。",
+        f"{_star_str(4)} 星条目：完全共识·字段异议，可采纳但建议核对字段细节。",
+        f"{_star_str(3)} 星条目：多数共识，可采纳多数结论。",
+        f"{_star_str(2)} 星条目：多数共识·关键异议，少数涉及关键字段，建议人工复核少数意见。",
+        f"{_star_str(1)} 星条目（三方分歧）：三方各持不同意见，建议人工逐条复核并做出最终判断。",
+        f"{_star_str(1)} 星条目（仅单源）：仅 1 个模型有效（其余模型调用失败），结论仅供参考，建议人工确认。",
+        f"{_star_str(1)} 星条目（全部失效）：全部模型调用失败，AI 结论不可用，必须人工复核。",
         "无匹配 条目：匹配层未找到对应EoICD信号，需确认HLR是否属于ICD接口范畴。",
     ]
     for s in suggestions:
@@ -307,11 +417,6 @@ def generate_consensus_report(
         "待确认": RGBColor(0xCC, 0x55, 0x00),
         "无匹配": RGBColor(0x99, 0x33, 0xCC),
     }
-    agreement_colors = {
-        "full": RGBColor(0x00, 0x80, 0x00),
-        "majority": RGBColor(0xCC, 0x88, 0x00),
-        "split": RGBColor(0xCC, 0x00, 0x00),
-    }
 
     # Section definitions: (group_key, heading_title, filter_predicate)
     sections = [
@@ -336,11 +441,6 @@ def generate_consensus_report(
         table = doc.add_table(rows=1, cols=len(headers))
         table.style = "Table Grid"
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        # Set all tables to 100% page width for consistent sizing
-        _tblW = table._tbl.tblPr.find(qn('w:tblW'))
-        if _tblW is not None:
-            _tblW.set(qn('w:w'), '5000')
-            _tblW.set(qn('w:type'), 'pct')
         _style_header_row(table, headers)
 
         for m in group:
@@ -357,7 +457,8 @@ def generate_consensus_report(
             if len(m["matched_profile_keys"]) > 5:
                 blocks_str += f" ... (+{len(m['matched_profile_keys']) - 5})"
 
-            agreement_label = {"full": "完全一致", "majority": "多数一致", "split": "分歧", "no_consensus": "无有效裁判", "single_source": "仅单一来源"}.get(agreement, agreement)
+            # 共识列标签按 (stars, agreement) 联合映射，与顶部"星级分布"表口径一致
+            consensus_label, consensus_color = _map_consensus_label(stars, agreement)
 
             # Inconsistency attributes column
             attr_list = m.get("inconsistent_attributes", [])
@@ -376,9 +477,16 @@ def generate_consensus_report(
                 _set_cell_font(row.cells[6], "—")
                 _set_cell_font(row.cells[7], "—")
             else:
-                _set_cell_font(row.cells[6], agreement_label, color=agreement_colors.get(agreement))
+                _set_cell_font(row.cells[6], consensus_label, color=consensus_color)
                 _set_cell_font(row.cells[7], _star_str(stars), bold=True, size=10,
                                color=RGBColor(0xCC, 0x88, 0x00))
+
+        # 设置明细表列宽
+        detail_col_widths = [1.18, 4.61, 1.46, 5.1, 2.11, 9.93, 1.76, 1.93]
+        for row_obj in table.rows:
+            for i, w in enumerate(detail_col_widths):
+                row_obj.cells[i].width = Cm(w)
+        _set_table_layout_fixed(table)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))

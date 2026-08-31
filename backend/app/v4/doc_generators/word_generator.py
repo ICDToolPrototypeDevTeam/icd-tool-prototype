@@ -233,7 +233,7 @@ def generate_consistency_report(
         _set_cell_font(row.cells[4], entry["analysis"], size=8)
         _set_cell_font(row.cells[5], conf_str)
 
-    col_widths = [0.8, 3.0, 2.5, 5.5, 11.0, 1.2]
+    col_widths = [0.8, 5.0, 1.9, 4.5, 12.0, 1.2]
     for row_obj in dt.rows:
         for i, w in enumerate(col_widths):
             row_obj.cells[i].width = Cm(w)
