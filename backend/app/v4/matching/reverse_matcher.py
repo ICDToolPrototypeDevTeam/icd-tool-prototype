@@ -47,7 +47,7 @@ _TOP_K = _TOP_K_DEFAULT  # backward-compat alias for any external importer
 # Dimensions whose values contribute to the numeric total. Diagnostic
 # tags (``direction_conflict`` / ``direction_softened_for_exact_signal``)
 # are clamped to 1 and intentionally NOT summed.
-_NUMERIC_DIMS = ("signal_name", "direction", "bit_field", "sdi", "data_type", "device_bus")
+_NUMERIC_DIMS = ("signal_name", "direction", "bit_field", "sdi", "data_type", "device_bus", "channel_suffix")
 
 # Common Chinese suffixes that occasionally append to otherwise-Latin
 # signal tokens in HLR text (e.g. ``EDP_TCB_STATUS_034状态``). Only
@@ -72,6 +72,13 @@ _SIGNAL_NUM_RE = re.compile(
 _SIGNAL_NUM_BLACKLIST = frozenset({
     "200", "664", "429", "100", "500", "1000", "000", "255", "128",
 })
+
+# Channel suffix pattern: _R<digit>[_<letter>] at end of signal name.
+# Matches _R1, _R1A, _R2B, etc. Used for redundancy-channel matching
+# (HSCU/RPDU: R1A/R1B = channel 1 lane A/B, R2A/R2B = channel 2).
+_CHANNEL_SUFFIX_RE = re.compile(r'_([Rr])(\d+)([A-Za-z]?)$')
+# Bare variant for token-level filtering (no leading underscore).
+_CHANNEL_SUFFIX_TOKEN_RE = re.compile(r'[Rr]\d+[A-Za-z]?$')
 
 # Score tiering: blocks are classified into 3 tiers based on total score
 # and the number of active (non-zero) dimensions.
@@ -276,9 +283,19 @@ def _has_named_component(text: str) -> bool:
     Used to prevent token-decomposition of names like '通道AFTEFAN1' or '通道BBSOV1'
     whose decomposed tokens ('aftefan', 'bbsov') would substring-match unrelated blocks.
     Returns True for both 'precise' and 'moderate' specificity components.
+
+    Also treats short alpha+digit tokens (e.g. R1, R2A, ABV1) as named
+    components so that ``_tokenize_name`` doesn't strip the digit part
+    and leave an overly-generic single letter ('r') that matches every
+    block with a channel suffix.
     """
     for match in _PRECISE_COMPONENT_RE.finditer(text):
-        if _classify_keyword_specificity(match.group()) in ('precise', 'moderate'):
+        component = match.group()
+        # Short alpha+digit tokens like R1, R2A are channel/device
+        # identifiers — always treat as named to prevent digit stripping.
+        if len(component) <= 3 and component[-1].isdigit():
+            return True
+        if _classify_keyword_specificity(component) in ('precise', 'moderate'):
             return True
     return False
 
@@ -291,9 +308,14 @@ def _score_block(
     block: ICDBlock,
     enhancements: MatcherEnhancementConfig | None = None,
 ) -> tuple[int, dict[str, int]]:
-    """Score a single ICDBlock against an HLR across 6 dimensions.
+    """Score a single ICDBlock against an HLR across 7 dimensions.
 
     Returns (total_score, dimension_scores).
+
+    Dimensions: signal_name(30), direction(15), bit_field(20), sdi(15),
+    data_type(10), device_bus(10), channel_suffix(10).  channel_suffix
+    fires only when HLR keywords carry a redundancy-channel suffix
+    (_R1, _R2A, etc.); AMS/FGMC signals lack this pattern → always 0.
 
     ``enhancements`` (RPDU profile only) toggles three optional scoring
     augmentations; when ``None`` or all flags False the result is
@@ -314,6 +336,11 @@ def _score_block(
     family_tokens.update(_tokenize_name(family_lower))
     for tok in list(family_tokens):
         family_tokens.update(_resolve_aliases(tok, syn))
+    # Remove channel-suffix tokens from family_tokens (same rationale as above)
+    family_tokens = {
+        t for t in family_tokens
+        if not _CHANNEL_SUFFIX_TOKEN_RE.fullmatch(t)
+    }
 
     hlr_tokens: set[str] = set()
     for kw in hlr_prof.signal_keywords:
@@ -321,13 +348,45 @@ def _score_block(
         hlr_tokens.add(kw_lower)
         if not _has_named_component(kw_lower):
             hlr_tokens.update(_tokenize_name(kw_lower))
+        else:
+            # Segment-based tokenization: split on '_', tokenize each segment
+            # individually. Named components (e.g. AFTEFAN1, ABV1) are kept
+            # as-is to prevent sub-token noise; generic segments (e.g. HW,
+            # FAULT, LOAD, VOLT) are tokenized normally. This prevents a
+            # single moderate/precise component from blocking tokenization of
+            # the entire compound keyword.
+            for segment in kw_lower.split("_"):
+                if not segment:
+                    continue
+                if not _has_named_component(segment):
+                    hlr_tokens.update(_tokenize_name(segment))
+                else:
+                    hlr_tokens.add(segment)
         hlr_tokens.update(_resolve_aliases(kw_lower, syn))
+
+    # Remove channel-suffix tokens (R1, R1A, R2B, etc.) from hlr_tokens.
+    # These are handled by the dedicated channel_suffix dimension (1a);
+    # leaving them in signal_name would cause every RPDU block with any
+    # channel suffix to match equally on the generic "r" token that
+    # _tokenize_name("R1") produces.
+    hlr_tokens = {
+        t for t in hlr_tokens
+        if not _CHANNEL_SUFFIX_TOKEN_RE.fullmatch(t)
+    }
 
     for dev in hlr_prof.devices:
         dev_lower = dev.lower()
         hlr_tokens.add(dev_lower)
         if not _has_named_component(dev_lower):
             hlr_tokens.update(_tokenize_name(dev_lower))
+        else:
+            for segment in dev_lower.split("_"):
+                if not segment:
+                    continue
+                if not _has_named_component(segment):
+                    hlr_tokens.update(_tokenize_name(segment))
+                else:
+                    hlr_tokens.add(segment)
         hlr_tokens.update(_resolve_aliases(dev_lower, syn))
 
     # Inject Chinese→English mapped tokens
@@ -376,6 +435,42 @@ def _score_block(
                 signal_overlap.add(dev_lower)
 
     dims["signal_name"] = min(30, len(signal_overlap) * 8)
+
+    # ── 1a. Channel suffix match (10pts) ──
+    # HLR keywords like ABV1_LOAD_VOLT_AVAIL_RPDU_R1 carry a redundancy-
+    # channel suffix (_R1).  EoICD block families carry the full suffix
+    # (_R1A, _R1B, _R2A, _R2B).  Match by channel number: _R1 → _R1A/​_R1B
+    # but NOT _R2A/​_R2B.  When the HLR suffix also carries a sub-channel
+    # letter (e.g. _R1A), require exact letter match.
+    hlr_channel_nums: set[str] = set()
+    hlr_channel_letters: set[str] = set()
+    for kw in hlr_prof.signal_keywords:
+        ch = _CHANNEL_SUFFIX_RE.search(kw.lower())
+        if ch:
+            hlr_channel_nums.add(ch.group(2))
+            if ch.group(3):
+                hlr_channel_letters.add(ch.group(3).upper())
+    for dev in hlr_prof.devices:
+        ch = _CHANNEL_SUFFIX_RE.search(dev.lower())
+        if ch:
+            hlr_channel_nums.add(ch.group(2))
+            if ch.group(3):
+                hlr_channel_letters.add(ch.group(3).upper())
+
+    dims["channel_suffix"] = 0
+    if hlr_channel_nums:
+        blk_ch = _CHANNEL_SUFFIX_RE.search(family_lower)
+        if blk_ch:
+            blk_num = blk_ch.group(2)
+            blk_letter = blk_ch.group(3).upper() if blk_ch.group(3) else ""
+            if blk_num in hlr_channel_nums:
+                if hlr_channel_letters:
+                    # HLR specifies sub-channel letter → exact match required
+                    if blk_letter in hlr_channel_letters:
+                        dims["channel_suffix"] = 10
+                else:
+                    # HLR has _R1 (no letter) → matches any sub-channel
+                    dims["channel_suffix"] = 10
 
     # ── 1b. Signal-number exact-match bonus (RPDU only) ──
     # HLR content like "EDP_TCB_STATUS_034状态" hides the trailing 3-digit

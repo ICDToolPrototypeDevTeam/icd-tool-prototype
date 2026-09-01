@@ -182,6 +182,11 @@ auto_detect:
 # The hook appends "(alias: L<octal>_<name>)" annotations to requirement
 # content so the AI labeler sees BOTH forms and emits labels in the octal form
 # that the matcher recognizes. Original text is preserved for traceability.
+# Reverse matcher knobs (opt-in per profile).
+# See ``MatcherEnhancementConfig`` (profiles/base.py) for semantics.
+matcher:
+  enable_direction_soft_on_exact_signal: true  # keep dir-contradicting candidates when signal name matches
+
 hlr_preprocess:
   enabled: true
   auto_parse_hlr_table_0: true    # auto-detect LBL catalog table in HLR Word; covers 12 labels (DIS_00_SYS1, DIS_03_INFO, QTY_SYS2, QTY_SYS3, PRESS_SYS1-3, TEMP_SYS1-3, PWR_CMD_HSCU, CONFIG_RPT)
