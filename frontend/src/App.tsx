@@ -5,7 +5,7 @@ import CorrectnessPage from './pages/CorrectnessPage'
 import CompletenessPage from './pages/CompletenessPage'
 
 export default function App() {
-  const { isOnline, v4Online } = useV4Health()
+  const { v4Online } = useV4Health()
 
   return (
     <div className="app">
@@ -48,8 +48,8 @@ export default function App() {
         </nav>
 
         <div className="header__status">
-          <div className={`status-dot ${(!isOnline || !v4Online) ? 'status-dot--offline' : ''}`} />
-          <span>{!isOnline ? '服务离线' : !v4Online ? 'V4 服务不可用' : '在线服务'}</span>
+          <div className={`status-dot ${!v4Online ? 'status-dot--offline' : ''}`} />
+          <span>{!v4Online ? 'V4 服务不可用' : '在线服务'}</span>
         </div>
       </header>
 
