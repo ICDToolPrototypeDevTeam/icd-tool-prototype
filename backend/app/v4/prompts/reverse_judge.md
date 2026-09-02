@@ -10,7 +10,7 @@ ICD 是接口定义权威来源，HLR 是软件对 ICD 的实现。
 
 2. **提取 HLR 声明**：将 HLR 正文和基本原理作为一个整体，提取其中每个明确的技术断言（bit条件、bit范围、LSB/MSB、有效/无效逻辑、方向、周期、范围等）。
 
-3. **逐项比对**：只比对 HLR 明确写出的技术声明，HLR 未提及的属性视为不在本条需求的范围内，不作为不一致的依据。比对时重点关注：
+3. **逐项比对**：只比对 HLR 明确写出的技术声明，HLR 未提及的属性视为不在本条需求的范围内，不作为不一致的依据。若本条 case 匹配到多个 ICD Block，先根据 HLR 正文中的信号名、Label 号或别名判断 HLR 实际引用了哪些 Block，只对实际引用的 Block 逐项比对；HLR 未提及的 Block 不在比对范围内，不构成"需求缺失"，不得作为 inconsistent 或 needs_review 的依据。比对时重点关注：
    - bit 偏移/宽度与 ICD 是否一致
    - 离散信号每个条件（bitX=1→有效/无效）与 ICD OneState/ZeroState 是否一致
    - LSB/MSB 位序与实际 bit 宽度是否对应
@@ -19,7 +19,21 @@ ICD 是接口定义权威来源，HLR 是软件对 ICD 的实现。
 4. **判定**：
    - 全部通过 → covered（一致）
    - HLR 明确写出的声明与 ICD 存在矛盾 → inconsistent（不一致）
-   - ICD Block 与该 HLR 不相关，或 HLR 描述的是软件内部逻辑/计算/状态转换而非 ICD 接口实现 → needs_review（待确认）
+   - needs_review（待确认）仅限两种情形：
+     a) HLR 明确断言了某接口属性，但所给 ICD 信息不足以验证该断言是否与 ICD 矛盾（如 ICD 画像中该属性缺失、ICD Block 明细不全）
+     b) HLR 未引用所匹配 ICD Block 的任何信号或 Label，完全无法进行比对（Block 无法支持判定）
+
+## needs_review 禁用情形（重要）
+
+以下情形**不得**判 needs_review，均应判 covered（一致），并在 analysis 中注明比对范围：
+
+1. **HLR 未提及某些 ICD 属性**（如 BNR 数据格式、位偏移、位宽、LSB 分辨率、量程、周期、方向）——本任务只比对 HLR 明确写出的技术声明，未提及的属性不在本条需求比对范围内，不构成不一致，也不构成待确认
+2. **HLR 描述软件内部数据路由/状态传递逻辑**，仅引用信号名或 Label 号、未对接口实现属性做出断言——比对范围内无矛盾可判，判 covered
+3. **多 Block 中 HLR 未提及的部分 Block**（该 case 匹配到多个 Block 而 HLR 只提及其中一部分）——未提及的 Block 不在比对范围内，**不构成"需求缺失"**，不得据此判 inconsistent 或 needs_review；最终判定只依据 HLR 实际引用的 Block 的比对结果。引用 Block 比对无矛盾 → covered，analysis 注明比对范围
+
+（needs_review 的适用情形见上方判定规则第 4 步：断言无法验证，或 HLR 对所有匹配 Block 均未引用。）
+
+上述情形判 covered 时 confidence 可适当下调（如 0.6-0.75），以体现信息有限。
 
 ## AMSC 通用协议特征 covered 判定说明（空气管理系统控制器专用）
 
@@ -44,6 +58,7 @@ ICD 是接口定义权威来源，HLR 是软件对 ICD 的实现。
 ## 注意事项
 
 - 只检查 HLR 明确写出的技术声明是否与 ICD 矛盾；HLR 未提及的属性不构成不一致
+- HLR 未提及的属性、HLR 的内部逻辑描述，均**不得**判 needs_review（见"needs_review 禁用情形"），只能判 covered 或 inconsistent；HLR 对所有匹配 Block 均未引用时按判定规则判 needs_review
 - 必须逐一检查 HLR 中的每个技术声明，不可用概括性描述替代
 - confidence 范围 0.0-1.0
 - 匹配证据仅供参考，不影响正常判断

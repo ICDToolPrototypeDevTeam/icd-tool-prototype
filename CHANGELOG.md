@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-01
+
+### Fixed
+
+- **反向管道 needs_review 误判修正（判定语义对齐"只比对 HLR 明确写出的声明"）**：真实 HSCU 样例暴露两类误判——(1) HLR 仅描述软件内部数据路由/状态传递、引用信号 Label 但未断言接口属性（BNR 格式/位偏移/位宽/LSB/量程/周期/方向）时，三方裁判判 needs_review；(2) 一个 HLR 匹配到多个 ICD Block 而只写了其中一个时，被误判"需求缺失"其余 Block。修正后判定语义：HLR 未提及的属性与多 Block 中未提及的部分 Block 不在比对范围内，不构成不一致、也不构成 needs_review，判 covered；needs_review 仅限三种情形——HLR 明确断言了接口属性但所给 ICD 信息不足以验证、HLR 对所有匹配 Block 均未引用（Block 无法支持判定）、provider 分歧。修改点：`prompts/reverse_judge.md`（判定规则重写 + 新增「needs_review 禁用情形」章节 + 逐项比对多 Block 规则）、`comparison/semantic_judge.py`（"待确定"匹配的用户提示词注入精简为谨慎提醒）、`prompts/consensus.md`（inconsistent_attributes 排除"未提及"属性 + 2 处教学示例修正）、`comparison/report_generator.py`（待确认说明文案同步）。对外 API、数据契约、星级机制无变化。
+
 ## [Unreleased] - 2026-08-29
 
 ### Changed

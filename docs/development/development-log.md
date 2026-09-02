@@ -2523,3 +2523,45 @@ Word 模板列宽此前依赖旧 `tblW` 写入方式，存在按内容长度跑�
 ### 下一步建议
 
 前端表格列宽在「V4 五星评价体系前端适配」Issue 中同步调整。
+
+---
+
+## 2026-09-01：反向管道 needs_review 误判修正（HSCU 匹配质量优化延续，分支 Task/Optimize_result_quality）
+
+### 任务目标
+
+HSCU 真实结果中出现大量误判待确认：(1) HLR 仅描述软件内部数据路由与状态传递（如将 AIR_SPEED_FCM1_R1 的值/Valid 赋给 FCM13 信号）、引用 Label L206 但未断言接口属性，三方裁判以"无法确认 covered 或 inconsistent"判 needs_review；(2) 匹配到多个 ICD Block（如 XXX_1、XXX_2）而 HLR 只写了 XXX_1 时，被误判"需求缺失 XXX_2"。两类均应只比对 HLR 明确写出的声明；同时区分"匹配层待确定"与"判定层待确认"——完全无关的 Block（无法支持判定）仍应判 needs_review。
+
+### 完成内容
+
+1. `prompts/reverse_judge.md`：判定规则重写——covered（HLR 声明与 ICD 一致或未断言）；inconsistent（明确声明矛盾）；needs_review 仅限两种情形（a. HLR 断言接口属性但 ICD 信息不足以验证；b. HLR 对所有匹配 Block 均未引用、完全无法比对）。新增「needs_review 禁用情形」章节：未提及属性 / 内部逻辑 / 多 Block 中未提及的部分 Block 三情形判 covered 且不构成"需求缺失"；逐项比对步骤增加多 Block 只比对实际引用 Block 的规则
+2. `comparison/semantic_judge.py`：match_type=待确定 的用户提示词注入精简——删除"无关 → 标记 needs_review"指令行，仅保留"谨慎判断 + confidence 下调"提醒，判定完全交由系统提示词，匹配层"待确定"不再强制传导为判定层"待确认"
+3. `prompts/consensus.md`：inconsistent_attributes 判定规则新增"HLR 未提及/未声明的属性不构成事实差异"；示例 2 与语义一致示例中"缺失定义"类教学案例替换为真实矛盾案例
+4. `comparison/report_generator.py`：待确认说明文案改为"ICD 信息不足以验证 HLR 断言，或匹配 Block 与 HLR 无关"
+
+### 修改文件
+
+1. `backend/app/v4/prompts/reverse_judge.md`
+2. `backend/app/v4/comparison/semantic_judge.py`
+3. `backend/app/v4/prompts/consensus.md`
+4. `backend/app/v4/comparison/report_generator.py`
+
+### 验证方式
+
+1. `python -m py_compile app/v4/comparison/semantic_judge.py app/v4/comparison/report_generator.py`
+2. 临时脚本 `backend/verify_reverse_prompt_fix.py`：构造 4 个场景 case（内部路由引用 Label / 完全无关 Block / 多 Block 只写其一 / 断言接口属性但 ICD 信息不足），真实 API 跑 3 provider 判定 + consensus 复核
+
+### 验证结果
+
+最终语义 4 场景全部符合预期：A 内部路由引用 Label、未断言接口属性 → 三方 covered，consensus full 5★ covered（0.94）；B 完全无关 Block → 三方 needs_review，consensus needs_review；C 多 Block 只写其一 → 三方 covered，分析明确写"L146 未被引用、不构成需求缺失"，consensus full 5★ covered（0.93）；D 断言 bit0 状态语义但 ICD 无位状态定义 → 三方 needs_review，consensus full 5★ needs_review（0.92）。无 provider 再以"未断言属性"为由判待确认。
+
+### 遗留问题
+
+1. `prompts/reverse_judge.md` 中 AMSC 章节示例"对接收的 A429 字 bit11-26 进行风扇 RPM 解算 → needs_review"未动：其属"明确断言位定义"场景，但新规则下若 ICD 提供位定义应直接比对判 covered/inconsistent，示例措辞与新语义存在轻微张力，待 AMSC 回归观察
+2. 临时验证脚本 `backend/verify_reverse_prompt_fix.py` 是否保留待定
+3. 全量 HSCU E2E 回归未跑（仅单案例级验证）
+
+### 下一步建议
+
+1. 用 HSCU 完整样例文件跑一次全管线，确认 needs_review 占比下降且无新的误判
+2. 观察 consensus 层 inconsistent_attributes 是否还有"未声明"类条目残留

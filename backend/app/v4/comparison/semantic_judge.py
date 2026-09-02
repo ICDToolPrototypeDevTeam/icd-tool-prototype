@@ -123,8 +123,7 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
     mt = evidence.get('match_type', 'N/A')
     parts.append(f"- 匹配类型: {mt}")
     if mt == "待确定":
-        parts.append("- ⚠ 此匹配置信度较低（部分维度命中或分数偏低），请谨慎判断")
-        parts.append("- 若 HLR 内容与 ICD 信号块确实无关（如仅提及 Label 号但无具体信号描述），标记为 needs_review")
+        parts.append("- ⚠ 此匹配置信度较低（部分维度命中或分数偏低），请谨慎判断，confidence 适当下调")
         parts.append("- 若能确认 ICD 要求已在 HLR 中落实或不一致，正常判断即可")
     parts.append(f"- HLR Labels: {evidence.get('hlr_labels', [])}")
     parts.append(f"- 匹配 Block 数: {evidence.get('matched_block_count', 0)}")
