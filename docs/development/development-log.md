@@ -2565,3 +2565,87 @@ HSCU 真实结果中出现大量误判待确认：(1) HLR 仅描述软件内部�
 
 1. 用 HSCU 完整样例文件跑一次全管线，确认 needs_review 占比下降且无新的误判
 2. 观察 consensus 层 inconsistent_attributes 是否还有"未声明"类条目残留
+
+---
+
+## 2026-09-02：反向匹配 SDI 位独立成 Block + SSM 位定义随 case 附注（HSCU 匹配质量优化延续）
+
+### 任务目标
+
+HSCU 真实样例暴露两条裁判证据缺口：(1) HLR 明确断言 SDI（如 HLR_022587"设置Label和SDI"）时，SDI 叶子（含 CodedSet=1=System1 等业务语义）被 build_blocks 按协议族整体跳过，裁判看不到 SDI 定义；(2) HLR 断言 SSM 值（如 HLR_023389"将LBL_DIS_00_SYS1_SSM置为SSM_DIS_NO"）时，SSM 位定义（bit29、2bit、A429_SSM_DIS）不可见，且该 HLR 匹配到的全是 SPAR 备用位块（词名只保留在 SPAR 叶子里，数据位叶子是 HYD_* 业务名）。另确认 ICD 全库 SSM 叶子无 CodedSet/OneState/ZeroState（取值编码缺失，属数据限制而非代码问题）。
+
+### 完成内容
+
+1. `config.py`：PROTOCOL_DATAFORMATS 移除 A429SDI（entry 层放行，A429SSM_BNR/LABEL/PARITY 仍过滤）
+2. `signal_profiler.py`：build_blocks 协议族跳过名单移除 SDI（LABEL/SSM/PARITY/OCTLBL 仍跳过）；ICDBlock 新增 `word_protocol_fields` 字段，承载同 label SSM 叶子的位定义（REVERSE_KEY_ATTRS 子集）
+3. `reverse_matcher.py`：新增 `_PROTOCOL_FAMILY_TOKEN_GATE` 协议族词元门控——HLR 文本含独立"SDI"词元才允许 SDI 块参与候选（注意 Python3 re 的 \b 把中文视为单词字符，"和SDI"无边界，改用 `(?<![A-Za-z0-9_])SDI(?![A-Za-z0-9_])` 断言）；显式提及时 signal_name 给到 30（精确信号名命中级）；top-K 豁免——显式断言的协议块追加进 case 不替换前 top-K；`_filter_sn_zero_within_label` 的 sn>0 触发条件排除协议块（防 SDI 块触发过滤删光真实上下文）
+4. `reverse_case_builder.py`：序列化时附加 `word_protocol_fields`（每 label 每 case 一次，防重复撑大输入）
+5. `semantic_judge.py`：用户提示词渲染"同 word 协议字段（匹配层附注，仅作比对上下文）"
+
+### 修改文件
+
+1. `backend/app/v4/config.py`
+2. `backend/app/v4/matching/signal_profiler.py`
+3. `backend/app/v4/matching/reverse_matcher.py`
+4. `backend/app/v4/matching/reverse_case_builder.py`
+5. `backend/app/v4/comparison/semantic_judge.py`
+
+### 验证方式
+
+1. `python -m py_compile` 全部修改文件
+2. 离线验证（`verify_sdi_ssm_fix.py`）：真实 job 684be363 的 eoicd/hlr/hlr_labels JSON 进程内跑匹配链——SDI block 生成 20 个、L145/SDI 属性完整（bit8/2bit/A429SDI/CodedSet=1=System1）、023389 无 SDI 块（门控生效）、022587 拿到 L145/SDI、附注每 case 一次
+3. 全量回归：10 条 HSCU HLR 新代码匹配结果 vs job 保存旧结果——0 条失配、0 条 match_type 变化、非 SDI HLR 0 变化、仅 022587/023124 各追加 1 个 SDI 块
+4. 真实 API：023389/022587 两 case 三 provider 判定 + consensus
+
+### 验证结果
+
+1. 全量回归通过（见上，无挤压现象：top-K 前 20 不变，SDI 块追加在第 21 位）
+2. 023389（SSM 断言）：deepseek=needs_review（ICD 无 SSM 取值编码）、minimax/qwen=covered（SSM 类型 A429_SSM_DIS 与断言一致），consensus=covered 2★（key 字段分歧，标记少数意见）
+3. 022587（含 SDI）：三方 covered，consensus=covered 5★ conf 0.93
+
+### 遗留问题
+
+1. HLR Word LBL 目录表的 SDI号/SSM类型/信号名称（YYY）列未提取（hooks.py 目前只抽 LABEL 号）：SDI 匹配目前靠文本词元，未用上目录表的权威 SDI 值；SSM类型列可为 SSM 断言提供类型级对照。建议下一轮扩展 `_extract_label_mappings` 提取这三列
+2. 023389 判 covered（2★）依赖裁判对"SSM_DIS_NO 与 A429_SSM_DIS 类型一致"的理解，ICD 无取值编码表；是否需要协议规则（ARINC 429 SSM 编码）或接受 needs_review，待用户确认
+3. SPAR 备用位块仍会匹配"只提词名"的 HLR（023389 匹配 20 个 SPAR 块）；是否对 SPAR family 降权待定
+4. 临时验证脚本 `verify_sdi_ssm_fix.py` / `verify_reverse_prompt_fix.py` 去留待定
+
+### 下一步建议
+
+1. hooks.py 提取目录表 SDI号/SSM类型列，SDI 匹配改为值级比对（matcher 已有 15 分 SDI 维度 + SDI 矛盾门）
+2. 用 HSCU 完整样例文件跑全管线 E2E 回归
+3. 评估 SPAR 块降权与 ARINC 429 协议规则
+
+### 第二轮补充（同日）：目录表 SDI/SSM 提取 + E2E 回归修复
+
+**完成内容**（承接上轮下一步建议 1-2）：
+
+1. `hooks.py`：`_extract_label_mappings` 重构为 `_extract_label_meta`，按表格式（行单元格数 ≥8 取 SDI 列 3/SSM 列 7；≥4 取 SDI 列 2）提取 SDI号/SSM类型；单数字 SDI 才写入别名 `SDI=n`（多值映射如 `1=HSCU_A;2=HSCU_B` 跳过），别名形如 `L206_AIR_SPEED_FCM1_R1（SDI=1，SSM类型=BNR）`。真实 Word 验证 6 条改写正确
+2. `reverse_matcher.py`：SDI 维度与 Gate 2 改多值集合匹配；SDI 值级命中纳入方向矛盾 soft 救援（`sn>=30 或 sdi>0`）；新增 HLR 正文显式列名 top-K 豁免（`_extract_listed_signal_tokens`，family 前缀匹配）
+3. `signal_profiler.py`：CodedSet 在 profile 层多值合并（同一 profile 多条目如 1=System1/2=System2/3=System3）；SDIExpected/CodedSet 在 block 层多值合并（跨 channel 聚合）
+4. `config.py`：放行 A429_SSM_BNR（SSM 附注补 DataFormatType）
+5. `prompts/reverse_judge.md`：内部逻辑判 covered 增加"相关性前提"——HLR 引用的信号与全部匹配 Block 均不相关（无 Label 对应、无完整信号名重合，仅共享 OHMS 等通用后缀不算）时按 4(b) 判 needs_review
+
+**E2E 验证**（`run_hscu_e2e.py` 进程内直调管线，真实 LLM，HSCU 10 条 HLR）：
+
+1. 首轮 E2E 暴露 3 个回归全部修复：022645（labeler 关键词碎片化 → sn=24 < 方向救援阈值 30 → FCM1 word 被方向门误删 → 待确定；SDI 值级命中纳入救援后恢复 4 个 FCM1 word 已匹配）、023194（L051 块聚合 ABV1/2/3 通道 SDIExpected first-wins 显示单一错误值 → 误判不一致；多值合并后 covered）、023124（L173 SDI CodedSet first-wins 只剩 1=System1 → 裁判看不到 SDI=2 编码 → 待确认；多值合并后 covered 5★）
+2. 023507（HLR 显式列名 HYD_QTY_XDCR 因 labeler 只给碎片词元排第 23 被 top-20 截掉 → 裁判判"ICD 信息不完整"；列名豁免后 38 块全量进 case → 三方 covered 5★）
+3. 022996（匹配块与 LBL_CMD1_OHMS 完全不相关）按新语义三方 needs_review，consensus 5★ needs_review（0.93）
+4. 最终 E2E 汇总：7 个进入裁判的 case——covered×6、needs_review×1（022996，符合语义）；0 待确定、0 不一致；平均星级 4.57
+
+**遗留问题**：
+
+1. deepseek 曾把 L126_FLIGHT_LEG_OHMS 的"OHMS"通用后缀当作相关信号（已在提示词加澄清并复验通过，但该模型对相关性判定的稳定性需持续观察）
+2. ~~SPAR 备用位块仍会匹配"只提词名"的 HLR~~（已解决，见下）
+3. 目录表多值 SDI（如 DIS_03_INFO 的 1=HSCU_A;2=HSCU_B）未写入别名——其语义已由 SDI 块的 CodedSet 多值合并覆盖，暂无缺口
+4. 临时脚本 `verify_reverse_prompt_fix.py`/`verify_sdi_ssm_fix.py`/`verify_final_cases.py`/`run_hscu_e2e.py` 去留待定（后两个可作回归工具保留）
+
+### 第三轮补充（同日）：SPAR 备用位块匹配降级
+
+**完成内容**：`reverse_matcher.py` 新增 `_filter_spar_when_data_matched`——同 label 已有 signal_name>0 的真实数据块命中时，SPAR 块从裁判上下文剔除；无数据命中时保留（词名唯一线索）。协议族块（SDI 的 sn 来自词元门控加分）不计入"数据命中"判定，避免误触发。
+
+**验证结果**（真实 API）：022587 由 21 块（含 SPAR 噪音）变为 33 块全数据块，三方 covered 5★（0.95）；023389 保留 19 SPAR+SDI 作词名上下文，consensus covered 2★（deepseek 对"SSM_DIS_NO 无 ICD 取值编码"持 needs_review 少数意见，属已知数据限制）。
+
+### 第四轮补充（同日）：HSCU/AMSC 容器全管线回归（用户执行）
+
+用户重建容器后跑两 job 回归：HSCU `61e59c1f`（covered×5、needs_review×2=022996 完全不相关+023389 SSM 编码缺失，与本地 E2E 一致）；AMSC `01929fcb`（14 case：inconsistent×8、covered×5、needs_review×1，无 split）。AMSC 协议 HLR（HLR_544"按通道位置写 SDI 位固定数据"）从"协议标准保证 covered"升级为证据级验证：裁判对照 60 个 SDI 块的 CodedSet（0=AMSC1A…）与 bit8/2bit 定位，covered 5★。遗留优化点：A429隐式路径下协议类 HLR 会把所有 label 的 SDI 块全匹配进 case（60 块，输入偏大但判定正确），后续可限制语义路径协议块候选数量。

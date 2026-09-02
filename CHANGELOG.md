@@ -2,6 +2,13 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-02
+
+### Changed
+
+- **反向匹配：SDI 位独立成 Block + SSM 位定义随 case 附注**：HSCU 样例暴露两条证据缺口——(1) HLR 明确断言 SDI（"设置Label和SDI"）时，SDI 叶子（含 CodedSet，如 1=System1）被 build_blocks 按协议族整体跳过，裁判无 SDI 定义可看；(2) HLR 断言 SSM（"将 LBL_xxx_SSM 置为 SSM_DIS_NO"）时，SSM 位定义（bit29/2bit/A429_SSM_DIS）同样不可见。修改点：`config.py` PROTOCOL_DATAFORMATS 移除 A429SDI/A429_SSM_BNR（entry 层放行，SSM 附注补 dtype）；`signal_profiler.py` build_blocks 放行 SDI 族生成 Block、ICDBlock 新增 `word_protocol_fields` 承载同 label 的 SSM 位定义附注、CodedSet（profile 层）与 SDIExpected/CodedSet（block 层）改为多值合并（修复 first-wins 使裁判看不到 `2=System2` 等编码、误判 inconsistent/needs_review）；`reverse_matcher.py` 新增协议族词元门控（HLR 文本含"SDI"才允许 SDI 块候选）、显式提及按精确信号名命中给 signal_name 30 分、top-K 豁免（显式断言的协议块与 HLR 正文显式列名的信号块追加不替换）、sn-zero 过滤触发条件排除协议块、SDI 维度与 Gate 2 改为多值集合匹配、SDI 值级命中纳入方向矛盾 soft 救援条件（修复 labeler 关键词碎片化导致 sn<30 时 FCM1 word 被方向门误删的回归）；`reverse_case_builder.py` 序列化附注每 label 每 case 一次；`semantic_judge.py` 渲染附注为裁判上下文；`hooks.py` 目录表提取扩展 SDI号/SSM类型列（8 列表与 4 列表分别处理，单数字 SDI 写入别名 `SDI=n`，多值映射跳过），别名形如 `L206_AIR_SPEED_FCM1_R1（SDI=1，SSM类型=BNR）`；`prompts/reverse_judge.md` 内部逻辑判 covered 增加"相关性前提"（HLR 引用的信号与全部匹配 Block 均不相关时判 needs_review，仅共享通用后缀不视为相关）。E2E 结果：HSCU 10 条 HLR 全管线跑通，7 个进入裁判的 case 中 6 个 covered、1 个 needs_review（022996 匹配块完全不相关，符合新语义）；历史误判 023124/023194/022645/023389/023507 全部修复。
+- **SPAR 备用位块匹配降级**：`reverse_matcher.py` 新增 `_filter_spar_when_data_matched`——同 label 已有 signal_name>0 的真实数据块命中时，SPAR（备用位）块从裁判上下文剔除（HLR 不会对备用位做断言，SPAR 命中纯属词名巧合）；HLR 只提词名、无数据块命中时保留 SPAR（它是词名上下文的唯一线索）。协议族块（SDI）不计入"数据命中"判定，避免"只提词名"场景下 SDI 块误触发过滤。验证：022587 从 21 块（含 SPAR 噪音）变为 33 块全数据块，三方 covered 5★（0.95）；023389 保留 19 SPAR+SDI，covered 2★。
+
 ## [Unreleased] - 2026-09-01
 
 ### Fixed

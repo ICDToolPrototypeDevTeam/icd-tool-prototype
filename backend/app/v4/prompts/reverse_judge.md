@@ -21,14 +21,14 @@ ICD 是接口定义权威来源，HLR 是软件对 ICD 的实现。
    - HLR 明确写出的声明与 ICD 存在矛盾 → inconsistent（不一致）
    - needs_review（待确认）仅限两种情形：
      a) HLR 明确断言了某接口属性，但所给 ICD 信息不足以验证该断言是否与 ICD 矛盾（如 ICD 画像中该属性缺失、ICD Block 明细不全）
-     b) HLR 未引用所匹配 ICD Block 的任何信号或 Label，完全无法进行比对（Block 无法支持判定）
+     b) HLR 引用的信号/Label 与所匹配的全部 ICD Block 均不相关（Block 完全不相关，无法支持判定）
 
 ## needs_review 禁用情形（重要）
 
 以下情形**不得**判 needs_review，均应判 covered（一致），并在 analysis 中注明比对范围：
 
 1. **HLR 未提及某些 ICD 属性**（如 BNR 数据格式、位偏移、位宽、LSB 分辨率、量程、周期、方向）——本任务只比对 HLR 明确写出的技术声明，未提及的属性不在本条需求比对范围内，不构成不一致，也不构成待确认
-2. **HLR 描述软件内部数据路由/状态传递逻辑**，仅引用信号名或 Label 号、未对接口实现属性做出断言——比对范围内无矛盾可判，判 covered
+2. **HLR 描述软件内部数据路由/状态传递逻辑**，仅引用信号名或 Label 号、未对接口实现属性做出断言——比对范围内无矛盾可判，判 covered。**前提**：所匹配的 ICD Block 与 HLR 引用的信号相关（Label 号一致，或 Block 信号名与 HLR 引用的信号名存在词元重合）。"相关"要求完整信号名/Label 号的对应（如 CMD1_OHMS ↔ L*_CMD1_OHMS）；仅共享通用后缀/片段（如 OHMS、STATUS）不视为相关。若 HLR 引用的信号与所匹配的全部 ICD Block 均不相关（无 Label 对应、无信号名重合），属于"完全无法比对"，按判定规则第 4 步 (b) 判 needs_review，本禁用情形不适用
 3. **多 Block 中 HLR 未提及的部分 Block**（该 case 匹配到多个 Block 而 HLR 只提及其中一部分）——未提及的 Block 不在比对范围内，**不构成"需求缺失"**，不得据此判 inconsistent 或 needs_review；最终判定只依据 HLR 实际引用的 Block 的比对结果。引用 Block 比对无矛盾 → covered，analysis 注明比对范围
 
 （needs_review 的适用情形见上方判定规则第 4 步：断言无法验证，或 HLR 对所有匹配 Block 均未引用。）

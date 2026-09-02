@@ -102,6 +102,20 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
                         f"{ss.get('dtype', '?')}"
                     )
 
+            # Same-word protocol field definitions (SSM enrichment) — context
+            # only, not a matching object. Lets the judge verify HLR assertions
+            # about protocol bits (e.g. "将 LBL_xxx_SSM 置为 SSM_DIS_NO").
+            proto_fields = blk.get("word_protocol_fields", [])
+            if proto_fields:
+                parts.append("- 同 word 协议字段（匹配层附注，仅作比对上下文）:")
+                for pf in proto_fields:
+                    name = pf.get("name", "?")
+                    attrs = pf.get("attrs", {})
+                    parts.append(
+                        f"  - {name}: "
+                        + ", ".join(f"{k} = {v}" for k, v in attrs.items())
+                    )
+
             parts.append("")
     else:
         parts.append("## EoICD 信号块（ICD 基准定义）")

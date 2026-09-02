@@ -169,7 +169,14 @@ FORWARD_GENERIC_SIGNAL_TERMS = {
 }
 
 # ——— Protocol overhead DataFormatType values (not application-layer data) ———
-PROTOCOL_DATAFORMATS = {"A429OCTLBL", "A429PARITY", "A429SDI", "A429_SSM_BNR"}
+# A429SDI / A429_SSM_BNR 不在过滤列表：
+#   - SDI 位带有 CodedSet 等业务语义（如 1=System1），且 HSCU HLR 会显式断言
+#     SDI（如"设置Label和SDI"），SDI 需作为独立 Block 参与匹配与判定
+#     （匹配资格由 reverse_matcher 的协议族词元门控控制）。
+#   - SSM 位定义（bit29/2bit/类型）需随 case 附注提供给裁判，用于验证 HLR
+#     的 SSM 断言（如"将 LBL_xxx_SSM 置为 SSM_DIS_NO"）；SSM 族不生成 Block
+#     （build_blocks 仍跳过），仅经 word_protocol_fields 附注消费。
+PROTOCOL_DATAFORMATS = {"A429OCTLBL", "A429PARITY"}
 
 # ——— Attribute → category mapping ———
 ATTR_CATEGORY_MAP = {

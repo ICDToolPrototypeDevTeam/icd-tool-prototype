@@ -28,6 +28,7 @@ from app.v4.matching.hlr_classifier import (
     extract_bit_fields,
     extract_sdi,
     extract_direction,
+    _SDI_RE,
 )
 from app.v4.matching.signal_profiler import build_profiles, build_blocks, SignalProfile, ICDBlock
 from app.v4.models import (
@@ -491,7 +492,21 @@ def _score_block(
                     30, dims["signal_name"] + len(matched_nums) * 10
                 )
 
-    # ── 2. Direction match (15pts) ──
+    # ── 2. SDI match (15pts) ──
+    # 从 HLR 正文提取全部 SDI 值（目录表别名可注入多个 SDI=，如一条需求
+    # 引用多个 LBL），任一与 block 的 SDIExpected 一致即得分。
+    # 先于 direction 计算：SDI 值级命中（如 SDI=1 vs SDIExpected=1）是
+    # 身份级命中证据，方向矛盾时用于 direction-soft 救援判定。
+    hlr_sdis = {m for m in _SDI_RE.findall(hlr_prof.content)}
+    dims["sdi"] = 0
+    if hlr_sdis:
+        for prof in block.profiles:
+            prof_sdi = str(prof.attributes.get("SDIExpected", {}).get("value", ""))
+            if prof_sdi and prof_sdi in hlr_sdis:
+                dims["sdi"] = 15
+                break
+
+    # ── 3. Direction match (15pts) ──
     hlr_dir = hlr_prof.extracted_direction
     block_dir = block.direction
     if hlr_dir:
@@ -501,13 +516,16 @@ def _score_block(
             dims["direction"] = 8
         else:
             # Direction contradiction.  When the HLR's signal name already
-            # matched the block exactly (signal_name saturated at 30), this
-            # is often an injected-fault or doc typo, not a "wrong target".
+            # matched the block exactly (signal_name saturated at 30) or the
+            # block's SDI value matches the HLR's SDI assertion, this is
+            # often an injected-fault or doc typo, not a "wrong target".
             # Don't let the 15pt gap bury it below direction-coincident noise
             # before the AI judge reviews the inconsistency. Apportion a
             # mid value (8) instead, and tag the candidate so downstream
-            # stages can surface the conflict (RPDU only).
-            if direction_soft and dims.get("signal_name", 0) >= 30:
+            # stages can surface the conflict.
+            if direction_soft and (
+                dims.get("signal_name", 0) >= 30 or dims.get("sdi", 0) > 0
+            ):
                 dims["direction"] = 8
                 dims["direction_softened_for_exact_signal"] = 1
             else:
@@ -559,17 +577,7 @@ def _score_block(
             break
     dims["bit_field"] = bit_score
 
-    # ── 4. SDI match (15pts) ──
-    hlr_sdi = hlr_prof.sdi_value.strip()
-    dims["sdi"] = 0
-    if hlr_sdi:
-        for prof in block.profiles:
-            prof_sdi = str(prof.attributes.get("SDIExpected", {}).get("value", ""))
-            if prof_sdi and hlr_sdi == prof_sdi:
-                dims["sdi"] = 15
-                break
-
-    # ── 5. Data type match (10pts) ──
+    # ── 4. Data type match (10pts) ──
     dims["data_type"] = 0
     cat = hlr_prof.signal_category
     content_lower = hlr_prof.content.lower()
@@ -609,6 +617,15 @@ def _score_block(
     )
     dims["device_bus"] = (5 if bus_match else 0) + min(5, len(dev_overlap) * 2)
 
+    # ── 6b. Protocol-family explicit-mention bonus ──
+    # SDI 等协议族 block：HLR 文本明确提到该字段词元时，是对协议位的显式
+    # 断言（如"设置Label和SDI"），按精确信号名命中给予 signal_name 基准
+    # 分，避免其被同分的 SPAR 等低质块挤出 top-K。
+    fam_upper = (block.signal_family or "").upper()
+    gate_re = _PROTOCOL_FAMILY_TOKEN_GATE.get(fam_upper)
+    if gate_re is not None and gate_re.search(hlr_prof.content):
+        dims["signal_name"] = max(int(dims.get("signal_name", 0)), 30)
+
     total = sum(dims.get(k, 0) for k in _NUMERIC_DIMS)
     return total, dims
 
@@ -634,12 +651,12 @@ def _apply_hard_gates(
         enhancements = MatcherEnhancementConfig()
     direction_soft = enhancements.enable_direction_soft_on_exact_signal
     hlr_dir = hlr_prof.extracted_direction.strip()
-    hlr_sdi = hlr_prof.sdi_value.strip()
     cat = hlr_prof.signal_category
 
     # Only apply direction gate when direction extraction is unambiguous
     # AND not bidirectional (发送/接收 means both are plausible).
     dir_gate_active = hlr_dir in ("发送", "接收")
+    hlr_sdis = {m for m in _SDI_RE.findall(hlr_prof.content)}
 
     filtered: list[tuple[int, dict[str, int], ICDBlock]] = []
     for total, dims, block in scored:
@@ -651,11 +668,14 @@ def _apply_hard_gates(
                 hlr_dir == "接收" and block_dir == "发送"
             )
             if dir_conflict:
-                # 信号名已精确命中的 block，方向矛盾不剔除——
-                # 这是注入故障/文档笔误，应保留并标记不一致让上层甄别。
+                # 信号名已精确命中（sn>=30）或 SDI 值级命中（目录表 SDI=1
+                # vs ICD SDIExpected=1）的 block，方向矛盾不剔除——这是
+                # 注入故障/文档笔误，应保留并标记不一致让上层甄别。
                 sn_score = dims.get("signal_name", 0)
                 if direction_soft and (
-                    sn_score >= 30 or (sn_score > 0 and block_dir == "发送/接收")
+                    sn_score >= 30
+                    or (sn_score > 0 and block_dir == "发送/接收")
+                    or dims.get("sdi", 0) > 0
                 ):
                     # direction 已在 _score_block 为精确命中矛盾信号给 8 分，
                     # 保留该分值；仅叠加不一致标记供语义层甄别。重算 total。
@@ -670,15 +690,16 @@ def _apply_hard_gates(
                     continue  # 方向矛盾且信号名未命中，仍视为噪声剔除
 
         # —— Gate 2: SDI contradiction ——
-        # Only gate when block has an explicit SDI but none match HLR's SDI.
-        if hlr_sdi:
+        # Only gate when block has an explicit SDI but none match the HLR's
+        # SDI values (正文/目录表别名可携带多个 SDI=，任一匹配即保留)。
+        if hlr_sdis:
             block_has_sdi = False
             block_sdi_matches = False
             for prof in block.profiles:
                 prof_sdi = str(prof.attributes.get("SDIExpected", {}).get("value", ""))
                 if prof_sdi:
                     block_has_sdi = True
-                    if hlr_sdi == prof_sdi:
+                    if prof_sdi in hlr_sdis:
                         block_sdi_matches = True
                         break
             if block_has_sdi and not block_sdi_matches:
@@ -724,7 +745,14 @@ def _filter_sn_zero_within_label(
 
     result: list[tuple[int, dict[str, int], ICDBlock]] = []
     for entries in by_label.values():
-        has_sn_positive = any(d.get("signal_name", 0) > 0 for _, d, _ in entries)
+        # 协议族 block（如 SDI）的 signal_name 来自词元门控加分，不能作为
+        # "该 label 已有真实信号名命中"的证据——否则 HLR 提到 SDI 但数据块
+        # 均 sn=0 时，SDI 会触发过滤把全部真实上下文删光。
+        has_sn_positive = any(
+            d.get("signal_name", 0) > 0
+            and (b.signal_family or "").upper() not in _PROTOCOL_FAMILY_TOKEN_GATE
+            for _, d, b in entries
+        )
         if has_sn_positive:
             result.extend((t, d, b) for t, d, b in entries if d.get("signal_name", 0) > 0)
         else:
@@ -743,6 +771,81 @@ def _filter_sn_zero_within_label(
     return result
 
 
+def _filter_spar_when_data_matched(
+    scored: list[tuple[int, dict[str, int], ICDBlock]],
+) -> list[tuple[int, dict[str, int], ICDBlock]]:
+    """SPAR（备用位）块降级：仅当同 label 没有其他 signal_name>0 的块时才保留。
+
+    SPAR 叶子名携带词名（如 SPAR_22_DIS_00_SYS1_T1A），是"HLR 只提词名"场景
+    下仅有的词名线索；但 HLR 不会对备用位做断言，当同 label 的真实数据位已
+    命中（signal_name>0）时，SPAR 块是纯噪音，应从裁判上下文中剔除。
+    """
+    by_label: dict[str, list[tuple[int, dict[str, int], ICDBlock]]] = defaultdict(list)
+    for total, dims, block in scored:
+        by_label[block.label or block.block_key].append((total, dims, block))
+
+    result: list[tuple[int, dict[str, int], ICDBlock]] = []
+    for entries in by_label.values():
+        # "数据命中"只认真实数据块：协议族 block（如 SDI，其 sn 来自词元
+        # 门控加分）与 SPAR 本身都不算，否则"只提词名"场景下 SDI 块会误
+        # 触发过滤、把唯一的词名线索（SPAR）删光。
+        has_data_hit = any(
+            d.get("signal_name", 0) > 0
+            and (b.signal_family or "").upper() not in _PROTOCOL_FAMILY_TOKEN_GATE
+            and not (b.signal_family or "").upper().startswith("SPAR")
+            for _, d, b in entries
+        )
+        for total, dims, block in entries:
+            fam = (block.signal_family or "").upper()
+            if fam.startswith("SPAR") and has_data_hit:
+                continue
+            result.append((total, dims, block))
+    return result
+
+
+# 协议族 block 匹配资格门控：SDI 等泛名协议位 block 仅在 HLR 文本明确
+# 提到该字段词元时才作为候选参与匹配。否则每个 A429 word 的 SDI block
+# 都会以低分混入所有 label 命中的 case，形成噪音；且与"只比对 HLR 明确
+# 写出的声明"的判定语义一致。
+_PROTOCOL_FAMILY_TOKEN_GATE = {
+    # 注意：不能用 \b——Python3 re 的 \b 把中文也视为单词字符，
+    # "设置Label和SDI" 中 "和SDI" 之间无边界，\bSDI\b 匹配不上。
+    "SDI": re.compile(r"(?<![A-Za-z0-9_])SDI(?![A-Za-z0-9_])", re.IGNORECASE),
+}
+
+
+def _protocol_family_eligible(hlr_content: str, block: ICDBlock) -> bool:
+    """True when a protocol-family block may be a matching candidate."""
+    fam = (block.signal_family or "").upper()
+    gate = _PROTOCOL_FAMILY_TOKEN_GATE.get(fam)
+    if gate is None:
+        return True
+    return bool(gate.search(hlr_content))
+
+
+# HLR 正文中显式列出的全大写信号名 token（如"根据匹配的数据设置各数据位：
+# HYD_QTY_XDCR..."清单），用于 top-K 豁免。排除协议/通用噪声词。
+_LISTED_SIGNAL_RE = re.compile(r"\b[A-Z][A-Z0-9_]{3,}\b")
+_LISTED_SIGNAL_NOISE = {
+    "HLR", "EOICD", "TRUE", "FALSE", "SSM", "SDI", "LBL", "A429", "ARINC",
+    "LABEL", "PARITY", "HSCU",
+}
+
+
+def _extract_listed_signal_tokens(content: str) -> list[str]:
+    """Extract explicitly-listed signal-name tokens from HLR body text."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in _LISTED_SIGNAL_RE.findall(content):
+        if t in _LISTED_SIGNAL_NOISE:
+            continue
+        lt = t.lower()
+        if lt not in seen:
+            seen.add(lt)
+            out.append(lt)
+    return out
+
+
 def _score_and_rank_blocks(
     hlr_prof: HLRMatchProfile,
     candidates: list[ICDBlock],
@@ -751,6 +854,8 @@ def _score_and_rank_blocks(
     """Score blocks, apply hard gates, sort desc, return top results."""
     scored: list[tuple[int, dict[str, int], ICDBlock]] = []
     for block in candidates:
+        if not _protocol_family_eligible(hlr_prof.content, block):
+            continue
         total, dims = _score_block(hlr_prof, block, enhancements=enhancements)
         if total >= _MIN_SCORE_THRESHOLD:
             scored.append((total, dims, block))
@@ -981,6 +1086,8 @@ def match_reverse(
                     # sort by score desc, so AI has signal context even for weak matches
                     raw_scored: list[tuple[int, dict[str, int], ICDBlock]] = []
                     for block in label_blocks:
+                        if not _protocol_family_eligible(hlr_prof.content, block):
+                            continue
                         total, dims = _score_block(hlr_prof, block, enhancements=enhancements)
                         raw_scored.append((total, dims, block))
                     raw_scored.sort(key=lambda x: x[0], reverse=True)
@@ -997,7 +1104,24 @@ def match_reverse(
         # as a backward-compat constant for external importers but no
         # longer used at runtime here.
         top_scored = scored[:enhancements.top_k]
+        # 显式断言的协议族 block（如 SDI）不受 top-K 截断：HLR 明确提到该
+        # 字段词元时，其定义必须出现在裁判上下文里，即使总分低于其他块
+        # （门控已保证 scored 中的协议块均通过了词元检查）。
+        for extra in scored[enhancements.top_k:]:
+            if (extra[2].signal_family or "").upper() in _PROTOCOL_FAMILY_TOKEN_GATE:
+                top_scored.append(extra)
+        # HLR 正文显式列名的 block 同样不受 top-K 截断：数据位清单
+        # （"根据匹配的数据设置各数据位：HYD_QTY_XDCR..."）中列出的信号，
+        # 即使 labeler 未将其完整捕获为关键词（只给碎片词元如 "xdcr"）、
+        # 导致总分偏低，也必须进入裁判上下文。
+        listed = _extract_listed_signal_tokens(hlr_prof.content)
+        if listed:
+            for extra in scored[enhancements.top_k:]:
+                fam = (extra[2].signal_family or "").lower()
+                if any(fam == t or fam.startswith(t + "_") for t in listed):
+                    top_scored.append(extra)
         top_scored = _filter_sn_zero_within_label(top_scored, enhancements=enhancements)
+        top_scored = _filter_spar_when_data_matched(top_scored)
 
         # Clear blocks when match_type is 无匹配
         if match_type == "无匹配":
