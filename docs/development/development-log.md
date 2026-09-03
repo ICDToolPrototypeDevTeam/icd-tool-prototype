@@ -2523,3 +2523,15 @@ Word 模板列宽此前依赖旧 `tblW` 写入方式，存在按内容长度跑�
 ### 下一步建议
 
 前端表格列宽在「V4 五星评价体系前端适配」Issue 中同步调整。
+
+---
+
+## 2026-09-03 微调：A429 协议层提示去除 SDI 检测与人工审查提示语
+
+- **原因**：业务团队复盘发现 SDI 在某些业务场景作为业务标识符，被列入协议层规则判定会触发不必要提示；提示语末尾的"建议人工审查 ARINC 429 协议合规性"在语义上像"待确认"或"需补充操作"，与"`无匹配` 即最终结果"的定位冲突。
+- **修改范围**：仅 `backend/app/v4/matching/reverse_matcher.py`（L92-127 区域）+ `backend/tests/test_protocol_hint.py`。
+- **关键决策**：
+  - Hint 路径 1 改用派生集合 `_HINT_DETECT_KEYWORDS = FRAME_SIGNAL_KEYWORDS - {"sdi"}`，与 Rule 9 / `is_frame_signal()` 解耦。
+  - `FRAME_SIGNAL_KEYWORDS` 保留 SDI，确保 Rule 9 仍过滤 EoICD 中名为 SDI 的协议开销 signal。
+- **设计文档**：`docs/superpowers/specs/2026-09-03-a429-hint-sdi-removal-design.md`
+- **影响面**：HLR 标注 / 分类 / 评分 / 候选 / 过滤 零变动；下游透传层自动跟随常量更新。

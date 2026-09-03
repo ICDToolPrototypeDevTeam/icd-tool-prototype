@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-03
+
+### 修正
+
+- A429 协议层提示移除 SDI 检测与人工审查提示语：`_is_a429_protocol_rule()` 不再因 SDI 触发协议层规则提示（SDI 在某些业务场景作为业务标识符，不应触发），提示文案末尾"建议人工审查 ARINC 429 协议合规性"删除（与"无匹配即最终结果"语义对齐）。范围严格限于原 commit `901c7f7` 触及的 `reverse_matcher.py` 与本地测试脚本，未触动 `FRAME_SIGNAL_KEYWORDS` / Rule 9 / 透传层。
+
 ## [Unreleased] - 2026-08-29
 
 ### Changed
