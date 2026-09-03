@@ -90,9 +90,14 @@ def _has_chinese(text: str) -> bool:
 
 # —— A429 协议层规则检测 ——
 _A429_PROTOCOL_HINT = (
-    "\U0001f4a1 HLR 描述的是 A429 协议级规则（如 SSM/SDI/PARITY 等字段位号定义），"
-    "不对应单个 EoICD Block，建议人工审查 ARINC 429 协议合规性。"
+    "\U0001f4a1 HLR 描述的是 A429 协议级规则（如 SSM/PARITY 等字段位号定义），"
+    "不对应单个 EoICD Block。"
 )
+
+# Hint 检测专用关键字集合：与 FRAME_SIGNAL_KEYWORDS 共底层，
+# 但排除 SDI（SDI 在某些业务场景被当作业务标识符保留，
+# 不当作协议级规则的判定信号）。Rule 9 仍走 FRAME_SIGNAL_KEYWORDS。
+_HINT_DETECT_KEYWORDS = FRAME_SIGNAL_KEYWORDS - {"sdi"}
 
 # 匹配"标签第 N 位" / "标签 第 N 和 M 位" / "标签 第 9-10 位" / "标签的第 9 和 10 位" 等位号位置表达
 _LABEL_BIT_POS_RE = re.compile(
@@ -105,9 +110,9 @@ def _is_a429_protocol_rule(hlr_content: str, signal_keywords: set[str] | None) -
     """检测 HLR 是否描述 A429 协议层规则（非应用层数据）。
 
     三重判定（任一命中即返回 True）：
-      1. signal_keywords 与 FRAME_SIGNAL_KEYWORDS 交集非空
+      1. signal_keywords 与 _HINT_DETECT_KEYWORDS 交集非空（已排除 SDI）
       2. hlr_content 中出现"标签第 N 位"位号位置表达
-      3. hlr_content 中直接出现 ssm/sdi/parity/奇偶校验 字面
+      3. hlr_content 中直接出现 ssm/parity/奇偶校验 字面
 
     参数:
         hlr_content: HLR 全文
@@ -116,13 +121,13 @@ def _is_a429_protocol_rule(hlr_content: str, signal_keywords: set[str] | None) -
     返回:
         True 表示该 HLR 是协议级规则。
     """
-    if signal_keywords and (signal_keywords & FRAME_SIGNAL_KEYWORDS):
+    if signal_keywords and (signal_keywords & _HINT_DETECT_KEYWORDS):
         return True
     text = (hlr_content or "").lower()
     if _LABEL_BIT_POS_RE.search(text):
         return True
     # 兜底：content 里出现协议字段字面（应对 labeler 漏标的中英文混写）
-    if any(k in text for k in ("ssm", "sdi", "parity", "奇偶校验")):
+    if any(k in text for k in ("ssm", "parity", "奇偶校验")):
         return True
     return False
 
