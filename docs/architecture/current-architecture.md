@@ -89,6 +89,7 @@ V4 反向管线 pipeline（6 步）
 | `v4/llm/`       | LLM 抽象层：`factory.py`（env 驱动 + mock fallback）、deepseek/minimax/qwen client、`mock_llm.py` |
 | `v4/prompts/`   | Prompt Markdown 文本资产（reverse_judge / consensus / re_review / forward_review） |
 | `v4/traceability/` | 追溯表预筛选（独立零耦合模块）；正向 `forward_scope`（trace/full 范围构建） |
+| `v4/refine/` | RPDU 专属：matched ICD Block 无关过滤 + 精确/同义词补采（Issue RPDU 适配续）；Step 3 后可选阶段 |
 | `output/`      | 运行时生成的输出文件存放目录                |
 
 ## 6. 前端模块划分
@@ -120,6 +121,10 @@ Step 2 HLR AI 标注
 Step 3 反向匹配
    条目过滤 → 信号画像 → Block 聚合 → HLR 分类 → 两阶段匹配 → 可选追溯预筛选
    模块: v4/matching/{entry_filter,signal_profiler,reverse_case_builder,hlr_classifier,reverse_matcher,traceability}.py
+    ↓
+Step 3.5 RPDU refine 后处理（仅 RPDU profile 启用，由 pipeline `refine=True` 触发）
+   matched ICD Block 无关过滤 + 精确补采 + 同义词补采 → 重建 cases
+   模块: v4/refine/{block_filter,runner}.py
     ↓
 Step 4 多智能体裁判（含降级保护）
    DeepSeek / MiniMax / Qwen 并行判定 → multi_judge_results.json
@@ -295,12 +300,17 @@ backend/app/
     │       ├── config.yaml
     │       ├── hooks.py
     │       └── README.md
+    │   └── fsecu/          # FSECU profile（前舱座椅电子控制单元，占位）
+    │       ├── __init__.py
+    │       ├── hooks.py
+    │       └── config.yaml
     ├── matching/           # 反向匹配、信号画像、HLR 分类、entry filter
     ├── comparison/         # multi_judge + review_agent + 报告生成
     ├── doc_generators/     # xlsx + 3 类 docx 生成
     ├── prompts/            # reverse_judge / consensus / re_review .md
     ├── llm/                # factory / deepseek_client / minimax_client / qwen_client / mock_llm
     ├── traceability/       # 追溯表预筛选（独立零耦合模块）
+    ├── refine/             # RPDU 专属：无关 block 过滤 + 精确/同义词补采
     ├── degradation/        # Provider 健康跟踪 / Case 超时 / 熔断 / Review 降级
     └── synonyms.yaml       # 别名映射
 ```
@@ -324,6 +334,11 @@ backend/app/
    3d. HLR 分类: 4 路正则分类 + 提取 Label/位字段/SDI/方向 — matching/hlr_classifier.py
    3e. 两阶段 Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三层过滤 → 三级分层）— matching/reverse_matcher.py
    3f. 可选追溯表预筛选 + 兜底机制 — matching/traceability.py
+
+3.5 RPDU refine 后处理（仅 RPDU profile，由 pipeline `refine=True` 触发）
+   重建完整 ICD Block 索引 → matched 无关过滤 + 精确补采 + 同义词补采 → 覆盖写盘 reverse_matches.json → 重建 cases
+   模块: refine/runner.py（run_pipeline_refined_stage）+ refine/block_filter.py（filter_matched_blocks）
+   关闭 refine（refine=False / no_refine=True）→ 字节走原 3f 之后链路，行为与原 RPDU 完全相同
 
 4. 多智能体裁判
    3 Agent 平行裁判（DeepSeek/MiniMax/Qwen）

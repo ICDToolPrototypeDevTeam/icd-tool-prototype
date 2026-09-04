@@ -908,3 +908,103 @@ think 块剥离、markdown fence 移除（以 ``` 开头场景）、JSON 截断�
 1. **不同 prompt 模板下同一 provider 行为可能差异显著**：minimax 在 multi-judge（system prompt 强制 JSON）下返回纯 fence JSON，在 re-review（system prompt 短、prompt 鼓励反思）下返回「先 markdown 分析 + 后 fence JSON」。任何 JSON 解析逻辑都应假设 provider 不按预期排版。
 2. **LLM 临时 debug print 必须覆盖 try/except 两路径**：本次修复前最初只成功路径 print，异常路径无 raw body，导致 `requests.RequestException` 抛出时无法定位是 empty body 还是其他问题。修复后两个路径都 print，才确认是 HTTP 200 + 有 content + JSON 解析失败。
 3. **非贪婪正则 + `re.DOTALL` 是 fence 提取的最低成本方案**：re-review 的 markdown 分析段可能含有零散 `{`（表格、数学公式），`re.findall` 非贪婪 + DOTALL 即可正确锚定 ```json fence 内 JSON 起点。
+
+---
+
+### BUG-20260903-001：RPDU refine 整合后 FastAPI 入口未透传 `refine` 形参导致真实 E2E 走原 pipeline
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-09-03
+
+#### 关联 Issue / PR
+
+- Issue RPDU 适配续
+- job `10c3d635`
+
+#### 问题现象
+
+整合同事 RPDU 优化代码到 V4 主线、`pipeline.run_reverse_pipeline` 已正确支持 `refine=True` 精化分支后，跑真实 E2E（job `10c3d635`，上传 RPDU HLR + EoICD Pub/Sub Excel）：
+
+- `output/reverse_matches.json` 中每条 HLR 反向匹配数仍为 top_k=50 全量候选（未做无关 block 过滤、未做精确/同义词补采）；
+- 与同事代码 reference case04 对照，11 条 HLR 匹配数差距大（应为 `8/11/1/5/7/9/4/4/4/6/7`，实测仍是全量 50/50/50/...）；
+- `output/consensus_results.json` 5 星分布与参考结果差距大（参考 9×5★ + 1×3★ + 1×1★，实测分布偏移）。
+
+但跑 CLI `python -m app.v4.cli reverse-analyze ...`（CLI 子命令路径）时，`pipeline.run_reverse_pipeline(refine=True)` 正确触发，与 case04 一致。证明问题出在 HTTP API 入口链路，而非 `refine` 子包或 pipeline 本身。
+
+#### 复现方式
+
+1. 后端启动（`uvicorn app.main:app --reload --port 8000` 或 `docker compose up`）
+2. 通过 `POST /api/v4/coverage-analysis` 上传 RPDU HLR + EoICD Pub/Sub Excel，`controller_profile=rpdu`，不传 `no_refine`
+3. 任务完成后检查 `backend/output/v4/{job_id}/output/reverse_matches.json`：matched_blocks 应已被 refine 过滤 + 补采（与 case04 对齐），但实测未被处理
+4. 同时跑 CLI `python -m app.v4.cli reverse-analyze --controller-profile rpdu ...` 对照，CLI 输出与 case04 一致
+
+#### 影响范围
+
+仅影响通过 HTTP API 入口创建的 RPDU 任务；CLI 入口不受影响。所有其他 profile（AMS / FGMC / HSCU / FSECU）不受影响（`refine=False` 路径不被触发）。
+
+#### 原因分析
+
+Pipeline CLI 入口路径：`cli._cmd_reverse_analyze` → `profile.profile_id == "rpdu" and not args.no_refine` 判定 → `run_reverse_pipeline(refine=refine)`：CLI 链路完整传 `refine`。
+
+Pipeline FastAPI 入口路径：`api/v4/coverage.py::coverage_analysis` → `launch_v4_pipeline(...)` → `api/v4/runner.py::run_v4_pipeline_thread(...)` → `run_reverse_pipeline(...)`：调用点漏补 `refine=...` 形参。
+
+具体定位：`backend/app/api/v4/runner.py:241` 调用 `run_reverse_pipeline(...)` 时未传 `refine`，导致 pipeline 默认走 `refine=False` 分支，与同事代码 reference 行为差异。
+
+代码追溯：`pipeline.run_reverse_pipeline(refine: bool = False)` 形参定义在 `backend/app/v4/pipeline.py:738`（新增），调用形参链路为：
+
+```text
+cli._cmd_reverse_analyze      → run_reverse_pipeline(refine=refine)    [CLI ✅]
+api/v4/coverage.coverage_analysis → launch_v4_pipeline                [HTTP ❌ 缺 no_refine 形参]
+launch_v4_pipeline           → run_v4_pipeline_thread(args=...)        [HTTP ❌ args 元组缺 no_refine]
+run_v4_pipeline_thread       → run_reverse_pipeline(...)                [HTTP ❌ refine=refine 缺]
+```
+
+整条 HTTP 入口链路上 `no_refine` 形参缺失，导致 `refine` 判定逻辑无法运行。
+
+#### 修复方案
+
+按 debug-rules §5 最小修改原则，仅补透传链路，不顺手重构：
+
+1. `backend/app/api/v4/coverage.py::coverage_analysis` 形参新增 `no_refine: bool = Form(False)`；
+2. `launch_v4_pipeline(...)` 调用点追加 `no_refine=no_refine`；
+3. `launch_v4_pipeline(...)` 函数签名新增 `no_refine: bool = False`；
+4. `launch_v4_pipeline(...)` 内 `args=(job, ..., controller_profile, no_refine)` 元组追加 `no_refine`；
+5. `run_v4_pipeline_thread(...)` 函数签名新增 `no_refine: bool = False`；
+6. `run_v4_pipeline_thread(...)` 内计算 `refine = (profile.profile_id == "rpdu") and (not no_refine)`；
+7. `run_v4_pipeline_thread(...)` 调用 `run_reverse_pipeline(...)` 时追加 `refine=refine`。
+
+修改后 HTTP 路径与 CLI 路径行为对齐：
+
+- `cli._cmd_reverse_analyze`：`refine = (profile.profile_id == "rpdu") and (not getattr(args, "no_refine", False))`
+- `api/v4/runner.run_v4_pipeline_thread`：`refine = (profile.profile_id == "rpdu") and (not no_refine)`
+
+两处判定表达式结构一致。
+
+#### 修改文件
+
+1. `backend/app/api/v4/coverage.py`（新增 `no_refine` form 字段 + 透传）
+2. `backend/app/api/v4/runner.py`（`launch_v4_pipeline` 与 `run_v4_pipeline_thread` 双函数补 `no_refine` 形参与透传 + `refine` 判定）
+
+#### 验证方式
+
+1. `docker compose build backend` 重新构建
+2. 真实 E2E：`POST /api/v4/coverage-analysis` 上传 RPDU HLR + EoICD Pub/Sub Excel（job `8e6498ab`）
+3. 检查 `output/reverse_matches.json`：11 条 HLR 反向匹配数与 case04 完全一致（8/11/1/5/7/9/4/4/4/6/7）
+4. 检查 `output/consensus_results.json`：5 星分布平均 4.45（9×5★ + 1×3★ + 1×1★）
+5. 检查 `output/re_review_results.json`：REV-0008 触发 split → 待确认
+6. AMS / FGMC / HSCU 回归：HTTP API 上传不传 `no_refine`（默认 false），行为与 RPDU 整合前字节一致
+
+#### 验证结果
+
+已验证通过。job `8e6498ab` 全部数据与同事代码 reference case04 完全对齐；AMS / FGMC / HSCU 回归测试不变。
+
+#### 经验总结
+
+1. **新增 pipeline 形参必须穿透整条调用链**：本次 `refine: bool` 形参从 `pipeline.run_reverse_pipeline` 入口补到 CLI 入口，但 HTTP API 入口的 4 层调用（`coverage_analysis` → `launch_v4_pipeline` → `run_v4_pipeline_thread` → `run_reverse_pipeline`）漏补；正确做法是改造 `pipeline.run_reverse_pipeline` 形参时同步审计所有调用点（CLI + API + 测试）。
+2. **多入口架构的形参审计清单**：本期 V4 后端有 3 个 pipeline 入口（CLI `cli.py` / HTTP API `api/v4/runner.py` / 单元测试 `tests/`）。新增/修改 pipeline 形参时必须同步审计这 3 个入口，否则会出现「CLI 行为正确、HTTP 行为错」的隐蔽问题。
+3. **真实 E2E + reference 对照是发现此类问题的最低成本手段**：单元测试覆盖率未覆盖 HTTP API → CLI 入口一致性，本次问题只在「同事代码 reference 对照」时才暴露。下次类似集成建议加 E2E 用例做入口一致性 diff。

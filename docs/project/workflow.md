@@ -31,6 +31,11 @@ Step 3: 反向匹配（含条目过滤→信号画像→Block 聚合→HLR 分�
     3e: 两阶段 Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三层过滤 → 三级分层）— matching/reverse_matcher.py
     3f: 可选追溯表预筛选 + 兜底机制 — matching/traceability.py
 
+Step 3.5: RPDU refine 后处理（仅 RPDU profile，由 pipeline `refine=True` 触发；`refine=False` / `no_refine=True` 时跳过此步走原 Step 4 字节一致）
+    重建完整 ICD Block 索引 → matched ICD Block 无关过滤（按 HLR 引用信号名剥离方向/数据源前缀精确比对）+ 精确补采（完整 ICD 中存在但 top-N 候选漏采的同名 block 补回）+ 同义词补采（Airspeed 等同义词组覆盖）→ 覆盖写盘 reverse_matches.json → 用过滤后匹配重建 cases
+    模块: refine/runner.py（run_pipeline_refined_stage）+ refine/block_filter.py（filter_matched_blocks）
+    触发判定: `profile.profile_id == "rpdu" and not no_refine`（CLI `--no-refine` / API `no_refine=true` 可关闭做 A-B 对照）
+
 Step 4: 多智能体裁判（含降级保护）
     DeepSeek / MiniMax / Qwen 三模型并行独立判定（线程池 + concurrent.futures 执行模型）
     任务提交限流：信号量（DEGRADATION_MAX_INFLIGHT，默认 6）控制同时提交到线程池的任务数，超限任务在 submit 前阻塞等待
@@ -152,6 +157,7 @@ Review Agent 汇总三个模型的结论，对分歧处复核，给出最终判�
 4. **env 保存/恢复**：V4 runner 后台线程在进入时备份 `JUDGE_PROVIDERS` 与 `USE_MOCK_LLM`，`try/finally` 按 None/赋值恢复。
 5. **追溯表预筛选（可选）**：仅 `enable_traceability_prefilter=true` 时走 `matching/traceability.py`，否则 `_match_reverse_with_trace` 跳过。
 6. **降级保护**：Step 4 的 `_judge_with_degradation()` 在每 case 前过滤 unhealthy provider，已熔断的 provider 不再发起 HTTP 调用。任务提交受信号量限流（`DEGRADATION_MAX_INFLIGHT`，默认 6），超限任务在 submit 前阻塞等待。超时的 provider 先补 error judgment 占位而不中断 case，任务本体转入后台线程池。Step 4.5 在总预算（`DEGRADATION_DRAIN_BUDGET`，默认 300s）内统一 join，drain 任务数受上限约束（`DEGRADATION_DRAIN_MAX_TASKS`，默认 60），超限任务被 cancel（未执行的取消，已执行的结果丢弃）。迟到的有效结果替换占位后进入 Step 5 共识。Step 4 失败兜底（JSON 解析失败 / API 错误 / 重试耗尽）统一归一为 `coverage_status="error"`。Step 5 的 `_apply_degradation_review()` 对 Review Agent 输出做后处理，不修改 `review_judgments()` 本身；Step 5.6 复查后重新应用降级约束。降级 star cap 与 5 星体系一致（0 存活 → 1★、1 存活 → ≤1★、2 存活 → ≤2★，3 存活不限）。
+7. **RPDU refine 后处理（可选 Step 3.5）**：仅 RPDU profile 启用（`profile.profile_id == "rpdu" and not no_refine`）。`refine/runner.run_pipeline_refined_stage()` 重建完整 ICD Block 索引后做无关过滤 + 精确补采 + 同义词补采，覆盖写盘 `reverse_matches.json` 后重建 cases。`refine=False` 或 `no_refine=True` 时跳过此步，行为与 refine 引入前字节一致；其他 profile（AMS/FGMC/HSCU）行为字节不变。
 
 ## 12. 异常处理
 
@@ -160,6 +166,7 @@ Review Agent 汇总三个模型的结论，对分歧处复核，给出最终判�
 | Step 1 解析 | `parser` 抛异常 | `job.status = failed` | `/api/v4/jobs/{id}/result` 返 409，`message` 含异常摘要 |
 | Step 2 HLR 标注 | DeepSeek API 错误 / 解析失败 | label 退化为空 + `errors: [...]` 累计 | `/api/v4/jobs/{id}/result.errors` 数组；UI 标注 `部分 HLR 标签缺失` |
 | Step 3 反向匹配 | 反向匹配抛异常 | `job.status = failed` | 同 Step 1 |
+| Step 3.5 RPDU refine | `filter_matched_blocks` 抛异常 / HLR 标签数据缺失 | refine 阶段失败 → `job.status = failed`；`refine=False` 路径不被影响 | 同 Step 1 |
 | Step 4 多智能体 | 3 provider 全失败 | 各 provider judgment 归一为 `error`，Step 5 后 0 存活强制 1★ + no_consensus + 待确认 | `status_distribution` 出现 待确认；`degradation.review_star_capped_count` 递增 |
 | Step 5 Review 共识 | Review 失败 | `consensus_results.json` 中 `summary: {"all_failed": true}` | `mock_models` 仅含失败 provider |
 | Step 5.5 低星复查（1★/2★） | 单 provider 复查 API 失败 | 该 provider 标记为 `error`，其余 provider 继续；最终以已有结果计 | re_review_results.json 中该 provider 为 `error` 状态，不阻断其他 provider |
