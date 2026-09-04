@@ -92,6 +92,7 @@ def _judge_with_provider_sync(
 
 # Cached prompt load (module-level, read once per process)
 _reverse_prompt: str | None = None
+_reverse_prompt_rpdu: str | None = None
 
 
 def _load_reverse_prompt() -> str:
@@ -100,3 +101,29 @@ def _load_reverse_prompt() -> str:
         from app.v4.prompts import load_prompt
         _reverse_prompt = load_prompt("reverse_judge")
     return _reverse_prompt
+
+
+def _load_reverse_prompt_rpdu() -> str:
+    """RPDU-only addendum (reverse_judge_rpdu.md), loaded separately so the
+    shared reverse_judge.md stays profile-agnostic."""
+    global _reverse_prompt_rpdu
+    if _reverse_prompt_rpdu is None:
+        from app.v4.prompts import load_prompt
+        _reverse_prompt_rpdu = load_prompt("reverse_judge_rpdu")
+    return _reverse_prompt_rpdu
+
+
+def _build_judge_system_prompt(profile) -> str:
+    """Assemble the reverse-judge system prompt for a controller profile.
+
+    Shared rules always apply; the RPDU-specific addendum is appended only
+    when the resolved profile is ``rpdu``. It must not live in the shared
+    file: models otherwise apply RPDU rules to AMS/FGMC/HSCU cases too
+    (observed: AMSC 100ms send period vs ICD 1000ms TransmissionInterval
+    Minimum flipped inconsistent → covered after the section was merged
+    into reverse_judge.md).
+    """
+    base = _load_reverse_prompt()
+    if profile is not None and getattr(profile, "profile_id", None) == "rpdu":
+        return base + "\n\n" + _load_reverse_prompt_rpdu()
+    return base

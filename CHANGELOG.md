@@ -22,6 +22,32 @@
 
 - **profile 白名单扩展为 `{ams, fgmc, hscu, rpdu, fsecu}`**：`backend/app/api/v4/coverage.py` 与 `backend/app/v4/cli.py` 三处 `choices=["ams", "fgmc"]` → `["ams", "fgmc", "hscu", "rpdu", "fsecu"]`，错误信息动态列出支持列表。
 
+## [Unreleased] - 2026-09-03
+
+### Fixed
+
+- **判定 error 高发修复（截断重试 timeout 死循环）**：大 case（多 ICD Block）判定响应频繁截断（finish_reason=length），翻倍 max_tokens 重试时单请求 timeout 仍固定 120s，16384 tokens 生成必然超时 → 整链重试 → 空响应/error，同一缺陷使 deepseek/minimax 在重 case 上轮番 error（c2cfdfc6 REV-0003、ed72ffc6 REV-0004/0005）。修复：三个 LLM client（`deepseek_client.py`/`minimax_client.py`/`qwen_client.py`）截断重试循环内单请求 timeout 随 max_tokens 同步 ×2（120→240s），warning 打印同步带 timeout。桩测验证：三家截断重试 timeout=[120, 240] 断言通过。
+- **FGMC 反向判定标签/证据集对称性修复（含保送尝试与撤销）**：E2E（job `c2cfdfc6`）中镜像需求 005906（inconsistent）与 005907（covered）行为不对称，根因与处理：(1) 输入文档把通道写成 `FGMC_ CHB`（下划线后空格），AI labeler 因此漏标 devices/keywords——`hlr_labeler.py` 在送 LLM 前压缩 `_\s+`，标注输入与排版无关（保留生效）；(2) 曾尝试对 bit_field>0（位号精确/部分命中 ICD 位范围）的块免 top-K 截断补全 SDI 目标证据集——实测"所有 ARINC 429 标签"类 HLR 的候选含 127 个同质 SDI 块（同为 offset8/size2 + 同一 CodedSet），全量保送把 case 从 20 块撑到 131 块，prompt 膨胀使长输出 provider（deepseek，输出含大量推理 token）8192 起步即截断、翻倍仍难写完→error→连续失败触发熔断后全链 SKIPPED（单块小 case 019482 亦 error 即熔断所致），已撤销保送（2026-09-03）——归一化后两案打分同构，top-K 截断天然对称（复测 005906/005907 top-20 块顺序+集合完全一致），无需保送。005906 的 inconsistent 本身定性为 AI 位序解码偶发错位（通道↔SDI 一致性判断语义保留，不改判定提示词）；strap/config 块为合法数据块不予排除；通道 A/B 区分确认不需要匹配层专门机制。验证：无保送复跑 005906/005907 均回到 20 块且完全一致。
+- **FGMC 反向判定待确认回归修复（ICD 数据驱动）**：FGMC 全流程回归（job `a6bb1b5b`）相对 golden 待确认 1→4（005906/005907/005915/019482），005916 由 covered 翻 inconsistent。根因：HLR"第N位"为物理 1 基、ICD BitOffsetWithinDS 为 0 基，各 provider 换算不一致导致误判。修复全部由 ICD 数据驱动、无协议规则注入：`hlr_classifier.py` 新增中文位号提取并统一换算 0 基（"第9和10位"→offset8/size2 等）；`reverse_matcher.py` SDI 协议块门控由"HLR 显式 SDI 词元"放宽为"位字段与 ICD 位范围重叠即放行"；`signal_profiler.py` word_protocol_fields 泛化为 LABEL/SDI/SSM/PARITY 全协议位锚点；`semantic_judge.py` 附 ICD 锚点基制说明、BNR 负量程符号位推导行（量程 -512 且 LsbRes/ParameterSize 在场时由算术强制"补码有符号、最高位为符号位"，仅条件触发）、HLR 位声明结构化呈现（物理→0 基逐条列出，防裁判换算错位）。验证：真实 LLM 探针 005916 三家全票 covered（此前 1:2 inconsistent）、005906 回 covered 多数、005907 covered、005910 covered；005915/019482 的 SSM 取值编码在 FGMC Publisher ICD 无定义（无 CodedSet），三家判定靠领域记忆互相矛盾，列为已知数据天花板（不注入协议知识，建议人工抽查）。
+
+- **判定位对组装位序修正（reverse_judge.md 位号方向约定）**：FGMC 005906（FGMC_CHA→"所有标签"第9位="1"/第10位="0"）与 005907（CHB→"0"/"1"）被 multi_judge 多轮判 needs_review/inconsistent，判词称"编码'10'=值2=Channel B 与 CHA 矛盾"。实为各 provider 把 HLR 书写顺序当作位序：ARINC 429 字内位号越大越高位（第10位是第9位的高位），(9位,10位)=(1,0) 即字段值 1=Channel A、(0,1) 即值 2=Channel B，与 ICD CodedSet（`1=LEFT Channel or Channel A / 2=RIGHT Channel or Channel B`）自洽，两案均应 covered。该盲区与思考开关无关（deepseek disabled/enabled/effort-low 与 qwen 同错）。修复：`prompts/reverse_judge.md` 比对关注点补一句位号方向约定（第10位是第9位的高位、第31位是第30位的高位，不得按 HLR 书写顺序当作高位在前），不注入协议编码细节。E2E（job `94b8aa9b`）验证：005906/005907 均翻回多数 covered。
+- **deepseek 思考模式定案（enabled + reasoning_effort=low）**：为压制 error 曾显式关闭 deepseek 思考（reasoning 计入 max_tokens，思考会吃光判定输出预算），error 确实消失但质量下降（用户观察"很多待确认"；单块探针 005916 因缺符号位等价推理从 covered 翻 inconsistent）。定案折中：`deepseek_client.py` 恢复 `"thinking": {"type": "enabled"}` 并加 `"reasoning_effort": "low"`——20-block case 实测 reasoning≈3068 tokens，8192 预算内 finish=stop，既保留关键推理又控制输出长度；截断重试 max_tokens/timeout ×2 机制继续兜底。E2E（job `94b8aa9b`）验证：0 error，deepseek 6 case 中 5 covered + 1 合规 needs_review（019482，ICD 无 SSM 定义）、0 inconsistent。
+
+## [Unreleased] - 2026-09-02
+
+### Changed
+
+- **反向匹配：SDI 位独立成 Block + SSM 位定义随 case 附注**：HSCU 样例暴露两条证据缺口——(1) HLR 明确断言 SDI（"设置Label和SDI"）时，SDI 叶子（含 CodedSet，如 1=System1）被 build_blocks 按协议族整体跳过，裁判无 SDI 定义可看；(2) HLR 断言 SSM（"将 LBL_xxx_SSM 置为 SSM_DIS_NO"）时，SSM 位定义（bit29/2bit/A429_SSM_DIS）同样不可见。修改点：`config.py` PROTOCOL_DATAFORMATS 移除 A429SDI/A429_SSM_BNR（entry 层放行，SSM 附注补 dtype）；`signal_profiler.py` build_blocks 放行 SDI 族生成 Block、ICDBlock 新增 `word_protocol_fields` 承载同 label 的 SSM 位定义附注、CodedSet（profile 层）与 SDIExpected/CodedSet（block 层）改为多值合并（修复 first-wins 使裁判看不到 `2=System2` 等编码、误判 inconsistent/needs_review）；`reverse_matcher.py` 新增协议族词元门控（HLR 文本含"SDI"才允许 SDI 块候选）、显式提及按精确信号名命中给 signal_name 30 分、top-K 豁免（显式断言的协议块与 HLR 正文显式列名的信号块追加不替换）、sn-zero 过滤触发条件排除协议块、SDI 维度与 Gate 2 改为多值集合匹配、SDI 值级命中纳入方向矛盾 soft 救援条件（修复 labeler 关键词碎片化导致 sn<30 时 FCM1 word 被方向门误删的回归）；`reverse_case_builder.py` 序列化附注每 label 每 case 一次；`semantic_judge.py` 渲染附注为裁判上下文；`hooks.py` 目录表提取扩展 SDI号/SSM类型列（8 列表与 4 列表分别处理，单数字 SDI 写入别名 `SDI=n`，多值映射跳过），别名形如 `L206_AIR_SPEED_FCM1_R1（SDI=1，SSM类型=BNR）`；`prompts/reverse_judge.md` 内部逻辑判 covered 增加"相关性前提"（HLR 引用的信号与全部匹配 Block 均不相关时判 needs_review，仅共享通用后缀不视为相关）。E2E 结果：HSCU 10 条 HLR 全管线跑通，7 个进入裁判的 case 中 6 个 covered、1 个 needs_review（022996 匹配块完全不相关，符合新语义）；历史误判 023124/023194/022645/023389/023507 全部修复。
+- **SPAR 备用位块匹配降级**：`reverse_matcher.py` 新增 `_filter_spar_when_data_matched`——同 label 已有 signal_name>0 的真实数据块命中时，SPAR（备用位）块从裁判上下文剔除（HLR 不会对备用位做断言，SPAR 命中纯属词名巧合）；HLR 只提词名、无数据块命中时保留 SPAR（它是词名上下文的唯一线索）。协议族块（SDI）不计入"数据命中"判定，避免"只提词名"场景下 SDI 块误触发过滤。验证：022587 从 21 块（含 SPAR 噪音）变为 33 块全数据块，三方 covered 5★（0.95）；023389 保留 19 SPAR+SDI，covered 2★。
+- **删除「AMSC 通用协议特征 covered 判定说明」章节（reverse_judge.md）**：SDI 位独立成 Block 后，协议类 HLR（如 HLR_544"按通道位置写 SDI 位固定数据"）已能凭 SDI 块的位定义与 CodedSet 证据级验证。A/B 测试实证：移除该章节后 HLR_544 仍三方 covered、consensus 5★（0.95），与有章节时一致；AMS 样例中无奇偶校验类协议 HLR，删除对当前结果零影响。无块证据的协议断言（如未来文档出现"奇偶校验位设为奇校验"）将按判定规则 4(b) 落入 needs_review——比"协议标准保证 covered"更诚实；如需自动 covered 可后续将 PARITY 位同样块化。
+- **判定初始 max_tokens 4096→8192**（`semantic_judge.py`）：FGMC 慢跑排查发现 deepseek 判定响应频繁截断、触发翻倍重试（截断→4096→8192→16384 从头重新生成，单次耗时成倍）。大 case（20 Block）下 4096 几乎必截断，初始提到 8192 后多数 case 一次生成完成，减少一轮"生成→截断→重来"。共识（review_agent）与复查（re_review）本就是 8192，不受影响。
+
+## [Unreleased] - 2026-09-01
+
+### Fixed
+
+- **反向管道 needs_review 误判修正（判定语义对齐"只比对 HLR 明确写出的声明"）**：真实 HSCU 样例暴露两类误判——(1) HLR 仅描述软件内部数据路由/状态传递、引用信号 Label 但未断言接口属性（BNR 格式/位偏移/位宽/LSB/量程/周期/方向）时，三方裁判判 needs_review；(2) 一个 HLR 匹配到多个 ICD Block 而只写了其中一个时，被误判"需求缺失"其余 Block。修正后判定语义：HLR 未提及的属性与多 Block 中未提及的部分 Block 不在比对范围内，不构成不一致、也不构成 needs_review，判 covered；needs_review 仅限三种情形——HLR 明确断言了接口属性但所给 ICD 信息不足以验证、HLR 对所有匹配 Block 均未引用（Block 无法支持判定）、provider 分歧。修改点：`prompts/reverse_judge.md`（判定规则重写 + 新增「needs_review 禁用情形」章节 + 逐项比对多 Block 规则）、`comparison/semantic_judge.py`（"待确定"匹配的用户提示词注入精简为谨慎提醒）、`prompts/consensus.md`（inconsistent_attributes 排除"未提及"属性 + 2 处教学示例修正）、`comparison/report_generator.py`（待确认说明文案同步）。对外 API、数据契约、星级机制无变化。
+
 ## [Unreleased] - 2026-08-29
 
 ### Changed

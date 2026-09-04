@@ -28,6 +28,7 @@ from app.v4.matching.hlr_classifier import (
     extract_bit_fields,
     extract_sdi,
     extract_direction,
+    _SDI_RE,
 )
 from app.v4.matching.signal_profiler import build_profiles, build_blocks, SignalProfile, ICDBlock
 from app.v4.models import (
@@ -47,7 +48,7 @@ _TOP_K = _TOP_K_DEFAULT  # backward-compat alias for any external importer
 # Dimensions whose values contribute to the numeric total. Diagnostic
 # tags (``direction_conflict`` / ``direction_softened_for_exact_signal``)
 # are clamped to 1 and intentionally NOT summed.
-_NUMERIC_DIMS = ("signal_name", "direction", "bit_field", "sdi", "data_type", "device_bus")
+_NUMERIC_DIMS = ("signal_name", "direction", "bit_field", "sdi", "data_type", "device_bus", "channel_suffix")
 
 # Common Chinese suffixes that occasionally append to otherwise-Latin
 # signal tokens in HLR text (e.g. ``EDP_TCB_STATUS_034状态``). Only
@@ -72,6 +73,13 @@ _SIGNAL_NUM_RE = re.compile(
 _SIGNAL_NUM_BLACKLIST = frozenset({
     "200", "664", "429", "100", "500", "1000", "000", "255", "128",
 })
+
+# Channel suffix pattern: _R<digit>[_<letter>] at end of signal name.
+# Matches _R1, _R1A, _R2B, etc. Used for redundancy-channel matching
+# (HSCU/RPDU: R1A/R1B = channel 1 lane A/B, R2A/R2B = channel 2).
+_CHANNEL_SUFFIX_RE = re.compile(r'_([Rr])(\d+)([A-Za-z]?)$')
+# Bare variant for token-level filtering (no leading underscore).
+_CHANNEL_SUFFIX_TOKEN_RE = re.compile(r'[Rr]\d+[A-Za-z]?$')
 
 # Score tiering: blocks are classified into 3 tiers based on total score
 # and the number of active (non-zero) dimensions.
@@ -276,9 +284,19 @@ def _has_named_component(text: str) -> bool:
     Used to prevent token-decomposition of names like '通道AFTEFAN1' or '通道BBSOV1'
     whose decomposed tokens ('aftefan', 'bbsov') would substring-match unrelated blocks.
     Returns True for both 'precise' and 'moderate' specificity components.
+
+    Also treats short alpha+digit tokens (e.g. R1, R2A, ABV1) as named
+    components so that ``_tokenize_name`` doesn't strip the digit part
+    and leave an overly-generic single letter ('r') that matches every
+    block with a channel suffix.
     """
     for match in _PRECISE_COMPONENT_RE.finditer(text):
-        if _classify_keyword_specificity(match.group()) in ('precise', 'moderate'):
+        component = match.group()
+        # Short alpha+digit tokens like R1, R2A are channel/device
+        # identifiers — always treat as named to prevent digit stripping.
+        if len(component) <= 3 and component[-1].isdigit():
+            return True
+        if _classify_keyword_specificity(component) in ('precise', 'moderate'):
             return True
     return False
 
@@ -291,9 +309,14 @@ def _score_block(
     block: ICDBlock,
     enhancements: MatcherEnhancementConfig | None = None,
 ) -> tuple[int, dict[str, int]]:
-    """Score a single ICDBlock against an HLR across 6 dimensions.
+    """Score a single ICDBlock against an HLR across 7 dimensions.
 
     Returns (total_score, dimension_scores).
+
+    Dimensions: signal_name(30), direction(15), bit_field(20), sdi(15),
+    data_type(10), device_bus(10), channel_suffix(10).  channel_suffix
+    fires only when HLR keywords carry a redundancy-channel suffix
+    (_R1, _R2A, etc.); AMS/FGMC signals lack this pattern → always 0.
 
     ``enhancements`` (RPDU profile only) toggles three optional scoring
     augmentations; when ``None`` or all flags False the result is
@@ -314,6 +337,11 @@ def _score_block(
     family_tokens.update(_tokenize_name(family_lower))
     for tok in list(family_tokens):
         family_tokens.update(_resolve_aliases(tok, syn))
+    # Remove channel-suffix tokens from family_tokens (same rationale as above)
+    family_tokens = {
+        t for t in family_tokens
+        if not _CHANNEL_SUFFIX_TOKEN_RE.fullmatch(t)
+    }
 
     hlr_tokens: set[str] = set()
     for kw in hlr_prof.signal_keywords:
@@ -321,13 +349,45 @@ def _score_block(
         hlr_tokens.add(kw_lower)
         if not _has_named_component(kw_lower):
             hlr_tokens.update(_tokenize_name(kw_lower))
+        else:
+            # Segment-based tokenization: split on '_', tokenize each segment
+            # individually. Named components (e.g. AFTEFAN1, ABV1) are kept
+            # as-is to prevent sub-token noise; generic segments (e.g. HW,
+            # FAULT, LOAD, VOLT) are tokenized normally. This prevents a
+            # single moderate/precise component from blocking tokenization of
+            # the entire compound keyword.
+            for segment in kw_lower.split("_"):
+                if not segment:
+                    continue
+                if not _has_named_component(segment):
+                    hlr_tokens.update(_tokenize_name(segment))
+                else:
+                    hlr_tokens.add(segment)
         hlr_tokens.update(_resolve_aliases(kw_lower, syn))
+
+    # Remove channel-suffix tokens (R1, R1A, R2B, etc.) from hlr_tokens.
+    # These are handled by the dedicated channel_suffix dimension (1a);
+    # leaving them in signal_name would cause every RPDU block with any
+    # channel suffix to match equally on the generic "r" token that
+    # _tokenize_name("R1") produces.
+    hlr_tokens = {
+        t for t in hlr_tokens
+        if not _CHANNEL_SUFFIX_TOKEN_RE.fullmatch(t)
+    }
 
     for dev in hlr_prof.devices:
         dev_lower = dev.lower()
         hlr_tokens.add(dev_lower)
         if not _has_named_component(dev_lower):
             hlr_tokens.update(_tokenize_name(dev_lower))
+        else:
+            for segment in dev_lower.split("_"):
+                if not segment:
+                    continue
+                if not _has_named_component(segment):
+                    hlr_tokens.update(_tokenize_name(segment))
+                else:
+                    hlr_tokens.add(segment)
         hlr_tokens.update(_resolve_aliases(dev_lower, syn))
 
     # Inject Chinese→English mapped tokens
@@ -377,6 +437,42 @@ def _score_block(
 
     dims["signal_name"] = min(30, len(signal_overlap) * 8)
 
+    # ── 1a. Channel suffix match (10pts) ──
+    # HLR keywords like ABV1_LOAD_VOLT_AVAIL_RPDU_R1 carry a redundancy-
+    # channel suffix (_R1).  EoICD block families carry the full suffix
+    # (_R1A, _R1B, _R2A, _R2B).  Match by channel number: _R1 → _R1A/​_R1B
+    # but NOT _R2A/​_R2B.  When the HLR suffix also carries a sub-channel
+    # letter (e.g. _R1A), require exact letter match.
+    hlr_channel_nums: set[str] = set()
+    hlr_channel_letters: set[str] = set()
+    for kw in hlr_prof.signal_keywords:
+        ch = _CHANNEL_SUFFIX_RE.search(kw.lower())
+        if ch:
+            hlr_channel_nums.add(ch.group(2))
+            if ch.group(3):
+                hlr_channel_letters.add(ch.group(3).upper())
+    for dev in hlr_prof.devices:
+        ch = _CHANNEL_SUFFIX_RE.search(dev.lower())
+        if ch:
+            hlr_channel_nums.add(ch.group(2))
+            if ch.group(3):
+                hlr_channel_letters.add(ch.group(3).upper())
+
+    dims["channel_suffix"] = 0
+    if hlr_channel_nums:
+        blk_ch = _CHANNEL_SUFFIX_RE.search(family_lower)
+        if blk_ch:
+            blk_num = blk_ch.group(2)
+            blk_letter = blk_ch.group(3).upper() if blk_ch.group(3) else ""
+            if blk_num in hlr_channel_nums:
+                if hlr_channel_letters:
+                    # HLR specifies sub-channel letter → exact match required
+                    if blk_letter in hlr_channel_letters:
+                        dims["channel_suffix"] = 10
+                else:
+                    # HLR has _R1 (no letter) → matches any sub-channel
+                    dims["channel_suffix"] = 10
+
     # ── 1b. Signal-number exact-match bonus (RPDU only) ──
     # HLR content like "EDP_TCB_STATUS_034状态" hides the trailing 3-digit
     # number behind a Chinese suffix; the regular boundary matcher
@@ -396,7 +492,21 @@ def _score_block(
                     30, dims["signal_name"] + len(matched_nums) * 10
                 )
 
-    # ── 2. Direction match (15pts) ──
+    # ── 2. SDI match (15pts) ──
+    # 从 HLR 正文提取全部 SDI 值（目录表别名可注入多个 SDI=，如一条需求
+    # 引用多个 LBL），任一与 block 的 SDIExpected 一致即得分。
+    # 先于 direction 计算：SDI 值级命中（如 SDI=1 vs SDIExpected=1）是
+    # 身份级命中证据，方向矛盾时用于 direction-soft 救援判定。
+    hlr_sdis = {m for m in _SDI_RE.findall(hlr_prof.content)}
+    dims["sdi"] = 0
+    if hlr_sdis:
+        for prof in block.profiles:
+            prof_sdi = str(prof.attributes.get("SDIExpected", {}).get("value", ""))
+            if prof_sdi and prof_sdi in hlr_sdis:
+                dims["sdi"] = 15
+                break
+
+    # ── 3. Direction match (15pts) ──
     hlr_dir = hlr_prof.extracted_direction
     block_dir = block.direction
     if hlr_dir:
@@ -406,13 +516,16 @@ def _score_block(
             dims["direction"] = 8
         else:
             # Direction contradiction.  When the HLR's signal name already
-            # matched the block exactly (signal_name saturated at 30), this
-            # is often an injected-fault or doc typo, not a "wrong target".
+            # matched the block exactly (signal_name saturated at 30) or the
+            # block's SDI value matches the HLR's SDI assertion, this is
+            # often an injected-fault or doc typo, not a "wrong target".
             # Don't let the 15pt gap bury it below direction-coincident noise
             # before the AI judge reviews the inconsistency. Apportion a
             # mid value (8) instead, and tag the candidate so downstream
-            # stages can surface the conflict (RPDU only).
-            if direction_soft and dims.get("signal_name", 0) >= 30:
+            # stages can surface the conflict.
+            if direction_soft and (
+                dims.get("signal_name", 0) >= 30 or dims.get("sdi", 0) > 0
+            ):
                 dims["direction"] = 8
                 dims["direction_softened_for_exact_signal"] = 1
             else:
@@ -464,17 +577,7 @@ def _score_block(
             break
     dims["bit_field"] = bit_score
 
-    # ── 4. SDI match (15pts) ──
-    hlr_sdi = hlr_prof.sdi_value.strip()
-    dims["sdi"] = 0
-    if hlr_sdi:
-        for prof in block.profiles:
-            prof_sdi = str(prof.attributes.get("SDIExpected", {}).get("value", ""))
-            if prof_sdi and hlr_sdi == prof_sdi:
-                dims["sdi"] = 15
-                break
-
-    # ── 5. Data type match (10pts) ──
+    # ── 4. Data type match (10pts) ──
     dims["data_type"] = 0
     cat = hlr_prof.signal_category
     content_lower = hlr_prof.content.lower()
@@ -514,6 +617,15 @@ def _score_block(
     )
     dims["device_bus"] = (5 if bus_match else 0) + min(5, len(dev_overlap) * 2)
 
+    # ── 6b. Protocol-family explicit-mention bonus ──
+    # SDI 等协议族 block：HLR 文本明确提到该字段词元时，是对协议位的显式
+    # 断言（如"设置Label和SDI"），按精确信号名命中给予 signal_name 基准
+    # 分，避免其被同分的 SPAR 等低质块挤出 top-K。
+    fam_upper = (block.signal_family or "").upper()
+    gate_re = _PROTOCOL_FAMILY_TOKEN_GATE.get(fam_upper)
+    if gate_re is not None and gate_re.search(hlr_prof.content):
+        dims["signal_name"] = max(int(dims.get("signal_name", 0)), 30)
+
     total = sum(dims.get(k, 0) for k in _NUMERIC_DIMS)
     return total, dims
 
@@ -539,12 +651,12 @@ def _apply_hard_gates(
         enhancements = MatcherEnhancementConfig()
     direction_soft = enhancements.enable_direction_soft_on_exact_signal
     hlr_dir = hlr_prof.extracted_direction.strip()
-    hlr_sdi = hlr_prof.sdi_value.strip()
     cat = hlr_prof.signal_category
 
     # Only apply direction gate when direction extraction is unambiguous
     # AND not bidirectional (发送/接收 means both are plausible).
     dir_gate_active = hlr_dir in ("发送", "接收")
+    hlr_sdis = {m for m in _SDI_RE.findall(hlr_prof.content)}
 
     filtered: list[tuple[int, dict[str, int], ICDBlock]] = []
     for total, dims, block in scored:
@@ -556,11 +668,14 @@ def _apply_hard_gates(
                 hlr_dir == "接收" and block_dir == "发送"
             )
             if dir_conflict:
-                # 信号名已精确命中的 block，方向矛盾不剔除——
-                # 这是注入故障/文档笔误，应保留并标记不一致让上层甄别。
+                # 信号名已精确命中（sn>=30）或 SDI 值级命中（目录表 SDI=1
+                # vs ICD SDIExpected=1）的 block，方向矛盾不剔除——这是
+                # 注入故障/文档笔误，应保留并标记不一致让上层甄别。
                 sn_score = dims.get("signal_name", 0)
                 if direction_soft and (
-                    sn_score >= 30 or (sn_score > 0 and block_dir == "发送/接收")
+                    sn_score >= 30
+                    or (sn_score > 0 and block_dir == "发送/接收")
+                    or dims.get("sdi", 0) > 0
                 ):
                     # direction 已在 _score_block 为精确命中矛盾信号给 8 分，
                     # 保留该分值；仅叠加不一致标记供语义层甄别。重算 total。
@@ -575,15 +690,16 @@ def _apply_hard_gates(
                     continue  # 方向矛盾且信号名未命中，仍视为噪声剔除
 
         # —— Gate 2: SDI contradiction ——
-        # Only gate when block has an explicit SDI but none match HLR's SDI.
-        if hlr_sdi:
+        # Only gate when block has an explicit SDI but none match the HLR's
+        # SDI values (正文/目录表别名可携带多个 SDI=，任一匹配即保留)。
+        if hlr_sdis:
             block_has_sdi = False
             block_sdi_matches = False
             for prof in block.profiles:
                 prof_sdi = str(prof.attributes.get("SDIExpected", {}).get("value", ""))
                 if prof_sdi:
                     block_has_sdi = True
-                    if hlr_sdi == prof_sdi:
+                    if prof_sdi in hlr_sdis:
                         block_sdi_matches = True
                         break
             if block_has_sdi and not block_sdi_matches:
@@ -629,9 +745,23 @@ def _filter_sn_zero_within_label(
 
     result: list[tuple[int, dict[str, int], ICDBlock]] = []
     for entries in by_label.values():
-        has_sn_positive = any(d.get("signal_name", 0) > 0 for _, d, _ in entries)
+        # 协议族 block（如 SDI）的 signal_name 来自词元门控加分，不能作为
+        # "该 label 已有真实信号名命中"的证据——否则 HLR 提到 SDI 但数据块
+        # 均 sn=0 时，SDI 会触发过滤把全部真实上下文删光。
+        has_sn_positive = any(
+            d.get("signal_name", 0) > 0
+            and (b.signal_family or "").upper() not in _PROTOCOL_FAMILY_TOKEN_GATE
+            for _, d, b in entries
+        )
         if has_sn_positive:
-            result.extend((t, d, b) for t, d, b in entries if d.get("signal_name", 0) > 0)
+            for t, d, b in entries:
+                if d.get("signal_name", 0) > 0:
+                    result.append((t, d, b))
+                elif (b.signal_family or "").upper() in _PROTOCOL_FAMILY_TOKEN_GATE:
+                    # 协议族块（SDI）即使 sn=0 也保留：其入围要么靠 HLR 显式
+                    # 词元（6b 已给 sn=30），要么靠 ICD 位范围重叠门控——两者
+                    # 都是证据级准入，不应被"同 label 已有 sn>0 数据块"误删。
+                    result.append((t, d, b))
         else:
             result.extend(entries)
 
@@ -648,6 +778,124 @@ def _filter_sn_zero_within_label(
     return result
 
 
+def _filter_spar_when_data_matched(
+    scored: list[tuple[int, dict[str, int], ICDBlock]],
+) -> list[tuple[int, dict[str, int], ICDBlock]]:
+    """SPAR（备用位）块降级：仅当同 label 没有其他 signal_name>0 的块时才保留。
+
+    SPAR 叶子名携带词名（如 SPAR_22_DIS_00_SYS1_T1A），是"HLR 只提词名"场景
+    下仅有的词名线索；但 HLR 不会对备用位做断言，当同 label 的真实数据位已
+    命中（signal_name>0）时，SPAR 块是纯噪音，应从裁判上下文中剔除。
+    """
+    by_label: dict[str, list[tuple[int, dict[str, int], ICDBlock]]] = defaultdict(list)
+    for total, dims, block in scored:
+        by_label[block.label or block.block_key].append((total, dims, block))
+
+    result: list[tuple[int, dict[str, int], ICDBlock]] = []
+    for entries in by_label.values():
+        # "数据命中"只认真实数据块：协议族 block（如 SDI，其 sn 来自词元
+        # 门控加分）与 SPAR 本身都不算，否则"只提词名"场景下 SDI 块会误
+        # 触发过滤、把唯一的词名线索（SPAR）删光。
+        has_data_hit = any(
+            d.get("signal_name", 0) > 0
+            and (b.signal_family or "").upper() not in _PROTOCOL_FAMILY_TOKEN_GATE
+            and not (b.signal_family or "").upper().startswith("SPAR")
+            for _, d, b in entries
+        )
+        for total, dims, block in entries:
+            fam = (block.signal_family or "").upper()
+            if fam.startswith("SPAR") and has_data_hit:
+                continue
+            result.append((total, dims, block))
+    return result
+
+
+# 协议族 block 匹配资格门控：SDI 等泛名协议位 block 仅在 HLR 文本明确
+# 提到该字段词元时才作为候选参与匹配。否则每个 A429 word 的 SDI block
+# 都会以低分混入所有 label 命中的 case，形成噪音；且与"只比对 HLR 明确
+# 写出的声明"的判定语义一致。
+_PROTOCOL_FAMILY_TOKEN_GATE = {
+    # 注意：不能用 \b——Python3 re 的 \b 把中文也视为单词字符，
+    # "设置Label和SDI" 中 "和SDI" 之间无边界，\bSDI\b 匹配不上。
+    "SDI": re.compile(r"(?<![A-Za-z0-9_])SDI(?![A-Za-z0-9_])", re.IGNORECASE),
+}
+
+
+def _hlr_bit_fields_overlap(hlr_prof: HLRMatchProfile, icd_offset: int, icd_size: int) -> bool:
+    """HLR 位号（已换算 0 基）与 ICD 位范围 [icd_offset, icd_offset+icd_size) 是否有交集."""
+    icd_lo, icd_hi = icd_offset, icd_offset + icd_size
+    for bf in hlr_prof.bit_fields:
+        try:
+            lo = int(bf.get("offset"))
+            sz = int(bf.get("size") or 1)
+        except (TypeError, ValueError):
+            continue
+        if lo + max(sz, 1) > icd_lo and lo < icd_hi:
+            return True
+    return False
+
+
+def _block_icd_bit_range(block: ICDBlock) -> tuple[int, int] | None:
+    """Block 的 ICD 位范围 (offset, size)，取自 profile 级 BitOffsetWithinDS/ParameterSize."""
+    for prof in block.profiles:
+        off = prof.attributes.get("BitOffsetWithinDS", {}).get("value", "")
+        size = prof.attributes.get("ParameterSize", {}).get("value", "")
+        try:
+            o = int(off)
+        except (TypeError, ValueError):
+            continue
+        try:
+            s = int(size)
+        except (TypeError, ValueError):
+            s = 1
+        return (o, max(s, 1))
+    return None
+
+
+def _protocol_family_eligible(hlr_prof: HLRMatchProfile, block: ICDBlock) -> bool:
+    """True when a protocol-family block may be a matching candidate.
+
+    两条放行路径（任一命中即 eligible）：
+      1. HLR 文本显式提到该字段词元（如 "设置Label和SDI"）；
+      2. HLR 中文位号（"第9和10位"等，已换算 0 基）与该协议字段在 ICD 中的
+         位范围重叠——例如对所有 A429 标签的 SDI 位做全局断言的需求并不写
+         "SDI" 词元，但其位号指向 SDI 字段，ICD 数据本身就是证据。
+    """
+    fam = (block.signal_family or "").upper()
+    gate = _PROTOCOL_FAMILY_TOKEN_GATE.get(fam)
+    if gate is None:
+        return True
+    if gate.search(hlr_prof.content):
+        return True
+    br = _block_icd_bit_range(block)
+    if br is not None and _hlr_bit_fields_overlap(hlr_prof, br[0], br[1]):
+        return True
+    return False
+
+
+# HLR 正文中显式列出的全大写信号名 token（如"根据匹配的数据设置各数据位：
+# HYD_QTY_XDCR..."清单），用于 top-K 豁免。排除协议/通用噪声词。
+_LISTED_SIGNAL_RE = re.compile(r"\b[A-Z][A-Z0-9_]{3,}\b")
+_LISTED_SIGNAL_NOISE = {
+    "HLR", "EOICD", "TRUE", "FALSE", "SSM", "SDI", "LBL", "A429", "ARINC",
+    "LABEL", "PARITY", "HSCU",
+}
+
+
+def _extract_listed_signal_tokens(content: str) -> list[str]:
+    """Extract explicitly-listed signal-name tokens from HLR body text."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in _LISTED_SIGNAL_RE.findall(content):
+        if t in _LISTED_SIGNAL_NOISE:
+            continue
+        lt = t.lower()
+        if lt not in seen:
+            seen.add(lt)
+            out.append(lt)
+    return out
+
+
 def _score_and_rank_blocks(
     hlr_prof: HLRMatchProfile,
     candidates: list[ICDBlock],
@@ -656,6 +904,8 @@ def _score_and_rank_blocks(
     """Score blocks, apply hard gates, sort desc, return top results."""
     scored: list[tuple[int, dict[str, int], ICDBlock]] = []
     for block in candidates:
+        if not _protocol_family_eligible(hlr_prof, block):
+            continue
         total, dims = _score_block(hlr_prof, block, enhancements=enhancements)
         if total >= _MIN_SCORE_THRESHOLD:
             scored.append((total, dims, block))
@@ -886,6 +1136,8 @@ def match_reverse(
                     # sort by score desc, so AI has signal context even for weak matches
                     raw_scored: list[tuple[int, dict[str, int], ICDBlock]] = []
                     for block in label_blocks:
+                        if not _protocol_family_eligible(hlr_prof, block):
+                            continue
                         total, dims = _score_block(hlr_prof, block, enhancements=enhancements)
                         raw_scored.append((total, dims, block))
                     raw_scored.sort(key=lambda x: x[0], reverse=True)
@@ -902,7 +1154,30 @@ def match_reverse(
         # as a backward-compat constant for external importers but no
         # longer used at runtime here.
         top_scored = scored[:enhancements.top_k]
+        # 显式写出词元的协议族 block（如 "设置Label和SDI"）不受 top-K 截断：
+        # HLR 明确提到该字段时其定义必须出现在裁判上下文里，即使总分低于
+        # 其他块。位号门控放行的 SDI 块（"所有标签第9和10位"）不在此列——
+        # 其 ICD 布局/值语义跨标签同质（同为 offset/size + 同一 CodedSet），
+        # top-K 内的样例已足以支撑判断；曾尝试按 bit_field>0 全量保送，
+        # 实测把 case 从 20 块撑到 131 块（127 个同质 SDI），prompt 膨胀拖垮
+        # 长输出 provider（deepseek 截断→error→熔断连锁），已撤销（2026-09-03）。
+        for extra in scored[enhancements.top_k:]:
+            fam = (extra[2].signal_family or "").upper()
+            gate_re = _PROTOCOL_FAMILY_TOKEN_GATE.get(fam)
+            if gate_re is not None and gate_re.search(hlr_prof.content):
+                top_scored.append(extra)
+        # HLR 正文显式列名的 block 同样不受 top-K 截断：数据位清单
+        # （"根据匹配的数据设置各数据位：HYD_QTY_XDCR..."）中列出的信号，
+        # 即使 labeler 未将其完整捕获为关键词（只给碎片词元如 "xdcr"）、
+        # 导致总分偏低，也必须进入裁判上下文。
+        listed = _extract_listed_signal_tokens(hlr_prof.content)
+        if listed:
+            for extra in scored[enhancements.top_k:]:
+                fam = (extra[2].signal_family or "").lower()
+                if any(fam == t or fam.startswith(t + "_") for t in listed):
+                    top_scored.append(extra)
         top_scored = _filter_sn_zero_within_label(top_scored, enhancements=enhancements)
+        top_scored = _filter_spar_when_data_matched(top_scored)
 
         # Clear blocks when match_type is 无匹配
         if match_type == "无匹配":

@@ -52,7 +52,7 @@ def generate_reverse_report(
 
     ai_review_count = status_counts.get("needs_review", 0)
     if ai_review_count:
-        key_findings.append(f"{ai_review_count} 条HLR经AI判定为待确认（ICD Block与HLR不相关或无法判断，需人工确认）")
+        key_findings.append(f"{ai_review_count} 条HLR经AI判定为待确认（ICD信息不足以验证HLR断言，或匹配Block与HLR无关，需人工确认）")
 
     # ── Match-layer 无匹配 (never sent to AI) ──
     no_match_judgments: list[ReverseJudgmentResult] = []
@@ -95,7 +95,7 @@ def generate_reverse_report(
         "建议": [
             "一致的 HLR: EoICD定义的接口要求在HLR中正确落实，无需处理",
             "不一致的 HLR: 逐一核对与ICD矛盾的具体属性（方向/bit/数据类型/范围等），确定以哪方为准",
-            "待确认的 HLR: AI判定ICD Block与HLR不相关或无法判断，需人工逐条确认",
+            "待确认的 HLR: ICD信息不足以验证HLR的接口断言，或所匹配Block与HLR无关，需人工逐条确认",
             "未匹配的 HLR: 匹配层未在EoICD中找到对应信号，需检查HLR是否属于ICD接口范畴",
         ],
     }

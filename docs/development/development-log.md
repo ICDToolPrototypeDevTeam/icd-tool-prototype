@@ -2637,3 +2637,248 @@ Word 模板列宽此前依赖旧 `tblW` 写入方式，存在按内容长度跑�
 ### 下一步建议
 
 前端表格列宽在「V4 五星评价体系前端适配」Issue 中同步调整。
+
+---
+
+## 2026-09-01：反向管道 needs_review 误判修正（HSCU 匹配质量优化延续，分支 Task/Optimize_result_quality）
+
+### 任务目标
+
+HSCU 真实结果中出现大量误判待确认：(1) HLR 仅描述软件内部数据路由与状态传递（如将 AIR_SPEED_FCM1_R1 的值/Valid 赋给 FCM13 信号）、引用 Label L206 但未断言接口属性，三方裁判以"无法确认 covered 或 inconsistent"判 needs_review；(2) 匹配到多个 ICD Block（如 XXX_1、XXX_2）而 HLR 只写了 XXX_1 时，被误判"需求缺失 XXX_2"。两类均应只比对 HLR 明确写出的声明；同时区分"匹配层待确定"与"判定层待确认"——完全无关的 Block（无法支持判定）仍应判 needs_review。
+
+### 完成内容
+
+1. `prompts/reverse_judge.md`：判定规则重写——covered（HLR 声明与 ICD 一致或未断言）；inconsistent（明确声明矛盾）；needs_review 仅限两种情形（a. HLR 断言接口属性但 ICD 信息不足以验证；b. HLR 对所有匹配 Block 均未引用、完全无法比对）。新增「needs_review 禁用情形」章节：未提及属性 / 内部逻辑 / 多 Block 中未提及的部分 Block 三情形判 covered 且不构成"需求缺失"；逐项比对步骤增加多 Block 只比对实际引用 Block 的规则
+2. `comparison/semantic_judge.py`：match_type=待确定 的用户提示词注入精简——删除"无关 → 标记 needs_review"指令行，仅保留"谨慎判断 + confidence 下调"提醒，判定完全交由系统提示词，匹配层"待确定"不再强制传导为判定层"待确认"
+3. `prompts/consensus.md`：inconsistent_attributes 判定规则新增"HLR 未提及/未声明的属性不构成事实差异"；示例 2 与语义一致示例中"缺失定义"类教学案例替换为真实矛盾案例
+4. `comparison/report_generator.py`：待确认说明文案改为"ICD 信息不足以验证 HLR 断言，或匹配 Block 与 HLR 无关"
+
+### 修改文件
+
+1. `backend/app/v4/prompts/reverse_judge.md`
+2. `backend/app/v4/comparison/semantic_judge.py`
+3. `backend/app/v4/prompts/consensus.md`
+4. `backend/app/v4/comparison/report_generator.py`
+
+### 验证方式
+
+1. `python -m py_compile app/v4/comparison/semantic_judge.py app/v4/comparison/report_generator.py`
+2. 临时脚本 `backend/verify_reverse_prompt_fix.py`：构造 4 个场景 case（内部路由引用 Label / 完全无关 Block / 多 Block 只写其一 / 断言接口属性但 ICD 信息不足），真实 API 跑 3 provider 判定 + consensus 复核
+
+### 验证结果
+
+最终语义 4 场景全部符合预期：A 内部路由引用 Label、未断言接口属性 → 三方 covered，consensus full 5★ covered（0.94）；B 完全无关 Block → 三方 needs_review，consensus needs_review；C 多 Block 只写其一 → 三方 covered，分析明确写"L146 未被引用、不构成需求缺失"，consensus full 5★ covered（0.93）；D 断言 bit0 状态语义但 ICD 无位状态定义 → 三方 needs_review，consensus full 5★ needs_review（0.92）。无 provider 再以"未断言属性"为由判待确认。
+
+### 遗留问题
+
+1. `prompts/reverse_judge.md` 中 AMSC 章节示例"对接收的 A429 字 bit11-26 进行风扇 RPM 解算 → needs_review"未动：其属"明确断言位定义"场景，但新规则下若 ICD 提供位定义应直接比对判 covered/inconsistent，示例措辞与新语义存在轻微张力，待 AMSC 回归观察
+2. 临时验证脚本 `backend/verify_reverse_prompt_fix.py` 是否保留待定
+3. 全量 HSCU E2E 回归未跑（仅单案例级验证）
+
+### 下一步建议
+
+1. 用 HSCU 完整样例文件跑一次全管线，确认 needs_review 占比下降且无新的误判
+2. 观察 consensus 层 inconsistent_attributes 是否还有"未声明"类条目残留
+
+---
+
+## 2026-09-02：反向匹配 SDI 位独立成 Block + SSM 位定义随 case 附注（HSCU 匹配质量优化延续）
+
+### 任务目标
+
+HSCU 真实样例暴露两条裁判证据缺口：(1) HLR 明确断言 SDI（如 HLR_022587"设置Label和SDI"）时，SDI 叶子（含 CodedSet=1=System1 等业务语义）被 build_blocks 按协议族整体跳过，裁判看不到 SDI 定义；(2) HLR 断言 SSM 值（如 HLR_023389"将LBL_DIS_00_SYS1_SSM置为SSM_DIS_NO"）时，SSM 位定义（bit29、2bit、A429_SSM_DIS）不可见，且该 HLR 匹配到的全是 SPAR 备用位块（词名只保留在 SPAR 叶子里，数据位叶子是 HYD_* 业务名）。另确认 ICD 全库 SSM 叶子无 CodedSet/OneState/ZeroState（取值编码缺失，属数据限制而非代码问题）。
+
+### 完成内容
+
+1. `config.py`：PROTOCOL_DATAFORMATS 移除 A429SDI（entry 层放行，A429SSM_BNR/LABEL/PARITY 仍过滤）
+2. `signal_profiler.py`：build_blocks 协议族跳过名单移除 SDI（LABEL/SSM/PARITY/OCTLBL 仍跳过）；ICDBlock 新增 `word_protocol_fields` 字段，承载同 label SSM 叶子的位定义（REVERSE_KEY_ATTRS 子集）
+3. `reverse_matcher.py`：新增 `_PROTOCOL_FAMILY_TOKEN_GATE` 协议族词元门控——HLR 文本含独立"SDI"词元才允许 SDI 块参与候选（注意 Python3 re 的 \b 把中文视为单词字符，"和SDI"无边界，改用 `(?<![A-Za-z0-9_])SDI(?![A-Za-z0-9_])` 断言）；显式提及时 signal_name 给到 30（精确信号名命中级）；top-K 豁免——显式断言的协议块追加进 case 不替换前 top-K；`_filter_sn_zero_within_label` 的 sn>0 触发条件排除协议块（防 SDI 块触发过滤删光真实上下文）
+4. `reverse_case_builder.py`：序列化时附加 `word_protocol_fields`（每 label 每 case 一次，防重复撑大输入）
+5. `semantic_judge.py`：用户提示词渲染"同 word 协议字段（匹配层附注，仅作比对上下文）"
+
+### 修改文件
+
+1. `backend/app/v4/config.py`
+2. `backend/app/v4/matching/signal_profiler.py`
+3. `backend/app/v4/matching/reverse_matcher.py`
+4. `backend/app/v4/matching/reverse_case_builder.py`
+5. `backend/app/v4/comparison/semantic_judge.py`
+
+### 验证方式
+
+1. `python -m py_compile` 全部修改文件
+2. 离线验证（`verify_sdi_ssm_fix.py`）：真实 job 684be363 的 eoicd/hlr/hlr_labels JSON 进程内跑匹配链——SDI block 生成 20 个、L145/SDI 属性完整（bit8/2bit/A429SDI/CodedSet=1=System1）、023389 无 SDI 块（门控生效）、022587 拿到 L145/SDI、附注每 case 一次
+3. 全量回归：10 条 HSCU HLR 新代码匹配结果 vs job 保存旧结果——0 条失配、0 条 match_type 变化、非 SDI HLR 0 变化、仅 022587/023124 各追加 1 个 SDI 块
+4. 真实 API：023389/022587 两 case 三 provider 判定 + consensus
+
+### 验证结果
+
+1. 全量回归通过（见上，无挤压现象：top-K 前 20 不变，SDI 块追加在第 21 位）
+2. 023389（SSM 断言）：deepseek=needs_review（ICD 无 SSM 取值编码）、minimax/qwen=covered（SSM 类型 A429_SSM_DIS 与断言一致），consensus=covered 2★（key 字段分歧，标记少数意见）
+3. 022587（含 SDI）：三方 covered，consensus=covered 5★ conf 0.93
+
+### 遗留问题
+
+1. HLR Word LBL 目录表的 SDI号/SSM类型/信号名称（YYY）列未提取（hooks.py 目前只抽 LABEL 号）：SDI 匹配目前靠文本词元，未用上目录表的权威 SDI 值；SSM类型列可为 SSM 断言提供类型级对照。建议下一轮扩展 `_extract_label_mappings` 提取这三列
+2. 023389 判 covered（2★）依赖裁判对"SSM_DIS_NO 与 A429_SSM_DIS 类型一致"的理解，ICD 无取值编码表；是否需要协议规则（ARINC 429 SSM 编码）或接受 needs_review，待用户确认
+3. SPAR 备用位块仍会匹配"只提词名"的 HLR（023389 匹配 20 个 SPAR 块）；是否对 SPAR family 降权待定
+4. 临时验证脚本 `verify_sdi_ssm_fix.py` / `verify_reverse_prompt_fix.py` 去留待定
+
+### 下一步建议
+
+1. hooks.py 提取目录表 SDI号/SSM类型列，SDI 匹配改为值级比对（matcher 已有 15 分 SDI 维度 + SDI 矛盾门）
+2. 用 HSCU 完整样例文件跑全管线 E2E 回归
+3. 评估 SPAR 块降权与 ARINC 429 协议规则
+
+### 第二轮补充（同日）：目录表 SDI/SSM 提取 + E2E 回归修复
+
+**完成内容**（承接上轮下一步建议 1-2）：
+
+1. `hooks.py`：`_extract_label_mappings` 重构为 `_extract_label_meta`，按表格式（行单元格数 ≥8 取 SDI 列 3/SSM 列 7；≥4 取 SDI 列 2）提取 SDI号/SSM类型；单数字 SDI 才写入别名 `SDI=n`（多值映射如 `1=HSCU_A;2=HSCU_B` 跳过），别名形如 `L206_AIR_SPEED_FCM1_R1（SDI=1，SSM类型=BNR）`。真实 Word 验证 6 条改写正确
+2. `reverse_matcher.py`：SDI 维度与 Gate 2 改多值集合匹配；SDI 值级命中纳入方向矛盾 soft 救援（`sn>=30 或 sdi>0`）；新增 HLR 正文显式列名 top-K 豁免（`_extract_listed_signal_tokens`，family 前缀匹配）
+3. `signal_profiler.py`：CodedSet 在 profile 层多值合并（同一 profile 多条目如 1=System1/2=System2/3=System3）；SDIExpected/CodedSet 在 block 层多值合并（跨 channel 聚合）
+4. `config.py`：放行 A429_SSM_BNR（SSM 附注补 DataFormatType）
+5. `prompts/reverse_judge.md`：内部逻辑判 covered 增加"相关性前提"——HLR 引用的信号与全部匹配 Block 均不相关（无 Label 对应、无完整信号名重合，仅共享 OHMS 等通用后缀不算）时按 4(b) 判 needs_review
+
+**E2E 验证**（`run_hscu_e2e.py` 进程内直调管线，真实 LLM，HSCU 10 条 HLR）：
+
+1. 首轮 E2E 暴露 3 个回归全部修复：022645（labeler 关键词碎片化 → sn=24 < 方向救援阈值 30 → FCM1 word 被方向门误删 → 待确定；SDI 值级命中纳入救援后恢复 4 个 FCM1 word 已匹配）、023194（L051 块聚合 ABV1/2/3 通道 SDIExpected first-wins 显示单一错误值 → 误判不一致；多值合并后 covered）、023124（L173 SDI CodedSet first-wins 只剩 1=System1 → 裁判看不到 SDI=2 编码 → 待确认；多值合并后 covered 5★）
+2. 023507（HLR 显式列名 HYD_QTY_XDCR 因 labeler 只给碎片词元排第 23 被 top-20 截掉 → 裁判判"ICD 信息不完整"；列名豁免后 38 块全量进 case → 三方 covered 5★）
+3. 022996（匹配块与 LBL_CMD1_OHMS 完全不相关）按新语义三方 needs_review，consensus 5★ needs_review（0.93）
+4. 最终 E2E 汇总：7 个进入裁判的 case——covered×6、needs_review×1（022996，符合语义）；0 待确定、0 不一致；平均星级 4.57
+
+**遗留问题**：
+
+1. deepseek 曾把 L126_FLIGHT_LEG_OHMS 的"OHMS"通用后缀当作相关信号（已在提示词加澄清并复验通过，但该模型对相关性判定的稳定性需持续观察）
+2. ~~SPAR 备用位块仍会匹配"只提词名"的 HLR~~（已解决，见下）
+3. 目录表多值 SDI（如 DIS_03_INFO 的 1=HSCU_A;2=HSCU_B）未写入别名——其语义已由 SDI 块的 CodedSet 多值合并覆盖，暂无缺口
+4. 临时脚本 `verify_reverse_prompt_fix.py`/`verify_sdi_ssm_fix.py`/`verify_final_cases.py`/`run_hscu_e2e.py` 去留待定（后两个可作回归工具保留）
+
+### 第三轮补充（同日）：SPAR 备用位块匹配降级
+
+**完成内容**：`reverse_matcher.py` 新增 `_filter_spar_when_data_matched`——同 label 已有 signal_name>0 的真实数据块命中时，SPAR 块从裁判上下文剔除；无数据命中时保留（词名唯一线索）。协议族块（SDI 的 sn 来自词元门控加分）不计入"数据命中"判定，避免误触发。
+
+**验证结果**（真实 API）：022587 由 21 块（含 SPAR 噪音）变为 33 块全数据块，三方 covered 5★（0.95）；023389 保留 19 SPAR+SDI 作词名上下文，consensus covered 2★（deepseek 对"SSM_DIS_NO 无 ICD 取值编码"持 needs_review 少数意见，属已知数据限制）。
+
+### 第四轮补充（同日）：HSCU/AMSC 容器全管线回归（用户执行）
+
+用户重建容器后跑两 job 回归：HSCU `61e59c1f`（covered×5、needs_review×2=022996 完全不相关+023389 SSM 编码缺失，与本地 E2E 一致）；AMSC `01929fcb`（14 case：inconsistent×8、covered×5、needs_review×1，无 split）。AMSC 协议 HLR（HLR_544"按通道位置写 SDI 位固定数据"）从"协议标准保证 covered"升级为证据级验证：裁判对照 60 个 SDI 块的 CodedSet（0=AMSC1A…）与 bit8/2bit 定位，covered 5★。遗留优化点：A429隐式路径下协议类 HLR 会把所有 label 的 SDI 块全匹配进 case（60 块，输入偏大但判定正确），后续可限制语义路径协议块候选数量。
+
+### 第五轮补充（同日）：删除 AMSC 协议特征判定章节
+
+A/B 测试：临时移除 `prompts/reverse_judge.md` 的「AMSC 通用协议特征 covered 判定说明」章节后重建 HLR_544 case 判定——三方 covered（0.70/0.90/0.90）、consensus full 5★ covered 0.95，与有章节时的容器结果一致（裁判直接对照 SDI 块的 bit8/2bit 与 CodedSet 证据，未依赖协议规则）。据此删除该章节：SDI 类断言已证据化，样例中无奇偶校验类 HLR；无块证据的协议断言将来按规则 4(b) 落入 needs_review（更诚实的判定），如需自动 covered 可将 PARITY 同样块化。提示词已删除章节、CHANGELOG 已同步。
+
+## 2026-09-03：FGMC 反向判定待确认回归修复（ICD 数据驱动，分支 Task/Optimize_result_quality）
+
+### 任务目标
+
+用户执行 FGMC 全流程 E2E 的回归（job `a6bb1b5b`，提交 368b7df/0f4374c 之间产物）相对 golden `8534c5f2` 待确认数 1→4（005906/005907/005915/019482）+ 005916 由 covered 翻转为 inconsistent。约束：只接受 ICD 数据驱动的修复，拒绝恢复 AMSC 协议特性章节、拒绝 offset 基制 prompt 澄清类外部规则注入。用户对分歧根因质疑"是否各家对 offset 的理解不一致"——经查证属实（HLR"第N位"为物理 1 基、ICD BitOffsetWithinDS 为 0 基，各家换算不一致导致误判），据此实施 ICD 驱动修复。
+
+### 完成内容
+
+1. `hlr_classifier.py`：新增中文位号提取（"第N位"/"第N到M位"/"第N和M位"），物理位号→0 基 offset（N-1）换算并标记 `convention=cn-physical`；相邻并列位（"第9和10位"）合并为连续段，单 bit 落入已提取范围则跳过（防"第18到28位、第29位"重复计数）
+2. `reverse_matcher.py`：协议族块（SDI）门控由"HLR 显式 SDI 词元"放宽为"HLR 位字段与 ICD 位范围重叠即放行"（005906"第9和10位"→SDI offset8/size2、005907 位号断言同路径）；top-K 免截断保送收紧为仅词元显式命中；`_filter_sn_zero_within_label` 保留门控准入的协议块
+3. `signal_profiler.py`：`ssm_by_label` 泛化为 `proto_anchor_by_label`，收集 LABEL/SDI/SSM/PARITY 全协议叶子的 REVERSE_KEY_ATTRS（按 BitOffsetWithinDS 数值排序），`word_protocol_fields` 随之承载全量位锚点
+4. `semantic_judge.py`：锚点渲染附注标题改"同 word 协议字段（ICD 位偏移锚点…）"+ 一句由锚点数据支撑的基制说明（offset=N 对应物理第 N+1 位）；本轮再增两处证据层增强：
+   - BNR 负量程推导行（条件触发）：数据字段 DataFormatType=BNR 且 FullScaleRngMin<0 时，由块自身量程/LsbRes/ParameterSize 算术推导"该字段为补码有符号数，最高位为符号位"（无符号 N 位不可能取负值，如 12bit×0.25 只能 0~1023.75，量程 -512 强制有符号）
+   - HLR 位声明结构化呈现：正文位声明（物理→0 基）逐条列出，消除裁判自行换算的错位（minimax 曾把 005915 的第31位误当 PARITY 的物理32位）
+
+### 修改文件
+
+1. `backend/app/v4/matching/hlr_classifier.py`
+2. `backend/app/v4/matching/reverse_matcher.py`
+3. `backend/app/v4/matching/signal_profiler.py`
+4. `backend/app/v4/comparison/semantic_judge.py`
+
+### 验证方式
+
+1. 离线 dry-run（真实 job eoicd/hlr 数据进程内跑匹配链）：005906/005907 新代码匹配到 SDI 协议块（位号门控生效），其余 5 条 HLR 匹配不变
+2. HSCU/AMS 用 ProfileRegistry 真实 profile 复跑：字节级一致、零变化（顺带修复 harness 传 profile=None 使 hscu direction-soft 救援失效的隐患）
+3. 旧 job 映射重建：REV 顺序 = reverse_matches.results 顺序（golden/a6bb1b5b 一致），逐 HLR 建立 golden→回归→新代码三方对照
+4. 真实 LLM 探针：关键案每 provider 单判（不跑 consensus），005916/005915 于证据层增强后重探
+
+### 验证结果
+
+| REV | HLR | golden | 回归 a6bb1b5b | 新代码探针 |
+|---|---|---|---|---|
+| REV-0001 | 005916 | covered 5★0.95 | inconsistent 2★0.6 | ds 0.93 / mm 0.85 / qwen 0.90 全 covered |
+| REV-0002 | 005910 | covered 5★0.95 | covered 5★0.93 | mm 0.75 / qwen 0.85 covered |
+| REV-0003 | 005906 | covered 3★0.75 | needs_review 5★0.92 | ds 0.65 / mm 0.70 covered + qwen inconsistent → 2:1 |
+| REV-0004 | 005907 | covered 5★0.93 | needs_review 5★0.9 | mm 0.85 / qwen 0.70 covered（ds parse err） |
+| REV-0005 | 005915 | needs_review 2★0.7 | 待确认 1★0.48 | ds needs_review / mm inconsistent / qwen covered（三向分裂，见遗留） |
+| REV-0006 | 019482 | inconsistent 4★0.8 | needs_review 2★0.6 | mm 0.90 / qwen 0.90 covered（引 A429 SSM 标准记忆） |
+
+关键收敛：005916 三家从 1:2 inconsistent 全翻 covered——分歧根因由 offset 基制理解（已消除）转为 BNR 符号位语义（推导行后三家一致认可 12 位含符号位布局与 HLR 拆分等价）；005906 回 covered 多数、005907 covered；005915 三家判定从"换算错位"纠正为"SSM 编码不在 ICD"的真实分歧。
+
+### 遗留问题
+
+1. **SSM 取值编码数据天花板**：005915（正常→SSM=00）/019482（故障→SSM=11）的编码语义在 FGMC Publisher ICD 无任何定义（无 CodedSet/编码表，同为协议叶子的 SDI 有 CodedSet 而 SSM 无），三家判定靠各自 A429_SSM_BNR 领域记忆且互相矛盾（qwen 认为 11=失效、常见 ARINC429 表 00=Failure/11=Normal 则两案恰反）。经用户确认：列为遗留，不注入协议知识；019482 新判 covered 依据为领域知识，建议人工抽查
+2. 005907 的 deepseek 判 JSON parse error（截断重试仍失败），E2E 中靠 consensus 容错（其余两家 covered）
+3. FGMC 全流程 E2E 尚未重跑：探针证据已充分（预期终态回 golden 水平：005915 可能仍待确认），由用户执行 `backend/run_fgmc_e2e.py`，输出待分析
+
+### 下一步建议
+
+1. 分析用户 E2E 输出（consensus 终态、星级），确认待确认数回到 1 且 005916 不再 inconsistent
+2. SSM 孪生案如需确定结论，唯一 ICD 侧路径是让 Publisher 供给 SSM 编码表（或需求文档补充 SSM 语义），否则维持"人工抽查"标注
+3. 临时探针脚本可并入回归工具（如 `verify_fgmc_probes.py` 长期保留与否待定）
+
+### 第二轮：E2E c2cfdfc6 分析（待确认 1→5 covered/1 inconsistent）
+
+> 注：本轮的修改 ②（bit_field>0 保送）已于第四轮撤销（实测把 case 撑到 131 块拖垮 deepseek），见下文第四轮；修改 ①（labeler 空格归一化）保留生效。
+
+用户复跑 FGMC E2E（job `c2cfdfc6`，代码含第一轮修复）后：5 covered（005916/005910/005907/005915/019482 均回 covered，005915 经 consensus majority 收敛）、仅 REV-0003=005906 判 inconsistent 2★0.82（minimax 0.95 + qwen 0.95 判 inconsistent；deepseek 全程 JSON parse error 缺位）。逐案核对 multi_judge 细节 + 与镜像需求 005907（covered 5★）对比后定位根因与决策：
+
+1. **005906 误判为 AI 偶发错位（用户定性，不改判定）**：qwen 在 005907 把"值2='10'"解为（bit9=0,bit10=1），对 005906 却把（bit9=1,bit10=0）直接读成 '10'=值2 → 同一约定内不自洽，纯解码错位。"通道触发↔SDI 写入值一致性"的判断语义本身正确、应予保留，不修改 reverse_judge.md
+2. **标签不对称（输入排版引发）**：005906/005907 为镜像需求，但输入文档把一条写成 `FGMC_ CHB`（下划线后空格），AI labeler 对 005907 输出 signal_keywords=[]、devices=[]（005906 正常输出 devices=['FGMC']），匹配对象不对称。修复：`hlr_labeler.py` 在送 LLM 前把 `_\s+` 压缩为 `_`（只在标注步骤内部，不动 pipeline，不影响已缓存标签读取路径与正文原文）
+3. **SDI 目标证据集不对称**：005906 的 top-K(20) 被 L357（50 分）+ 两个 L347 strap 块（48 分）挤占，SDI 块缺 L142/143/144（"所有标签"少 3 个）；005907 的 18 个 SDI 全在。strap/config 块是 L347/L357 的合法数据块，不应被排除（用户确认）；修复：`reverse_matcher.py` 在 top-K 保送区追加"bit_field>0 位号命中块免截断"（append 不替换）——按标签逐字段写入断言的需求中，每个标签的字段块都是断言对象，位号精确/部分命中的块全部进裁判上下文；纯位范围松重叠（bit_field=0）仍截断，防 case 膨胀
+4. 通道 A/B 区分（005906/CHA、005907/CHB 触发 + strap 块 CH_A/CH_B 同进 case）确认不需要匹配层专门机制：两条 HLR 断言的是"所有标签 SDI=固定位值"，通道只出现在触发条件（ICD 无该状态的契约信号）；strap 块是上下文非断言对象，归一+保送后两案对称即可。真正断言通道值的 HLR 由已有 SDI 值级维度（15 分+Gate 2）覆盖
+
+### 修改文件（第二轮）
+
+1. `backend/app/v4/matching/hlr_labeler.py`（`_\s+` 归一化，新增 `_normalize_label_input_text`）
+2. `backend/app/v4/matching/reverse_matcher.py`（bit_field>0 免截断保送，紧邻既有词元/列名保送区）
+
+### 验证方式（第二轮）
+
+1. 归一化探针：`FGMC_ CHB`→`FGMC_CHB`、词间正常空格不受影响（已执行通过）
+2. `python -m py_compile` 两模块通过（已执行）
+3. FGMC E2E 复跑（真实 LLM，job 目录全新故无缓存污染）：预期 005906 与 005907 对称（同批 SDI 全量 + 同源 strap 上下文），005906 回 covered；005915 是否稳定 covered 视 consensus
+
+### 遗留问题（第二轮）
+
+1. 005906 复跑验证待用户执行 `backend/run_fgmc_e2e.py`
+2. ~~deepseek 判定反复 JSON parse error（finish_reason=length，8192 起步仍截断），本轮 c2cfdfc6 全程缺位由 consensus 容错~~ → 已定位并修复（见下第三轮）
+3. SSM 编码天花板（第一轮遗留）不变
+
+### 第三轮：判定 error 高发定位与修复（截断重试 timeout 死循环）
+
+E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepseek error，叠加 c2cfdfc6 的 REV-0003 deepseek error（`JSON parse error after retries: Expecting value: line 1 column 1 (char 0)`），error 集中在 005906/005907/005915 三个大 case（18 SDI 块 + 锚点的大 prompt）且 provider 轮换出现。定位：error 非单点偶发，是"大 case 长输出 × 截断翻倍重试 × 单请求 timeout 固定 120s"的死循环——8192 max_tokens 起步易截断，翻倍到 16384 后单请求 120s 内生成不完必然超时，超时触发整链网络重试重来，重试仍截断/超时/空响应，最终三层重试耗尽落 error。`Expecting value char 0` 即空响应（16384 重试后上游返回空 content）的直接后果。修复：三个 LLM client（deepseek/minimax/qwen，同构）在截断重试循环内让单请求 timeout 随 max_tokens 同步 ×2（120→240s），warning 打印同步带 timeout；外层网络重试仍用基础 timeout。验证：桩请求模拟截断→重试，三家 timeout=[120, 240] 断言通过；py_compile 通过。
+
+### 第四轮：error 真因 = bit_field 保送把 case 撑爆（131 块），保送已撤销
+
+用户复跑（job `631a2b91`，含 timeout 修复代码）后 deepseek 全链 error（REV-0003/0004/0006），qwen/minimax 全正常。631a2b91 的 reverse_matches 显示 005906/005907 各自匹配 **131 块**（上轮 bit_field>0 保送生效）：127 个 SDI 块（全部精确命中 offset8/size2）+ 4 个数据块。诊断证据链：
+1. 005906/005907 正文"对所有 ARINC 429 标签"不列具体 label（labels n=0），全量语义路径下所有带 SDI 锚点的 word（127 个）都是候选；保送把它们全量塞进 case（原注释"全量保送会把 case 撑爆"的警告成真）
+2. 用 631a2b91 数据重建 REV-0003 原 prompt 单发 deepseek：HTTP 200/5.8s/finish stop/合法 JSON——网络与 key 正常，错误绑 case 规模；deepseek 输出冗长（679 输出含 452 推理 token），131 块的分析 8192 起步必然截断、16384 也难写完 → parse error/超时；qwen/minimax 输出紧凑能完成
+3. 熔断放大（阈值 3 次连续失败拉黑 300s）：005906(fail1)→005907 同 131 块(fail2)→005915(fail3)→019482（单块小 case）的 error 只能是熔断 SKIPPED
+决策（用户确认）：**撤销 bit_field>0 无界保送，恢复 top-K=20 截断**。理由：对称性已由标签归一化达成（005906/005907 候选、打分同构）；127 个 SDI 位定义同质（同 offset/size + 同一 CodedSet），top-K 样例足以支撑"所有标签"类判断；原注释语义成立。验证：无保送复跑 631a2b91 数据——005906/005907 均回 20 块（L357 config 1 + strap 2 + SDI 17），**top-20 block_key 顺序与集合完全一致**（对称性断言通过）；匹配类型分布不变（5 已匹配/1 待确定/1 无匹配）。timeout ×2 修复保留（对小 case 截断重试仍有保护）。
+
+### 第五轮：deepseek 思考模式取舍（disabled 质量下降）+ 位号方向约定修复（终态）
+
+深挖 error 同时引入 deepseek 思考模式开关实验，最终定案两处修改（job `94b8aa9b` 验证，0 error）：
+
+1. **thinking 实验链条**：`deepseek_client.py` 曾显式关闭思考（`"thinking": {"type": "disabled"}`，reasoning 计入 max_tokens 会吃光 8192 预算故关）——error 确实消失，但用户观察到"很多待确认"。数据对照（job `8a8ca216` disabled 形态）：deepseek 判 needs_review 的 case 均与 qwen 同票，初看非 deepseek 独家噪声；单块探针（005916，符号位等价推理）disabled 时 covered→inconsistent 翻转证实思考缺失确实伤质量。折中定案：**开启思考 + `"reasoning_effort": "low"`**（20 块 case 实测 reasoning≈3068 tokens、8192 内 finish=stop、31.9s，不再撑爆预算；截断×2 timeout 机制保留兜底）。
+2. **位号方向约定（用户指正，systematic 判定盲区）**：005906（FGMC_CHA→第9位="1"/第10位="0"）与 005907（FGMC_CHB→第9位="0"/第10位="1"）在多轮被 deepseek+qwen 判 needs_review/inconsistent，理由是"编码'10'=值2=Channel B，与 CHA 矛盾"。用户指正：**第10位是高位、第9位是低位**（ARINC 429 字内位号越大越显著）——(bit9,bit10)=(1,0) 实为字段值 1=Channel A、(0,1)=值 2=Channel B，两条 HLR 与 ICD CodedSet（`1=LEFT Channel or Channel A / 2=RIGHT Channel or Channel B`，Publisher Table 实据）自洽。各 provider 均把 HLR 书写顺序当 MSB→LSB 组装位对，与 thinking 开关无关（disabled/enabled/effort-low/qwen 同错）。修复（用户精简方案）：`prompts/reverse_judge.md` 比对关注点补一句——"ARINC 429 字内位号越大越高位（第10位是第9位的高位、第31位是第30位的高位），不得按 HLR 书写顺序当作高位在前"，不加协议编码细节。
+
+**验证（job `94b8aa9b`，用户执行 run_fgmc_e2e.py）**：6 个可判 case（015273 无匹配不计）0 error；deepseek 5 covered + 1 needs_review、0 inconsistent（对照 disabled 形态 8a8ca216：3 covered/2 inconsistent/1 needs_review）；005906 REV-0003 → deepseek/qwen/minimax = covered/covered/inconsistent（多数 covered，此前两票 needs_review）；005907 REV-0004 → deepseek/minimax covered（deepseek 分析已正确表述"位9=SDI 最低位、位10=最高位，置 0/1 即二进制 10=值2=Channel B"，qwen 本轮仍把方向写反判 inconsistent——同规则跨案不自洽，属 qwen 随机游走，多数票兜住）；005916/005910/005915 全 covered。剩余 REV-0006=019482（故障→30/31位='1''1'）ds+qwen needs_review，理由成立：FGMC Publisher ICD 只定义温度数据字段（BNR 17/12）无 Label114 的 SSM/30-31 位定义，断言无法验证（延续第一轮 SSM 数据天花板遗留，re-review 维持）。**修改文件：`deepseek_client.py`（thinking enabled + reasoning_effort=low）、`prompts/reverse_judge.md`（位号方向 1 行）。**
+
+### 遗留问题（第五轮，FGMC 收尾）
+
+1. **REV-0006=019482（故障→30/31位='1''1'）needs_review**：FGMC Publisher ICD 无 Label114 SSM/30-31 位定义，断言无法验证（延续 SSM 数据天花板，不注入协议知识，建议人工抽查）；其孪生案 005915（正常→'0''0'）本轮全 covered
+2. **qwen 位序方向偶发写反**（005907 判 inconsistent，同规则在 005906 又判对——自相矛盾，随机游走），本轮多数票兜住；如再犯可考虑 qwen 专属措辞或值级换算下沉（代码按字段定义算好位对值，裁判零协议负担）
+3. **HSCU 方向柔性挂起**（用户 2026-09-03 定性"这样改不太好"）：`enable_direction_soft_on_exact_signal: true`（hscu/rpdu profile，commit 368b7df 引入）用"证据强度"（sn>=30 或 SDI 值级命中）兜底"labeler 碎片化→打分低→方向门误删"（022645 类），方向矛盾本身未根治。根因改法：方向门只在 HLR 明确断言方向时收紧（对齐 09-02 判定语义）+ labeler 层修复碎片化 + 撤销 soft flag，需 HSCU 全量回归。**待用户另立 Issue 处理，不在本轮范围。**
+
+### 下一步建议
+
+1. 提交本分支改动（deepseek_client/minimax_client/qwen_client timeout×2、reverse_matcher 保送撤销与注释、hlr_labeler 归一化、reverse_judge.md 位序行、语义层改动、文档），用户执行 FGMC E2E 已通过（job `94b8aa9b`）
+2. HSCU 方向门重构（遗留 3）另立 Issue 时再议
+3. `_diag_ds_effort.py` 临时探针已删除（工作区处于"已暂存新增+删除"态，提交前需 `git add -A` 刷新索引）
