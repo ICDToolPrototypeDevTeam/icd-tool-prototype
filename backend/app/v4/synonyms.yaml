@@ -102,6 +102,11 @@ IRD:
   - Interface Requirement Document
   - 接口需求
 
+OFVTRV:
+  - OFV_TRV
+  - OFV
+  - TRV
+
 # ── Signal / field aliases ────────────────────────────────────────────
 Label:
   - LABEL

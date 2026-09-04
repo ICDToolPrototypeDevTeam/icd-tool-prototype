@@ -2637,3 +2637,55 @@ Word 模板列宽此前依赖旧 `tblW` 写入方式，存在按内容长度跑�
 ### 下一步建议
 
 前端表格列宽在「V4 五星评价体系前端适配」Issue 中同步调整。
+
+## 2026-09-04：AMSC HLR_547 OFVTRV 反向匹配遗漏修复
+
+### 任务目标
+
+排查并修复 AMSC 反向匹配遗漏——`FSF21000101_HLR_547`（阀控 OFVTRV 失效在关位 / 开位故障有效标志 + bit22 / bit23）在 L11 label scope 内未匹配出 `OFV_TRV_FAILED_CLOSED` 与 `OFV_TRV_FAILED_OPEN` 两个 ICD Block，导致反向匹配数 5/7、对应反推失效标志位信号被错误归入"无匹配"。
+
+### 完成内容
+
+1. 定位根因：HLR 设备名 `OFVTRV` = `OFV`（OutFlow Valve，压力调节活门）+ `TRV`（Thrust Reverser，反推装置）首字母纯小写拼接；`eoicd_enricher._tokenize_name` 正则 `[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]|[0-9]+` 只能按 `_` / `-` / CamelCase 边界切分，对 pure-lowercase 拼接无能为力，导致 HLR 端 tokens = `{ofvtrv}`，block `OFV_TRV_FAILED_CLOSED` 端 tokens = `{ofv, trv, failed, closed}`，二者 token 重叠 = 0。
+2. 评估 4 个修复方案（A. 词条补齐 / B. token 化正则扩展 / C. 注入 cn_english_tokens 映射 / D. hard-coded device-pair 表），按实施难度、影响面、回归风险对比后选 A。
+3. 在 `backend/app/v4/synonyms.yaml` IRD 与 Signal/field 段之间新增 `OFVTRV` canonical_term 与 3 个 alias（`OFV_TRV` / `OFV` / `TRV`）。选 alias 形式而非把 `OFVTRV` 自己列在 alias 里，避免 canonical↔alias identity 自映射噪声；同时让 HLR 写成 `OFV_TRV` 的拼法也能命中；保留 `OFV` / `TRV` 拆分 alias 兼容 HLR 用「OFV 失效」 / 「TRV 失效」自然语言表述。
+4. 验证修复效果：
+   - HLR_547 在 L11 label scope 内 matched_profile_keys 从 5 个扩到 7 个（新增 `L11/OFV_TRV_FAILED_CLOSED` + `L11/OFV_TRV_FAILED_OPEN`），其余 15 条 AMSC HLR 字节不变；
+   - AMS / FGMC / HSCU 三个 profile 的 job（7066001a / 97f06570 / f896a92b）以"with-OFVTRV" vs "without-OFVTRV"对照，FGMC 0 个 HLR 受影响，HSCU 0 个 HLR 受 OFVTRV 词条影响（job f896a92b 中 HLR_022645 出现的 Airspeed signal_name 分数 25→55 来自同日早些时候 `Airspeed` 别名组的添加，与本修复无关，已隔离测试确认）；
+   - 路径分类副作用：HLR_547 反推失效相关 block 进入候选集后，落地 match_type 走「精确匹配」分支，无路径分类降级。
+5. 选 A 不选 B 的关键理由：
+   - 改动面最小（只动 `synonyms.yaml`），不动匹配核心（`_tokenize_name` / `_score_block` / `_apply_hard_gates`），与同事代码的"按项目沉淀精化补采规则"风格一致；
+   - AMS / FGMC / HSCU 回归隔离测试已证明零行为变化；
+   - 任何 RPDU / FSECU 等后续 profile 沉淀同类「双首字母缩写拼接 device」词条时，复用同一 yaml 段，无需修改核心匹配代码。
+
+### 修改文件
+
+1. `backend/app/v4/synonyms.yaml`（在 IRD 段之后追加 `OFVTRV` canonical_term + 3 alias）
+2. `CHANGELOG.md`（[Unreleased] - 2026-09-03 段新增 `### Fixed` 子节，记录本次词条补齐与回归验证结论）
+3. `docs/development/development-log.md`（新增本节）
+
+### 验证方式
+
+1. inline `_get_synonym_lookup()` 检查 `OFVTRV` 词条被加载：`lookup['ofvtrv'] == {'ofvtrv', 'ofv_trv', 'ofv', 'trv'}`。
+2. inline 模拟 HLR_547 在 L11 label scope 内候选集：未改词条时 5 个 `*_NOT_OPERATIONAL` 块；改后 5 个 `*_NOT_OPERATIONAL` + 2 个 `OFV_TRV_FAILED_*`，无噪声 L11 label 外 block 进入（Path 1 label-prefix filter 兜底）。
+3. end-to-end：原 AMS job `7066001a-4794-4c62-9437-d1560f01ca9b` 输入跑 `match_reverse`，保存到 `output/ofvtrv_fix/reverse_matches_after_fix.json`，与 `output/v4/7066001a.../output/reverse_matches.json` diff：仅 HLR_547 变化（+2 OFV_TRV_FAILED_* keys），其余 15 HLR `matched_profile_keys` 集合完全一致；全局 stats `eoicd_blocks_matched: 57` 不变。
+4. FGMC 回归：job `97f06570-10c7-4c5f-b069-a7a3e78f1cf9`（7 HLRs）以"with-OFVTRV" vs "without-OFVTRV"对照，0 个 HLR `matched_profile_keys` 集合变化。
+5. HSCU 回归：job `f896a92b-1dd5-44b4-b25c-26897f0e9749`（10 HLRs）以"with-OFVTRV" vs "without-OFVTRV"对照，0 个 HLR `matched_profile_keys` 集合变化（job 中 HLR_022645 出现的 Airspeed signal_name 分数 25→55 是同日早些时候 `Airspeed` 别名组添加带来的，OFVTRV 隔离测试已证明不影响）。
+
+### 验证结果
+
+全部 4 步验证通过：
+- 词条加载正确
+- inline 候选集仿真与预期一致
+- AMS end-to-end 修复精确，15/16 HLRs 字节不变
+- FGMC / HSCU 隔离测试零回归
+
+### 遗留问题
+
+1. 同类风险面：未来若再有「双首字母小写拼接 device」（如 `eecpmg`、`fcmlrm`），仍需在 `synonyms.yaml` 逐个补词条；`_tokenize_name` 的 pure-lowercase 限制未根治。
+2. 同事代码路径：HLR 写成 `OFV_TRV`（带下划线）现可命中；HLR 写成 `OFVTRV`（无下划线）也命中；混合拼写情况未覆盖，但 AMSC 项目实际样本均为规范拼写，暂无需扩展。
+
+### 下一步建议
+
+1. （可选，长期）把"双首字母小写拼接 device"识别下沉到 `_tokenize_name` 之外的"device 拆词启发式"层，配合 `synonyms.yaml` 的 `device:` canonical 段使用；该方向需要更系统的 device-corpus 与更严格的可逆性约束评估，避免误切其他词（如 `oleddisplay` 不应切为 `oled` + `display`）。当前 Issue 范围不动。
+2. 监控线上匹配质量：若后续 issue 报告其他 HLR 类似 OFVTRV 漏匹配，按本 issue 的诊断模式（看 HLR device 与 block signal_family 的 token overlap）复用同方案。

@@ -22,6 +22,10 @@
 
 - **profile 白名单扩展为 `{ams, fgmc, hscu, rpdu, fsecu}`**：`backend/app/api/v4/coverage.py` 与 `backend/app/v4/cli.py` 三处 `choices=["ams", "fgmc"]` → `["ams", "fgmc", "hscu", "rpdu", "fsecu"]`，错误信息动态列出支持列表。
 
+### Fixed
+
+- **OFVTRV 词条补齐（HLR `FSF21000101_HLR_547` 反向匹配遗漏修复）**：`backend/app/v4/synonyms.yaml` 在 IRD 与 Signal/field 段之间新增 `OFVTRV` canonical_term 与 3 个 alias（`OFV_TRV` / `OFV` / `TRV`），对应 AMSC 控制器「压力调节活门+反推装置」组合缩写。根因：`_tokenize_name` 只能按 `_` / `-` / CamelCase 边界切分，pure-lowercase 拼接的 `ofvtrv` 永远切不开，HLR device `OFVTRV` 与 ICD block `OFV_TRV_FAILED_CLOSED/OPEN` 零 token 重叠。修复后 HLR_547 在 L11 label scope 内 matched_profile_keys 从 5 个扩到 7 个（新增 `L11/OFV_TRV_FAILED_CLOSED` 与 `L11/OFV_TRV_FAILED_OPEN` 两个反推失效标志 + bit22/bit23 位对应 block），其余 15 条 AMSC HLR 字节不变；FGMC / HSCU job 用「strip OFVTRV 重跑」对照后，0 个 HLR 受 OFVTRV 词条影响（HSCU job f896a92b 中 HLR_022645 出现的 Airspeed 分数变化来自同日早些时候添加的 `Airspeed` 别名组，与本修复无关）。选词原则：`(canonical: OFVTRV, aliases: OFV_TRV, OFV, TRV)` —— alias 写成 `OFV_TRV` 而非 `OFVTRV` 自身可避免与 canonical 形成「identity self-mapping」噪声，同时让 HLR 写成 `OFV_TRV` 的拼法也能命中；保留 `OFV` / `TRV` 两个拆分 alias 是为兼容 HLR 写「OFV 失效」 / 「TRV 失效」之类的自然语言表述。
+
 ## [Unreleased] - 2026-08-29
 
 ### Changed
