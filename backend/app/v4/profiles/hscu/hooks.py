@@ -67,6 +67,17 @@ _SIGNAL_LINE_RE = re.compile(r"^[A-Z][A-Z0-9_]{4,}$")
 _SIGNAL_COL_INDEX = 5
 _MIN_SIGNAL_COLS = _SIGNAL_COL_INDEX + 1  # 6 cells needed to access col 5
 
+# 目录表 SDI/SSM 列位置（两种表格式不同，按行单元格数区分）：
+#   - 8 列表（RDCU1 inbound，Table[0]）：col3=SDI号, col7=SSM类型
+#   - 4 列表（HSCU outbound，Table[8]）：col2=SDI号，无 SSM 列
+_SDI_COL_8 = 3
+_SSM_COL_8 = 7
+_SDI_COL_4 = 2
+# SDI 单值形式（0-3 单数字）才写入别名供匹配层值级比对；
+# "1=HSCU_A;2=HSCU_B" 这类多值映射不写（无法归约为单值）。
+_SDI_SINGLE_RE = re.compile(r"^[0-3]$")
+_SSM_TOKEN_RE = re.compile(r"^[A-Za-z]{2,8}$")
+
 
 def _bare_name(raw: str) -> str:
     """Strip a trailing ``_SSM`` suffix (ARINC-429 SSM bit) from a captured
@@ -224,12 +235,12 @@ def _extract_signal_names(cell_text: str) -> list[str]:
     return out
 
 
-def _extract_label_mappings(
+def _extract_label_meta(
     source_file: str,
     table_index: int | None = None,
-) -> dict[str, str]:
+) -> dict[str, dict]:
     """Open ``source_file`` (HLR Word), auto-detect ALL LBL catalog tables,
-    and return a ``{bare_name: octal}`` dict.
+    and return a ``{name: {"octal": str, "sdi": str, "ssm": str}}`` dict.
 
     Catalog tables are identified by ``_identify_label_tables``:
       - >= 3 columns (excludes 8x2 requirement tables)
@@ -237,20 +248,27 @@ def _extract_label_mappings(
       - at least one row contains both an LBL_* cell and an octal cell
 
     A document may legitimately contain MULTIPLE catalogs of different
-    formats (e.g. HSCU HLR has Table[0]=RDCU1 catalog with ``_R1`` suffix
-    + Table[8]=HSCU catalog without ``_R1``). All are parsed and merged.
+    formats with DIFFERENT column layouts (HSCU HLR: Table[0]=8-col
+    RDCU1 inbound catalog with SDI号/SSM类型/信号名称 columns;
+    Table[8]=4-col HSCU outbound catalog with SDI号 only). SDI/SSM
+    columns are therefore resolved per-format by row cell count:
+      - >= 8 cells → SDI at index 3, SSM at index 7 (Table[0] format)
+      - >= 4 cells → SDI at index 2, no SSM (Table[8] format)
+    Only single-digit SDI values (0-3) are kept; multi-value mappings
+    like ``1=HSCU_A;2=HSCU_B`` are dropped (not reducible to one value).
+    SSM is kept when it is a short alphabetic token (BNR/DIS/...).
 
     For each qualifying row, ``_extract_row_mapping`` finds the (LBL_*,
     octal) pair by within-row scanning (no fixed column assumption).
-    Tables are processed in document order; on name collision, the
-    later table's value wins (HSCU-specific catalog overrides
-    RDCU1 catalog, since HSCU body text more closely matches the HSCU
-    catalog's no-``_R1`` form).
+    Tables are processed in document order; on name collision, later
+    tables override earlier ones field-by-field (fields present in the
+    later row win; missing fields keep the earlier value).
 
     Both the original ``LBL_<NAME>`` form and the ``_R1``-stripped form
-    are inserted into the dict, so downstream HLR text matching works
-    whether the body writes ``LBL_<NAME>_R1`` (catalog form) or
-    ``LBL_<NAME>`` (body form).
+    are inserted, so downstream HLR text matching works whether the body
+    writes ``LBL_<NAME>_R1`` (catalog form) or ``LBL_<NAME>`` (body form).
+    Signal names from the 8-col format's col 5 inherit their row's
+    octal/SDI/SSM.
 
     ``table_index`` is an optional escape hatch: when provided, skip the
     auto-detect heuristic and use ONLY the table at that index (caller
@@ -260,7 +278,7 @@ def _extract_label_mappings(
     Returns an empty dict if the docx is unreadable, has no qualifying
     table, or all rows lack valid (LBL, octal) pairs.
     """
-    result: dict[str, str] = {}
+    result: dict[str, dict] = {}
     p = Path(source_file)
     if not p.exists():
         return result
@@ -289,18 +307,44 @@ def _extract_label_mappings(
             if pair is None:
                 continue
             raw_name, octal_value = pair
-            # Insert both the catalog (suffix-stripped) form and the original form
+
+            # SDI/SSM columns resolved per table format (see docstring).
+            sdi_value = ""
+            ssm_value = ""
+            if len(cells) >= 8:
+                if _SDI_SINGLE_RE.match(cells[_SDI_COL_8]):
+                    sdi_value = cells[_SDI_COL_8]
+                if _SSM_TOKEN_RE.match(cells[_SSM_COL_8]):
+                    ssm_value = cells[_SSM_COL_8].upper()
+            elif len(cells) >= 4:
+                if _SDI_SINGLE_RE.match(cells[_SDI_COL_4]):
+                    sdi_value = cells[_SDI_COL_4]
+
+            # Insert both the catalog (suffix-stripped) form and the
+            # original form; overlay-merge so later tables only override
+            # fields they actually carry.
             bare = _R_SUFFIX_RE.sub("", raw_name)
             for key in (bare, raw_name):
                 inner = key[4:] if key.upper().startswith("LBL_") else key
-                result[inner] = octal_value
+                entry = result.setdefault(inner, {"octal": "", "sdi": "", "ssm": ""})
+                entry["octal"] = octal_value
+                if sdi_value:
+                    entry["sdi"] = sdi_value
+                if ssm_value:
+                    entry["ssm"] = ssm_value
             # 8-col RDCU1 catalog (Table[0]): col 5 holds the bare signal
             # names carried by this LBL. Each is a separate mapping entry
             # so HLR text that references a signal by its bare name (no
-            # ``LBL_`` prefix) still gets aliased to ``L<octal>_<signal>``.
+            # ``LBL_`` prefix) still gets aliased to ``L<octal>_<signal>``
+            # and inherits the row's SDI/SSM.
             if len(cells) >= _MIN_SIGNAL_COLS:
                 for sig in _extract_signal_names(cells[_SIGNAL_COL_INDEX]):
-                    result[sig] = octal_value
+                    sentry = result.setdefault(sig, {"octal": "", "sdi": "", "ssm": ""})
+                    sentry["octal"] = octal_value
+                    if sdi_value:
+                        sentry["sdi"] = sdi_value
+                    if ssm_value:
+                        sentry["ssm"] = ssm_value
     return result
 
 
@@ -329,21 +373,22 @@ def preprocess_hlr_requirements(
     mappings = profile.hlr_preprocess.extra_mappings
     cfg = profile.hlr_preprocess
 
-    # Build per-name (bare_name, octal_value) lookup, dropping any mapping
-    # whose value is a placeholder (e.g. "???") or empty.
-    bare_octal: dict[str, str] = {}
+    # Per-name meta lookup: {"octal": ..., "sdi": ..., "ssm": ...}.
+    meta: dict[str, dict] = {}
 
-    # Auto-extract from the HLR Word's LBL catalog table if enabled. The
-    # table is auto-detected by _identify_label_table() — no fixed index
-    # or column offset required (handles HSCU documents where the LBL
-    # catalog sits at Table[8], not Table[0], and has 4 cols not 8).
-    # Acts as the base; explicit extra_mappings extend/override below.
+    # Auto-extract from the HLR Word's LBL catalog tables if enabled. The
+    # tables are auto-detected by _identify_label_tables() — no fixed
+    # index required (handles HSCU documents where the LBL catalogs are
+    # Table[0] 8-col RDCU1 inbound + Table[8] 4-col HSCU outbound, with
+    # different column layouts). Acts as the base; explicit
+    # extra_mappings extend/override below.
     if cfg.auto_parse_hlr_table_0 and hlr_out and getattr(hlr_out, "source_file", None):
-        bare_octal.update(
-            _extract_label_mappings(hlr_out.source_file)
+        meta.update(
+            _extract_label_meta(hlr_out.source_file)
         )
 
-    # Apply explicit extra_mappings on top.
+    # Apply explicit extra_mappings on top (octal only — they carry no
+    # SDI/SSM info).
     for full_key, octal in mappings:
         octal_clean = octal.strip()
         if not octal_clean or "?" in octal_clean:
@@ -352,10 +397,18 @@ def preprocess_hlr_requirements(
         octal_value = (
             octal_clean[1:] if octal_clean.upper().startswith("L") else octal_clean
         )
-        bare_octal[bare_name] = octal_value
+        entry = meta.setdefault(bare_name, {"octal": "", "sdi": "", "ssm": ""})
+        entry["octal"] = octal_value
 
-    if not bare_octal:
+    if not meta:
         return 0
+
+    # Octal map with placeholder ("???") or empty values dropped.
+    bare_octal: dict[str, str] = {
+        name: m["octal"]
+        for name, m in meta.items()
+        if m.get("octal") and "?" not in m["octal"]
+    }
 
     rewritten = 0
     for req in hlr_out.requirements:
@@ -380,17 +433,33 @@ def preprocess_hlr_requirements(
         # Only append aliases for tokens that, after stripping a trailing
         # ``_SSM`` (for the LBL path), resolve to a configured mapping.
         # Preserve declaration order so the suffix is stable across runs.
+        # Each alias carries its catalog SDI/SSM when available:
+        #   L145_DIS_00_SYS1（SDI=1，SSM类型=DIS）
+        # The ``SDI=<n>`` form feeds the matcher's value-level SDI
+        # dimension and Gate 2; ``SSM类型=`` is judge-facing context only.
+        def _alias_for(name: str) -> str:
+            m = meta.get(name, {})
+            alias = f"L{_format_alias_octal(bare_octal[name])}_{name}"
+            extras = []
+            if m.get("sdi"):
+                extras.append(f"SDI={m['sdi']}")
+            if m.get("ssm"):
+                extras.append(f"SSM类型={m['ssm']}")
+            if extras:
+                alias += "（" + "，".join(extras) + "）"
+            return alias
+
         present_mapped: list[str] = []
         seen: set[str] = set()
         for token_name in lbl_tokens:
             bare = _bare_name(token_name)
             if bare in bare_octal and bare not in seen:
                 seen.add(bare)
-                present_mapped.append(f"L{_format_alias_octal(bare_octal[bare])}_{bare}")
+                present_mapped.append(_alias_for(bare))
         for sig in bare_signal_tokens:
             if sig not in seen:
                 seen.add(sig)
-                present_mapped.append(f"L{_format_alias_octal(bare_octal[sig])}_{sig}")
+                present_mapped.append(_alias_for(sig))
         if not present_mapped:
             continue
         suffix = "（亦称：" + "、".join(present_mapped) + "）"

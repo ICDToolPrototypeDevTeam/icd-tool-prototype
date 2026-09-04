@@ -12,7 +12,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from app.v4.config import ATTR_CATEGORY_MAP, SEND_VERBS, RECEIVE_VERBS, PROTOCOL_DATAFORMATS
+from app.v4.config import ATTR_CATEGORY_MAP, SEND_VERBS, RECEIVE_VERBS, PROTOCOL_DATAFORMATS, REVERSE_KEY_ATTRS
 from app.v4.matching.eoicd_enricher import _resolve_aliases, _get_synonym_lookup, _tokenize_name
 from app.v4.models import EoICDRequirement
 
@@ -154,12 +154,21 @@ class ICDBlock:
     # Each entry: {"dp_name": str, "bit_offset": str, "size": str, "dtype": str}
     sub_signals: list[dict] = field(default_factory=list)
 
+    # Same-word protocol field definitions attached for judge-side context
+    # (SSM enrichment). Not a matching candidate — only serialized into the
+    # case so the judge can verify HLR assertions about protocol bits.
+    # Each entry: {"name": str, "attrs": {attr: value}}
+    word_protocol_fields: list[dict] = field(default_factory=list)
+
 
 def build_blocks(profiles: list[SignalProfile]) -> list[ICDBlock]:
     """Group SignalProfiles into ICDBlocks by signal family.
 
-    Profiles whose signal family is a protocol overhead node (LABEL, SDI,
-    SSM, PARITY, OCTLBL) are skipped — they don't represent data signals.
+    Profiles whose signal family is a protocol overhead node (LABEL, SSM,
+    PARITY, OCTLBL) are skipped — they don't represent data signals.
+    SDI is kept as a block: the SDI leaf carries business semantics
+    (CodedSet, e.g. 1=System1) and HLRs assert SDI values explicitly;
+    its matching eligibility is gated in reverse_matcher by HLR text.
     """
     groups: dict[tuple[str | None, str], list[SignalProfile]] = defaultdict(list)
     for prof in profiles:
@@ -167,7 +176,42 @@ def build_blocks(profiles: list[SignalProfile]) -> list[ICDBlock]:
         family = _extract_signal_family(prof.profile_key)
         groups[(label, family)].append(prof)
 
-    protocol_names = {"LABEL", "SDI", "SSM", "PARITY", "OCTLBL"}
+    protocol_names = {"LABEL", "SSM", "PARITY", "OCTLBL"}
+
+    # Same-word protocol-field anchors: label → [{name, attrs}], covering the
+    # LABEL/SDI/SSM/PARITY protocol leaves of an A429 word.  These leaves carry
+    # the word's bit layout (BitOffsetWithinDS/ParameterSize/DataFormatType)
+    # and, for SDI, value semantics (CodedSet).  LABEL/SSM/PARITY/OCTLBL stay
+    # out of block matching (protocol_names above); SDI becomes a block *and*
+    # is anchored here too so that data-block cases still expose the SDI field
+    # position.  The anchor rows give the judge (1) the ICD bit-offset base
+    # (offset=0/8/29/31 → physical 1-8/9-10/30-31/32) from data alone, and
+    # (2) grounds to verify HLR assertions like "将第9和10位设置为1/0" → SDI.
+    _PROTOCOL_ANCHOR_FAMILIES = {"LABEL", "OCTLBL", "SDI", "SSM", "PARITY"}
+    proto_anchor_by_label: dict[str, list[dict]] = defaultdict(list)
+    for prof in profiles:
+        if prof.label is None:
+            continue
+        family = _extract_signal_family(prof.profile_key).upper()
+        if family not in _PROTOCOL_ANCHOR_FAMILIES:
+            continue
+        attrs: dict[str, str] = {}
+        for k, v in prof.attributes.items():
+            if k in REVERSE_KEY_ATTRS:
+                attrs[k] = str(v.get("value", "")) + (f" {v['unit']}" if v.get("unit") else "")
+        if attrs:
+            proto_anchor_by_label[prof.label].append({"name": family, "attrs": attrs})
+
+    # Sort anchors by ICD bit offset so the layout reads naturally
+    # (LABEL at 0, SDI at 8, SSM at 29, PARITY at 31 in 32-bit words).
+    def _anchor_sort_key(entry: dict) -> tuple[int, str]:
+        off = entry.get("attrs", {}).get("BitOffsetWithinDS", "")
+        try:
+            return (int(str(off).split()[0]), entry["name"])
+        except (ValueError, IndexError):
+            return (999, entry["name"])
+    for entries in proto_anchor_by_label.values():
+        entries.sort(key=_anchor_sort_key)
 
     # Build label → bit_offset → {dp_name, size, dtype} from pure-DP profiles.
     # These are Publisher-table profiles (sides={'DP'}) with complete per-field attributes.
@@ -226,12 +270,24 @@ def build_blocks(profiles: list[SignalProfile]) -> list[ICDBlock]:
             block_key = family
 
         # Merge attributes (first value wins, profiles in same block
-        # should agree on shared attributes)
+        # should agree on shared attributes). Exception: multi-value
+        # attributes (SDIExpected / CodedSet) — one block can aggregate
+        # channels with different SDI values (e.g. L051's ABV1/ABV2/ABV3
+        # words carry SDIExpected=1/2/3; L173's SDI leaf carries
+        # CodedSet 1=System1/2=System2/3=System3 per QTY_SYSx word).
+        # "First wins" would present a single wrong value to the judge;
+        # join distinct values instead.
         attrs: dict[str, dict] = {}
         for prof in profs:
             for k, v in prof.attributes.items():
                 if k not in attrs:
                     attrs[k] = v
+                elif k in ("SDIExpected", "CodedSet"):
+                    cur = str(attrs[k].get("value", ""))
+                    new = str(v.get("value", ""))
+                    if new and new != cur:
+                        joined = f"{cur}/{new}" if cur else new
+                        attrs[k] = dict(v, value=joined)
 
         # Merge direction
         directions = {p.direction for p in profs}
@@ -362,6 +418,7 @@ def build_blocks(profiles: list[SignalProfile]) -> list[ICDBlock]:
             direction_verbs_set=dir_verbs,
             channel_count=len(profs),
             sub_signals=sub_signals,
+            word_protocol_fields=proto_anchor_by_label.get(label, []),
         ))
 
     return blocks
@@ -403,15 +460,26 @@ def build_profiles(eoicd_reqs: list[EoICDRequirement]) -> list[SignalProfile]:
         # Build attributes dict (first value wins per attr_name).
         # Process DP entries first so RP entries (with merged DP data from
         # parser) can override Label + SDIExpected with RP-authoritative values.
+        # Exception: CodedSet is multi-value (e.g. L173's SDI leaf carries
+        # 1=System1 / 2=System2 / 3=System3 as separate entries) — join
+        # distinct values instead of first-wins, so the judge sees the full
+        # coding set.
         attrs: dict[str, dict] = {}
         sorted_entries = sorted(entries, key=lambda e: 0 if e.side == "DP" else 1)
         for e in sorted_entries:
-            if e.attribute_name not in attrs and e.attribute_value is not None:
+            if e.attribute_value is None:
+                continue
+            new_val = str(e.attribute_value)
+            if e.attribute_name not in attrs:
                 attrs[e.attribute_name] = {
-                    "value": str(e.attribute_value),
+                    "value": new_val,
                     "unit": e.unit or "",
                     "entry_id": e.ird_id,
                 }
+            elif e.attribute_name == "CodedSet":
+                cur = attrs[e.attribute_name]["value"]
+                if new_val and new_val not in cur.split("/"):
+                    attrs[e.attribute_name]["value"] = f"{cur}/{new_val}" if cur else new_val
 
         # --- Aggregate token sets from all entries ---
         device_tokens: set[str] = set()
