@@ -51,6 +51,120 @@
 
 ## 3. 开发记录
 
+### 2026-09-03 Issue RPDU 适配续：RPDU refine 后处理整合到 V4 主线
+
+#### 任务目标
+
+把同事 RPDU 优化代码（`filter_matched_blocks` 三步精化：无关 block 过滤 + 精确补采 + 同义词补采）整合到 V4 主线。要求：
+
+1. 大变动架构（不局限于 HLR Excel 解析）；
+2. 不影响其他系统（AMS / FGMC / HSCU 字节不变）；
+3. 保留 V4 既有的 5 星评价体系（ADR-004）、多模型共识、降级保护、re_review 机制；
+4. 解决 case04 验收问题：无关 ICD block 污染报告、`needs_review` 判定标准过宽、top-N 候选漏采真目标信号。
+
+#### 完成内容
+
+1. **`refine` 子包创建**：`backend/app/v4/refine/` 新增 `__init__.py` / `block_filter.py` / `runner.py`，同事版本代码基本采纳，只在 `runner.py` 上做 Plan A 简化——仅做过滤/补采 + 重建 cases，不调 LLM、不生成共识/报告，返回 `(new_match_result, new_cases)` 后由 pipeline 主干继续走原 Step 4-6。
+2. **`pipeline.run_reverse_pipeline` 新增 `refine: bool = False` 形参**：`if refine: match_result, cases = run_pipeline_refined_stage(...) else: <原 L 840-846 字节一致>`。开关判定：`profile.profile_id == "rpdu" and not no_refine`。
+3. **FastAPI / CLI 透传 `no_refine`**：`POST /api/v4/coverage-analysis` 新增 `no_refine: bool = Form(False)` 字段；`coverage.py` → `launch_v4_pipeline` → `run_v4_pipeline_thread` → `run_reverse_pipeline` 形成完整透传链。CLI `reverse-analyze` 新增 `--no-refine` 形参。
+4. **`prompts/reverse_judge.md` 新增 RPDU 特定判定规则**：补充「接收端不比较总线协议标注」「缓存/发送周期约束 ≤ ICD TransmissionIntervalMinimum」两条规则（位于 AMSC 通用协议特征章节之后）。
+5. **`synonyms.yaml` 新增 `Airspeed` 别名组**：与同事精化补采逻辑对齐。
+6. **FSECU profile 占位**：`backend/app/v4/profiles/fsecu/` 新增 `__init__.py` / `hooks.py` / `config.yaml`（仅含 `id / display_name / version`），profile 白名单加入 `"fsecu"`。
+7. **profile 白名单扩展为 `{ams, fgmc, hscu, rpdu, fsecu}`**：`coverage.py` 与 `cli.py` 三处 `choices=["ams","fgmc"]` → `["ams","fgmc","hscu","rpdu","fsecu"]`，错误信息动态列出支持列表。
+8. **FastAPI 入口缺补 `refine` 形参修复（debug-rules 第 8 节触发 debug-log 记录）**：真实 E2E（job `10c3d635`）发现 `reverse_matches.json` 内容与同事参考 case04 差距大（候选未过滤、未补采），定位为 `run_v4_pipeline_thread` 调用 `run_reverse_pipeline` 未传 `refine` 形参。Plan B：补透传 `no_refine` → `refine=...` 完整链路。
+9. **真实 E2E 回归（job `8e6498ab`）**：11 条 HLR 反向匹配数与 case04 完全一致（8/11/1/5/7/9/4/4/4/6/7），5 星分布 4.45（9×5★ + 1×3★ + 1×1★），re_review 触发 REV-0008（split → 待确认），AMS / FGMC / HSCU 行为字节不变。
+
+#### 修改文件
+
+1. `backend/app/v4/refine/__init__.py`（新增，19 行）
+2. `backend/app/v4/refine/block_filter.py`（新增，227 行，同事版本采纳）
+3. `backend/app/v4/refine/runner.py`（新增，56 行，Plan A 简化版）
+4. `backend/app/v4/pipeline.py`（新增 `refine` 形参 + if/else 分支，Step 3 字节不变）
+5. `backend/app/v4/cli.py`（`reverse-analyze` 子命令新增 `--no-refine`，3 处 choices 扩展）
+6. `backend/app/v4/prompts/reverse_judge.md`（新增 RPDU 特定判定规则章节）
+7. `backend/app/v4/synonyms.yaml`（新增 `Airspeed` 别名组）
+8. `backend/app/v4/profiles/fsecu/__init__.py`（新增，占位）
+9. `backend/app/v4/profiles/fsecu/hooks.py`（新增，占位）
+10. `backend/app/v4/profiles/fsecu/config.yaml`（新增，占位）
+11. `backend/app/v4/profiles/rpdu/README.md`（新增 refine 后处理章节）
+12. `backend/app/api/v4/coverage.py`（新增 `no_refine` form 字段，profile 白名单扩展）
+13. `backend/app/api/v4/runner.py`（新增 `no_refine` 形参透传 + `refine` 判定）
+14. `CHANGELOG.md`（新增 [Unreleased] - 2026-09-03 段）
+15. `docs/architecture/current-architecture.md`（新增 refine 子包 / Step 3.5 / profile 树节点）
+16. `docs/project/workflow.md`（新增 Step 3.5 / 异常处理 / 关键约束）
+17. `docs/architecture/api.md`（新增 `no_refine` 字段，profile 白名单扩展）
+18. `docs/development/development-log.md`（新增本条记录）
+19. `docs/development/debug-log.md`（新增 FastAPI 入口缺补 `refine` 形参修复记录）
+
+#### 验证方式
+
+1. **同事代码 reference 对照（case04）**：`input_doc_file/RPDU测试输入文件/RPDU_ref对比结果1111111111/case04/reverse_matches.json` 与真实 E2E 输出（job `8e6498ab/output/reverse_matches.json`）对比：11 条 HLR 反向匹配数完全一致（8/11/1/5/7/9/4/4/4/6/7），`eoicd_blocks_total=59 / eoicd_blocks_matched=59` 等统计一致。
+2. **5 星分布验证**：job `8e6498ab/output/consensus_results.json` → `star_distribution={1: 1, 3: 1, 5: 9}`，平均 4.45。
+3. **re_review 触发验证**：job `8e6498ab/output/re_review_results.json` → REV-0008 触发，split → 待确认。
+4. **AMS / FGMC / HSCU 回归**：`coverage.py` profile 白名单扩展 + `pipeline.refine=False` 路径不走 refine，行为字节不变。
+5. **CLI --no-refine 验证**：CLI `reverse-analyze --no-refine` 与真实 E2E（job `10c3d635`）原始行为对齐。
+
+#### 验证结果
+
+- 反向匹配 / 5 星分布 / re_review 全部按预期工作，与同事代码 reference case04 一致；
+- AMS / FGMC / HSCU 行为字节不变；
+- CLI / API `--no-refine` / `no_refine=true` 透传生效；
+- FastAPI 入口缺补 `refine` 形参问题已修复（详见 debug-log）。
+
+#### 遗留问题
+
+1. 同事代码 6.2 节第 2/3/4/5 条 follow-up 未优化：多 provider 场景 LLM 费用浪费、硬编码模型清单、`recovered_block_count` O(n²) 性能、串行 LLM 改并发。本期不处理。
+2. `reverse_matches.json` 覆盖写盘后，下游 reviewer 调试时缺少「refine 前后对比」快照。建议后续 Issue 增加 `reverse_matches.pre_refine.json` 备份。
+
+#### 下一步建议
+
+1. 同事代码 6.2 节 follow-up 排期（性能 / 成本 / 并发）。
+2. 反向 matches refine 前后快照备份（便于 reviewer 调试）。
+3. RPDU 测试输入文件正式归档到 `backend/tests/fixtures/rpdu/`（当前 reference 在 `input_doc_file/RPDU测试输入文件/`，CI 拉取不便）。
+
+### 2026-09-04 Issue RPDU 适配续：RPDU 自动识别支持
+
+#### 任务目标
+
+`POST /api/v4/coverage-analysis` 在用户不传 `controller_profile` 时走 `coverage.py::_detect_system_type` 自动识别系统类型。原 detector 仅支持 `python-docx` 打开 Word 表，对 RPDU xlsx 直接抛 `PackageNotFoundError` → 接口 500。本任务在 detector 基础设施层补 xlsx 支持 + 为 RPDU profile 添加 `auto_detect` 规则，让前端不指定 profile 也能正确上传 RPDU 样本。
+
+#### 完成内容
+
+1. **`_load_hlr_tables(hlr_path)` helper**：`backend/app/api/v4/coverage.py` 新增，按扩展名分发 `.docx`（`python-docx`）/ `.xlsx`（`openpyxl`），归一化为 `list[list[list[str]]]`（list of 2D cell-text arrays）。
+2. **`_match_auto_detect` 形参与字段扩展**：签名从 `(doc: Document, auto_detect: dict)` 改为 `(tables: list[list[list[str]]], auto_detect: dict)`；新增 `min_rows` 字段（≥N 语义）支持 RPDU 行数差异大的样本，与原 `required_rows`（==N 精确）并存。3 个 .docx profile 的 `required_rows` 精确语义不变。
+3. **`_detect_system_type` 切换加载器**：`doc = Document(str(hlr_path))` → `tables = _load_hlr_tables(hlr_path)`，registry 初始化逻辑保留不变。
+4. **`backend/app/v4/profiles/rpdu/config.yaml` 追加 `auto_detect` 段**：`min_rows: 4` / `required_cols: 7` / col 0 row 2 `starts_with "FSF24"`。复用 AMS/FGMC/HSCU 同 schema；选用 FSF24 controller number 前缀（Excel 行 3 第一行数据）而非「需求编号/模块名称」列头文本，与其他系统的 FSF21/FSF29/FGMC prefix 模式对齐。
+5. **基础设施下沉**：未来任何 xlsx profile 只需在 `config.yaml` 写 `auto_detect` 段即可接入 detector，`coverage.py` 无需修改。
+
+#### 修改文件
+
+1. `backend/app/api/v4/coverage.py`（`_load_hlr_tables` helper + `_match_auto_detect` 形参与 `min_rows` 字段 + `_detect_system_type` 切换加载器）
+2. `backend/app/v4/profiles/rpdu/config.yaml`（末尾追加 `auto_detect` 段）
+3. `backend/app/v4/profiles/rpdu/README.md`（新增「自动识别」章节）
+4. `CHANGELOG.md`（`[Unreleased] - 2026-09-03` Added 段追加 RPDU 自动识别条目）
+5. `docs/development/development-log.md`（新增本条记录）
+
+#### 验证方式
+
+1. inline `_detect_system_type` 校准：3 个 RPDU 真实样本（`RPDU软高需求.xlsx` 581 行 / `RPDU软高需求_未注入故障v1.xlsx` 13 行 / `RPDU软高需求_注入故障v1.0.xlsx` 13 行）全部返回 `rpdu`
+2. AMS / FGMC / HSCU .docx 测试样本回归：27 个文件全部仍正确识别为各自 profile，无破坏
+3. 合成 xlsx 边界用例：FSF21 7 列 / FSF24 5 列 / RPDU 形状 + FSF24 + 7 列（合成）均不误匹配 RPDU 规则
+4. RPDU .docx 样本（10 个，含同事 ref 对比结果）：不误匹配 RPDU 规则（按「先不管 Word」决策保留）
+5. profile registry 加载：RPDU `auto_detect` 字段经 `_load_hlr_tables` → `_match_auto_detect` 链路正确读取
+
+#### 验证结果
+
+全部通过：3 个 RPDU xlsx 正确识别为 `rpdu`，27 个 docx 样本无回归，合成边界用例无误匹配，profile registry 正确加载 RPDU `auto_detect` 配置。
+
+#### 遗留问题
+
+RPDU Word 模板暂不支持自动识别（按「先不管word」决策保留）。后续若同事再提供 RPDU Word 模板，需新增/调整 profile `auto_detect` 规则（detector 基础设施已就绪，`_load_hlr_tables` 同时支持 docx/xlsx）。
+
+#### 下一步建议
+
+1. 待 RPDU Word 模板出现时补充对应 `auto_detect` 规则
+2. 当前 `_load_hlr_tables` 简单按扩展名分发，若未来某 profile 同时需要 docx + xlsx 双格式 HLR，可在 profile config 中加 `hlr_format` 字段显式覆盖扩展名默认行为
+
 ### 2026-08-24 Issue #63 续：HSCU HLR 预处理 hook 适配新文档结构
 
 #### 任务目标

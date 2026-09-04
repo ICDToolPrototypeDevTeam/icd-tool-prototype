@@ -4,6 +4,26 @@
 
 ## [Unreleased] - 2026-09-03
 
+### Added
+
+- **RPDU refine 后处理模块（Issue RPDU 适配续）**：新增 `backend/app/v4/refine/` 子包（`__init__.py` / `block_filter.py` / `runner.py`），在 Step 3 反向匹配后、Step 4 多智能体裁判前，对 matched ICD Block 做「无关 block 过滤 + 精确补采 + 同义词补采」三步精化，仅 RPDU profile 启用。`block_filter.filter_matched_blocks()` 接收 `match_result` + `hlr_labels` + `block_index`，输出与 `reverse_matches.json` 同构的新 `ReverseMatchOutput`；`refine.runner.run_pipeline_refined_stage()` 串联「重建 block 索引 → 过滤+补采 → 覆盖写盘 → 用过滤后匹配重建 cases」全流程，返回 `(new_match_result, new_cases)` 供 Step 4-6 复用。`pipeline.run_reverse_pipeline()` 新增 `refine: bool = False` 参数；开启时 refine 阶段覆盖写盘 `reverse_matches.json`，关闭时跑原 Step 3 链路（字节一致）。其他 profile（AMS/FGMC/HSCU）行为字节不变。
+
+- **FSECU profile 占位**：新增 `backend/app/v4/profiles/fsecu/` 子包（含 `__init__.py` / `hooks.py` / `config.yaml`，仅含 `id / display_name / version` 三项）作为前舱座椅电子控制单元的预留位；`coverage.py` 与 `cli.py` 的 profile 白名单加入 `"fsecu"`，但当前未挂任何业务逻辑。
+
+- **RPDU 特定判定规则（reverse_judge.md）**：在 `prompts/reverse_judge.md` 新增「RPDU 特定判定规则」章节（位于 AMSC 通用协议特征章节之后），补充两条 RPDU 项目背景下的判定口径——「接收端不比较总线协议标注」（EoICD Publisher/Subscriber 表格中各总线协议 Sheet 仅描述发送端总线协议，接收端 HLR 不强制要求与发送端物理总线标注一致）、「缓存/发送周期约束」（HLR 周期 ≤ ICD `TransmissionIntervalMinimum`，否则判 inconsistent）。
+
+- **`synonyms.yaml` 新增 Airspeed 别名组**：在 FCM 与 FCU 之间插入 `Airspeed` canonical_term 与 6 个 alias（空速 / 空速信号 / AIRSPEED / Airspeed / airspeed / Air_Speed / air_speed），与原同事代码的精化补采逻辑对齐。
+
+- **RPDU 自动识别支持（Issue RPDU 适配续）**：`backend/app/api/v4/coverage.py::_detect_system_type` 拆出 `_load_hlr_tables(hlr_path)` helper 按扩展名分发 `.docx`（`python-docx`）与 `.xlsx`（`openpyxl`），归一化为 `list[list[list[str]]]`；`_match_auto_detect` 形参从 `(doc: Document, auto_detect: dict)` 改为新数据结构，并新增 `min_rows` 字段（≥N 语义，与原 `required_rows` 的 ==N 精确语义并存）。`backend/app/v4/profiles/rpdu/config.yaml` 末尾追加 `auto_detect` 段（`min_rows: 4` / `required_cols: 7` / col 0 row 2 `starts_with "FSF24"`），复用 AMS/FGMC/HSCU 同 schema；选用 RPDU controller number FSF24 前缀（Excel 行 3 第一行数据）而非「需求编号/模块名称」列头文本，与其他系统的 FSF21/FSF29/FGMC prefix 模式对齐。前端不传 `controller_profile` 时 RPDU xlsx 现在可自动识别。3 个 .docx profile + FSECU 行为字节不变；detector 基础设施下沉后未来任何 xlsx profile 只需写 `auto_detect` 段即可接入。
+
+### Changed
+
+- **FastAPI `no_refine` 形参透传**：`POST /api/v4/coverage-analysis` 新增 `no_refine: bool = Form(False)` 字段；`coverage.py` → `api/v4/runner.py::launch_v4_pipeline` → `run_v4_pipeline_thread` → `pipeline.run_reverse_pipeline` 形成完整透传链。CLI `reverse-analyze` 子命令新增 `--no-refine` 形参（默认 False）。`refine` 启用判定：`profile.profile_id == "rpdu" and not no_refine`。与 CLI `--no-refine` 配合做 A-B 对照。
+
+- **profile 白名单扩展为 `{ams, fgmc, hscu, rpdu, fsecu}`**：`backend/app/api/v4/coverage.py` 与 `backend/app/v4/cli.py` 三处 `choices=["ams", "fgmc"]` → `["ams", "fgmc", "hscu", "rpdu", "fsecu"]`，错误信息动态列出支持列表。
+
+## [Unreleased] - 2026-09-03
+
 ### Fixed
 
 - **判定 error 高发修复（截断重试 timeout 死循环）**：大 case（多 ICD Block）判定响应频繁截断（finish_reason=length），翻倍 max_tokens 重试时单请求 timeout 仍固定 120s，16384 tokens 生成必然超时 → 整链重试 → 空响应/error，同一缺陷使 deepseek/minimax 在重 case 上轮番 error（c2cfdfc6 REV-0003、ed72ffc6 REV-0004/0005）。修复：三个 LLM client（`deepseek_client.py`/`minimax_client.py`/`qwen_client.py`）截断重试循环内单请求 timeout 随 max_tokens 同步 ×2（120→240s），warning 打印同步带 timeout。桩测验证：三家截断重试 timeout=[120, 240] 断言通过。

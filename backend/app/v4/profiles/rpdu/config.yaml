@@ -193,3 +193,22 @@ matcher:
   enable_direction_soft_on_exact_signal: true  # keep dir-contradicting candidates when signal name matches
   enable_signal_number_bonus: true            # reward exact 3+ digit signal numbers
   top_k: 50                                   # wider candidate window (legacy default 20)
+
+# Auto-detection: same schema as AMS/FGMC/HSCU .docx profiles.
+# ``min_rows`` (not ``required_rows``) because RPDU test samples have widely
+# varying row counts (fault-injection samples have 13 rows; full samples
+# have 581 rows). Row offset 2 = first data row (Excel row 3, 0-based array
+# index 2) — RPDU Excel layout: row 1 = title, row 2 = header, row 3+ = data.
+# ``required_cols: 7`` distinguishes RPDU from AMS/FGMC/HSCU (all of which
+# use 2-col tables). Controller identification uses the FSF24 ID prefix
+# (RPDU's controller number) on col 0 first data row, mirroring the
+# AMS/FGMC/HSCU pattern of using their own FSFxx/FGMC prefix as the
+# controller-distinguishing signal — far more reliable than column
+# header text (e.g. "需求编号" / "模块名称") which is generic.
+auto_detect:
+  min_rows: 4
+  required_cols: 7
+  cell_patterns:
+    "0":
+      row: 2
+      starts_with: "FSF24"

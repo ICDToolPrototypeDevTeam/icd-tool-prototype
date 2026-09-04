@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+import openpyxl
 from docx import Document
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
@@ -69,17 +70,60 @@ async def _save_upload(file: UploadFile, dest_dir: Path) -> Path:
     return dest
 
 
-def _match_auto_detect(doc: Document, auto_detect: dict) -> bool:
-    """Match a single auto_detect rule against a Word document's tables."""
+def _load_hlr_tables(hlr_path: Path) -> list[list[list[str]]]:
+    """Load HLR file as list of 2D cell-text arrays (one per table/sheet).
+
+    .docx → list of Word tables; .xlsx → list of sheets. Each table/sheet
+    becomes a 2D array of stripped cell text strings. Lets the downstream
+    ``_match_auto_detect`` operate on a format-agnostic structure.
+    """
+    ext = hlr_path.suffix.lower()
+    if ext == ".docx":
+        doc = Document(str(hlr_path))
+        return [
+            [[cell.text.strip() for cell in row.cells] for row in table.rows]
+            for table in doc.tables
+        ]
+    if ext == ".xlsx":
+        wb = openpyxl.load_workbook(str(hlr_path), data_only=True)
+        try:
+            return [
+                [
+                    ["" if c.value is None else str(c.value).strip() for c in row]
+                    for row in ws.iter_rows(values_only=False)
+                ]
+                for ws in wb.worksheets
+            ]
+        finally:
+            wb.close()
+    raise ValueError(f"Unsupported HLR extension for auto-detect: {ext}")
+
+
+def _match_auto_detect(tables: list[list[list[str]]], auto_detect: dict) -> bool:
+    """Match a single auto_detect rule against a list of 2D cell-text arrays.
+
+    Schema (same as AMS/FGMC/HSCU docx profiles):
+      - ``required_rows`` (optional int): exact row count to match (legacy field)
+      - ``min_rows`` (optional int): minimum row count to match (≥ N; used by
+        profiles whose sample row count varies, e.g. RPDU has both 13 and 581
+        row test files)
+      - ``required_cols`` (optional int): exact column count to match
+      - ``cell_patterns``: ``{"<col_idx>": {"contains"|"starts_with": "...",
+        "row": N}}`` — 0-based column key, 0-based row offset (default 0)
+    """
     required_rows = auto_detect.get("required_rows")
+    min_rows = auto_detect.get("min_rows")
     required_cols = auto_detect.get("required_cols")
     cell_patterns = auto_detect.get("cell_patterns", {})
 
-    for table in doc.tables:
-        rows, cols = len(table.rows), len(table.columns)
-        if required_rows and rows != required_rows:
+    for table in tables:
+        rows = len(table)
+        cols = max((len(row) for row in table), default=0)
+        if required_rows is not None and rows != required_rows:
             continue
-        if required_cols and cols != required_cols:
+        if min_rows is not None and rows < min_rows:
+            continue
+        if required_cols is not None and cols != required_cols:
             continue
 
         matched = True
@@ -89,12 +133,14 @@ def _match_auto_detect(doc: Document, auto_detect: dict) -> bool:
             if row_idx >= rows or col_idx >= cols:
                 matched = False
                 break
-            cell_text = table.cell(row_idx, col_idx).text.strip()
-            # contains 匹配
+            try:
+                cell_text = table[row_idx][col_idx]
+            except IndexError:
+                matched = False
+                break
             if "contains" in pattern and pattern["contains"] not in cell_text:
                 matched = False
                 break
-            # starts_with 匹配
             if "starts_with" in pattern and not cell_text.startswith(pattern["starts_with"]):
                 matched = False
                 break
@@ -104,7 +150,10 @@ def _match_auto_detect(doc: Document, auto_detect: dict) -> bool:
 
 
 def _detect_system_type(hlr_path: Path) -> str:
-    """Auto-detect HLR file system type by scanning Word tables against profile auto_detect configs.
+    """Auto-detect HLR file system type by scanning tables against profile auto_detect configs.
+
+    Loads the HLR file (.docx or .xlsx) into a uniform list-of-2D-arrays via
+    ``_load_hlr_tables`` and matches each profile's auto_detect rule.
 
     Ensures registry is initialized before scanning (coverage.py is synchronous,
     while init_registry() is called in the background runner thread).
@@ -112,7 +161,7 @@ def _detect_system_type(hlr_path: Path) -> str:
     if not _registry._profiles:
         init_registry(Path(__file__).resolve().parents[2] / "v4" / "profiles")
 
-    doc = Document(str(hlr_path))
+    tables = _load_hlr_tables(hlr_path)
     reg = get_registry()
 
     for pid in reg.list_ids():
@@ -120,7 +169,7 @@ def _detect_system_type(hlr_path: Path) -> str:
         ad = cfg.auto_detect
         if not ad:
             continue
-        if _match_auto_detect(doc, ad):
+        if _match_auto_detect(tables, ad):
             return pid
     raise ValueError("无法识别 HLR 文件所属系统类型，请手动选择系统类型上传。")
 
@@ -135,6 +184,7 @@ async def coverage_analysis(
     judge_providers: list[str] = Form(default_factory=lambda: ["deepseek"]),
     enable_traceability_prefilter: bool = Form(False),
     controller_profile: Optional[str] = Form(None),
+    no_refine: bool = Form(False),
 ):
     # —— 字段校验 ——
     _hlr_ext = Path(hlr_word_file.filename or "").suffix.lower()
@@ -208,6 +258,7 @@ async def coverage_analysis(
         judge_providers=judge_providers,
         use_mock_llm=use_mock_llm,
         controller_profile=controller_profile,
+        no_refine=no_refine,
     )
 
     return V4AnalyzeResponse(
