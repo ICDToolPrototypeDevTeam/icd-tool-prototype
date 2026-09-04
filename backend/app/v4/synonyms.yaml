@@ -70,6 +70,15 @@ FCM:
   - Fly Control Module
   - Flight Control Module
 
+Airspeed:
+  - 空速
+  - 空速信号
+  - AIRSPEED
+  - Airspeed
+  - airspeed
+  - Air_Speed
+  - air_speed
+
 FCU:
   - 风扇控制单元
   - Fan Control Unit

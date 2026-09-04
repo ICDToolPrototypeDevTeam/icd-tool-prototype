@@ -135,6 +135,7 @@ async def coverage_analysis(
     judge_providers: list[str] = Form(default_factory=lambda: ["deepseek"]),
     enable_traceability_prefilter: bool = Form(False),
     controller_profile: Optional[str] = Form(None),
+    no_refine: bool = Form(False),
 ):
     # —— 字段校验 ——
     _hlr_ext = Path(hlr_word_file.filename or "").suffix.lower()
@@ -208,6 +209,7 @@ async def coverage_analysis(
         judge_providers=judge_providers,
         use_mock_llm=use_mock_llm,
         controller_profile=controller_profile,
+        no_refine=no_refine,
     )
 
     return V4AnalyzeResponse(

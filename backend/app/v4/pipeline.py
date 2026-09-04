@@ -735,6 +735,7 @@ def run_reverse_pipeline(
     job: Job,
     trace_dir: Path | None = None,
     profile: ControllerProfile | None = None,
+    refine: bool = False,
 ) -> PipelineResult:
     """Run reverse pipeline: parse → label → match → judge → report.
 
@@ -745,6 +746,13 @@ def run_reverse_pipeline(
     consumer: ``HLRWordParser``, ``label_hlrs``, ``enrich_all_labels``, and
     ``build_trace_index``. ``None`` falls back to the registry's AMS default
     so pre-#63 callers keep byte-identical output.
+
+    When ``refine=True`` (RPDU-only via CLI), the pipeline runs an extra
+    pre-processing stage after Step 3 (reverse match): filter irrelevant
+    ICD blocks, recover signals missed by top-N candidates (including
+    Chinese→English synonym recovery such as 空速→airspeed), then re-build
+    cases for the standard Step 4-6. ``refine=False`` keeps byte-identical
+    original behaviour.
     """
     if not (eoicd_json or publisher or subscriber):
         raise ValueError("need eoicd (parsed JSON) or publisher/subscriber (Excel)")
@@ -837,13 +845,35 @@ def run_reverse_pipeline(
     print(f"  Output: {match_path}")
     print(f"  Stats: {match_result.stats}")
 
-    # Build block index for case building
-    eoicd_kept = [req for req in eoicd_out.requirements if should_keep(req)]
-    eoicd_profiles = build_profiles(eoicd_kept)
-    blocks = build_blocks(eoicd_profiles)
-    block_index: dict[str, ICDBlock] = {b.block_key: b for b in blocks}
+    # 精化分支：仅 RPDU profile 走过滤+补采（refine runner 内部自构 block_index），
+    # 后续继续走原 Step 4-6（多模型并发 + drain + degradation + 5星共识 + re_review）。
+    if refine:
+        print()
+        print("=" * 50)
+        print("Refine: 过滤无关 ICD Block + 精确补采 + 同义词补采")
+        print("=" * 50)
+        job.update(JobStatus.RUNNING, "Refine: 过滤无关 ICD Block + 补采")
+        from app.v4.refine.runner import run_pipeline_refined_stage
+        match_result, cases = run_pipeline_refined_stage(
+            eoicd_out=eoicd_out,
+            hlr_labels=hlr_labels,
+            match_result=match_result,
+            output_dir=output_dir,
+        )
+        match_path.write_text(  # 覆盖写过滤后的 reverse_matches.json
+            match_result.model_dump_json(indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"  Output: {match_path}")
+        print(f"  Stats: {match_result.stats}")
+    else:
+        # Build block index for case building
+        eoicd_kept = [req for req in eoicd_out.requirements if should_keep(req)]
+        eoicd_profiles = build_profiles(eoicd_kept)
+        blocks = build_blocks(eoicd_profiles)
+        block_index: dict[str, ICDBlock] = {b.block_key: b for b in blocks}
 
-    cases = build_reverse_cases(match_result, block_index)
+        cases = build_reverse_cases(match_result, block_index)
 
     # Step 4: Multi-agent judging (with degradation)
     print()

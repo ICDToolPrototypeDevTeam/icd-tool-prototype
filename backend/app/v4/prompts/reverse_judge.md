@@ -21,6 +21,13 @@ ICD 是接口定义权威来源，HLR 是软件对 ICD 的实现。
    - HLR 明确写出的声明与 ICD 存在矛盾 → inconsistent（不一致）
    - ICD Block 与该 HLR 不相关，或 HLR 描述的是软件内部逻辑/计算/状态转换而非 ICD 接口实现 → needs_review（待确认）
 
+## 判定口径（在判定步骤之上的严格约束）
+
+在应用上面第 4 步判定时，必须同时遵守以下口径：
+
+- **needs_review（待确认）仅限"人工也无法直接判断"的情形**：只有当 HLR 明确引用的信号在提供的 ICD Block 证据中不存在、且无法与任何 ICD 信号建立对应关系、需要人工在完整 ICD 中复核时，才标记 needs_review。能判断的一律给出 covered 或 inconsistent。
+- **HLR 未提及的属性不参与比对，不算不一致，也不能作为 needs_review 的理由**。
+
 ## AMSC 通用协议特征 covered 判定说明（空气管理系统控制器专用）
 
 适用情形：在 AMSC（Air Management System Controller，空气管理系统控制器）项目背景下，部分 HLR 描述的是 AMSC 所用总线协议标准（ARINC 429 / A825 / A664）本身保证的通用级特征，而非 AMSC 具体接口信号的 ICD 定义。AMSC 关注的接口信号示例包括：风扇 RPM、舱温/管路温度、活门状态、压气机状态等。
@@ -35,6 +42,14 @@ ICD 是接口定义权威来源，HLR 是软件对 ICD 的实现。
   （ARINC 429 协议级特征，由协议标准保证正确性，与 AMSC 具体 ICD 信号无关）
 - HLR "ARINC 429 奇偶校验位应设置为奇校验" → covered
 - HLR "对接收的 A429 字 bit11-26 进行风扇 RPM 解算" → needs_review（涉及 AMSC 具体信号位定义，需对照 ICD 比对）
+
+## RPDU 特定判定规则（远程配电单元控制器专用）
+
+适用情形：在 RPDU（Remote Power Distribution Unit，远程配电单元）项目背景下，审查软件高层需求（HLR）与 EoICD 接口定义的一致性时，补充以下两条规则：
+
+1. **接收端不比较总线协议标注**：若 ICD Block 的方向为接收端（方向含"接收"、RX 等），则**不比对总线协议标注是否一致**。原因：EoICD 的 Publisher/Subscriber 表格中各个总线协议 Sheet 页描述的是**发送端**的总线协议（ARINC 429 / A825 / A664 等），并未描述接收端的总线协议，因此接收端信号的总线类型标注不可作为不一致的依据。
+
+2. **缓存/发送周期约束**：若 HLR 描述了软件写入缓存或发送的周期，则该周期应**小于等于**对应 ICD 信号的 TransmissionIntervalMinimum 属性值。若 HLR 周期 > ICD 的 TransmissionIntervalMinimum，判定为 inconsistent（周期不满足最小传输间隔要求）。
 
 ## 输出格式
 
