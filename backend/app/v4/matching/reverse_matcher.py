@@ -754,7 +754,14 @@ def _filter_sn_zero_within_label(
             for _, d, b in entries
         )
         if has_sn_positive:
-            result.extend((t, d, b) for t, d, b in entries if d.get("signal_name", 0) > 0)
+            for t, d, b in entries:
+                if d.get("signal_name", 0) > 0:
+                    result.append((t, d, b))
+                elif (b.signal_family or "").upper() in _PROTOCOL_FAMILY_TOKEN_GATE:
+                    # 协议族块（SDI）即使 sn=0 也保留：其入围要么靠 HLR 显式
+                    # 词元（6b 已给 sn=30），要么靠 ICD 位范围重叠门控——两者
+                    # 都是证据级准入，不应被"同 label 已有 sn>0 数据块"误删。
+                    result.append((t, d, b))
         else:
             result.extend(entries)
 
@@ -814,13 +821,56 @@ _PROTOCOL_FAMILY_TOKEN_GATE = {
 }
 
 
-def _protocol_family_eligible(hlr_content: str, block: ICDBlock) -> bool:
-    """True when a protocol-family block may be a matching candidate."""
+def _hlr_bit_fields_overlap(hlr_prof: HLRMatchProfile, icd_offset: int, icd_size: int) -> bool:
+    """HLR 位号（已换算 0 基）与 ICD 位范围 [icd_offset, icd_offset+icd_size) 是否有交集."""
+    icd_lo, icd_hi = icd_offset, icd_offset + icd_size
+    for bf in hlr_prof.bit_fields:
+        try:
+            lo = int(bf.get("offset"))
+            sz = int(bf.get("size") or 1)
+        except (TypeError, ValueError):
+            continue
+        if lo + max(sz, 1) > icd_lo and lo < icd_hi:
+            return True
+    return False
+
+
+def _block_icd_bit_range(block: ICDBlock) -> tuple[int, int] | None:
+    """Block 的 ICD 位范围 (offset, size)，取自 profile 级 BitOffsetWithinDS/ParameterSize."""
+    for prof in block.profiles:
+        off = prof.attributes.get("BitOffsetWithinDS", {}).get("value", "")
+        size = prof.attributes.get("ParameterSize", {}).get("value", "")
+        try:
+            o = int(off)
+        except (TypeError, ValueError):
+            continue
+        try:
+            s = int(size)
+        except (TypeError, ValueError):
+            s = 1
+        return (o, max(s, 1))
+    return None
+
+
+def _protocol_family_eligible(hlr_prof: HLRMatchProfile, block: ICDBlock) -> bool:
+    """True when a protocol-family block may be a matching candidate.
+
+    两条放行路径（任一命中即 eligible）：
+      1. HLR 文本显式提到该字段词元（如 "设置Label和SDI"）；
+      2. HLR 中文位号（"第9和10位"等，已换算 0 基）与该协议字段在 ICD 中的
+         位范围重叠——例如对所有 A429 标签的 SDI 位做全局断言的需求并不写
+         "SDI" 词元，但其位号指向 SDI 字段，ICD 数据本身就是证据。
+    """
     fam = (block.signal_family or "").upper()
     gate = _PROTOCOL_FAMILY_TOKEN_GATE.get(fam)
     if gate is None:
         return True
-    return bool(gate.search(hlr_content))
+    if gate.search(hlr_prof.content):
+        return True
+    br = _block_icd_bit_range(block)
+    if br is not None and _hlr_bit_fields_overlap(hlr_prof, br[0], br[1]):
+        return True
+    return False
 
 
 # HLR 正文中显式列出的全大写信号名 token（如"根据匹配的数据设置各数据位：
@@ -854,7 +904,7 @@ def _score_and_rank_blocks(
     """Score blocks, apply hard gates, sort desc, return top results."""
     scored: list[tuple[int, dict[str, int], ICDBlock]] = []
     for block in candidates:
-        if not _protocol_family_eligible(hlr_prof.content, block):
+        if not _protocol_family_eligible(hlr_prof, block):
             continue
         total, dims = _score_block(hlr_prof, block, enhancements=enhancements)
         if total >= _MIN_SCORE_THRESHOLD:
@@ -1086,7 +1136,7 @@ def match_reverse(
                     # sort by score desc, so AI has signal context even for weak matches
                     raw_scored: list[tuple[int, dict[str, int], ICDBlock]] = []
                     for block in label_blocks:
-                        if not _protocol_family_eligible(hlr_prof.content, block):
+                        if not _protocol_family_eligible(hlr_prof, block):
                             continue
                         total, dims = _score_block(hlr_prof, block, enhancements=enhancements)
                         raw_scored.append((total, dims, block))
@@ -1104,11 +1154,17 @@ def match_reverse(
         # as a backward-compat constant for external importers but no
         # longer used at runtime here.
         top_scored = scored[:enhancements.top_k]
-        # 显式断言的协议族 block（如 SDI）不受 top-K 截断：HLR 明确提到该
-        # 字段词元时，其定义必须出现在裁判上下文里，即使总分低于其他块
-        # （门控已保证 scored 中的协议块均通过了词元检查）。
+        # 显式写出词元的协议族 block（如 "设置Label和SDI"）不受 top-K 截断：
+        # HLR 明确提到该字段时其定义必须出现在裁判上下文里，即使总分低于
+        # 其他块。位号门控放行的 SDI 块（"所有标签第9和10位"）不在此列——
+        # 其 ICD 布局/值语义跨标签同质（同为 offset/size + 同一 CodedSet），
+        # top-K 内的样例已足以支撑判断；曾尝试按 bit_field>0 全量保送，
+        # 实测把 case 从 20 块撑到 131 块（127 个同质 SDI），prompt 膨胀拖垮
+        # 长输出 provider（deepseek 截断→error→熔断连锁），已撤销（2026-09-03）。
         for extra in scored[enhancements.top_k:]:
-            if (extra[2].signal_family or "").upper() in _PROTOCOL_FAMILY_TOKEN_GATE:
+            fam = (extra[2].signal_family or "").upper()
+            gate_re = _PROTOCOL_FAMILY_TOKEN_GATE.get(fam)
+            if gate_re is not None and gate_re.search(hlr_prof.content):
                 top_scored.append(extra)
         # HLR 正文显式列名的 block 同样不受 top-K 截断：数据位清单
         # （"根据匹配的数据设置各数据位：HYD_QTY_XDCR..."）中列出的信号，

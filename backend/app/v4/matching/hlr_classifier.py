@@ -66,6 +66,16 @@ _BIT_ASSIGN_RE = re.compile(r"bit(\d+)\s*=", re.IGNORECASE)
 _BIT_POSSESSIVE_RE = re.compile(r"bit(\d+)\s*的", re.IGNORECASE)
 _SDI_RE = re.compile(r"SDI\s*[=为]?\s*(\d+)", re.IGNORECASE)
 
+# —— 中文位号（物理 1 基 → ICD 0 基换算）——
+# HLR 常以"第N位"描述 A429 字内位布局（"第9和10位" = SDI 字段、
+# "第18到28位" = 数据位、"第29位符号位" = BNR 符号位）。ICD 的
+# BitOffsetWithinDS 是 0 基偏移（offset=8 即物理第 9 位），故提取时统一
+# N-1 换算，使位匹配与裁判输入在同一基制下与 ICD 比较。英文 bitN 形式
+# 保持原语义不变（历史行为）。
+_CN_BIT_RANGE_RE = re.compile(r"第\s*(\d+)\s*(?:到|至|~|～|-|—)\s*第?\s*(\d+)\s*位")
+_CN_BIT_AND_RE = re.compile(r"第\s*(\d+)\s*[和、与]\s*(?:第)?\s*(\d+)\s*位")
+_CN_BIT_SINGLE_RE = re.compile(r"第\s*(\d+)\s*位")
+
 
 def classify_hlr(
     text: str, keywords: "ClassifierKeywords | None" = None
@@ -123,6 +133,61 @@ def extract_bit_fields(text: str) -> list[dict]:
         if key not in seen:
             seen.add(key)
             fields.append({"offset": offset, "size": 1, "text": m.group(0)})
+
+    # 中文位号：先范围、再并列（"第9和10位"相邻合并为 2 位）、后单 bit。
+    # offset 一律 0 基（物理位号 - 1）；单 bit 若落在已提取范围内则跳过，
+    # 避免"第18到28位、第29位符号位"这类文本把边界位重复计数。
+    cn_ranges: list[tuple[int, int]] = []
+    for m in _CN_BIT_RANGE_RE.finditer(text):
+        a, b = int(m.group(1)), int(m.group(2))
+        lo, hi = min(a, b), max(a, b)
+        offset = lo - 1
+        size = hi - lo + 1
+        key = (offset, size)
+        if key not in seen:
+            seen.add(key)
+            fields.append({
+                "offset": offset, "size": size,
+                "text": m.group(0), "convention": "cn-physical",
+            })
+        cn_ranges.append((offset, offset + size))
+    for m in _CN_BIT_AND_RE.finditer(text):
+        a, b = int(m.group(1)), int(m.group(2))
+        lo, hi = min(a, b), max(a, b)
+        if hi - lo == 1:
+            # 相邻并列（第9和10位）→ 合并为连续位段
+            offset = lo - 1
+            key = (offset, 2)
+            if key not in seen:
+                seen.add(key)
+                fields.append({
+                    "offset": offset, "size": 2,
+                    "text": m.group(0), "convention": "cn-physical",
+                })
+            cn_ranges.append((offset, offset + 2))
+        else:
+            # 不相邻并列（第3和5位）→ 两个独立单 bit
+            for bit in (lo, hi):
+                offset = bit - 1
+                key = (offset, 1)
+                if key not in seen:
+                    seen.add(key)
+                    fields.append({
+                        "offset": offset, "size": 1,
+                        "text": m.group(0), "convention": "cn-physical",
+                    })
+    for m in _CN_BIT_SINGLE_RE.finditer(text):
+        n = int(m.group(1))
+        offset = n - 1
+        if any(r_lo <= offset < r_hi for r_lo, r_hi in cn_ranges):
+            continue
+        key = (offset, 1)
+        if key not in seen:
+            seen.add(key)
+            fields.append({
+                "offset": offset, "size": 1,
+                "text": m.group(0), "convention": "cn-physical",
+            })
     return fields
 
 

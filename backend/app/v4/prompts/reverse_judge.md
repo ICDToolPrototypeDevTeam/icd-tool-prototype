@@ -13,7 +13,7 @@ ICD 是接口定义权威来源，HLR 是软件对 ICD 的实现。
 3. **逐项比对**：只比对 HLR 明确写出的技术声明，HLR 未提及的属性视为不在本条需求的范围内，不作为不一致的依据。若本条 case 匹配到多个 ICD Block，先根据 HLR 正文中的信号名、Label 号或别名判断 HLR 实际引用了哪些 Block，只对实际引用的 Block 逐项比对；HLR 未提及的 Block 不在比对范围内，不构成"需求缺失"，不得作为 inconsistent 或 needs_review 的依据。比对时重点关注：
    - bit 偏移/宽度与 ICD 是否一致
    - 离散信号每个条件（bitX=1→有效/无效）与 ICD OneState/ZeroState 是否一致
-   - LSB/MSB 位序与实际 bit 宽度是否对应
+   - LSB/MSB 位序与实际 bit 宽度是否对应（ARINC 429 字内位号越大越高位，如第10位是第9位的高位、第31位是第30位的高位，不得按 HLR 书写顺序当作高位在前）
    - 方向、数据类型、取值范围、单位、周期是否与 ICD 矛盾
 
 4. **判定**：
@@ -34,21 +34,6 @@ ICD 是接口定义权威来源，HLR 是软件对 ICD 的实现。
 （needs_review 的适用情形见上方判定规则第 4 步：断言无法验证，或 HLR 对所有匹配 Block 均未引用。）
 
 上述情形判 covered 时 confidence 可适当下调（如 0.6-0.75），以体现信息有限。
-
-## AMSC 通用协议特征 covered 判定说明（空气管理系统控制器专用）
-
-适用情形：在 AMSC（Air Management System Controller，空气管理系统控制器）项目背景下，部分 HLR 描述的是 AMSC 所用总线协议标准（ARINC 429 / A825 / A664）本身保证的通用级特征，而非 AMSC 具体接口信号的 ICD 定义。AMSC 关注的接口信号示例包括：风扇 RPM、舱温/管路温度、活门状态、压气机状态等。
-
-判定为 covered（由协议标准保证）的 3 个同时满足条件：
-1. HLR 核心内容是 AMSC 所用总线的协议级实现（如 SDI/SSM 位编码、奇偶校验位、协议帧打包/解包），而非 AMSC 具体接口信号（风扇 RPM、舱温、活门状态等）的实现
-2. HLR 文本中不引用任何 AMSC 具体 ICD 信号名（风扇/活门/温度等）、bit 偏移、Label 号、信号状态定义
-3. HLR 描述的实现逻辑符合该协议的标准要求（无矛盾表述）
-
-判定示例：
-- HLR "ARINC 429 SDI 位（bit8/bit9）应根据通道位置写入固定数据" → covered
-  （ARINC 429 协议级特征，由协议标准保证正确性，与 AMSC 具体 ICD 信号无关）
-- HLR "ARINC 429 奇偶校验位应设置为奇校验" → covered
-- HLR "对接收的 A429 字 bit11-26 进行风扇 RPM 解算" → needs_review（涉及 AMSC 具体信号位定义，需对照 ICD 比对）
 
 ## 输出格式
 

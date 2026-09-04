@@ -178,23 +178,40 @@ def build_blocks(profiles: list[SignalProfile]) -> list[ICDBlock]:
 
     protocol_names = {"LABEL", "SSM", "PARITY", "OCTLBL"}
 
-    # SSM enrichment index: label → [{name, attrs}]. The SSM family carries
-    # no CodedSet/OneState/ZeroState data (only bit position/size/type), so
-    # it stays out of block matching; instead its bit definitions are
-    # attached to every block of the same label for judge-side context.
-    ssm_by_label: dict[str, list[dict]] = defaultdict(list)
+    # Same-word protocol-field anchors: label → [{name, attrs}], covering the
+    # LABEL/SDI/SSM/PARITY protocol leaves of an A429 word.  These leaves carry
+    # the word's bit layout (BitOffsetWithinDS/ParameterSize/DataFormatType)
+    # and, for SDI, value semantics (CodedSet).  LABEL/SSM/PARITY/OCTLBL stay
+    # out of block matching (protocol_names above); SDI becomes a block *and*
+    # is anchored here too so that data-block cases still expose the SDI field
+    # position.  The anchor rows give the judge (1) the ICD bit-offset base
+    # (offset=0/8/29/31 → physical 1-8/9-10/30-31/32) from data alone, and
+    # (2) grounds to verify HLR assertions like "将第9和10位设置为1/0" → SDI.
+    _PROTOCOL_ANCHOR_FAMILIES = {"LABEL", "OCTLBL", "SDI", "SSM", "PARITY"}
+    proto_anchor_by_label: dict[str, list[dict]] = defaultdict(list)
     for prof in profiles:
         if prof.label is None:
             continue
-        family = _extract_signal_family(prof.profile_key)
-        if family.upper() != "SSM":
+        family = _extract_signal_family(prof.profile_key).upper()
+        if family not in _PROTOCOL_ANCHOR_FAMILIES:
             continue
         attrs: dict[str, str] = {}
         for k, v in prof.attributes.items():
             if k in REVERSE_KEY_ATTRS:
                 attrs[k] = str(v.get("value", "")) + (f" {v['unit']}" if v.get("unit") else "")
         if attrs:
-            ssm_by_label[prof.label].append({"name": family, "attrs": attrs})
+            proto_anchor_by_label[prof.label].append({"name": family, "attrs": attrs})
+
+    # Sort anchors by ICD bit offset so the layout reads naturally
+    # (LABEL at 0, SDI at 8, SSM at 29, PARITY at 31 in 32-bit words).
+    def _anchor_sort_key(entry: dict) -> tuple[int, str]:
+        off = entry.get("attrs", {}).get("BitOffsetWithinDS", "")
+        try:
+            return (int(str(off).split()[0]), entry["name"])
+        except (ValueError, IndexError):
+            return (999, entry["name"])
+    for entries in proto_anchor_by_label.values():
+        entries.sort(key=_anchor_sort_key)
 
     # Build label → bit_offset → {dp_name, size, dtype} from pure-DP profiles.
     # These are Publisher-table profiles (sides={'DP'}) with complete per-field attributes.
@@ -401,7 +418,7 @@ def build_blocks(profiles: list[SignalProfile]) -> list[ICDBlock]:
             direction_verbs_set=dir_verbs,
             channel_count=len(profs),
             sub_signals=sub_signals,
-            word_protocol_fields=ssm_by_label.get(label, []),
+            word_protocol_fields=proto_anchor_by_label.get(label, []),
         ))
 
     return blocks
