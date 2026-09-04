@@ -12,7 +12,7 @@ from pathlib import Path
 
 from app.v4.comparison.multi_judge import (
     _judge_with_provider_sync,
-    _load_reverse_prompt,
+    _build_judge_system_prompt,
 )
 from app.v4.comparison.report_generator import generate_consensus_reverse_report
 from app.v4.comparison.re_review import re_review_judgments
@@ -514,6 +514,7 @@ def _judge_with_degradation(
     cases: list,
     providers: list[str],
     ctx: DegradationContext,
+    profile=None,
 ) -> MultiJudgeOutput:
     """Judge cases with provider health tracking, timeout, and circuit breaking.
 
@@ -525,7 +526,7 @@ def _judge_with_degradation(
     """
     from app.v4.models import MultiJudgeOutput, MultiJudgeResult
 
-    system_prompt = _load_reverse_prompt()
+    system_prompt = _build_judge_system_prompt(profile)
     total = len(cases)
     results: list[MultiJudgeResult] = []
     executor = _get_drain_executor()
@@ -882,7 +883,9 @@ def run_reverse_pipeline(
     print("=" * 50)
     job.update(JobStatus.RUNNING, "Step 4/6: Multi-agent judging")
     ctx = DegradationContext(config=DegradationConfig.from_env())
-    multi_out = _judge_with_degradation(cases, JUDGE_PROVIDERS, ctx)
+    multi_out = _judge_with_degradation(
+        cases, JUDGE_PROVIDERS, ctx, profile=resolved_profile
+    )
 
     # Step 4.5: Drain timed-out judgments — late-but-valid outputs are kept
     # and replace their TIMEOUT placeholders before consensus runs.

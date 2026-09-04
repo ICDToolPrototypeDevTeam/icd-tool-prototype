@@ -8,13 +8,14 @@ ICD 是接口定义权威来源，HLR 是软件对 ICD 的实现。
 
 1. **提取 ICD 约束**：从 ICD Block 提取方向、Label号、子信号明细（bit偏移/宽度/类型）、OneState/ZeroState 定义、取值范围、单位、周期等关键约束。
 
-2. **提取 HLR 声明**：将 HLR 正文和基本原理作为一个整体，提取其中每个明确的技术断言（bit条件、bit范围、LSB/MSB、有效/无效逻辑、方向、周期、范围等）。
+2. **提取 HLR 声明**：将 HLR 正文和基本原理作为一个整体，提取其中每个明确的技术断言（bit条件、bit范围、LSB/MSB、有效/无效逻辑、方向、周期、范围等），**包括对信号/字段内容语义的定义**——HLR 在正文或括号注释中对某 Label/位段/信号"装的是什么、表示什么含义"的说明（位段用途描述、括号内的信号内容定义等）属于技术断言，不是可忽略的普通注释。
 
 3. **逐项比对**：只比对 HLR 明确写出的技术声明，HLR 未提及的属性视为不在本条需求的范围内，不作为不一致的依据。若本条 case 匹配到多个 ICD Block，先根据 HLR 正文中的信号名、Label 号或别名判断 HLR 实际引用了哪些 Block，只对实际引用的 Block 逐项比对；HLR 未提及的 Block 不在比对范围内，不构成"需求缺失"，不得作为 inconsistent 或 needs_review 的依据。比对时重点关注：
    - bit 偏移/宽度与 ICD 是否一致
    - 离散信号每个条件（bitX=1→有效/无效）与 ICD OneState/ZeroState 是否一致
    - LSB/MSB 位序与实际 bit 宽度是否对应（ARINC 429 字内位号越大越高位，如第10位是第9位的高位、第31位是第30位的高位，不得按 HLR 书写顺序当作高位在前）
    - 方向、数据类型、取值范围、单位、周期是否与 ICD 矛盾
+   - **内容语义是否与 ICD 信号定义矛盾**：HLR 对信号/字段内容语义的定义（某 Label/位段/信号表示什么含义、括号注释中的内容说明）须与 ICD 信号名/子信号名/单位/OneState-ZeroState 所表达的信号定义一致。HLR 将字段语义定义为与 ICD 定义不同的事物（语义错配）——即使数据类型、量程等技术格式一致，仍判 inconsistent；HLR 把某 Label 的内容说成 ICD 中该 Label 未承载的含义（内容张冠李戴），同样判 inconsistent
 
 4. **判定**：
    - 全部通过 → covered（一致）
@@ -28,20 +29,12 @@ ICD 是接口定义权威来源，HLR 是软件对 ICD 的实现。
 以下情形**不得**判 needs_review，均应判 covered（一致），并在 analysis 中注明比对范围：
 
 1. **HLR 未提及某些 ICD 属性**（如 BNR 数据格式、位偏移、位宽、LSB 分辨率、量程、周期、方向）——本任务只比对 HLR 明确写出的技术声明，未提及的属性不在本条需求比对范围内，不构成不一致，也不构成待确认
-2. **HLR 描述软件内部数据路由/状态传递逻辑**，仅引用信号名或 Label 号、未对接口实现属性做出断言——比对范围内无矛盾可判，判 covered。**前提**：所匹配的 ICD Block 与 HLR 引用的信号相关（Label 号一致，或 Block 信号名与 HLR 引用的信号名存在词元重合）。"相关"要求完整信号名/Label 号的对应（如 CMD1_OHMS ↔ L*_CMD1_OHMS）；仅共享通用后缀/片段（如 OHMS、STATUS）不视为相关。若 HLR 引用的信号与所匹配的全部 ICD Block 均不相关（无 Label 对应、无信号名重合），属于"完全无法比对"，按判定规则第 4 步 (b) 判 needs_review，本禁用情形不适用
+2. **HLR 描述软件内部数据路由/状态传递逻辑**，仅引用信号名或 Label 号、未对接口实现属性做出断言——比对范围内无矛盾可判，判 covered。**限定**：本情形仅适用于 HLR 未对引用信号的内容语义做出定义的情形；若 HLR 在正文或括号注释中给出了内容语义（位段用途、信号内容定义），该语义属于技术断言，须按比对清单中的"内容语义"项与 ICD 比对，语义与 ICD 矛盾时判 inconsistent，本 covered 情形不适用。**前提**：所匹配的 ICD Block 与 HLR 引用的信号相关（Label 号一致，或 Block 信号名与 HLR 引用的信号名存在词元重合）。"相关"要求完整信号名/Label 号的对应（如 CMD1_OHMS ↔ L*_CMD1_OHMS）；仅共享通用后缀/片段（如 OHMS、STATUS）不视为相关。若 HLR 引用的信号与所匹配的全部 ICD Block 均不相关（无 Label 对应、无信号名重合），属于"完全无法比对"，按判定规则第 4 步 (b) 判 needs_review，本禁用情形不适用
 3. **多 Block 中 HLR 未提及的部分 Block**（该 case 匹配到多个 Block 而 HLR 只提及其中一部分）——未提及的 Block 不在比对范围内，**不构成"需求缺失"**，不得据此判 inconsistent 或 needs_review；最终判定只依据 HLR 实际引用的 Block 的比对结果。引用 Block 比对无矛盾 → covered，analysis 注明比对范围
 
 （needs_review 的适用情形见上方判定规则第 4 步：断言无法验证，或 HLR 对所有匹配 Block 均未引用。）
 
 上述情形判 covered 时 confidence 可适当下调（如 0.6-0.75），以体现信息有限。
-
-## RPDU 特定判定规则（远程配电单元控制器专用）
-
-适用情形：在 RPDU（Remote Power Distribution Unit，远程配电单元）项目背景下，审查软件高层需求（HLR）与 EoICD 接口定义的一致性时，补充以下两条规则：
-
-1. **接收端不比较总线协议标注**：若 ICD Block 的方向为接收端（方向含"接收"、RX 等），则**不比对总线协议标注是否一致**。原因：EoICD 的 Publisher/Subscriber 表格中各个总线协议 Sheet 页描述的是**发送端**的总线协议（ARINC 429 / A825 / A664 等），并未描述接收端的总线协议，因此接收端信号的总线类型标注不可作为不一致的依据。
-
-2. **缓存/发送周期约束**：若 HLR 描述了软件写入缓存或发送的周期，则该周期应**小于等于**对应 ICD 信号的 TransmissionIntervalMinimum 属性值。若 HLR 周期 > ICD 的 TransmissionIntervalMinimum，判定为 inconsistent（周期不满足最小传输间隔要求）。
 
 ## 输出格式
 
