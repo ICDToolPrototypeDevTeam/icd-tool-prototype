@@ -123,9 +123,9 @@
 三位专家的结论在**语义**上一致 —— 即使措辞不同或 coverage_status 标签不同，
 各自 analysis 描述的核心判断指向同一事实。
 例（语义一致）：
-  专家A analysis："HLR描述了温度信号的采集功能，但缺少对数据格式、分辨率和量程的具体定义"
-  专家B analysis："ICD要求该信号为BNR格式精度0.01，HLR中只写了采集温度信号，格式和精度要求未落实"
-  → 两者都在说格式和精度定义缺失这同一个事实，视为一致。
+  专家A analysis："HLR 声明的量程上限为 100℃"
+  专家B analysis："ICD 定义 FuncRngMax=120，HLR 写的是 100，范围上限不一致"
+  → 两者都在说量程上限不一致这同一个事实，视为一致。
 
 ★★☆ 部分分歧（agreement=majority）：
 两位专家结论语义一致，另一位有实质性分歧。
@@ -153,6 +153,7 @@
 - **不管 3 个 provider 是否对同一字段达成共识**——只要 HLR 描述与 ICD 定义不符就填入
 - 仅当 `final_coverage_status` 为 `inconsistent` 时填写
 - 字段名优先取自上方 12 个 key 白名单（Direction / DataFormatType 等）；其它取 EoICD 标准属性名
+- **HLR 未提及/未声明的属性不构成事实差异**（如"HLR 未声明默认值""HLR 未写格式定义"），不得填入 inconsistent_attributes；只有 HLR 明确写出的声明与 ICD 定义矛盾才算差异
 
 **示例**（3 个 provider 共识识别 EoICD-HLR 差异 → 都进 inconsistent_attributes）：
 
@@ -294,14 +295,14 @@
   "agreement_level": "majority",
   "inconsistent_attributes": [
     {
-      "attribute": "DefaultValue",
-      "detail": "HLR 未声明默认值",
+      "attribute": "Units",
+      "detail": "HLR 声明单位 kPa，ICD 定义 MPa（仅 qwen 识别）",
       "providers": ["qwen"]
     }
   ],
   "field_disagreements": [],
   "final_coverage_status": "covered",
-  "final_analysis": "多数判 covered，仅 Qwen 提到默认值缺失（辅助字段），provider 间看法一致 → 3★",
+  "final_analysis": "多数判 covered，仅 Qwen 识别出 Units 单位矛盾（key 字段），provider 间看法一致 → 3★",
   "confidence": 0.78,
   "consistent_agents": ["deepseek", "minimax"],
   "divergent_agents": ["qwen"]

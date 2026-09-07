@@ -61,13 +61,16 @@ Content-Type: multipart/form-data
 | `use_mock_llm` | bool (form) | 否（默认 false） | 是否走 mock |
 | `judge_providers` | list[str] (form) | 否（默认 `["deepseek"]`） | 多模型 panel provider 白名单 ∈ `{deepseek, minimax, qwen}` |
 | `enable_traceability_prefilter` | bool (form) | 否（默认 false） | 是否启用追溯预筛选 |
-| `controller_profile` | str (form) | 否（默认 `ams`） | 控制器 profile id ∈ `{ams, fgmc, hscu}`，决定 HLR 解析规则、分类关键词、追溯表配置与 AI 标注示例 |
+| `controller_profile` | str (form) | 否（默认 `ams`） | 控制器 profile id ∈ `{ams, fgmc, hscu, rpdu, fsecu}`，决定 HLR 解析规则、分类关键词、追溯表配置与 AI 标注示例 |
+| `no_refine` | bool (form) | 否（默认 false） | 仅 RPDU profile 生效；`true` 时关闭 Step 3.5 refine 后处理（matched ICD Block 无关过滤 + 精确/同义词补采），与最初版 RPDU 行为对齐做 A-B 对照 |
 
 文件名校验：`[^A-Za-z0-9._\-一-龥]` 之外字符会被替换为 `_`；`safe_filename()`。
 
 `judge_providers` 任一不在白名单 → 422。
 
 `controller_profile` 不在白名单 → 422（在创建任务前 fail fast）。不传该字段时行为与 Issue A 完全一致（AMS 默认）。
+
+`no_refine` 仅 RPDU profile 生效；非 RPDU profile 传入该字段被忽略。CLI 等价形参为 `reverse-analyze --no-refine`。
 
 预期返回（V4AnalyzeResponse）：
 
@@ -192,7 +195,7 @@ Content-Type：
 | 文件 >50 MB | 413 | 整请求 >200 MB |
 | 文件名含非法字符 | 422 | |
 | `judge_providers` 出现 `claude` 等 | 422 | 错误信息含 `allowed: deepseek, minimax, qwen` |
-| `controller_profile` 不在白名单 | 422 | `controller_profile: unsupported '<name>'; allowed: ams, fgmc, hscu` |
+| `controller_profile` 不在白名单 | 422 | `controller_profile: unsupported '<name>'; allowed: ams, fgmc, hscu, rpdu, fsecu` |
 | `{model}` 不在 `{deepseek,minimax,qwen}` | 400 | `invalid model: <name>; allowed: ...` |
 | 任务 `running` 时调 `/result` | 409 | `job not finished: status=...` |
 | 任务 `failed` 时调 `/result` | 409 | |

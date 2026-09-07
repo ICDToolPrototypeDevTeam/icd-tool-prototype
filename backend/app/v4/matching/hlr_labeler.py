@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -59,8 +60,22 @@ def _build_system_prompt(profile: "ControllerProfile | None") -> str:
 SYSTEM_PROMPT = _build_system_prompt(None)
 
 
+# 词内下划线后紧跟空白（Word/PDF 断行或排版导致，如 "FGMC_ CHB"）。
+# 空白会把一个标识符切成两段，标注时导致设备/关键词漏标或只标出一半
+# （如 devices 漏 FGMC），同一需求不同文档排版下标注不对称。送 LLM 前
+# 把 "_\s+" 压缩为 "_"，让标识符恢复连续。
+_WHITESPACE_IN_IDENTIFIER_RE = re.compile(r"_\s+")
+
+
+def _normalize_label_input_text(text: str) -> str:
+    return _WHITESPACE_IN_IDENTIFIER_RE.sub("_", text or "")
+
+
 def _build_label_prompt(hlr: HLRRequirement) -> str:
-    return f"需求ID: {hlr.requirement_id}\n需求正文: {hlr.content}"
+    return (
+        f"需求ID: {hlr.requirement_id}\n"
+        f"需求正文: {_normalize_label_input_text(hlr.content)}"
+    )
 
 
 def _call_label_api(

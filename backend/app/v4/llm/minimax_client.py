@@ -46,6 +46,7 @@ class MiniMaxClient:
         for attempt in range(max_retries + 1):
             try:
                 token_budget = max_tokens
+                request_timeout = timeout  # 截断重试翻倍预算时同步放大，见下
                 for _ in range(3):
                     payload["max_tokens"] = token_budget
                     resp = requests.post(
@@ -55,7 +56,7 @@ class MiniMaxClient:
                             "Content-Type": "application/json",
                         },
                         json=payload,
-                        timeout=timeout,
+                        timeout=request_timeout,
                     )
                     resp.raise_for_status()
                     body = resp.json()
@@ -65,10 +66,15 @@ class MiniMaxClient:
                     if finish_reason != "length" or token_budget >= MAX_TOKEN_CAP:
                         break
                     token_budget = min(token_budget * 2, MAX_TOKEN_CAP)
+                    # 输出预算翻倍后生成耗时同步翻倍：仍用 120s 会让"翻倍必然超时"
+                    # （16384 tokens 正常生成 >2min），超时即整链重试重来，大 case
+                    # 反复截断→超时→空响应/error。timeout 随预算一起 ×2。
+                    request_timeout = int(request_timeout * 2)
                     import sys
                     print(
                         f"  [minimax] WARNING: response truncated (finish_reason=length), "
-                        f"retrying with max_tokens={token_budget}",
+                        f"retrying with max_tokens={token_budget}, "
+                        f"timeout={request_timeout}s",
                         file=sys.stderr,
                     )
                 return ChatResponse(content=content, usage=usage)

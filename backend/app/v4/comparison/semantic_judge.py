@@ -4,9 +4,49 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 
+from app.v4.matching.hlr_classifier import extract_bit_fields
 from app.v4.models import ReverseCase, ReverseJudgmentResult
+
+
+def _to_float(v) -> float | None:
+    """Parse a display string like '-512' / '12 Bits' / '1000 ms' to float."""
+    if v is None:
+        return None
+    s = str(v).strip().replace(",", "")
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    return float(m.group()) if m else None
+
+
+def _append_bnr_sign_derivation(parts: list[str], merged: dict) -> None:
+    """If the merged data-field attrs prove a signed BNR field (negative
+    FullScaleRngMin), state the arithmetic consequence: the field is two's
+    complement and its top physical bit is the sign bit.
+
+    Pure derivation from the block's own numbers — a 12-bit field with
+    LSB 0.25 unsigned can only span 0..1023.75, so a range min of -512
+    forces signedness; the sign bit of two's complement is the MSB.
+    """
+    if not merged:
+        return
+    if str(merged.get("DataFormatType", "")).strip() != "BNR":
+        return
+    rng_min = _to_float(merged.get("FullScaleRngMin"))
+    offset = _to_float(merged.get("BitOffsetWithinDS"))
+    size = _to_float(merged.get("ParameterSize"))
+    if rng_min is None or rng_min >= 0 or offset is None or size is None:
+        return
+    top_phys = int(offset + size)
+    top_off = int(top_phys - 1)
+    parts.append(
+        f"- [推导] 数据字段 offset={int(offset)}, size={int(size)} ⇒ 覆盖物理第"
+        f"{int(offset) + 1}~{top_phys}位；FullScaleRngMin={merged.get('FullScaleRngMin')} < 0 "
+        f"(无符号 {int(size)} 位×LsbRes 只能取非负值) ⇒ 该字段为二进制补码有符号数，"
+        f"最高位(0基 offset={top_off}，物理第{top_phys}位)为符号位，已包含在 "
+        f"ParameterSize={merged.get('ParameterSize')} 之内。"
+    )
 
 
 def _extract_json(text: str) -> str:
@@ -69,6 +109,7 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
     """
     parts = []
     hlr = case.hlr_requirement
+    anchor_note_added = False
 
     # ── ICD Block (benchmark) ──
     if case.matched_profiles:
@@ -89,6 +130,7 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
                 parts.append("- 信号级公共属性:")
                 for attr_name, attr_val in merged.items():
                     parts.append(f"  - {attr_name} = {attr_val}")
+                _append_bnr_sign_derivation(parts, merged)
 
             # Sub-signals (bit-level layout within one A429 word)
             sub_signals = blk.get("sub_signals", [])
@@ -101,6 +143,31 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
                         f"{ss.get('size', '?')}bit, "
                         f"{ss.get('dtype', '?')}"
                     )
+
+            # Same-word protocol field definitions — context only, not a
+            # matching object. Anchors expose the word's bit layout
+            # (LABEL/SDI/SSM/PARITY offsets+size, SDI CodedSet) so the judge
+            # can verify HLR assertions about protocol bits (e.g. "将第9和10位
+            # 设置为1/0" → SDI=1) against ICD data alone.
+            proto_fields = blk.get("word_protocol_fields", [])
+            if proto_fields:
+                parts.append("- 同 word 协议字段（ICD 位偏移锚点，仅作比对上下文）:")
+                for pf in proto_fields:
+                    name = pf.get("name", "?")
+                    attrs = pf.get("attrs", {})
+                    parts.append(
+                        f"  - {name}: "
+                        + ", ".join(f"{k} = {v}" for k, v in attrs.items())
+                    )
+                if not anchor_note_added:
+                    # 基制说明由上方 ICD 锚点数据直接支撑（如 LABEL offset=0 →
+                    # 物理第1~8位、SDI offset=8 → 物理第9~10位），非外部规则。
+                    parts.append(
+                        "  位偏移约定：BitOffsetWithinDS 为 0 基偏移，offset=N 对应"
+                        "物理位第 N+1 位；HLR 正文的“第 N 位”/“第N到M位”是物理位号，"
+                        "判定时请换算为 0 基后与 ICD 位偏移比对。"
+                    )
+                    anchor_note_added = True
 
             parts.append("")
     else:
@@ -115,6 +182,17 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
     hlr_rationale = hlr.get('rationale', '')
     if hlr_rationale:
         parts.append(f"- 基本原理: {hlr_rationale}")
+
+    # HLR 正文位声明结构化呈现（物理位号 → 0 基 offset/size），让裁判直接
+    # 比对本行与 ICD 锚点，避免各家对“第 N 位”自行换算时错位（如把第31位
+    # 误当 PARITY 的物理32位）。
+    bit_decls = extract_bit_fields(hlr.get('content', ''))
+    if bit_decls:
+        parts.append("- HLR 位声明（物理位号→0基换算，由正文提取，仅供比对）:")
+        for bf in bit_decls:
+            parts.append(
+                f"  - {bf.get('text', '?')} → offset={bf.get('offset')}, size={bf.get('size')}"
+            )
     parts.append("")
 
     # ── Match evidence ──
@@ -123,8 +201,7 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
     mt = evidence.get('match_type', 'N/A')
     parts.append(f"- 匹配类型: {mt}")
     if mt == "待确定":
-        parts.append("- ⚠ 此匹配置信度较低（部分维度命中或分数偏低），请谨慎判断")
-        parts.append("- 若 HLR 内容与 ICD 信号块确实无关（如仅提及 Label 号但无具体信号描述），标记为 needs_review")
+        parts.append("- ⚠ 此匹配置信度较低（部分维度命中或分数偏低），请谨慎判断，confidence 适当下调")
         parts.append("- 若能确认 ICD 要求已在 HLR 中落实或不一致，正常判断即可")
     parts.append(f"- HLR Labels: {evidence.get('hlr_labels', [])}")
     parts.append(f"- 匹配 Block 数: {evidence.get('matched_block_count', 0)}")
@@ -178,7 +255,7 @@ def _call_reverse_judge_api(
 
     for attempt in range(max_retries + 1):
         try:
-            response = llm.chat(messages=messages, temperature=0.1, max_tokens=4096)
+            response = llm.chat(messages=messages, temperature=0.1, max_tokens=8192)
             content = _extract_json(response["content"])
             data = json.loads(content)
             return ReverseJudgmentResult(
