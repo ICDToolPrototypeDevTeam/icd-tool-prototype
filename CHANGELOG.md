@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-08
+
+### Changed
+
+- **MiniMax / Qwen 模型升级**：`backend/.env.example` 与 `backend/app/v4/llm/factory.py` 的 `MINIMAX_MODEL` 由 `MiniMax-M2.7` 切换为 `MiniMax-M2.5`，`QWEN_MODEL` 由 `qwen3.7-flash` 切换为 `qwen3.6-35b-a3b`。`factory.py` 的 `os.getenv` fallback 默认值同步更新。DeepSeek 保持 `deepseek-v4-flash` 不变。`JUDGE_PROVIDERS` 不变（仍为 `deepseek,minimax,qwen`）。3 个 LLM client 实现未变，仅模型标识字符串切换。3 文件 / +6 / -4 行（commit `5dac3dc`）。
+
 ## [Unreleased] - 2026-09-03
 
 ### Added
