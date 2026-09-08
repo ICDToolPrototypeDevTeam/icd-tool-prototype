@@ -65,7 +65,7 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
         return QwenClient(
             api_key=api_key,
             base_url=os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-            model=os.getenv("QWEN_MODEL", "qwen-plus"),
+            model=os.getenv("QWEN_MODEL", "qwen3.6-35b-a3b"),
         )
 
     if provider == "minimax":
@@ -79,7 +79,7 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
         return MiniMaxClient(
             api_key=api_key,
             base_url=os.getenv("MINIMAX_BASE_URL", "https://api.minimax.chat"),
-            model=os.getenv("MINIMAX_MODEL", "abab7-chat"),
+            model=os.getenv("MINIMAX_MODEL", "MiniMax-M2.5"),
         )
 
     raise ValueError(

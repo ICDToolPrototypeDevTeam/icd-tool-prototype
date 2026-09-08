@@ -7,6 +7,8 @@
 # Claude local settings
 .claude/settings.local.json
 .claude/skills/weekly-report/
+.claude/skills/write-pr/
+.claude/skills/write-issue/
 
 # Python virtual environments
 
