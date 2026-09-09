@@ -13,6 +13,7 @@
 # Python virtual environments
 
 .venv/
+.venv-build/
 venv/
 env/
 

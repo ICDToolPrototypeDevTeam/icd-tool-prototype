@@ -2957,3 +2957,51 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
 
 1. `issue-model-switch-jinhang.md` 描述的金航网 6 模型全量切换未完成——GLM5.1 provider 新增、Qwen3.5 122b-v1 235b / Qwen3-32b/next 80b 切换、DeepSeek Base URL 切换均未做。
 2. 新模型质量（响应速度、JSON 解析稳定性、与现有 prompt 兼容性）未在生产样本验证，建议合并后尽快 E2E 回归。
+
+## 2026-09-09 Windows 单目录桌面打包（PyInstaller，免 Docker 双击即用）
+
+### 任务目标
+
+把 FastAPI 后端 + React 前端打包成 Windows 单目录可执行程序（`dist/ICDTool/ICDTool.exe`），双击启动后端并自动打开浏览器，供无 Docker 环境用户使用；同时保持 Docker Compose / 开发态启动方式不变。
+
+### 完成内容
+
+1. 后端路径改造（向后兼容）：`config.py` 新增 `_base_dir()` / `get_output_root()`，`sys.frozen` 时基目录 = exe 同级、输出写 exe 同级 `output/`；4 个 API 模块（`outputs.py` / `coverage.py` / `jobs.py` / `completeness.py`）输出路径改用 `get_output_root()`；`main.py` 仅在 frozen 时挂载前端静态资源 + SPA fallback。
+2. 新增 `packaging/` 目录：`run.py`（打包入口，启动 uvicorn + 延时开浏览器，端口可 `PORT` 覆盖）、`ICDTool.spec`（SPECPATH 相对路径、collect_submodules 覆盖动态导入）、`build.ps1`（5 步：前端 build → venv+依赖 → PyInstaller → 拷贝 static → 生成 .env）、`README.md`。
+3. `.gitignore` 追加 `.venv-build/`。
+4. 移除 .doc→.docx 转换死代码（遍历确认未调用，仅解析 .docx/.xlsx）。
+
+### 修改文件
+
+- `backend/app/v4/config.py`（+`_base_dir()` / `get_output_root()`）
+- `backend/app/main.py`（+frozen 分支静态挂载 + SPA fallback）
+- `backend/app/api/v4/{outputs,coverage,jobs,completeness}.py`（输出路径改 `get_output_root()`）
+- `.gitignore`（+`.venv-build/`）
+
+### 新增文件
+
+- `packaging/run.py`、`packaging/ICDTool.spec`、`packaging/build.ps1`、`packaging/README.md`
+- `docs/decisions/ADR-005-Windows单目录桌面打包.md`
+
+### 验证方式
+
+1. 本机 venv（非 frozen 路径等价）import + `/api/v4/health` 200。
+2. Windows 单目录版（`dist/ICDTool/ICDTool.exe`，`PORT=8001` 绕过被 Docker 占用的 8000）：
+   - 启动：`GET /` 返回 `index.html`（200）。
+   - 页面刷新：`GET /correctness`、`GET /completeness` SPA fallback 返回 `index.html`（200）。
+   - 反向：`POST /api/v4/coverage-analysis`（hlr + publisher + subscriber，mock）→ 完成 → `result` 摘要 + 下载 `eoicd-xlsx` / `consensus-docx` / `consistency/minimax`。
+   - 正向：`POST /api/v4/completeness-analysis`（trace 模式，两张追溯表，mock）→ 完成 → `result` 摘要 + 下载 `forward-xlsx` / `forward-docx`。
+   - 正向 full 模式：完成（`total_blocks=1618`，`covered_direct=765` / `uncovered=853` / `ai_reviewed=650`）；报告生成阶段（1618 块 python-docx 大表格）CPU 持续满载，约 10 分钟完成，作为数据量性能表现记录。
+   - 输出路径：确认产物写到 `dist/ICDTool/output/v4/<job_id>/`（frozen 路径逻辑生效）。
+3. 输入文件：`test-input/V4/`（HLR docx、Publisher/Subscriber xlsx、两张追溯表 xlsx）。
+
+### 验证结果
+
+- 本机 venv 与 exe 的启动 / 健康检查 / 页面刷新 / 反向 / 正向 trace / 正向 full / 报告生成 / 下载全部通过（下载文件经 `file` 校验为 Excel 2007+ / Word 2007+，HTTP 200）。
+- Docker Compose 回归：**受阻**——本机网络无法解析 / 访问 Docker Hub（`lookup auth.docker.io: no such host`，`FROM python:3.11-slim` / `node:20-alpine` 无法拉取），待网络恢复或配置镜像后补验（已用本地 venv 等价非 frozen 路径验证替代）。
+
+### 遗留问题
+
+1. Docker Compose 回归未跑（网络受阻），需在网络可用时补验 `docker compose up --build` + 健康检查。
+2. 正向 full 模式报告生成在 1628 块下耗时长（python-docx 大表格单核 CPU 密集），Docker / 开发态同样存在，与打包无关；是否优化（如分页 / 流式写 docx）留待后续 Issue。
+3. 打包产物 `dist/ICDTool/` 未随仓库分发（`.gitignore` 忽略 `dist/`），发布方式（是否上传 Release 产物）由用户决定。

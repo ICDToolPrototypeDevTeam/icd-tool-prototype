@@ -26,6 +26,7 @@ from app.api.v4.schemas import (
     V4JobStatusResponse,
 )
 from app.job_manager import JobStatus, job_manager
+from app.v4.config import get_output_root
 
 import json
 from pathlib import Path
@@ -65,7 +66,7 @@ def get_v4_job_status(job_id: str):
 
 
 def _base_outputs_dir(job_id: str) -> Path:
-    return Path(__file__).resolve().parent.parent.parent.parent / 'output' / 'v4' / job_id / 'output'
+    return get_output_root() / 'v4' / job_id / 'output'
 
 
 def _reverse_result(job, base_outputs_dir: Path) -> V4JobResultResponse:
