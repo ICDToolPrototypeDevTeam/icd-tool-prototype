@@ -2934,3 +2934,26 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
 
 1. （可选，长期）把"双首字母小写拼接 device"识别下沉到 `_tokenize_name` 之外的"device 拆词启发式"层，配合 `synonyms.yaml` 的 `device:` canonical 段使用；该方向需要更系统的 device-corpus 与更严格的可逆性约束评估，避免误切其他词（如 `oleddisplay` 不应切为 `oled` + `display`）。当前 Issue 范围不动。
 2. 监控线上匹配质量：若后续 issue 报告其他 HLR 类似 OFVTRV 漏匹配，按本 issue 的诊断模式（看 HLR device 与 block signal_family 的 token overlap）复用同方案。
+
+## 2026-09-08 LLM 模型切换（MiniMax M2.5 / Qwen 3.6-35b-a3b）
+
+### 本次修改
+
+切模型任务：MiniMax `M2.7` → `M2.5`、Qwen `qwen3.7-flash` → `qwen3.6-35b-a3b`，DeepSeek 保持 `v4-flash` 不变。
+
+1. `backend/.env.example`（MINIMAX_MODEL、QWEN_MODEL）
+2. `backend/app/v4/llm/factory.py`（两处 `os.getenv` fallback 跟随 .env.example 同步）
+3. `.gitignore`（追加 `.claude/skills/write-pr/`、`.claude/skills/write-issue/`，与本次切模型无业务关联，借 commit 窗口一并提交）
+
+3 文件 / +6 / -4 行（commit `5dac3dc`）。
+
+### 验证方式
+
+1. inline `python -c "from app.v4.llm.factory import get_llm; print(get_llm('qwen').model, get_llm('minimax').model, get_llm('deepseek').model)"` 应输出 `qwen3.6-35b-a3b MiniMax-M2.5 deepseek-v4-flash`（**尚未验证**）。
+2. `.env` 由用户本地维护（已在 `.gitignore`），需同步更新 `MINIMAX_MODEL=MiniMax-M2.5` 与 `QWEN_MODEL=qwen3.6-35b-a3b`（**尚未验证**）。
+3. E2E 真实样本（AMS / FGMC / HSCU / RPDU）在新模型下的 5★分布与历史 job（`7066001a-...` / `94b8aa9b` 等）回归对照（**尚未验证**）。
+
+### 遗留问题
+
+1. `issue-model-switch-jinhang.md` 描述的金航网 6 模型全量切换未完成——GLM5.1 provider 新增、Qwen3.5 122b-v1 235b / Qwen3-32b/next 80b 切换、DeepSeek Base URL 切换均未做。
+2. 新模型质量（响应速度、JSON 解析稳定性、与现有 prompt 兼容性）未在生产样本验证，建议合并后尽快 E2E 回归。
