@@ -2971,7 +2971,7 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
 
 ## 2026-09-10 微调：反向匹配摘要类别显示名修正（`A429隐式` → `总线信号(隐式)`）
 
-- **原因**：环控（FSECU）反向分析实测中，`FSF21000101_HLR_1237`（原文"软件应按照协议，从风扇**CAN**接口的接口数据中解析得到RFAN的工作模式。"）被展示为 `[A429隐式] 无匹配`。经查 `A429隐式` 对应的关键词桶实际覆盖 CAN/A825/A664/A429/AFDX/ARINC/总线全部总线（见 `hlr_classifier._DEFAULT_BUS`），以 A429 专属名展示构成对 CAN 总线 HLR 的错误断言。
+- **原因**：环控反向分析实测中，`FSF21000101_HLR_1237`（原文"软件应按照协议，从风扇**CAN**接口的接口数据中解析得到RFAN的工作模式。"）被展示为 `[A429隐式] 无匹配`。经查 `A429隐式` 对应的关键词桶实际覆盖 CAN/A825/A664/A429/AFDX/ARINC/总线全部总线（见 `hlr_classifier._DEFAULT_BUS`），以 A429 专属名展示构成对 CAN 总线 HLR 的错误断言。
 
 - **修改范围**：仅 `backend/app/v4/matching/reverse_matcher.py`（常量区新增 + `match_reverse()` summary 拼接块），外加 `backend/tests/test_category_display.py`（gitignored）与本文档。
 
