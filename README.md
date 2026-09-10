@@ -1,8 +1,8 @@
-# ICD工具原型Ver4.0
+# ICD工具原型Ver4.1
 
-ICD工具原型Ver4.0是一个面向EoICD源文件和软件高层需求（HLR）文件的智能化差异分析与需求生成工具。
+ICD工具原型Ver4.1是一个面向EoICD源文件和软件高层需求（HLR）文件的智能化差异分析与需求生成工具。
 
-当前工具运行版本为 **V4.0**，提供两个方向的智能化分析：
+当前工具运行版本为 **V4.1**，提供两个方向的智能化分析：
 
 - **反向（HLR→EoICD）可追溯性分析**：从软件高层需求（HLR）出发，验证每条 HLR 需求是否能在 EoICD 接口定义中找到对应项（即 HLR 到 EoICD 的可追溯性），从而表明 HLR 是否覆盖了对应的 EoICD 条目，通过 DeepSeek / MiniMax / Qwen 三模型并行裁判 + Review Agent 共识复核，输出条目化清单和一致性分析报告。
 - **正向（EoICD→HLR）完整性分析**：从 EoICD 源文件出发，检查每个业务对象（业务信号/字段）是否在 HLR 正文中被对应描述，用于识别"漏写"，输出正向完整性分析报告与明细。
@@ -124,6 +124,8 @@ JUDGE_PROVIDERS=deepseek,minimax,qwen
 ```bash
 docker compose up -d --build
 ```
+
+> **Windows 免 Docker 方式**：可打包为单目录桌面程序 `dist/ICDTool/ICDTool.exe`（双击启动后端并自动打开浏览器，同源访问 `/api/v4`）。构建与使用详见 `packaging/README.md`（决策见 `docs/decisions/ADR-005-Windows单目录桌面打包.md`）。
 
 ### 4.4 访问
 
@@ -249,10 +251,10 @@ icd-tool-prototype/
 
 ## 8. 当前阶段
 
-工程处于 ICD 工具 4.0 端到端原型验证阶段。
+工程处于 ICD 工具 4.1 端到端原型验证阶段。
 
 - **V4.0**：已完成 HLR→EoICD 可追溯性分析全流程（6 步），三模型并行裁判 + 星级评分共识，输出 5 份产物。DeepSeek 为必填（同时用于 HLR 标注和 Review Agent），MiniMax / Qwen 为可选（未配置时从 `JUDGE_PROVIDERS` 中移除即可）。
-- **V4.0 正向完整性分析**：已完成 EoICD→HLR 完整性分析全流程（8 步），确定性规则 + AI 三态复核，输出 1 份 Word 报告 + 1 份 Excel 明细。
+- **V4.1 正向完整性分析**：已完成 EoICD→HLR 完整性分析全流程（8 步），确定性规则 + AI 三态复核，输出 1 份 Word 报告 + 1 份 Excel 明细。
 - **前端**：默认使用 V4.0 界面。
 - **V3.0 旧版代码**：已移除（见 [ADR-002](docs/decisions/ADR-002-移除V3.md)）。
 
