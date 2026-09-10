@@ -107,6 +107,33 @@ _A429_PROTOCOL_HINT = (
 # 不当作协议级规则的判定信号）。Rule 9 仍走 FRAME_SIGNAL_KEYWORDS。
 _HINT_DETECT_KEYWORDS = FRAME_SIGNAL_KEYWORDS - {"sdi"}
 
+# summary 显示名映射 —— 仅用于拼接用户可见的摘要字符串。
+#
+# 这是显示层映射，刻意不改变 classify_hlr() 的返回值，也不改变
+# HLRCoverageResult.signal_category 字段：该字段是跨模块契约，被
+# forward_matcher._protocol_conflict()（正向协议冲突硬门）与
+# reverse_matcher L965/L972（label 过滤 / 总线过滤）消费。
+#
+# "A429隐式" 对应的桶实际覆盖 CAN/A825/A664/A429/AFDX/ARINC/总线
+# 全部总线（见 hlr_classifier._DEFAULT_BUS），对 CAN 接口 HLR 展示
+# "A429隐式" 是错误断言，故显示为总线中性的 "总线信号(隐式)"。
+_CATEGORY_DISPLAY = {
+    "A429显式": "A429显式",
+    "模拟量": "模拟量",
+    "离散量": "离散量",
+    "A429隐式": "总线信号(隐式)",
+    "逻辑/非通信": "逻辑/非通信",
+}
+
+
+def _display_category(cat: str) -> str:
+    """把分类器的内部类别名映射为用户可见的显示名。
+
+    未知类别原样透传，保证新增类别时不会因映射表缺项而丢失显示。
+    """
+    return _CATEGORY_DISPLAY.get(cat, cat)
+
+
 # 匹配"标签第 N 位" / "标签 第 N 和 M 位" / "标签 第 9-10 位" / "标签的第 9 和 10 位" 等位号位置表达
 _LABEL_BIT_POS_RE = re.compile(
     r"(?:标签|label)\s*(?:第|的\s*第|之\s*第|中\s*第)?\s*\d+\s*(?:[和与至、，/\-]\s*\d+\s*)*位",
@@ -1202,15 +1229,16 @@ def match_reverse(
         overall = "matched" if match_type == "已匹配" else ("uncertain" if match_type == "待确定" else "unmatched")
 
         # Build summary
+        disp = _display_category(cat)
         if matched_blocks:
             top_keys = [b.block_key for b in matched_blocks]
             summary = (
-                f"[{cat}] {match_type} → "
+                f"[{disp}] {match_type} → "
                 f"{', '.join(top_keys)}"
             )
         else:
             labels_str = ", ".join(hlr_prof.labels[:3]) if hlr_prof.labels else ""
-            base = f"[{cat}] {match_type}" + (f" (labels: {labels_str})" if labels_str else "")
+            base = f"[{disp}] {match_type}" + (f" (labels: {labels_str})" if labels_str else "")
             # 无匹配时，若 HLR 描述的是 A429 协议层规则，附加人工审查提示
             if match_type == "无匹配" and _is_a429_protocol_rule(
                 hlr.content, lbl.signal_keywords_set
