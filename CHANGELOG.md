@@ -8,6 +8,12 @@
 
 - **Windows 单目录桌面打包（PyInstaller）**：新增 `packaging/` 目录（`ICDTool.spec` / `build.ps1` / `run.py` / `README.md`），支持把 FastAPI 后端 + React 前端打包成 Windows 单目录可执行程序 `dist/ICDTool/ICDTool.exe`。双击后启动后端（默认 `127.0.0.1:8000`）并自动打开浏览器；前端静态资源内嵌于 exe 同级 `static/`，同源访问 `/api/v4`，无需跨域、无需 Docker。为兼容打包态，`backend/app/v4/config.py` 新增 `_base_dir()` / `get_output_root()`（`sys.frozen` 时基目录 = exe 同级，输出写 exe 同级 `output/`），`backend/app/main.py` 在 `sys.frozen` 时挂载前端静态资源 + SPA fallback，4 个 API 模块（`outputs.py` / `coverage.py` / `jobs.py` / `completeness.py`）的 output 路径改用 `get_output_root()`。Docker / 开发环境（非 frozen）行为不变。详见 `docs/decisions/ADR-005-*.md`。
 
+## [Unreleased] - 2026-09-10
+
+### Fixed
+
+- **反向匹配摘要类别显示名修正（`[A429隐式]` → `[总线信号(隐式)]`）**：`A429隐式` 对应的关键词桶实际覆盖 CAN/A825/A664/A429/AFDX/ARINC/总线等全部总线（见 `hlr_classifier._DEFAULT_BUS`），以 A429 专属名展示会对 CAN 接口 HLR 造成错误断言（实测 `FSF21000101_HLR_1237`，原文含"风扇CAN接口"，被展示为 `[A429隐式] 无匹配`）。修复方式为新增**纯显示层**映射 `_CATEGORY_DISPLAY` 与 `_display_category()`，仅在 `match_reverse()` 拼接 summary 字符串时替换类别名。`classify_hlr()` 返回值、`HLRCoverageResult.signal_category` 字段、`match_evidence["signal_category"]` 及正向 `_protocol_conflict()` / 反向 L965/L972 过滤逻辑零变动（该字段是跨模块契约，显示名与内部值刻意解耦）。1 文件 / +30 / -2 行（commit `9cedfed`）。
+
 ## [Unreleased] - 2026-09-08
 
 ### Changed
@@ -63,6 +69,12 @@
 ### Fixed
 
 - **OFVTRV 词条补齐（HLR `FSF21000101_HLR_547` 反向匹配遗漏修复）**：`backend/app/v4/synonyms.yaml` 在 IRD 与 Signal/field 段之间新增 `OFVTRV` canonical_term 与 3 个 alias（`OFV_TRV` / `OFV` / `TRV`），对应 AMSC 控制器「压力调节活门+反推装置」组合缩写。根因：`_tokenize_name` 只能按 `_` / `-` / CamelCase 边界切分，pure-lowercase 拼接的 `ofvtrv` 永远切不开，HLR device `OFVTRV` 与 ICD block `OFV_TRV_FAILED_CLOSED/OPEN` 零 token 重叠。修复后 HLR_547 在 L11 label scope 内 matched_profile_keys 从 5 个扩到 7 个（新增 `L11/OFV_TRV_FAILED_CLOSED` 与 `L11/OFV_TRV_FAILED_OPEN` 两个反推失效标志 + bit22/bit23 位对应 block），其余 15 条 AMSC HLR 字节不变；FGMC / HSCU job 用「strip OFVTRV 重跑」对照后，0 个 HLR 受 OFVTRV 词条影响（HSCU job f896a92b 中 HLR_022645 出现的 Airspeed 分数变化来自同日早些时候添加的 `Airspeed` 别名组，与本修复无关）。选词原则：`(canonical: OFVTRV, aliases: OFV_TRV, OFV, TRV)` —— alias 写成 `OFV_TRV` 而非 `OFVTRV` 自身可避免与 canonical 形成「identity self-mapping」噪声，同时让 HLR 写成 `OFV_TRV` 的拼法也能命中；保留 `OFV` / `TRV` 两个拆分 alias 是为兼容 HLR 写「OFV 失效」 / 「TRV 失效」之类的自然语言表述。
+
+## [Unreleased] - 2026-09-03
+
+### 修正
+
+- A429 协议层提示移除 SDI 检测与人工审查提示语：`_is_a429_protocol_rule()` 不再因 SDI 触发协议层规则提示（SDI 在某些业务场景作为业务标识符，不应触发），提示文案末尾"建议人工审查 ARINC 429 协议合规性"删除（与"无匹配即最终结果"语义对齐）。范围严格限于原 commit `901c7f7` 触及的 `reverse_matcher.py` 与本地测试脚本，未触动 `FRAME_SIGNAL_KEYWORDS` / Rule 9 / 透传层。
 
 ## [Unreleased] - 2026-08-29
 

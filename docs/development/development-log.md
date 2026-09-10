@@ -2640,6 +2640,15 @@ Word 模板列宽此前依赖旧 `tblW` 写入方式，存在按内容长度跑�
 
 ---
 
+## 2026-09-03 微调：A429 协议层提示去除 SDI 检测与人工审查提示语
+
+- **原因**：业务团队复盘发现 SDI 在某些业务场景作为业务标识符，被列入协议层规则判定会触发不必要提示；提示语末尾的"建议人工审查 ARINC 429 协议合规性"在语义上像"待确认"或"需补充操作"，与"`无匹配` 即最终结果"的定位冲突。
+- **修改范围**：仅 `backend/app/v4/matching/reverse_matcher.py`（L92-127 区域）+ `backend/tests/test_protocol_hint.py`。
+- **关键决策**：
+  - Hint 路径 1 改用派生集合 `_HINT_DETECT_KEYWORDS = FRAME_SIGNAL_KEYWORDS - {"sdi"}`，与 Rule 9 / `is_frame_signal()` 解耦。
+  - `FRAME_SIGNAL_KEYWORDS` 保留 SDI，确保 Rule 9 仍过滤 EoICD 中名为 SDI 的协议开销 signal。
+- **设计文档**：`docs/superpowers/specs/2026-09-03-a429-hint-sdi-removal-design.md`
+- **影响面**：HLR 标注 / 分类 / 评分 / 候选 / 过滤 零变动；下游透传层自动跟随常量更新。
 ## 2026-09-01：反向管道 needs_review 误判修正（HSCU 匹配质量优化延续，分支 Task/Optimize_result_quality）
 
 ### 任务目标
@@ -3005,3 +3014,33 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
 1. Docker Compose 回归未跑（网络受阻），需在网络可用时补验 `docker compose up --build` + 健康检查。
 2. 正向 full 模式报告生成在 1628 块下耗时长（python-docx 大表格单核 CPU 密集），Docker / 开发态同样存在，与打包无关；是否优化（如分页 / 流式写 docx）留待后续 Issue。
 3. 打包产物 `dist/ICDTool/` 未随仓库分发（`.gitignore` 忽略 `dist/`），发布方式（是否上传 Release 产物）由用户决定。
+
+---
+
+## 2026-09-10 微调：反向匹配摘要类别显示名修正（`A429隐式` → `总线信号(隐式)`）
+
+- **原因**：环控反向分析实测中，`FSF21000101_HLR_1237`（原文"软件应按照协议，从风扇**CAN**接口的接口数据中解析得到RFAN的工作模式。"）被展示为 `[A429隐式] 无匹配`。经查 `A429隐式` 对应的关键词桶实际覆盖 CAN/A825/A664/A429/AFDX/ARINC/总线全部总线（见 `hlr_classifier._DEFAULT_BUS`），以 A429 专属名展示构成对 CAN 总线 HLR 的错误断言。
+
+- **修改范围**：仅 `backend/app/v4/matching/reverse_matcher.py`（常量区新增 + `match_reverse()` summary 拼接块），外加 `backend/tests/test_category_display.py`（gitignored）与本文档。
+
+- **关键决策**：
+  1. 新增**显示层**映射 `_CATEGORY_DISPLAY` + `_display_category()`，与 `classify_hlr()` 返回值及 `signal_category` 字段**刻意解耦**。`signal_category` 是跨模块契约 —— 被 `forward_matcher._protocol_conflict()`（正向协议冲突硬门）与 `reverse_matcher` L965/L972（label 过滤 / 总线过滤）消费。直接改分类器返回值会一次性波及正向匹配门与反向两处过滤，属越界。
+  2. 显示名定为 `总线信号(隐式)`，**不携带具体总线名**。原因是 `_DEFAULT_BUS` 混有 `解析`/`接收`/`采集` 等通用动词，若扫描正文提取总线会产出 `(隐式: 解析)` 这类无意义展示；另需一套仅含总线名的词表，超出最小改动范围。
+  3. 映射表覆盖全部五个类别（四个 identity 条目），未来调整任何类别名只需改这一处。`_display_category()` 对未知键原样透传，防止新增类别时丢显示。
+
+- **显示出口唯一性核验**：类别名到达用户的出口仅 `summary` 一处 —— 共识 docx 表头无"信号类别"列；单模型 docx 的 `NOMATCH-*` 行硬编码空 `signal_category`；前端零引用；`report_generator.py` 的 `按信号类别分布` 构造后无任何渲染方。
+
+- **设计文档**：`docs/superpowers/specs/2026-09-10-category-display-name-fix-design.md`
+
+- **影响面**：HLR 标注 / 分类 / 评分 / 候选 / 过滤 / 正向匹配 零变动；输出 JSON 契约零变动（`signal_category` 字段值不变）；仅 docx「分析摘要」列文案变化。1 文件 / +30 / -2 行（commit `9cedfed`）。
+
+- **验证方式**：
+  1. `cd backend && python tests/test_category_display.py` → 12/12 通过，`EXIT_CODE=0`（已验证）。
+  2. `cd backend && python tests/test_protocol_hint.py` → V1/V2 均 OK，`EXIT_CODE=0`（已验证，hint 路径未受影响）。
+  3. `git diff --stat HEAD~1 HEAD` → 仅 `reverse_matcher.py` 1 个文件（已验证）。
+  4. 端到端：实跑环控反向分析，核对 docx 中 HLR_1237 摘要变为 `[总线信号(隐式)] 无匹配`、HLR_199 保持 `[模拟量] 无匹配`，且 `reverse_matches.json` 的 `signal_category` 字段仍为原值（**尚未验证** —— 需环控输入文件实跑）。
+
+- **遗留问题**：
+  1. `_DEFAULT_BUS` 含通用动词导致 `A429隐式` 桶语义过宽（实质是通信类需求的兜底桶）。本次只修显示名，不修判定范围。
+  2. 其他四个类别名未复核，其中 `逻辑/非通信` 的"非通信"同为过程语义断言，暂无证据表明造成实际误导。
+  3. 若一条 HLR 同时命中 `A429隐式` 与协议层规则检测，摘要会显示中性名 + 点名 A429 的提示语。不构成矛盾（提到 SSM 即确为 A429 协议内容），保持原样。
