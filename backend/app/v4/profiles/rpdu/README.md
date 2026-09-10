@@ -85,3 +85,79 @@ prefilter_per_hlr: true
 RPDU 是首个非 `.docx` HLR 的 profile；`create_hlr_parser` 工厂函数按扩展名分发，RPDU 的 `hlr_parser_driver.driver: xlsx` 让其走 `HLRExcelParser` 路径。其他 profile 继续走 `HLRWordParser`，互不影响。
 
 `HLRExcelParser` 与 `HLRWordParser` 都返回标准 `HLROutput`，下游（labeling / matching / judging）完全 parser-agnostic。
+
+## 自动识别（API 入口，Issue RPDU 适配续）
+
+`POST /api/v4/coverage-analysis` 在用户不传 `controller_profile` 时走 `coverage.py::_detect_system_type` 自动识别。原 detector 仅支持 `python-docx` 打开 Word 表，对 RPDU xlsx 直接抛 `PackageNotFoundError` → 接口 500。本节为 RPDU 自动识别补 detector 基础设施 + RPDU 专属规则。
+
+### 加载层扩展（基础设施）
+
+`_detect_system_type` 拆出 `_load_hlr_tables(hlr_path)` helper，按扩展名分发 `.docx`（`python-docx`）与 `.xlsx`（`openpyxl`），统一为 `list[list[list[str]]]`；`_match_auto_detect` 形参改为新数据结构，并新增 `min_rows` 字段（≥N 语义，与原 `required_rows` 的 ==N 精确语义并存）。基础设施下沉后，未来任何 xlsx profile 只需在 `config.yaml` 写 `auto_detect` 段即可接入 detector，`coverage.py` 无需修改。
+
+### RPDU `auto_detect` 规则
+
+```yaml
+auto_detect:
+  min_rows: 4                 # 故障注入样本 13 行 / 全量样本 581 行，无法用单一精确 required_rows
+  required_cols: 7            # 与 3 个 .docx profile 的 2 列天然隔离
+  cell_patterns:
+    "0":
+      row: 2                  # Excel 行 3 = 第一行数据（行 1=标题 / 行 2=表头 / 行 3+=数据）
+      starts_with: "FSF24"    # RPDU controller number 前缀
+```
+
+选用 FSF24 前缀（`col 0 row 2 starts_with`）而非「需求编号/模块名称」列头文本的原因：列头为通用中文关键字不可靠；FSF24 是 RPDU 项目控制器唯一标识前缀，与其他系统的 controller-distinguishing prefix 模式对齐（AMS 用 FSF21、HSCU 用 FSF29、FGMC 用 FGMC）。
+
+### 兼容性
+
+- AMS / FGMC / HSCU / FSECU：未声明 `auto_detect` 或保持原 `required_rows` 精确语义，行为字节不变。
+- RPDU Word 模板（暂未提供）：不会被本规则误匹配（Word 表与 Excel 加载层数据结构不同），按「无法识别 HLR 文件所属系统类型」错误处理，需手动指定 `controller_profile`。
+
+### 验证
+
+inline `_detect_system_type` 校准：3 个 RPDU 真实样本（`RPDU软高需求.xlsx` 581 行 / `RPDU软高需求_未注入故障v1.xlsx` 13 行 / `RPDU软高需求_注入故障v1.0.xlsx` 13 行）全部识别为 `rpdu`；27 个 .docx 测试样本（AMS / FGMC / HSCU）回归无破坏；合成 xlsx（FSF21 7 列 / FSF24 5 列）均不误匹配。
+
+## refine 后处理（Step 3.5，RPDU 专属）
+
+RPDU profile 在 `pipeline.run_reverse_pipeline(refine=True)` 时，会在 Step 3 反向匹配后、Step 4 多智能体裁判前，额外跑一遍 `backend/app/v4/refine/` 子包的「无关 block 过滤 + 精确补采 + 同义词补采」三步精化。
+
+**触发条件**：
+
+- 仅 RPDU profile 启用：`profile.profile_id == "rpdu"` 且 `no_refine=False`
+- API 入口：`POST /api/v4/coverage-analysis` form 字段 `no_refine=true` 可关闭
+- CLI 入口：`reverse-analyze --no-refine` 等价形参
+
+**模块职责**：
+
+| 模块 | 职责 |
+|------|------|
+| `refine/block_filter.py::filter_matched_blocks` | 接收 `match_result` + `hlr_labels` + `block_index`，输出与 `reverse_matches.json` 同构的过滤+补采后 `ReverseMatchOutput` |
+| `refine/runner.py::run_pipeline_refined_stage` | 重建完整 ICD Block 索引 → 过滤+补采 → 覆盖写盘 `reverse_matches.json` → 用过滤后匹配重建 cases → 返回 `(new_match_result, new_cases)` 供 Step 4-6 复用 |
+
+**三步精化设计**：
+
+1. **无关 block 过滤**：对 matched ICD Block 做 leaf 信号名精确比对——剥离 `RX_/TX_/DS_*` 方向/数据源前缀后与 HLR 中出现的信号名（含 HLR label 的 signal_keywords）做精确相等/子串判定，仅保留与该 HLR 强相关的 block。
+2. **精确补采**：当传入完整 ICD Block 索引时，额外补回完整 ICD 中同名但未被 top-N 候选覆盖的 block，消除「匹配层 top_k=50 漏采导致误判需确认」的问题。
+3. **同义词补采**：通过 `synonyms.yaml` 的 `Airspeed` 等 canonical_term 别名组覆盖 HLR 中以同义词形式引用的信号（如 `空速 / 空速信号 / AIRSPEED / Airspeed / airspeed / Air_Speed / air_speed`），让原本被遗漏的同名 ICD block 也能进入候选集。
+
+**与现有 pipeline 的衔接**：
+
+- 精化分支不调 LLM、不生成共识/报告；返回 `(new_match_result, new_cases)` 后由 pipeline 主干继续走原 Step 4-6（多模型并发 + drain + degradation + 5 星共识 + re_review）。
+- 5 星体系、ADR-004 多模型共识、re_review 机制、降级保护均保持不变。
+- `refine=False`（默认或被 `no_refine=true` 关闭）时，`pipeline.run_reverse_pipeline` 走原 Step 3 → Step 4 链路，行为与 RPDU refine 引入前字节一致。
+- 其他 profile（AMS / FGMC / HSCU / FSECU）的 `pipeline.run_reverse_pipeline(refine=...)` 调用永远传入 `refine=False`，行为字节不变。
+
+**回归验证**（真实 LLM E2E，job `8e6498ab`）：
+
+- 11 条 HLR 的反向匹配数与同事代码 reference case04 完全一致（8/11/1/5/7/9/4/4/4/6/7）。
+- 5 星分布平均 4.45：9 个 5★ + 1 个 3★ + 1 个 1★，无 4★/2★。
+- `re_review_results.json` 复查触发 REV-0008，split → 待确认。
+- AMS / FGMC / HSCU 回归：未走 refine 分支，行为字节不变。
+
+**开关 / 关闭方式**：
+
+- 关闭（与最初版 RPDU 行为对齐做 A-B 对照）：
+  - CLI：`--no-refine`
+  - API：multipart form 字段 `no_refine: true`
+- 开启（默认）：不传 `no_refine` 即可。
+- 非 RPDU profile 传入 `no_refine` 字段被忽略。

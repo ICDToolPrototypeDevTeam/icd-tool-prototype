@@ -202,6 +202,7 @@ def run_v4_pipeline_thread(
     judge_providers: list[str],
     use_mock_llm: bool,
     controller_profile: str = "ams",
+    no_refine: bool = False,
 ) -> None:
     """在后台线程内跑 V4 反向管线；带 env 保存/恢复；异常 → job.status=FAILED。"""
     output_dir = job_dir / "output"
@@ -224,6 +225,9 @@ def run_v4_pipeline_thread(
 
         job.update(JobStatus.RUNNING, "Step 1/6: Parsing input files")
 
+        # refine 仅 RPDU profile 启用，no_refine 可关闭（与 CLI --no-refine 一致做 A-B 对照）
+        refine = (profile.profile_id == "rpdu") and (not no_refine)
+
         # 调 V4 in-process 流水线
         result = run_reverse_pipeline(
             hlr=hlr_path,
@@ -234,6 +238,7 @@ def run_v4_pipeline_thread(
             job=job,
             trace_dir=trace_dir,
             profile=profile,
+            refine=refine,
         )
 
         # —— 反读落盘 JSON 派生结构化字段（避免在 runner 中实现 V4 Pydantic 序列化） ——
@@ -303,11 +308,12 @@ def launch_v4_pipeline(
     judge_providers: list[str],
     use_mock_llm: bool,
     controller_profile: str = "ams",
+    no_refine: bool = False,
 ) -> threading.Thread:
     """工厂：返回后台线程对象；前端已启动并发由 daemon 线程承载。"""
     t = threading.Thread(
         target=run_v4_pipeline_thread,
-        args=(job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir, judge_providers, use_mock_llm, controller_profile),
+        args=(job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir, judge_providers, use_mock_llm, controller_profile, no_refine),
         daemon=True,
     )
     t.start()

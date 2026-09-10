@@ -226,6 +226,9 @@ def _cmd_reverse_analyze(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     job = job_manager.create_job()
+    refine = (profile.profile_id == "rpdu") and (
+        not getattr(args, "no_refine", False)
+    )
     result = run_reverse_pipeline(
         hlr=hlr_path,
         eoicd_json=eoicd_json,
@@ -235,6 +238,7 @@ def _cmd_reverse_analyze(args: argparse.Namespace) -> None:
         job=job,
         trace_dir=trace_dir,
         profile=profile,
+        refine=refine,
     )
     if result.errors:
         for e in result.errors:
@@ -324,7 +328,7 @@ def main() -> None:
     p_label.add_argument(
         "--controller-profile",
         default="ams",
-        choices=["ams", "fgmc"],
+        choices=["ams", "fgmc", "hscu", "rpdu", "fsecu"],
         help="Controller profile id (default: ams)",
     )
 
@@ -340,7 +344,7 @@ def main() -> None:
     p_rev.add_argument(
         "--controller-profile",
         default="ams",
-        choices=["ams", "fgmc"],
+        choices=["ams", "fgmc", "hscu", "rpdu", "fsecu"],
         help="Controller profile id (default: ams)",
     )
 
@@ -357,8 +361,14 @@ def main() -> None:
     p_ra.add_argument(
         "--controller-profile",
         default="ams",
-        choices=["ams", "fgmc"],
+        choices=["ams", "fgmc", "hscu", "rpdu", "fsecu"],
         help="Controller profile id (default: ams)",
+    )
+
+    p_ra.add_argument(
+        "--no-refine",
+        action="store_true",
+        help="RPDU 专属：关闭 refine 后处理（过滤/补采），与最初版行为对齐做 A-B 对照",
     )
 
     # generate-word
