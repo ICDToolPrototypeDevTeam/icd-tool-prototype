@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse
 
 from app.api.v4.runner import FORWARD_OUTPUT_FILES, V4_OUTPUT_FILES
 from app.job_manager import job_manager
+from app.v4.config import get_output_root
 
 
 router = APIRouter()
@@ -33,7 +34,7 @@ def _output_root(job_id: str, expected_task_type: str) -> Path:
             status_code=404,
             detail=f'job task_type is {job.task_type}, not {expected_task_type}; this output belongs to a different analysis',
         )
-    root = Path(__file__).resolve().parent.parent.parent.parent / 'output' / 'v4' / job_id / 'output'
+    root = get_output_root() / 'v4' / job_id / 'output'
     if not root.exists():
         raise HTTPException(status_code=404, detail='output dir does not exist (job likely failed before pipeline produced files)')
     return root

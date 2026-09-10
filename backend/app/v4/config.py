@@ -2,6 +2,7 @@
 """Constants for EoICD Excel parsing: attribute mappings, unit rules, excluded attributes."""
 
 import os
+import sys
 from pathlib import Path
 
 # ——— Attributes excluded from requirement generation ———
@@ -133,7 +134,23 @@ from dotenv import load_dotenv
 # Load .env from backend/ directory.
 # V4 迁入 backend/app/v4/ 后，env load path 由原 `_v4_backend_raw/backend/.env`
 # 改写为 `backend/.env`（D4 "环境加载块" 允许改写范围）。
-_ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
+# 打包（PyInstaller，sys.frozen=True）时改为从可执行文件同级目录读取 .env，
+# 便于桌面版用户直接编辑 API key；开发 / Docker 环境行为不变。
+
+def _base_dir() -> Path:
+    """运行基目录：打包态 = exe 同级目录；开发 / Docker = backend/。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def get_output_root() -> Path:
+    """输出根目录（OUTPUT_DIR 环境变量优先，其次基目录下 output/）。"""
+    env = os.environ.get("OUTPUT_DIR")
+    return Path(env) if env else _base_dir() / "output"
+
+
+_ENV_PATH = _base_dir() / ".env"
 load_dotenv(_ENV_PATH)
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")

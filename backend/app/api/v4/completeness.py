@@ -25,6 +25,7 @@ from app.api.v4.coverage import _save_upload
 from app.api.v4.runner import launch_forward_pipeline
 from app.api.v4.schemas import V4AnalyzeResponse
 from app.job_manager import job_manager
+from app.v4.config import get_output_root
 
 
 router = APIRouter()
@@ -70,7 +71,7 @@ async def completeness_analysis(
 
     # —— 创建 Job 与目录（正向与反向共用 output/v4/{job_id}/ 结构）——
     job = job_manager.create_job(task_type="completeness")
-    job_dir = Path(__file__).resolve().parent.parent.parent.parent / 'output' / 'v4' / job.job_id
+    job_dir = get_output_root() / 'v4' / job.job_id
     input_dir = job_dir / 'input'
     input_dir.mkdir(parents=True, exist_ok=True)
 

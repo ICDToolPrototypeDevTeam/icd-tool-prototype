@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-09
+
+### Added
+
+- **Windows 单目录桌面打包（PyInstaller）**：新增 `packaging/` 目录（`ICDTool.spec` / `build.ps1` / `run.py` / `README.md`），支持把 FastAPI 后端 + React 前端打包成 Windows 单目录可执行程序 `dist/ICDTool/ICDTool.exe`。双击后启动后端（默认 `127.0.0.1:8000`）并自动打开浏览器；前端静态资源内嵌于 exe 同级 `static/`，同源访问 `/api/v4`，无需跨域、无需 Docker。为兼容打包态，`backend/app/v4/config.py` 新增 `_base_dir()` / `get_output_root()`（`sys.frozen` 时基目录 = exe 同级，输出写 exe 同级 `output/`），`backend/app/main.py` 在 `sys.frozen` 时挂载前端静态资源 + SPA fallback，4 个 API 模块（`outputs.py` / `coverage.py` / `jobs.py` / `completeness.py`）的 output 路径改用 `get_output_root()`。Docker / 开发环境（非 frozen）行为不变。详见 `docs/decisions/ADR-005-*.md`。
+
 ## [Unreleased] - 2026-09-10
 
 ### Fixed
