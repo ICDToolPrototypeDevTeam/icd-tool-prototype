@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-10
+
+### Fixed
+
+- **反向匹配摘要类别显示名修正（`[A429隐式]` → `[总线信号(隐式)]`）**：`A429隐式` 对应的关键词桶实际覆盖 CAN/A825/A664/A429/AFDX/ARINC/总线等全部总线（见 `hlr_classifier._DEFAULT_BUS`），以 A429 专属名展示会对 CAN 接口 HLR 造成错误断言（实测 `FSF21000101_HLR_1237`，原文含"风扇CAN接口"，被展示为 `[A429隐式] 无匹配`）。修复方式为新增**纯显示层**映射 `_CATEGORY_DISPLAY` 与 `_display_category()`，仅在 `match_reverse()` 拼接 summary 字符串时替换类别名。`classify_hlr()` 返回值、`HLRCoverageResult.signal_category` 字段、`match_evidence["signal_category"]` 及正向 `_protocol_conflict()` / 反向 L965/L972 过滤逻辑零变动（该字段是跨模块契约，显示名与内部值刻意解耦）。1 文件 / +30 / -2 行（commit `9cedfed`）。
+
 ## [Unreleased] - 2026-09-08
 
 ### Changed
