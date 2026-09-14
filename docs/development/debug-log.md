@@ -1008,3 +1008,68 @@ run_v4_pipeline_thread       → run_reverse_pipeline(...)                [HTTP 
 1. **新增 pipeline 形参必须穿透整条调用链**：本次 `refine: bool` 形参从 `pipeline.run_reverse_pipeline` 入口补到 CLI 入口，但 HTTP API 入口的 4 层调用（`coverage_analysis` → `launch_v4_pipeline` → `run_v4_pipeline_thread` → `run_reverse_pipeline`）漏补；正确做法是改造 `pipeline.run_reverse_pipeline` 形参时同步审计所有调用点（CLI + API + 测试）。
 2. **多入口架构的形参审计清单**：本期 V4 后端有 3 个 pipeline 入口（CLI `cli.py` / HTTP API `api/v4/runner.py` / 单元测试 `tests/`）。新增/修改 pipeline 形参时必须同步审计这 3 个入口，否则会出现「CLI 行为正确、HTTP 行为错」的隐蔽问题。
 3. **真实 E2E + reference 对照是发现此类问题的最低成本手段**：单元测试覆盖率未覆盖 HTTP API → CLI 入口一致性，本次问题只在「同事代码 reference 对照」时才暴露。下次类似集成建议加 E2E 用例做入口一致性 diff。
+
+---
+
+### BUG-20260911-001：HTTP 入口 Form 默认值覆盖 .env，导致 USE_MOCK_LLM=1 时反向/正向分析不走 Mock
+
+#### 状态
+
+fixed（exe 端到端验证待用户提供样例文件后进行）
+
+#### 发现日期
+
+2026-09-11
+
+#### 问题现象
+
+exe（及一切走 HTTP API 的场景）中，`.env` 设置 `USE_MOCK_LLM=1` 不生效：反向分析任务实际走真实 LLM——无 API Key 时任务直接 failed（`DEEPSEEK_API_KEY not set...`），有 Key 时真实调用 API。正向完整性分析同款问题。
+
+#### 复现方式
+
+1. exe 同级 `.env` 设置 `USE_MOCK_LLM=1`
+2. 前端上传文件发起反向分析（前端不发送 `use_mock_llm` 字段）
+3. 任务不走 Mock，报缺 API Key 或真实调用 API
+
+#### 影响范围
+
+- `backend/app/api/v4/coverage.py`（反向入口）
+- `backend/app/api/v4/completeness.py`（正向入口）
+- `backend/app/api/v4/runner.py`（env 写入链路）
+- CLI / MockLLMClient / factory 均不受影响
+
+#### 原因分析
+
+Mock 的设计意图是**只由 `.env` 的 `USE_MOCK_LLM` 控制**（前端无 mock 开关）。但 HTTP 入口的 `use_mock_llm` Form 字段定义为 `bool = Form(False)` 且前端从不发送该字段 → 恒为 `False`（永不为 `None`）→ `run_v4_pipeline_thread` 中 `if use_mock_llm is not None:` 判断恒真 → 线程启动时把 `.env` 加载好的 `USE_MOCK_LLM=1` 强制覆盖为 `"0"`。
+
+runner 里 `is not None` 判断原本就是为「未显式提供则不动 env」设计的，但 `bool = Form(False)` 的默认值使其形同虚设。`run_forward_pipeline_thread` 同款问题。
+
+#### 修复方案
+
+按最小修改原则，仅把两个端点的 Form 字段改为 `Optional[bool] = Form(None)`，runner 四处形参类型注解同步改为 `Optional[bool]`。`runner.py` 的 `is not None` 判断逻辑无需改动：
+
+- 未显式传 → 不动 env（`.env` 权威，Mock 生效）；
+- 显式传 true/false（curl 调试）→ 仍按显式值覆盖 env。
+
+#### 修改文件
+
+1. `backend/app/api/v4/coverage.py`（Form 字段类型/默认值）
+2. `backend/app/api/v4/completeness.py`（Form 字段类型/默认值）
+3. `backend/app/api/v4/runner.py`（4 处形参类型注解）
+4. `backend/tests/test_api_mock_env_default.py`（新增回归测试）
+5. `docs/architecture/api.md`（字段契约说明）
+
+#### 验证方式
+
+1. `cd backend && python -m pytest tests/test_api_mock_env_default.py -v`
+2. 修复前该测试 2 个用例 RED（端点默认捕获到 `False`），修复后 5/5 GREEN
+3. `USE_MOCK_LLM=1` 下 `get_llm('deepseek')` 返回 `MockLLMClient`（工厂链路 sanity）
+
+#### 验证结果
+
+已验证通过。回归测试 5/5 通过；工厂链路 sanity 通过。exe 端到端（上传样例文件跑完整反向任务）待用户用真实样例验证。
+
+#### 遗留问题
+
+1. `backend/tests/` 中 9 个 `app.v4.reverse.*` 测试文件因反向架构重构源码未提交而收集失败（只余 `__pycache__`），为既有状态，与本次修复无关。
+2. `config.JUDGE_PROVIDERS` 为 import-time 常量，runner 线程内 `os.environ["JUDGE_PROVIDERS"]` 覆盖对 `pipeline.py` 引用的模块级常量不生效（provider 白名单实际由 `.env` 决定）；与 Mock 无关，本次不动。

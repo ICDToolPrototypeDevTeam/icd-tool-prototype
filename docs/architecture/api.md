@@ -58,7 +58,7 @@ Content-Type: multipart/form-data
 | `eoicd_publisher_file` | UploadFile (.xlsx) | 二选一 | EoICD Publisher PubSub Excel |
 | `eoicd_subscriber_file` | UploadFile (.xlsx) | 二选一 | EoICD Subscriber PubSub Excel |
 | `traceability_files` | list[UploadFile] (.xlsx) | 否 | 0-N 追溯 Excel；启用预筛选时必传 |
-| `use_mock_llm` | bool (form) | 否（默认 false） | 是否走 mock |
+| `use_mock_llm` | bool (form) | 否（默认不覆盖） | 显式覆盖 mock 开关；未提供时以 `.env` 的 `USE_MOCK_LLM` 为准（Mock 仅由 env 控制） |
 | `judge_providers` | list[str] (form) | 否（默认 `["deepseek"]`） | 多模型 panel provider 白名单 ∈ `{deepseek, minimax, qwen}` |
 | `enable_traceability_prefilter` | bool (form) | 否（默认 false） | 是否启用追溯预筛选 |
 | `controller_profile` | str (form) | 否（默认 `ams`） | 控制器 profile id ∈ `{ams, fgmc, hscu, rpdu, fsecu}`，决定 HLR 解析规则、分类关键词、追溯表配置与 AI 标注示例 |
@@ -262,7 +262,7 @@ Content-Type: multipart/form-data
 | `analysis_mode` | str (form) | 否（默认 `full`） | `full`（全量）或 `trace`（追溯范围） |
 | `device_icd_trace_file` | UploadFile (.xlsx) | trace 模式必填 | 表1：设备→ICD 追溯表 |
 | `system_device_trace_file` | UploadFile (.xlsx) | trace 模式必填 | 表2：设备→高层需求追溯表 |
-| `use_mock_llm` | bool (form) | 否（默认 false） | 是否走 mock |
+| `use_mock_llm` | bool (form) | 否（默认不覆盖） | 显式覆盖 mock 开关；未提供时以 `.env` 的 `USE_MOCK_LLM` 为准（Mock 仅由 env 控制） |
 
 `analysis_mode` 不在 `{full, trace}` → 422；trace 模式缺任意一张追溯表 → 422。
 
