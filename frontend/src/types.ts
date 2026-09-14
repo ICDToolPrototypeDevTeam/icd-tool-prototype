@@ -17,9 +17,19 @@ export type V4DownloadKind =
   | 'consistency/qwen'
   | 'consensus-docx'
 
+export type V4JobStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'interrupted'
+  | 'abandoned'
+
+export type V4TaskType = 'correctness' | 'completeness'
+
 export interface V4JobStatusResponse {
   job_id: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: V4JobStatus
   stage: string
   stage_index: number
   stage_total: number
@@ -29,6 +39,16 @@ export interface V4JobStatusResponse {
   mock_models: string[]
   created_at: string
   updated_at: string
+}
+
+export interface V4JobListItem {
+  job_id: string
+  task_type: V4TaskType
+  status: V4JobStatus
+  message: string | null
+  created_at: string
+  updated_at: string
+  input_files: string[]
 }
 
 export interface V4JobResultResponse {

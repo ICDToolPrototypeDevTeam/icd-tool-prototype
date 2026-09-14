@@ -2,6 +2,17 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-14
+
+### Added
+
+- **任务中断恢复（V1 重连 + V2 中断标记与重跑）**：因故或人为关闭程序后，可在工具入口页或各分析页的「未完成的任务」区选择**继续**（按原参数快照全量重跑，输入文件无需重新上传）或**放弃**；仍在运行的任务（如关闭浏览器后后端未退出）可直接重新挂上轮询查看进度。实现方式：任务元数据（含参数快照）随每步进度原子持久化到 `output/v4/{job_id}/job.json`，进程启动时扫描并把仍为 `pending`/`running` 的任务标记为 `interrupted`（保留原 `updated_at` 作为中断前最后进度时间）。新增 `GET /api/v4/jobs`、`POST /api/v4/jobs/{job_id}/resume`、`POST /api/v4/jobs/{job_id}/abandon` 三个接口与 `interrupted` / `abandoned` 两个任务状态；放弃仅标记状态，不删除任何文件。重跑时 Step 2（HLR 标注）命中 `hlr_labels.json` 缓存自动跳过，Step 4/5 会全部重新执行。CLI 直跑（无 `job_dir`）不写 manifest，行为不变。详见 `docs/architecture/api.md` 第 13 节。
+- **前端「未完成的任务」区**：新增 `InterruptedTasks` 组件（工具入口页展示全部类型、分析页按 `task_type` 过滤），上传态与工具入口页均可操作；分析页支持 `?job=<id>` 直接挂载已有任务。
+
+### Fixed
+
+- **中断任务在二次重启后从列表消失**：启动扫描原先只载入 `pending`/`running` 的 manifest，导致用户未处理中断任务就再次关闭程序后，磁盘上已标记为 `interrupted` 的任务不再被载入内存，列表中永久消失。修复后扫描同样载入已为 `interrupted` 的 manifest（不重复写盘），反复重启不丢任务。
+
 ## [Unreleased] - 2026-09-11
 
 ### Fixed

@@ -1178,3 +1178,134 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+/* ========== Interrupted Tasks ========== */
+.interrupted {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 20px 24px;
+}
+
+.interrupted__header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.interrupted__title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.interrupted__hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.interrupted__list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.interrupted__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  background: var(--bg-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: border-color 0.2s ease;
+}
+
+.interrupted__item:hover {
+  border-color: var(--primary);
+}
+
+.interrupted__info {
+  flex: 1;
+  min-width: 0;
+}
+
+.interrupted__files {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.interrupted__tag {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(0, 102, 204, 0.1);
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.interrupted__status {
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+  background: rgba(107, 114, 128, 0.12);
+  color: var(--text-secondary);
+}
+
+.interrupted__status--running {
+  background: rgba(0, 102, 204, 0.1);
+  color: var(--primary);
+}
+
+.interrupted__status--interrupted {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+}
+
+.interrupted__meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.interrupted__actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.interrupted__actions .btn {
+  padding: 8px 18px;
+  font-size: 13px;
+  border-radius: var(--radius-sm);
+}
+
+.interrupted__error {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+@media (max-width: 768px) {
+  .interrupted__item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .interrupted__actions {
+    justify-content: flex-end;
+  }
+}

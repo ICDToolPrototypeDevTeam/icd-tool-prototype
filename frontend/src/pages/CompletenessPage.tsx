@@ -1,15 +1,19 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import CompletenessFileUpload from '../components/CompletenessFileUpload'
 import CompletenessResultView from '../components/CompletenessResultView'
+import InterruptedTasks from '../components/InterruptedTasks'
 import ProcessingView from '../components/ProcessingView'
 import WorkflowSteps from '../components/WorkflowSteps'
 import { useAnalysisJob } from '../hooks/useAnalysisJob'
 import { analyzeCompletenessV4, getForwardJobResultV4 } from '../api'
-import type { FileItem, ForwardAnalysisMode, V4ForwardJobResultResponse } from '../types'
+import type { FileItem, ForwardAnalysisMode, V4ForwardJobResultResponse, V4JobListItem } from '../types'
 
 export default function CompletenessPage() {
   const job = useAnalysisJob<V4ForwardJobResultResponse>()
 
+  const [searchParams, setSearchParams] = useSearchParams()
+  const attachRef = useRef(false)
   const [hlrWordFile, setHlrWordFile] = useState<FileItem | null>(null)
   const [publisherFile, setPublisherFile] = useState<FileItem | null>(null)
   const [subscriberFile, setSubscriberFile] = useState<FileItem | null>(null)
@@ -25,6 +29,20 @@ export default function CompletenessPage() {
       setDeviceIcdTraceFile(null)
       setSystemDeviceTraceFile(null)
     }
+  }
+
+  // 从工具入口页带 ?job=<id> 跳转过来时自动挂到该任务上（StrictMode 下 effect 会跑两次，用 ref 防重入）
+  useEffect(() => {
+    const resumeId = searchParams.get('job')
+    if (!resumeId || attachRef.current) return
+    attachRef.current = true
+    setSearchParams({}, { replace: true })
+    job.attach(resumeId, (id) => getForwardJobResultV4(id))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, setSearchParams])
+
+  function handleOpenTask(item: V4JobListItem) {
+    job.attach(item.job_id, (id) => getForwardJobResultV4(id))
   }
 
   function handleStart() {
@@ -75,6 +93,7 @@ export default function CompletenessPage() {
 
       {job.pageState === 'upload' && (
         <>
+          <InterruptedTasks taskType="completeness" onOpen={handleOpenTask} />
           <CompletenessFileUpload
             hlrWordFile={hlrWordFile}
             eoicdPublisherFile={publisherFile}
@@ -125,7 +144,9 @@ export default function CompletenessPage() {
         <div className="error-state">
           <div className="error-icon">⚠️</div>
           <h3 className="error-title">处理失败</h3>
-          <p className="error-message">请检查文件格式是否正确，或稍后重试</p>
+          <p className="error-message">
+            {job.errorMessage || '请检查文件格式是否正确，或稍后重试'}
+          </p>
           <button className="btn btn--new" onClick={handleReset}>
             重新尝试
           </button>

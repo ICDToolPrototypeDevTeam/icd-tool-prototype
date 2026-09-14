@@ -43,6 +43,48 @@ V4_INTERMEDIATE_JSON = {
 
 MOCK_ONLY_PROVIDERS = {"minimax", "qwen"}
 
+# 参数快照中被视为「上传文件」的 key（用于任务列表展示 + 恢复前存在性校验）
+_INPUT_FILE_PARAM_KEYS = (
+    "hlr_path", "publisher_path", "subscriber_path",
+    "device_icd_trace_file", "system_device_trace_file",
+)
+
+
+def _rel_path(job_dir: Path, p: Optional[Path]) -> Optional[str]:
+    """绝对路径 → 相对 job_dir 的 POSIX 相对路径（输出目录整体搬移后仍可用）。"""
+    if p is None:
+        return None
+    resolved = Path(p).resolve()
+    try:
+        return resolved.relative_to(Path(job_dir).resolve()).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def _abs_path(job_dir: Path, rel: Optional[str]) -> Optional[Path]:
+    if not rel:
+        return None
+    p = Path(rel)
+    return p if p.is_absolute() else Path(job_dir) / p
+
+
+def _require_file(job_dir: Path, rel: Optional[str]) -> Optional[Path]:
+    """还原参数快照中的文件路径；记录在案但已不存在 → FileNotFoundError。"""
+    p = _abs_path(job_dir, rel)
+    if p is not None and not p.exists():
+        raise FileNotFoundError(str(p))
+    return p
+
+
+def job_input_filenames(job: Job) -> list[str]:
+    """任务列表展示用：从参数快照取出上传文件名（不含目录）。"""
+    names = []
+    for key in _INPUT_FILE_PARAM_KEYS:
+        value = (job.params or {}).get(key)
+        if value:
+            names.append(Path(value).name)
+    return names
+
 
 def _parse_progress(message: Optional[str]) -> dict:
     """从 pipeline 写到 job.message 的字符串中解析 stage / case index。
@@ -311,6 +353,18 @@ def launch_v4_pipeline(
     no_refine: bool = False,
 ) -> threading.Thread:
     """工厂：返回后台线程对象；前端已启动并发由 daemon 线程承载。"""
+    # 落盘参数快照（供进程重启后按原参数继续执行）；必须在 start 之前完成，
+    # 保证 POST 返回时 manifest 已存在。
+    job.set_dir(job_dir, {
+        "hlr_path": _rel_path(job_dir, hlr_path),
+        "publisher_path": _rel_path(job_dir, publisher_path),
+        "subscriber_path": _rel_path(job_dir, subscriber_path),
+        "trace_dir": _rel_path(job_dir, trace_dir),
+        "judge_providers": list(judge_providers),
+        "use_mock_llm": use_mock_llm,
+        "controller_profile": controller_profile,
+        "no_refine": no_refine,
+    })
     t = threading.Thread(
         target=run_v4_pipeline_thread,
         args=(job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir, judge_providers, use_mock_llm, controller_profile, no_refine),
@@ -318,6 +372,55 @@ def launch_v4_pipeline(
     )
     t.start()
     return t
+
+
+def relaunch_from_manifest(job: Job, job_dir: Path) -> threading.Thread:
+    """按参数快照重启一个被中断的任务。
+
+    参数完全取自 ``job.params``（不接受调用方覆盖），保证恢复后的 label 缓存
+    等语义与首次运行一致。先校验输入文件，缺失则抛 FileNotFoundError 且任务
+    状态保持不变；校验通过后才置 RUNNING 并启动线程。
+    """
+    params = job.params or {}
+    hlr_path = _require_file(job_dir, params.get("hlr_path"))
+    publisher_path = _require_file(job_dir, params.get("publisher_path"))
+    subscriber_path = _require_file(job_dir, params.get("subscriber_path"))
+    if hlr_path is None or (publisher_path is None and subscriber_path is None):
+        raise FileNotFoundError("manifest missing required input paths")
+
+    trace_dir = _abs_path(job_dir, params.get("trace_dir"))
+    if trace_dir is not None and not trace_dir.is_dir():
+        raise FileNotFoundError(str(trace_dir))
+
+    job.update(JobStatus.RUNNING, "任务继续执行中")
+
+    if job.task_type == "completeness":
+        device_icd = _require_file(job_dir, params.get("device_icd_trace_file"))
+        system_device = _require_file(job_dir, params.get("system_device_trace_file"))
+        return launch_forward_pipeline(
+            job=job,
+            job_dir=job_dir,
+            hlr_path=hlr_path,
+            publisher_path=publisher_path,
+            subscriber_path=subscriber_path,
+            analysis_mode=params.get("analysis_mode", "full"),
+            device_icd_trace_file=device_icd,
+            system_device_trace_file=system_device,
+            use_mock_llm=params.get("use_mock_llm"),
+        )
+
+    return launch_v4_pipeline(
+        job=job,
+        job_dir=job_dir,
+        hlr_path=hlr_path,
+        publisher_path=publisher_path,
+        subscriber_path=subscriber_path,
+        trace_dir=trace_dir,
+        judge_providers=list(params.get("judge_providers") or []),
+        use_mock_llm=params.get("use_mock_llm"),
+        controller_profile=params.get("controller_profile", "ams"),
+        no_refine=bool(params.get("no_refine", False)),
+    )
 
 
 # ============================================================
@@ -478,6 +581,16 @@ def launch_forward_pipeline(
     use_mock_llm: Optional[bool],
 ) -> threading.Thread:
     """工厂：返回正向后台线程对象。"""
+    # 落盘参数快照，语义同反向管线（见 launch_v4_pipeline）。
+    job.set_dir(job_dir, {
+        "hlr_path": _rel_path(job_dir, hlr_path),
+        "publisher_path": _rel_path(job_dir, publisher_path),
+        "subscriber_path": _rel_path(job_dir, subscriber_path),
+        "analysis_mode": analysis_mode,
+        "device_icd_trace_file": _rel_path(job_dir, device_icd_trace_file),
+        "system_device_trace_file": _rel_path(job_dir, system_device_trace_file),
+        "use_mock_llm": use_mock_llm,
+    })
     t = threading.Thread(
         target=run_forward_pipeline_thread,
         args=(

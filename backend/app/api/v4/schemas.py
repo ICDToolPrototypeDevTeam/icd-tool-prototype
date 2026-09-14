@@ -56,6 +56,18 @@ class V4JobStatusResponse(BaseModel):
     updated_at: str
 
 
+class V4JobListItem(BaseModel):
+    """GET /api/v4/jobs 列表项（轻量，不含结果字段）。"""
+
+    job_id: str
+    task_type: str = "correctness"
+    status: JobStatus
+    message: Optional[str] = None
+    created_at: str
+    updated_at: str
+    input_files: list[str] = []
+
+
 # ============================================================================
 # 结果接口响应
 # ============================================================================

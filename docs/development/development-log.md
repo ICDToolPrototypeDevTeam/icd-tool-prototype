@@ -3044,3 +3044,52 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   1. `_DEFAULT_BUS` 含通用动词导致 `A429隐式` 桶语义过宽（实质是通信类需求的兜底桶）。本次只修显示名，不修判定范围。
   2. 其他四个类别名未复核，其中 `逻辑/非通信` 的"非通信"同为过程语义断言，暂无证据表明造成实际误导。
   3. 若一条 HLR 同时命中 `A429隐式` 与协议层规则检测，摘要会显示中性名 + 点名 A429 的提示语。不构成矛盾（提到 SSM 即确为 A429 协议内容），保持原样。
+
+---
+
+## 2026-09-14 任务中断恢复（V1 重连 + V2 中断标记与重跑）
+
+- **需求**：因故或人为手动关闭程序后，用户希望能选择继续之前未完成的任务。工程约束为尽量不破坏现有逻辑和正常功能。经确认本期范围为 V1（重连未关闭浏览器的运行中任务）+ V2（重启后标记中断，用户选择继续/放弃），入口为工具入口页 + 各分析页上传态两处；不列已完成任务；V3（case 级断点续跑）后续单独做。
+
+- **可行性前提（已核实）**：`JobManager._jobs` 是纯内存 dict，管线跑在 daemon 线程，进程退出即全丢。但（1）上传文件已落盘 `output/v4/{job_id}/input/`；（2）每步中间产物已落盘 `output/v4/{job_id}/output/`；（3）结果组装 `derive_*` 已全部走磁盘反读。因此**只要 Job 元数据能重建，结果展示几乎免费**，唯一缺口是任务参数（`judge_providers` / `use_mock_llm` / `controller_profile` / `no_refine` / `analysis_mode` / 追溯表）没有落盘，其中 `use_mock_llm` 无法从产物反推。
+
+- **实现要点**：
+  1. **manifest 落盘**（`job_manager.py`）：`Job` 新增 `job_dir` / `params` / `set_dir()` / `_persist()`；`update()` 末尾触发写盘，`update()` 每步一次，开销可忽略。路径一律存**相对 job_dir 的相对路径**（POSIX），保证输出目录整体搬迁后仍可恢复。原子写 `.tmp` + `os.replace` + 模块级 `threading.Lock`，防写盘瞬间被杀产生半截文件。`job_dir is None` 时 `_persist()` 为 no-op —— 这是 CLI 兼容的关键（`cli.py:228` 走 `create_job()` 但无 job_dir）。
+  2. **参数快照在 runner 组装**（`runner.py`）：`launch_v4_pipeline` / `launch_forward_pipeline` 本就收到全部参数，在函数内组装 params 并调 `job.set_dir(job_dir, params)`（在 `t.start()` 之前，保证 POST 返回时 manifest 已存在）。`coverage.py` / `completeness.py` **零改动**。
+  3. **中断检测走启动扫描**（`main.py` lifespan）：扫 `output/v4/*/job.json`，把 `pending`/`running` 标记为 `interrupted`。用「进程启动即视为上次全死」替代 pid 存活检测 —— uvicorn 单进程（`packaging/run.py:26` 无 workers），无 pid 复用歧义。**保留原 `updated_at` 不刷新**（它表示「最后一次进度时间」，比「标记中断的时间」对用户更有用），因此直接改 status 字段后写盘，不走 `update()`。
+  4. **恢复走与新建完全相同的启动路径**：`relaunch_from_manifest(job, job_dir)` 读 `job.params` → 还原绝对路径 → 校验输入文件仍存在 → 按 `task_type` 分发到 `launch_v4_pipeline` / `launch_forward_pipeline`，两条路径不各自漂移。恢复强制使用 manifest 参数，不接受前端覆盖。
+  5. **放弃 = 只标记不删文件**（`abandoned`），磁盘清理不在本期范围。
+
+- **重跑成本（须向用户说明）**：Step 2（HLR AI 标注）有原生文件缓存 `hlr_labels.json`（`hlr_labeler.py:193` 读得到就跳过）→ 恢复时免费跳过；Step 4（多模型判定）与 Step 5（共识）无按 case 落盘，会全部重新执行。前端「继续」文案已写明会重新执行分析。
+
+- **已核实的三条有利事实**：`re_review_judgments` 仅在 `consensus_out is None` 时才回读磁盘（`re_review.py:308`），而 `pipeline.py` Step 5.5 始终显式传入 → 重跑不会读到脏产物；`refine/runner.py` 不读磁盘（结果全在内存传入）→ 重跑干净；`cli.py:228` 无 job_dir → 持久化以 no-op 保证 CLI 行为不变。
+
+- **开发中发现并修复的缺陷（自测暴露）**：启动扫描最初只载入 `pending`/`running` 的 manifest。实测中「重启 → 出现中断任务 → 未处理再次重启」后，磁盘上已标记为 `interrupted` 的 manifest 因不满足该条件而不被载入内存，**任务从列表中永久消失**，直接违背需求。修复为同样载入已 `interrupted` 的 manifest（此时不重复写盘），反复重启不丢任务。该缺陷由「连续两次重启」的实测发现，单次重启的测试无法暴露。
+
+- **修改文件**：
+  - 后端：`backend/app/job_manager.py`（核心，`JobStatus` 扩展 + manifest 持久化 + `load_interrupted`）、`backend/app/api/v4/runner.py`（参数快照 + `job_input_filenames` + `relaunch_from_manifest`）、`backend/app/api/v4/schemas.py`（`V4JobListItem`）、`backend/app/api/v4/jobs.py`（3 个新接口）、`backend/app/main.py`（lifespan 启动扫描）
+  - 前端：`frontend/src/types.ts`（`V4JobStatus` / `V4TaskType` / `V4JobListItem`）、`frontend/src/api/index.ts`（`ApiError` + 3 个接口封装）、`frontend/src/hooks/useAnalysisJob.ts`（提取 `poll` + 新增 `attach` + `errorMessage` + 中断/404 立即停止轮询）、`frontend/src/pages/CorrectnessPage.tsx`、`frontend/src/pages/CompletenessPage.tsx`、`frontend/src/pages/LandingPage.tsx`、`frontend/src/index.css`
+  - 新增文件：`frontend/src/components/InterruptedTasks.tsx`
+
+- **未改动**（刻意）：`coverage.py` / `completeness.py`（快照在 runner 组装）、`outputs.py`、`pipeline.py`、`config.py`、`router.py` —— 管线与结果组装逻辑零改动。
+
+- **验证方式与结果**：
+  1. `cd frontend && npm run build` → tsc（strict + noUnusedLocals）与 vite build 通过（**已验证**）。
+  2. 真实任务全流程（反向 mock，环控输入）：提交 → manifest 落盘参数正确（相对路径）→ 杀进程重启 → `GET /api/v4/jobs?status=interrupted` 返回该任务且 `updated_at` 为中断前最后进度时间、`input_files` 正确 → `POST .../resume` 返回 200，日志出现 `[label] Loading cached labels`（Step 2 命中缓存）→ 任务跑完 `completed`（**已验证**）。
+  3. 正向（completeness）分支：同样提交-中断-恢复，恢复后跑完 `completed`（**已验证**）。
+  4. `POST .../abandon` → 200，`interrupted` 列表清空，输入与输出文件均保留未删除（**已验证**）。
+  5. 错误路径：`resume` 已 `abandoned` / 已 `completed` 任务 → 409；`abandon` 已 `completed` 任务 → 409；`resume` 不存在的任务 → 404；`resume` 输入文件缺失的任务 → 409 并点名缺失文件（**已验证**）。
+  6. 启动健壮性：manifest 为坏 JSON → 打日志跳过、启动正常；`status` 为未知值 → 跳过；manifest 无 `params` → 正常载入且 `input_files` 为空（**已验证**）。
+  7. CLI 回归：无 `job_dir` 的任务 `update()` 不抛异常且不产生任何文件；`py -3.12 -m app.v4.cli --help` 正常（**已验证**）。
+  8. 反复重启：同一中断任务连续重启 2 次仍在列表中，`updated_at` / `message` 不变（**已验证**，即上文缺陷修复的复验）。
+  9. 中文文件名：以浏览器同款 UTF-8 multipart 方式上传 → 落盘文件名与 manifest 路径均为正确中文（**已验证**）。
+  10. 浏览器交互（三个入口的实际点击与渲染）：**尚未验证** —— 本机无浏览器自动化工具。已用 dev server（后端 8000 / 前端 3000）与构建产物核对字符串均已打包，留待人工点击确认。
+
+- **遗留问题**：
+  1. 「继续」为全量重跑，Step 4/5 的 LLM 判定会全部重来（Step 2 走缓存）。真正的 case 级断点续跑为 V3，本期未做。
+  2. 已完成 / 失败任务不在列表中（本期刻意不提供历史任务列表）。
+  3. 无磁盘清理策略：放弃的任务文件保留，中断任务产物长期累积。
+  4. 无多实例锁：若同时启动两个后端实例指向同一输出目录，启动扫描会把对方的在跑任务误标为中断。
+  5. dev `--reload` 下每次热重载都会把在跑任务标记为中断（语义正确，线程确实已死，但会频繁产生中断任务）。
+
+- **下一步建议**：1) 人工点击验证三个入口的渲染与交互；2) 若「继续」的 LLM 成本成为痛点，优先做 V3（Step 4/5 按 case 增量落盘）；3) 需要时补磁盘清理与已完成任务列表。

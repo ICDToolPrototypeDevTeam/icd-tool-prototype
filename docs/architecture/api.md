@@ -21,7 +21,10 @@ API 设计应遵守以下原则：
 | `/api/v4/health`                               | `GET`  | 后端健康检查                          |
 | `/api/v4/coverage-analysis`                    | `POST` | 上传输入文件并创建 V4 反向管线任务               |
 | `/api/v4/completeness-analysis`                | `POST` | 上传输入文件并创建 V4 正向完整性分析任务            |
+| `/api/v4/jobs`                                 | `GET`  | 查询未完成/中断任务列表（可选 `status`、`task_type` 过滤） |
 | `/api/v4/jobs/{job_id}`                        | `GET`  | 查询任务状态                          |
+| `/api/v4/jobs/{job_id}/resume`                 | `POST` | 继续被中断的任务（按 manifest 参数快照全量重跑）    |
+| `/api/v4/jobs/{job_id}/abandon`                | `POST` | 放弃被中断的任务（仅标记，不删除文件）            |
 | `/api/v4/jobs/{job_id}/result`                 | `GET`  | 查询任务处理结果摘要（按 `task_type` 分发正确性/完整性两种 schema） |
 | `/api/v4/jobs/{job_id}/outputs/eoicd-xlsx`     | `GET`  | 下载 EoICD 条目化清单（xlsx）      |
 | `/api/v4/jobs/{job_id}/outputs/consensus-docx` | `GET`  | 下载多模型共识差异分析报告（docx）            |
@@ -93,7 +96,7 @@ GET /api/v4/jobs/{job_id}
 ```json
 {
   "job_id": "<uuid>",
-  "status": "pending | running | completed | failed",
+  "status": "pending | running | completed | failed | interrupted | abandoned",
   "stage": "parse | label | match | multi_judge | review | report | done",
   "stage_index": 3,
   "stage_total": 5,
@@ -107,6 +110,8 @@ GET /api/v4/jobs/{job_id}
 ```
 
 `mock_models` 按 ADR-001 D5 规则取值：`multi_judge_results.json.providers ∩ {"minimax", "qwen"}`；`USE_MOCK_LLM=1` 时所有 provider 都进 `mock_models`。
+
+`interrupted` / `abandoned` 为任务中断恢复相关状态，见第 13 节。
 
 ## 6. 查询任务结果摘要接口
 
@@ -349,3 +354,93 @@ GET /api/v4/jobs/{job_id}/outputs/forward-docx
 | trace 模式缺追溯表 | 422 |
 | 任务 `running`/`failed` 时调 `/result` | 409 |
 | 正向 xlsx/docx 未生成时下载 | 404 |
+
+## 13. 任务中断恢复接口
+
+任务元数据随每步进度持久化到 `backend/output/v4/{job_id}/job.json`（manifest）。进程启动时扫描一次：仍为 `pending` / `running` 的 manifest 必然来自上一个已退出的进程 → 标记为 `interrupted`（保留原 `updated_at` 作为「中断前的最后进度时间」）并载入内存。已为 `interrupted` 的 manifest 同样载入，因此反复重启不会丢失中断任务。输入文件与各阶段中间产物均已落盘，无需重新上传。
+
+### 13.1 查询任务列表
+
+```text
+GET /api/v4/jobs?status=interrupted&task_type=correctness
+```
+
+（V4JobListItem，返回数组）
+
+```json
+[
+  {
+    "job_id": "<uuid>",
+    "task_type": "correctness | completeness",
+    "status": "pending | running | completed | failed | interrupted | abandoned",
+    "message": "Step 4/6: Multi-agent judging",
+    "created_at": "ISO-8601",
+    "updated_at": "ISO-8601",
+    "input_files": ["HLR.docx", "Publisher.xlsx"]
+  }
+]
+```
+
+- 两个 query 参数均可选：`status` 按状态精确过滤，`task_type` 按任务类型过滤。
+- 内存中只保留本次进程创建的任务与启动时载入的 `interrupted` 任务，因此该接口不会返回历史 `completed` / `failed` 任务。
+- `input_files` 取自 manifest 参数快照中的输入文件（仅文件名，不含路径）；CLI 等无 manifest 的任务为空数组。
+
+### 13.2 继续任务
+
+```text
+POST /api/v4/jobs/{job_id}/resume
+```
+
+按 manifest 中的参数快照（`judge_providers` / `use_mock_llm` / `controller_profile` / `no_refine` / `analysis_mode` / 追溯表等）全量重跑，走与新建任务完全相同的启动路径。前端不接受也不传递任何覆盖参数。
+
+返回：
+
+```json
+{ "job_id": "<uuid>", "status": "running", "message": "任务已继续执行（将重新运行分析流程）" }
+```
+
+重跑成本说明：Step 2（HLR AI 标注）命中 `output/hlr_labels.json` 缓存会自动跳过；Step 4（多模型判定）与 Step 5（共识）无按 case 落盘，会全部重新执行。
+
+### 13.3 放弃任务
+
+```text
+POST /api/v4/jobs/{job_id}/abandon
+```
+
+只把状态标记为 `abandoned`，**不删除任何输入或输出文件**（磁盘清理不在本期范围）。
+
+返回：
+
+```json
+{ "job_id": "<uuid>", "status": "abandoned", "message": "任务已放弃（文件保留在输出目录，未删除）" }
+```
+
+### 13.4 中断恢复错误响应
+
+| 场景 | HTTP |
+| --- | --- |
+| `resume` / `abandon` 的任务不存在（如后端重启后该任务未留下可恢复记录） | 404 |
+| `resume` 的任务状态不是 `interrupted`（如 `completed` / `running` / `abandoned`） | 409 |
+| `abandon` 的任务状态不是 `interrupted` | 409 |
+| `resume` 时 manifest 记录的输入文件或追溯目录已不存在 | 409 |
+
+### 13.5 manifest 字段说明
+
+`output/v4/{job_id}/job.json` 由任务自身在每次 `update()` 时原子写入（`.tmp` + `os.replace`），字段：
+
+```json
+{
+  "schema_version": 1,
+  "job_id": "<uuid>",
+  "task_type": "correctness | completeness",
+  "status": "pending | running | completed | failed | interrupted | abandoned",
+  "message": "Step 1/6: Parsing input files",
+  "created_at": "ISO-8601",
+  "updated_at": "ISO-8601",
+  "params": { "hlr_path": "input/xxx.docx", "...": "..." }
+}
+```
+
+`params` 中的路径一律为相对 `job_dir` 的相对路径，保证输出目录整体搬迁后仍可恢复。不持久化任务结果（重跑时重新生成）。无 `job_dir` 的任务（如 CLI 直跑 `app/v4/cli.py`）不写 manifest，行为与本次改动前一致。
+
+**部署前提（Docker）**：本能力依赖 `output/` 跨进程存活。`docker-compose.yml` 已把 `./backend/output` 以 bind mount 挂到容器内 `/app/output`（且未设置 `OUTPUT_DIR`），因此 `docker compose restart` / `down` + `up` 后 manifest 仍在、中断任务不丢。若把该卷去掉、改为匿名 volume 或设置 `OUTPUT_DIR` 指向容器内非挂载路径，本能力会静默失效（重启后任务列表为空）。

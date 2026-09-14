@@ -1,15 +1,19 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import CorrectnessFileUpload from '../components/CorrectnessFileUpload'
 import CorrectnessResultView from '../components/CorrectnessResultView'
+import InterruptedTasks from '../components/InterruptedTasks'
 import ProcessingView from '../components/ProcessingView'
 import WorkflowSteps from '../components/WorkflowSteps'
 import { useAnalysisJob } from '../hooks/useAnalysisJob'
 import { analyzeFilesV4, getJobResultV4 } from '../api'
-import type { FileItem, V4JobResultResponse } from '../types'
+import type { FileItem, V4JobListItem, V4JobResultResponse } from '../types'
 
 export default function CorrectnessPage() {
   const job = useAnalysisJob<V4JobResultResponse>()
 
+  const [searchParams, setSearchParams] = useSearchParams()
+  const attachRef = useRef(false)
   const [hlrWordFile, setHlrWordFile] = useState<FileItem | null>(null)
   const [publisherFile, setPublisherFile] = useState<FileItem | null>(null)
   const [subscriberFile, setSubscriberFile] = useState<FileItem | null>(null)
@@ -18,6 +22,20 @@ export default function CorrectnessPage() {
   // Reverse-pipeline only: AMS / FGMC / HSCU / RPDU controller profile.
   // Forward (Completeness) analysis does not use this selector.
   const [v4ControllerProfile, setV4ControllerProfile] = useState<string>('')
+
+  // 从工具入口页带 ?job=<id> 跳转过来时自动挂到该任务上（StrictMode 下 effect 会跑两次，用 ref 防重入）
+  useEffect(() => {
+    const resumeId = searchParams.get('job')
+    if (!resumeId || attachRef.current) return
+    attachRef.current = true
+    setSearchParams({}, { replace: true })
+    job.attach(resumeId, (id) => getJobResultV4(id))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, setSearchParams])
+
+  function handleOpenTask(item: V4JobListItem) {
+    job.attach(item.job_id, (id) => getJobResultV4(id))
+  }
 
   function handleStart() {
     if (!hlrWordFile) {
@@ -63,6 +81,7 @@ export default function CorrectnessPage() {
 
       {job.pageState === 'upload' && (
         <>
+          <InterruptedTasks taskType="correctness" onOpen={handleOpenTask} />
           <CorrectnessFileUpload
             hlrWordFile={hlrWordFile}
             eoicdPublisherFile={publisherFile}
@@ -136,7 +155,9 @@ export default function CorrectnessPage() {
         <div className="error-state">
           <div className="error-icon">⚠️</div>
           <h3 className="error-title">处理失败</h3>
-          <p className="error-message">请检查文件格式是否正确，或稍后重试</p>
+          <p className="error-message">
+            {job.errorMessage || '请检查文件格式是否正确，或稍后重试'}
+          </p>
           <button className="btn btn--new" onClick={handleReset}>
             重新尝试
           </button>

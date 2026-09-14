@@ -1,8 +1,15 @@
 # -*- coding: utf-8 -*-
-"""GET /api/v4/jobs/{job_id}  状态 / 结果查询。"""
+"""任务状态 / 结果查询 + 中断任务列表与继续/放弃。
+
+- GET  /api/v4/jobs/{job_id}          状态查询
+- GET  /api/v4/jobs/{job_id}/result   结果查询
+- GET  /api/v4/jobs                   任务列表（可选 status / task_type 过滤）
+- POST /api/v4/jobs/{job_id}/resume   继续被中断的任务（按参数快照重新执行）
+- POST /api/v4/jobs/{job_id}/abandon  放弃被中断的任务（不删除文件）
+"""
 from __future__ import annotations
 
-from typing import Union
+from typing import Optional, Union
 
 from fastapi import APIRouter, HTTPException
 
@@ -14,12 +21,16 @@ from app.api.v4.runner import (
     derive_forward_summary,
     derive_mock_models,
     derive_outputs,
+    job_input_filenames,
+    relaunch_from_manifest,
     V4_INTERMEDIATE_JSON,
 )
 from app.api.v4.schemas import (
+    V4AnalyzeResponse,
     V4ForwardJobOutputs,
     V4ForwardJobResultResponse,
     V4ForwardJobResultSummary,
+    V4JobListItem,
     V4JobOutputs,
     V4JobResultResponse,
     V4JobResultSummary,
@@ -40,6 +51,33 @@ def _get_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail='job not found')
     return job
+
+
+@router.get('/jobs', response_model=list[V4JobListItem])
+def list_v4_jobs(status: Optional[str] = None, task_type: Optional[str] = None):
+    """任务列表（内存中的任务：本进程新建 + 启动扫描恢复的中断任务）。
+
+    按创建时间倒序。典型用法：`?status=interrupted&task_type=correctness`
+    取出待用户选择「继续 / 放弃」的任务。
+    """
+    jobs = job_manager.list_jobs()
+    if status:
+        jobs = [j for j in jobs if j.status.value == status]
+    if task_type:
+        jobs = [j for j in jobs if j.task_type == task_type]
+    jobs.sort(key=lambda j: j.created_at, reverse=True)
+    return [
+        V4JobListItem(
+            job_id=j.job_id,
+            task_type=j.task_type,
+            status=j.status,
+            message=j.message,
+            created_at=j.created_at.isoformat(),
+            updated_at=j.updated_at.isoformat(),
+            input_files=job_input_filenames(j),
+        )
+        for j in jobs
+    ]
 
 
 @router.get('/jobs/{job_id}', response_model=V4JobStatusResponse)
@@ -160,3 +198,52 @@ def get_v4_job_result(job_id: str):
         return _forward_result(job, base_outputs_dir)
     # 默认走正确性（反向）分支，保证旧反向调用方（task_type=correctness）向后兼容
     return _reverse_result(job, base_outputs_dir)
+
+
+@router.post('/jobs/{job_id}/resume', response_model=V4AnalyzeResponse)
+def resume_v4_job(job_id: str):
+    """继续一个被中断的任务。
+
+    按 manifest 中落盘的参数快照重新执行整条管线（已上传的输入文件直接复用，
+    Step 2 HLR 标签走缓存）。任务状态不是 interrupted → 409；输入文件缺失
+    → 409，且任务状态保持不变。
+    """
+    job = _get_job(job_id)
+    if job.status != JobStatus.INTERRUPTED:
+        raise HTTPException(
+            status_code=409,
+            detail=f'job not resumable: status={job.status.value}',
+        )
+
+    job_dir = get_output_root() / 'v4' / job_id
+    try:
+        relaunch_from_manifest(job, job_dir)
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=409,
+            detail=f'cannot resume, input or trace file missing: {e}',
+        )
+
+    return V4AnalyzeResponse(
+        job_id=job.job_id,
+        status=job.status.value,
+        message='任务已继续执行（将重新运行分析流程）',
+    )
+
+
+@router.post('/jobs/{job_id}/abandon', response_model=V4AnalyzeResponse)
+def abandon_v4_job(job_id: str):
+    """放弃一个被中断的任务；只改状态，不删除输入与中间产物。"""
+    job = _get_job(job_id)
+    if job.status != JobStatus.INTERRUPTED:
+        raise HTTPException(
+            status_code=409,
+            detail=f'job not abandonable: status={job.status.value}',
+        )
+
+    job.update(JobStatus.ABANDONED, '用户已放弃继续')
+    return V4AnalyzeResponse(
+        job_id=job.job_id,
+        status=job.status.value,
+        message='任务已放弃（文件保留在输出目录，未删除）',
+    )
