@@ -38,7 +38,8 @@ async def completeness_analysis(
     eoicd_subscriber_file: Optional[UploadFile] = File(None),
     device_icd_trace_file: Optional[UploadFile] = File(None),
     system_device_trace_file: Optional[UploadFile] = File(None),
-    use_mock_llm: bool = Form(False),
+    # Mock 仅由 .env 的 USE_MOCK_LLM 控制；此字段仅作显式覆盖（None = 不动 env）
+    use_mock_llm: Optional[bool] = Form(None),
 ):
     # —— 字段校验 ——
     if not hlr_word_file.filename.lower().endswith(".docx"):

@@ -181,7 +181,8 @@ async def coverage_analysis(
     eoicd_publisher_file: Optional[UploadFile] = File(None),
     eoicd_subscriber_file: Optional[UploadFile] = File(None),
     traceability_files: list[UploadFile] = File(default=[]),
-    use_mock_llm: bool = Form(False),
+    # Mock 仅由 .env 的 USE_MOCK_LLM 控制；此字段仅作显式覆盖（None = 不动 env）
+    use_mock_llm: Optional[bool] = Form(None),
     judge_providers: list[str] = Form(default_factory=lambda: ["deepseek"]),
     enable_traceability_prefilter: bool = Form(False),
     controller_profile: Optional[str] = Form(None),

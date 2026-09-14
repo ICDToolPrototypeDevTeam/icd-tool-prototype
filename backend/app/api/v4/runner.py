@@ -200,7 +200,7 @@ def run_v4_pipeline_thread(
     subscriber_path: Optional[Path],
     trace_dir: Optional[Path],
     judge_providers: list[str],
-    use_mock_llm: bool,
+    use_mock_llm: Optional[bool],
     controller_profile: str = "ams",
     no_refine: bool = False,
 ) -> None:
@@ -306,7 +306,7 @@ def launch_v4_pipeline(
     subscriber_path: Optional[Path],
     trace_dir: Optional[Path],
     judge_providers: list[str],
-    use_mock_llm: bool,
+    use_mock_llm: Optional[bool],
     controller_profile: str = "ams",
     no_refine: bool = False,
 ) -> threading.Thread:
@@ -403,7 +403,7 @@ def run_forward_pipeline_thread(
     analysis_mode: str,
     device_icd_trace_file: Optional[Path],
     system_device_trace_file: Optional[Path],
-    use_mock_llm: bool,
+    use_mock_llm: Optional[bool],
 ) -> None:
     """在后台线程内跑 V4 正向完整性管线；带 env 保存/恢复；异常 → FAILED。"""
     output_dir = job_dir / "output"
@@ -475,7 +475,7 @@ def launch_forward_pipeline(
     analysis_mode: str,
     device_icd_trace_file: Optional[Path],
     system_device_trace_file: Optional[Path],
-    use_mock_llm: bool,
+    use_mock_llm: Optional[bool],
 ) -> threading.Thread:
     """工厂：返回正向后台线程对象。"""
     t = threading.Thread(

@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-11
+
+### Fixed
+
+- **Mock 模式恢复由 `.env` 控制（`USE_MOCK_LLM=1` 失效修复）**：HTTP 入口 `use_mock_llm` Form 字段原默认 `False` 且前端从不发送该字段，导致 runner 线程启动时把 `.env` 加载好的 `USE_MOCK_LLM=1` 强制覆盖为 `"0"`，反向/正向分析均不走 Mock（无 API Key 时任务直接 failed）。修复后字段改为 `Optional[bool] = Form(None)`：未显式提供时以 `.env` 为准（Mock 仅由 env 控制），显式传 true/false 仍可覆盖（curl 调试通道不变）。涉及 `coverage.py` / `completeness.py` / `runner.py`，新增回归测试 `backend/tests/test_api_mock_env_default.py`，`docs/architecture/api.md` 字段契约同步更新。
+
 ## [Unreleased] - 2026-09-09
 
 ### Added
