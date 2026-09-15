@@ -694,6 +694,22 @@ body {
   margin: 0 auto;
 }
 
+.processing-resumed {
+  display: inline-block;
+  margin-bottom: 20px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(0, 102, 204, 0.08);
+  color: var(--primary);
+  font-size: 13px;
+}
+
+.processing-reuse {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
 /* ========== Results ========== */
 .results-grid {
   display: grid;

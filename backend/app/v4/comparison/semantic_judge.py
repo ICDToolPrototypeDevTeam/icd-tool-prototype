@@ -10,6 +10,10 @@ import time
 from app.v4.matching.hlr_classifier import extract_bit_fields
 from app.v4.models import ReverseCase, ReverseJudgmentResult
 
+# 调用参数指纹：既用于实际调用，也编入缓存 key（llm_cache.compute_key）。
+# 改这里 ⇒ key 变化 ⇒ 旧缓存自动失效。
+REVERSE_JUDGE_PARAMS = {"temperature": 0.1, "max_tokens": 8192}
+
 
 def _to_float(v) -> float | None:
     """Parse a display string like '-512' / '12 Bits' / '1000 ms' to float."""

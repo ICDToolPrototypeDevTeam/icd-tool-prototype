@@ -36,6 +36,10 @@ export interface V4JobStatusResponse {
   case_index: number
   case_total: number
   message: string
+  /** 本次运行是否为中断后的恢复运行 */
+  resumed?: boolean
+  /** 恢复运行的实时复用计数（按模型调用次数计：缓存复用 / 接续调用） */
+  reuse?: { reused: number; rerun: number } | null
   mock_models: string[]
   created_at: string
   updated_at: string

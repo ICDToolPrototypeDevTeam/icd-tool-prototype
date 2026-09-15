@@ -23,7 +23,7 @@ API 设计应遵守以下原则：
 | `/api/v4/completeness-analysis`                | `POST` | 上传输入文件并创建 V4 正向完整性分析任务            |
 | `/api/v4/jobs`                                 | `GET`  | 查询未完成/中断任务列表（可选 `status`、`task_type` 过滤） |
 | `/api/v4/jobs/{job_id}`                        | `GET`  | 查询任务状态                          |
-| `/api/v4/jobs/{job_id}/resume`                 | `POST` | 继续被中断的任务（按 manifest 参数快照全量重跑）    |
+| `/api/v4/jobs/{job_id}/resume`                 | `POST` | 继续被中断的任务（按 manifest 参数快照重跑，已完成的 LLM 判定复用缓存） |
 | `/api/v4/jobs/{job_id}/abandon`                | `POST` | 放弃被中断的任务（仅标记，不删除文件）            |
 | `/api/v4/jobs/{job_id}/result`                 | `GET`  | 查询任务处理结果摘要（按 `task_type` 分发正确性/完整性两种 schema） |
 | `/api/v4/jobs/{job_id}/outputs/eoicd-xlsx`     | `GET`  | 下载 EoICD 条目化清单（xlsx）      |
@@ -103,6 +103,8 @@ GET /api/v4/jobs/{job_id}
   "case_index": 12,
   "case_total": 12,
   "message": "Step 3/5: Multi-agent judging",
+  "resumed": false,
+  "reuse": { "reused": 33, "rerun": 0 },
   "mock_models": ["minimax", "qwen"],
   "created_at": "ISO-8601",
   "updated_at": "ISO-8601"
@@ -110,6 +112,8 @@ GET /api/v4/jobs/{job_id}
 ```
 
 `mock_models` 按 ADR-001 D5 规则取值：`multi_judge_results.json.providers ∩ {"minimax", "qwen"}`；`USE_MOCK_LLM=1` 时所有 provider 都进 `mock_models`。
+
+`resumed` 表示本次运行是否为中断后的恢复运行（`resume` 启动后置 `true`，首跑为 `false`）。`reuse` 仅在恢复运行时非空，以**模型调用次数**为单位反映本次运行的两个去向：`reused` = 直接复用中断前已完成结果、未发起请求的调用次数；`rerun` = 本次接续发起的调用次数（含中断前未执行到的步骤，以及中断时正在执行或已失败、缓存中没有可用结果的调用）。计数按 Step 4/5/5.5/5.6 逐条判定/共识调用累计、不去重（同一判定在后续步骤再次命中会再计一次），因此与 `llm_cache.jsonl` 的行数不是同一口径；也与需求条数不同 —— 每个需求对应「每个模型一次判定 + 一次共识」等多次调用。正向（完整性）管线无判定缓存，`reuse` 恒为 `{"reused": 0, "rerun": 0}`。
 
 `interrupted` / `abandoned` 为任务中断恢复相关状态，见第 13 节。
 
@@ -391,7 +395,7 @@ GET /api/v4/jobs?status=interrupted&task_type=correctness
 POST /api/v4/jobs/{job_id}/resume
 ```
 
-按 manifest 中的参数快照（`judge_providers` / `use_mock_llm` / `controller_profile` / `no_refine` / `analysis_mode` / 追溯表等）全量重跑，走与新建任务完全相同的启动路径。前端不接受也不传递任何覆盖参数。
+按 manifest 中的参数快照（`judge_providers` / `use_mock_llm` / `controller_profile` / `no_refine` / `analysis_mode` / 追溯表等）重跑，走与新建任务完全相同的启动路径。前端不接受也不传递任何覆盖参数。
 
 返回：
 
@@ -399,7 +403,15 @@ POST /api/v4/jobs/{job_id}/resume
 { "job_id": "<uuid>", "status": "running", "message": "任务已继续执行（将重新运行分析流程）" }
 ```
 
-重跑成本说明：Step 2（HLR AI 标注）命中 `output/hlr_labels.json` 缓存会自动跳过；Step 4（多模型判定）与 Step 5（共识）无按 case 落盘，会全部重新执行。
+重跑成本说明（反向/正确性管线）：
+
+- Step 2（HLR AI 标注）命中 `output/hlr_labels.json` 缓存自动跳过；
+- Step 4（多模型判定）、Step 5（共识）、Step 5.5（1★/2★ 复查）的**已完成的单条 LLM 判定结果**按内容寻址复用，只有未完成的才真正调用模型，结果随完成进度增量写入 `output/llm_cache.jsonl`。因此中断越晚、继续时省下的调用越多；
+- 复用只发生在**同一任务目录内**，不跨任务；换模型、改提示词、上游输入变化等会改变判定内容的情况都会自动失效并重新判定；
+- Step 1/2/3/6 等确定性步骤（解析、匹配、报告生成）本就很快，仍然全量重跑；
+- 正向（完整性）管线暂未按 case 复用，`resume` 仍为整段重跑。
+
+恢复启动后任务标记 `resumed=true`，并从 0 重新累计 `reuse` 计数（多次恢复不累加上一轮）；`GET /jobs/{id}` 可实时看到 `reuse.reused` / `reuse.rerun` 递增，用于前端展示「已复用中断前结果 N 次 · 接续调用模型 M 次」（次数即模型调用次数，口径见第 5 节）。
 
 ### 13.3 放弃任务
 
@@ -437,9 +449,13 @@ POST /api/v4/jobs/{job_id}/abandon
   "message": "Step 1/6: Parsing input files",
   "created_at": "ISO-8601",
   "updated_at": "ISO-8601",
-  "params": { "hlr_path": "input/xxx.docx", "...": "..." }
+  "params": { "hlr_path": "input/xxx.docx", "...": "..." },
+  "resumed": true,
+  "reuse": { "reused": 96, "rerun": 0 }
 }
 ```
+
+`resumed` / `reuse` 为中断恢复可视化字段（见第 5 节）：恢复运行开始与每完成一个 case 时随 `_persist` 落盘，进程被杀后计数不丢；旧 manifest 无这两键时按默认值（`false` / `null`）加载，无需迁移。
 
 `params` 中的路径一律为相对 `job_dir` 的相对路径，保证输出目录整体搬迁后仍可恢复。不持久化任务结果（重跑时重新生成）。无 `job_dir` 的任务（如 CLI 直跑 `app/v4/cli.py`）不写 manifest，行为与本次改动前一致。
 

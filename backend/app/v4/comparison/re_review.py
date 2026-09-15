@@ -35,6 +35,7 @@ from app.v4.degradation.concurrency import (
 )
 from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.v4.llm import get_llm
+from app.v4.llm_cache import KIND_RE_REVIEW, compute_key, resolve_model
 from app.v4.models import (
     ConsensusOutput,
     MultiJudgeOutput,
@@ -42,6 +43,9 @@ from app.v4.models import (
     ReverseCase,
 )
 from app.v4.prompts import load_prompt
+
+# 调用参数指纹：既用于实际调用，也编入缓存 key（llm_cache.compute_key）。
+RE_REVIEW_PARAMS = {"temperature": 0.1, "max_tokens": 8192}
 
 
 # ============================================================
@@ -189,7 +193,7 @@ def _call_re_review_api(
 
     for attempt in range(3):
         try:
-            response = llm.chat(messages=messages, temperature=0.1, max_tokens=8192)
+            response = llm.chat(messages=messages, **RE_REVIEW_PARAMS)
             content = _extract_json(response["content"])
             data = json.loads(content)
             return {
@@ -236,6 +240,27 @@ def _call_re_review_api(
     }
 
 
+def _make_re_review_prompt(
+    case: ReverseCase,
+    original_judgments: dict[str, dict],
+    provider: str,
+) -> str:
+    """构造某 provider 的复查 user prompt。
+
+    查缓存与实际调用共用这一条构造路径：一旦两处各自拼接，key 就会与真正
+    发给模型的载荷漂移，缓存要么永不命中、要么命中错误结果。
+    """
+    my_judgment = original_judgments.get(provider, {}) or {}
+    other_judgments = [
+        j for p, j in original_judgments.items() if p != provider
+    ]
+    return _build_re_review_user_prompt(
+        case=case,
+        my_judgment=my_judgment,
+        other_judgments=other_judgments,
+    )
+
+
 def _call_one_re_review(
     case: ReverseCase,
     original_judgments: dict[str, dict],
@@ -248,15 +273,7 @@ def _call_one_re_review(
     state. The caller (re_review_judgments) submits this via _submit_with_gate
     so concurrent invocations of the same provider LLM client are safe.
     """
-    my_judgment = original_judgments.get(provider, {}) or {}
-    other_judgments = [
-        j for p, j in original_judgments.items() if p != provider
-    ]
-    user_prompt = _build_re_review_user_prompt(
-        case=case,
-        my_judgment=my_judgment,
-        other_judgments=other_judgments,
-    )
+    user_prompt = _make_re_review_prompt(case, original_judgments, provider)
     llm = get_llm(provider)
     return _call_re_review_api(
         llm=llm,
@@ -277,6 +294,8 @@ def re_review_judgments(
     cases: list[ReverseCase],
     output_dir: Path,
     providers: list[str] | None = None,
+    cache=None,
+    tracker=None,
 ) -> tuple[MultiJudgeOutput, set[str]]:
     """Re-review every low-confidence (1★/2★) case with each judging provider.
 
@@ -342,30 +361,62 @@ def re_review_judgments(
             and (original_judgments.get(p, {}) or {}).get("coverage_status") != "error"
         ]
 
+        # 先查缓存：命中的 provider 不占 executor / gate 名额，直接落位；
+        # key 与真正发给模型的载荷同源（_make_re_review_prompt）。
+        hit: dict[str, dict] = {}
+        keys: dict[str, str] = {}
+        models: dict[str, str] = {}
+        if cache is not None:
+            for p in active_providers:
+                models[p] = resolve_model(p)
+                keys[p] = compute_key(
+                    kind=KIND_RE_REVIEW,
+                    provider=p,
+                    model=models[p],
+                    system_prompt=system_prompt,
+                    user_prompt=_make_re_review_prompt(case, original_judgments, p),
+                    params=RE_REVIEW_PARAMS,
+                )
+                cached = cache.get(keys[p])
+                if cached is not None:
+                    hit[p] = cached
+        miss = [p for p in active_providers if p not in hit]
+
+        if tracker is not None:
+            tracker.add(reused=len(hit), rerun=len(miss))
+
         # Per-case parallel submit (ADR-perf: re-review 3 provider wall
         # time dropped from sum → max). Reuses the Step 4 executor +
         # inflight semaphore so concurrent re-review tasks share the same
         # backpressure gate as multi-agent.
-        executor = _get_drain_executor()
         cfg = DegradationConfig.from_env()
-        futures: dict[Future, str] = {
-            _submit_with_gate(
-                executor,
-                _call_one_re_review,
-                case,
-                original_judgments,
-                p,
-                system_prompt,
-            ): p
-            for p in active_providers
-        }
+        futures: dict[Future, str] = {}
+        if miss:
+            executor = _get_drain_executor()
+            futures = {
+                _submit_with_gate(
+                    executor,
+                    _call_one_re_review,
+                    case,
+                    original_judgments,
+                    p,
+                    system_prompt,
+                ): p
+                for p in miss
+            }
 
         # Fixed ceiling per case (no adaptive "wait for 2 valid then
         # extra" — re-review needs every provider's fresh judgment to
         # replace the original, so timeout should force-quit stragglers
         # rather than hold the case hostage).
         deadline = time.monotonic() + cfg.case_total_timeout
+        # dict(original_judgments) 已含全部 provider 键，后续赋值只覆盖不改序
         new_judgments: dict[str, dict] = dict(original_judgments)
+        for p, j in hit.items():
+            nj = dict(j)
+            nj["agent_name"] = p
+            new_judgments[p] = nj
+
         pending = set(futures.keys())
         while pending:
             remaining = deadline - time.monotonic()
@@ -392,6 +443,16 @@ def re_review_judgments(
                     # against an LLM echoing a different ``agent_name``.
                     nj["agent_name"] = p
                     new_judgments[p] = nj
+                    if cache is not None and nj.get("coverage_status") != "error":
+                        cache.put(
+                            keys[p],
+                            kind=KIND_RE_REVIEW,
+                            provider=p,
+                            model=models[p],
+                            case_id=case_id,
+                            payload=nj,
+                            params=RE_REVIEW_PARAMS,
+                        )
 
         mjr.judgments = new_judgments
 
@@ -406,7 +467,8 @@ def re_review_judgments(
 
         print(
             f"  [re-review] {case_id}: re-reviewed "
-            f"{len(active_providers)} providers",
+            f"{len(active_providers)} providers "
+            f"(hit={len(hit)} miss={len(miss)})",
             file=sys.stderr,
         )
 

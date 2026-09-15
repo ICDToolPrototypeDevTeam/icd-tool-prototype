@@ -3093,3 +3093,76 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   5. dev `--reload` 下每次热重载都会把在跑任务标记为中断（语义正确，线程确实已死，但会频繁产生中断任务）。
 
 - **下一步建议**：1) 人工点击验证三个入口的渲染与交互；2) 若「继续」的 LLM 成本成为痛点，优先做 V3（Step 4/5 按 case 增量落盘）；3) 需要时补磁盘清理与已完成任务列表。
+## 2026-09-15 V3：反向管线 case 级断点续跑（LLM 判定缓存）
+
+- **需求**：V2 的「继续」是全量重跑，反向管线的成本集中在 Step 4（多模型判定）/ Step 5（共识）/ Step 5.5（1★/2★ 复查）三处 LLM 循环，而这三处的产物都只在整步跑完时才整体写盘 —— 中断即整步归零（Step 4 跑到第 7 个 case 被杀，前 6 个 case 的判定一个字节都没留下）。V3 让「继续」复用已完成 case 的判定。经确认的范围：①缓存只在同一任务目录内复用，不跨任务；②三处都缓存；③不做「复用 N 条 / 重跑 M 条」的计数展示；④先做反向，正向（完整性）管线下一期。
+
+- **实现要点**：
+  1. **内容寻址失效判断**（新增 `llm_cache.py`）：`key = sha256(CACHE_VERSION, kind, provider, model, params, system_prompt, user_prompt)`。prompt 即实际发给模型的完整载荷，所以上游任何变化（HLR 标签、匹配结果、候选块内容、prompt 改字、profile 的 RPDU 附加段）都会改变字符串 → key 自动失效。**刻意不做「改了 A 要作废 B」的依赖分析** —— 那是最容易出错的地方。`case_id` 只进日志与记录字段，绝不参与查找。三处 `kind` 不同（`reverse_judge` / `consensus` / `re_review`），key 空间天然分离。
+  2. **JSONL 增量落盘**：`output/v4/{job_id}/output/llm_cache.jsonl`，每完成一个 case 追加一行（不 indent，indent 会破坏「一行一条」）并立即关闭句柄，实例级 `threading.Lock`。选 JSONL 而非整体重写 JSON，是因为追加不需要读改写整个文件，中断最多丢「正在跑的那一个 case」。读取时坏行（含被中断写出的半行）跳过并统计告警。
+  3. **只缓存成功结果**：Step 4 / Step 5.5 用 `coverage_status != "error"` 判定（TIMEOUT 占位、熔断 SKIPPED、异常都不是判定结果）；Step 5 **不能用这个字段** —— `_call_review_api` 重试耗尽后返回的是 `star_rating=1, final_analysis="Review API error after retries"` 的「假成功」，必须用这个字面量做哨兵（已提为 `REVIEW_FAILURE_ANALYSIS` 常量），否则一次网络抖动会被永久固化。
+  4. **命中不占并发名额**：命中的 provider 直接落位，不提交 executor / gate；未命中的走原有调用与降级路径。`re_review.py` 抽出 `_make_re_review_prompt(case, original_judgments, provider)`，让「算 key」与「实际调用」共用同一条 prompt 构造路径，避免两处漂移。
+  5. **参数指纹**：三处 `llm.chat` 的 `temperature` / `max_tokens` 提为各模块常量（`REVERSE_JUDGE_PARAMS` / `REVIEW_PARAMS` / `RE_REVIEW_PARAMS`），同时用于调用与 key 计算 —— 从「靠人记得 bump CACHE_VERSION」变成自动失效。模型名已自动包含在 key 里（取自 `get_llm(provider).model`）。`CACHE_VERSION` 仍保留为纪律型防线，docstring 列出必须手工递增的场景（改 LLM client 内部 payload / 改 `_extract_json` 解析修复逻辑 / 改判定结果 schema）。
+  6. **Step 4.5 drain 补写**：首跑写盘时被 drain 的 case 上还是 TIMEOUT 占位，判定是 drain 之后才拿到的，不补写则恢复运行会重新排队等待这些慢 provider。`_backfill_judge_cache()` 在 drain 之后对回填过的 case 做幂等补写（`put` 对已存在的 key 返回 False，不重复追加）。
+
+- **两个必须同时修的隐患**（不修则「看似生效、实则几乎不命中」，两条均已在代码中核实）：
+  1. **provider 键序不稳定**：`_judge_case_with_timeout` 的收集循环是 `for f in done`，而 `done` 是 `concurrent.futures.wait` 返回的 **set**，`gathered` 的键序因此取决于 set 迭代序（与对象 id / 内存地址相关，**跨进程会变**）。该顺序经 `case_judgments` 带进 `mr.judgments`，而 `_build_review_user_prompt` 按 `mr.judgments.items()` 拼「裁判 1/2/3」、`_build_re_review_user_prompt` 的 `other_judgments` 顺序决定「判断 B/C」的分配 → 恢复后 prompt 与首次字节不同 → Step 5/5.5/5.6 全部 miss。修法：**无条件**按 `providers` 固定顺序组装 `case_judgments`（首次与恢复走同一条路径）。注：基线 `e2e_baseline/multi_judge_results.json` 的键序实测为 `deepseek, qwen, minimax`，即确实不是声明序，隐患真实存在。
+  2. **`filter_healthy([])` 抛异常**：`degradation/context.py` 在 healthy 为空时抛 `AllProvidersUnhealthyError`，若某 case 的 provider 全部命中缓存，把空 `miss` 传进去就会炸掉整步。修法：`miss` 为空时短路不调用；非空时仍传**全量** `providers` 再与实际调用集求交，保持与现状相同的熔断抛错语义。
+
+- **修改文件**：`backend/app/v4/pipeline.py`（`_judge_with_degradation` 加 `cache` 参数 + 键序归一化 + `_backfill_judge_cache` + `run_reverse_pipeline` 装配并透传三处调用点）、`backend/app/v4/comparison/review_agent.py`、`backend/app/v4/comparison/re_review.py`、`backend/app/v4/comparison/semantic_judge.py`（参数常量）；**新增** `backend/app/v4/llm_cache.py`；文档 `docs/architecture/api.md` §13.2、`CHANGELOG.md`；前端 `frontend/src/components/InterruptedTasks.tsx`（提示语不再说「重新执行」）。`coverage.py` / `completeness.py` / `job_manager.py` / `runner.py` 零改动。
+
+- **验证方式与结果**（全部 `USE_MOCK_LLM=1`；仓库无测试框架，用 CLI 双跑 + 本地 uvicorn 手工验证。mock 下 LLM 输出恒定，因此**只能靠日志与 JSONL 行数判断命中**，不能靠产物内容比对判断是否复用）：
+  1. CLI 首跑（`output/v3_case_check`，输入取 `e2e_baseline` 的 `hlr_requirements.json` / `eoicd_requirements.json`）：14 case 全部 `hit=0/3`、Step 5 全 MISS、re-review `hit=0 miss=3`，JSONL 98 行（42 reverse_judge + 14 consensus + 42 re_review）（**已验证**）。
+  2. 同命令同目录二跑：全部 `hit=3/3`、`consensus HIT`、`re-review hit=3 miss=0`、`consensus(5.6) HIT`，**JSONL 仍为 98 行且 key 序列逐行相同** —— 这是最关键的一条，任何 key 漂移（尤其隐患 1）都会表现为行数增长（**已验证**）。
+  3. 产物一致性：`multi_judge_results.json` / `re_review_results.json` / `consensus_results.json` / `reverse_report.json` 剥离 `generated_at`、`degradation` 后两次运行逐字段相同（**已验证**）。
+  4. 模拟「Step 4 跑到一半被杀」：删掉 JSONL 后半段 21 行 `reverse_judge`（对应 REV-0008~0014），三跑 → 仅这 7 个 case `hit=0/3`，其余 7 个仍 `hit=3/3`，行数回到 98（**已验证**）。
+  5. 缓存层级解耦：删掉全部 `consensus` 行，四跑 → Step 5 全 MISS（14），而 re-review 仍 `hit=3`、Step 5.6 `consensus(5.6)` 仍 HIT（14），行数回到 98 —— 验证 re_review 的 key 与共识解耦（**已验证**）。
+  6. 坏行容错：末尾手工追加半行 `{"key": "x"` → 启动打印 `skipped 1 malformed line(s)`、全部 `hit=3/3`、任务跑完（**已验证**）。
+  7. 上游改动自动失效：在 `prompts/reverse_judge.md` 末尾追加一个空格 → 14 case 全 MISS、行数 98 → 140；还原文件 → 全部回到 `hit=3/3`、行数不变（**已验证**）；`git status` 确认 prompt 文件已还原干净。
+  8. **API 恢复路径**（本地 uvicorn `127.0.0.1:8010`，非 Docker）：`POST /api/v4/coverage-analysis` 真实上传 AMS 输入提交反向任务 → 跑完 `completed`（缓存 84 行 = 12 case × 3 + 12 + 12 × 3）→ 杀进程 → 伪造 `job.json` 为 `running`（模拟被杀在 Step 5）→ 重启 → 启动扫描标记 `interrupted` 且 `GET /api/v4/jobs` 可见 → `POST .../resume` → 日志逐 case `hit=3/3`、`consensus HIT`、`re-review hit=3 miss=0`，任务回到 `completed`，**JSONL 仍为 84 行**（**已验证**）。
+  9. 前端提示语改动：`cd frontend && npm run build` → tsc（strict + noUnusedLocals）与 vite build 通过（**已验证**）。浏览器内实际渲染**尚未验证** —— 本机无浏览器自动化工具。
+  10. **drain 超时回填下的中断恢复**（真杀进程验证，**已验证**）：用 `DEGRADATION_CASE_TIMEOUT=0`（mock 单次 chat 实测 0.0000s，非零小值来不及超时，0 使首次 wait 前 remaining 即为负）+ `DEGRADATION_CONSECUTIVE_FAILURES=1000`（防熔断拉黑全部 provider）强制 Step 4 全超时 → 日志出现 `Draining 42 timed-out judgments`、42 条 `late result applied`、`[cache] drain backfill: 42 late judgment(s) written`。临时驱动脚本在 `drain backfill` 日志出现的瞬间 kill → 磁盘中间态恰好 42 行（全为 `reverse_judge`、每 provider 14 条、0 条 error 占位）。随后换回正常配置对同目录 resume → 14 个 case 全部 `hit=3/3 miss=0`、无任何 drain/timeout/backfill 日志、JSONL 补完到 98 行（42/14/42）。变体：删掉 14 条 minimax 行（等价「回填完成前被杀」）→ resume 仅 `hit=2/3 miss=1`，只补跑缺失 provider，行数回到 98。四条产物（multi_judge / consensus / re_review / reverse_matches）剥离 `generated_at` 后与正常直跑逐字段相同。注意：`DEGRADATION_CASE_TIMEOUT` 同时是 Step 5.5 re-review 自己的 deadline，置 0 会让复查也全超时 —— 这是测试配置副作用而非缺陷。
+
+- **遗留问题**：
+  1. 正向（完整性）管线 Step 7 `review_blocks_with_ai` 未做按 case 复用，`resume` 仍为整段重跑。
+  2. mock 下 `model == "mock"`，「换模型名自动失效」只能靠第 7 项同类手段（改 prompt）间接覆盖，未在真实 provider 上复验。
+  3. 真实 LLM 非确定性（temperature=0.1）：命中部分与首次逐比特一致；未命中部分重跑可能改变下游星评与复查集合 —— 语义正确，但同一次分析在恢复前后的产物的确可能不同。
+  4. 同一任务并发点两次「继续」时两个缓存实例可能交错写同一文件；前提是「同一任务不并发继续」，未做跨进程锁。
+  5. 首次运行行为有极小变化：`case_judgments` 键序由 set 迭代序改为 `providers` 固定序，唯一可见影响是 prompt 内「裁判编号」的展示序（JSON 键序无语义）。
+  6. 无缓存清理 / 过期策略，`llm_cache.jsonl` 随任务目录长期累积；失效条目只增不删。
+
+- **下一步建议**：1) 正向管线按 case 复用（结构相同，可直接照搬 `llm_cache.py` 与 `_judge_with_degradation` 的写法）；2) 真实 provider 上跑一次「跑到一半杀 → 继续」，确认省下的调用数与产物差异符合预期；3) 需要时补缓存清理策略。
+
+## 2026-09-15 中断恢复可视化（A：恢复身份标记 + B：运行中实时复用进度）
+
+- **需求**：V3 让「继续」真正复用中断前已完成的 LLM 判定，但复用只体现在后端日志 —— 前端进度页与首跑完全同形（stage + Step X/Y + message），用户观感是「像重新跑了一遍，只是速度快」。本 Issue 把「这是恢复运行」与「复用了多少」暴露到前端。讨论中曾评估「真跳过步骤」方案（按步骤断点跳过），结论是不必要且风险高（步骤间产物无原子性保证、跳过条件与缓存失效条件需双重维护），确认沿用缓存复用 + 可视化（A+B）。C（完成页汇总横幅）与正向管线缓存不在本次范围。
+
+- **实现要点**：
+  1. **恢复身份标记（A）**：`Job` 新增 `resumed: bool`（默认 `False`）+ `reuse` 计数（默认 `None`），随 `job.json` 持久化（`_persist` 加两键、`from_manifest` 用 `.get` 默认值加载，schema_version 保持 1，旧 manifest 无需迁移）；`relaunch_from_manifest` 在启动时置 `job.resumed = True` 并把 `reuse` 重置为 `{"reused": 0, "rerun": 0}`（多次恢复不累加上一轮）。
+  2. **实时复用计数（B）**：新增 `llm_cache.ReuseTracker`（threading.Lock 保护累计值，回调在锁外执行避免持锁写盘）。`run_reverse_pipeline` 仅在 `job.resumed` 为真时构造 `tracker`（CLI 与首跑全程 `None` → 行为零变化），透传到 Step 4 `_judge_with_degradation`、Step 5/5.6 `review_judgments`、Step 5.5 `re_review_judgments` 四处，每完成一个 case 经回调 `job.set_reuse_stats()` 更新计数并落盘（进程被杀计数不丢）。`rerun` 只计**实际重新发起调用**的判定（`healthy_miss`），熔断 SKIPPED 不计。
+  3. **计数口径**：单位 = **模型调用次数**（每条判定/共识调用计 1 次），累计 Step 4/5/5.5/5.6 的缓存命中与接续调用、**不去重** —— 同一条判定在 Step 5.5 会用 `re_review` 的独立 key 再算一次。`reused` = 中断前已完成结果被直接复用、未发起请求的次数；`rerun` = 本次接续发起的调用次数（含中断前未执行到的步骤，以及中断时正在执行/已失败、缓存中没有可用结果的调用）。因此这个数字既不等于需求条数（一个需求对应「每模型一次判定 + 一次共识」等多次调用），也不等于 `llm_cache.jsonl` 行数（该文件累计历次运行的全部成功调用，可能含本次未用到的旧 key）。
+  4. **轮询节奏不变**：曾短暂尝试恢复运行时把轮询降到 2s（mock 演示用），实施后撤销 —— 改为沿用原有 10s 固定轮询与 120 次预算，真实 LLM（分钟级）下计数刷新体验完整，也避免无谓的高频请求。
+  5. **前端展示**：`ProcessingView` 首渲染恢复横幅（正确性页「已完成的判定结果将直接复用，不重复调用模型」/ 完整性页中性文案），下方独立渲染计数行「已复用中断前结果 N 次 · 接续调用模型 M 次」（`resumed && reuse && reuse.reused > 0`，不放进 `hasV4Progress` 条件块）。状态接口 `V4JobStatusResponse` 新增 `resumed` / `reuse` 字段；注意后端可能给 `null`，前端用 `=== true` / `?? null` 判空。
+
+- **口径修订（同日，用户反馈后）**：原计数行文案「已复用中断前的判定 N 条 · 重新分析 M 条」有两处歧义 ——「条」易被读成需求/判定条数（真实任务 6 个需求却显示 24/12，直接对不上），「重新分析」又暗示重复劳动（恢复运行里多数接续调用中断前根本没执行过）。改为「已复用中断前结果 N 次 · 接续调用模型 M 次」，单位明确为模型调用次数；计数逻辑、字段与接口均不变，仅前端文案、注释与文档口径同步。
+
+- **修改文件**：后端 `backend/app/job_manager.py`（字段 + `set_reuse_stats`）、`backend/app/api/v4/runner.py`、`backend/app/v4/llm_cache.py`（`ReuseTracker`）、`backend/app/v4/pipeline.py`、`backend/app/v4/comparison/review_agent.py`、`backend/app/v4/comparison/re_review.py`、`backend/app/api/v4/schemas.py`、`backend/app/api/v4/jobs.py`；前端 `frontend/src/types.ts`、`frontend/src/hooks/useAnalysisJob.ts`、`frontend/src/components/ProcessingView.tsx`、`frontend/src/pages/CorrectnessPage.tsx`、`frontend/src/pages/CompletenessPage.tsx`、`frontend/src/index.css`；文档 `docs/architecture/api.md`（§5 / §13.2 / §13.5）、`CHANGELOG.md`。
+
+- **验证方式与结果**（全部 `USE_MOCK_LLM=1`；CLI 回归 + 本地 uvicorn `127.0.0.1:8010` 手工验证）：
+  1. **CLI 回归（首跑零变化）**：`output/v4vis_check` 首跑 14 case 全 `hit=0/3`、JSONL 98 行；同目录二跑全 `hit=3/3`、JSONL 仍 98 行；CLI 输出目录无 `job.json` 副作用（**已验证**）。
+  2. **API 反向恢复路径**：真实上传 AMS 输入提交反向任务 → 首跑 `resumed=false / reuse=null` → 跑完（缓存 84 行）后伪造 `job.json` 为 `running` → 重启服务 → 启动扫描标记 `interrupted` → `resume` 后用脚本按 ~1 秒间隔采样实测（验证手段，非前端轮询节奏）：`resumed=true`、`reuse.reused` 随 Step 4/5/5.5/5.6 逐 case 递增（0→9→18→…→96）、`rerun` 恒为 0（**已验证**）。终值 96 = 36 + 12 + 36 + 12（12 case × 3 provider 判定 + 12 共识 + 12 × 3 复查 + 12 共识 5.6），与后端日志 `[cache] hit=` / `consensus HIT` / `re-review hit=` 事件总数逐项吻合。
+  3. **半途杀 → 重启保计数**：第 2 次 resume 在计数 43 时 `taskkill` → 磁盘 `job.json` 保留 `resume=true / {43, 0}` → 重启后 GET 仍显示 `interrupted + reused=43`（**已验证**）。
+  4. **二次恢复不翻倍**：第 3 次 resume 计数从 0 重新累计，终值仍为 96（非 43+96 或 192）（**已验证**）。
+  5. **旧 manifest 兼容**：手工删除 `job.json` 的 `resumed` / `reuse` 两键 → 重启加载正常（沿用默认值 `false` / `null`），且从该 manifest `resume` 也能正常置位并计数到 96（**已验证**）。
+  6. **正向（完整性）恢复**：提交完整性任务（跑至 Step 8 中期杀进程）→ 重启 → `resume` → 全程 `resumed=true`、`reuse` 恒为 `{"reused":0,"rerun":0}` —— 正向无判定缓存，前端只出现中性横幅、不出现计数行（**已验证**）。注：该 AMS 大输入的 Step 8 报告生成（DOCX）耗时远超预期（十余分钟仍在跑，CPU 单核跑满属正常计算），本项验证在 Step 8 中期主动终止，未等到 completed —— 与本次改动无关（docx 路径零改动），仅影响测试耗时。
+  7. **前端构建**：`cd frontend && npm run build`（tsc strict + vite）通过（**已验证**）。浏览器内实际渲染（横幅、计数递增）**尚未验证** —— 本机无浏览器自动化工具，需用真实 API 跑「半途杀 → 继续」手工验证（mock 下曾保留的两个测试任务已删除，真实 API 下它们会全 miss 无验证价值）。
+  8. **真实 API 恢复运行对账**（燃油 FGMC 输入，真实 provider，任务 `a8b9ce7f-1574-4f12-bf7f-476a6cd28b32`）：首跑在 Step 5 完成、Step 5.5 尚未产出任何结果时被终止，恢复运行终值 `reuse = {"reused": 24, "rerun": 12}`。按 `llm_cache.jsonl` 追加顺序逐行核对：行 1–24（首跑写入的 Step 4 18 条判定 + Step 5 6 次共识）＝ `reused` 24；行 25–36（恢复运行新发起的 Step 5.5 复查 9 + Step 5.6 共识 3）＝ `rerun` 12；无重复 key、无漏计（**已核对**）。该对账同时确认 `reused` 只含缓存命中、未混入接续调用；同任务内 6 个需求对应 36 次调用，也印证了「不是需求条数口径」。
+
+- **遗留问题**：
+  1. 浏览器渲染尚未人工验证（见上）。
+  2. 计数为**模型调用次数**累计、跨步骤不去重（同一判定在 Step 5.5 以 `re_review` 的独立 key 再算一次），不是「唯一判定结果数」，也不是缓存行数；如需「净复用行数」需另设统计源。
+  3. mock 下恢复全程约 26 秒，10s 轮询只能看到 2–3 个计数快照，横幅是主要视觉信号；真实 LLM（分钟级）下计数刷新体验完整。
+  4. `job.json` 写频率上升（恢复运行每完成一个 case 一次原子小文件写，全量 ≈ 100 次/任务），已由 `_LOCK` 保护，无并发问题。
+  5. C（完成页汇总横幅）与正向管线 case 级缓存仍未做；第 2 项「并发双 resume」既有问题本次未引入新状态。
+
+- **下一步建议**：1) 手工浏览器验证恢复态视觉（两个保留任务可直接「继续」）；2) 如需要，补 C：完成页交代「本次恢复复用了多少」；3) 下一期正向管线 case 级复用，届时正向的 `reuse` 计数自动生效（tracker 透传结构已就位）。

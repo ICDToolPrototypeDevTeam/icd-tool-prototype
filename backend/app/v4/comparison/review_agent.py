@@ -8,6 +8,7 @@ import sys
 import time
 
 from app.v4.llm import get_llm
+from app.v4.llm_cache import KIND_CONSENSUS, compute_key, resolve_model
 from app.v4.models import (
     ConsensusOutput,
     ConsensusResult,
@@ -25,33 +26,84 @@ KEY_FIELDS = frozenset({
     "Units", "Period", "SDIExpected",
 })
 
+CONSENSUS_PROVIDER = "deepseek"
+
+# 调用参数指纹：既用于实际调用，也编入缓存 key（llm_cache.compute_key）。
+REVIEW_PARAMS = {"temperature": 0.1, "max_tokens": 8192}
+
+# 重试耗尽后的占位文案。带此文案的结果是「假成功」（star=1 的兜底对象），
+# 绝不能写入缓存，否则一次网络抖动会被固化进 llm_cache.jsonl。
+REVIEW_FAILURE_ANALYSIS = "Review API error after retries"
+
 
 def review_judgments(
     multi_results: list[MultiJudgeResult],
+    cache=None,
+    tag: str = "consensus",
+    tracker=None,
 ) -> ConsensusOutput:
     """Review per-case multi-agent judgments and produce consensus.
 
     Each case with N judgments is sent to the review LLM for
     agreement assessment, star rating, and final coverage status.
+
+    ``cache``（可选 LLMCache）按内容寻址复用已完成的共识判定；``tag`` 只用于
+    日志区分（Step 5 全量共识 / Step 5.6 复查后的局部共识），不参与 key。
     """
     llm = get_llm("deepseek")
     system_prompt = _load_consensus_prompt()
     total = len(multi_results)
     results: list[ConsensusResult] = []
+    model = resolve_model(CONSENSUS_PROVIDER) if cache is not None else ""
 
     for idx, mr in enumerate(multi_results):
         user_prompt = _build_review_user_prompt(mr)
-        consensus = _call_review_api(
-            llm=llm,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            case_id=mr.case_id,
-            model_results=mr.judgments,
+        key = (
+            compute_key(
+                kind=KIND_CONSENSUS,
+                provider=CONSENSUS_PROVIDER,
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                params=REVIEW_PARAMS,
+            )
+            if cache is not None
+            else ""
         )
+        cached = cache.get(key) if cache is not None else None
+
+        if cached is not None:
+            consensus = ConsensusResult(**cached)
+            # 存的是上一轮的对象：强制换回本轮入参，保证命中/未命中的产物逐字节一致
+            # （agent_name / raw_response 不参与 prompt，理论上可能不同）
+            consensus.model_results = mr.judgments
+            if tracker is not None:
+                tracker.add(reused=1)
+        else:
+            consensus = _call_review_api(
+                llm=llm,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                case_id=mr.case_id,
+                model_results=mr.judgments,
+            )
+            if tracker is not None:
+                tracker.add(rerun=1)
+            if cache is not None and consensus.final_analysis != REVIEW_FAILURE_ANALYSIS:
+                cache.put(
+                    key,
+                    kind=KIND_CONSENSUS,
+                    provider=CONSENSUS_PROVIDER,
+                    model=model,
+                    case_id=mr.case_id,
+                    payload=consensus.model_dump(),
+                    params=REVIEW_PARAMS,
+                )
         results.append(consensus)
 
         print(
-            f"  [review] {mr.case_id} ({idx + 1}/{total}) "
+            f"  [review] {mr.case_id} ({idx + 1}/{total}) {tag} "
+            f"{'HIT' if cached is not None else 'MISS'} "
             f"stars={consensus.star_rating} agreement={consensus.agreement_level} "
             f"→ {consensus.final_coverage_status}",
             file=sys.stderr,
@@ -118,7 +170,7 @@ def _call_review_api(
     for attempt in range(max_retries + 1):
         try:
             from app.v4.comparison.semantic_judge import _extract_json
-            response = llm.chat(messages=messages, temperature=0.1, max_tokens=8192)
+            response = llm.chat(messages=messages, **REVIEW_PARAMS)
             content = _extract_json(response["content"])
             data = json.loads(content)
             consistent, divergent = _derive_consensus_details(data, model_results)
@@ -165,7 +217,7 @@ def _call_review_api(
         inconsistent_attributes=[],
         field_disagreements=[],
         final_coverage_status="待确认",
-        final_analysis="Review API error after retries",
+        final_analysis=REVIEW_FAILURE_ANALYSIS,
         confidence=0.0,
         consistent_agents=[],
         divergent_agents=[],

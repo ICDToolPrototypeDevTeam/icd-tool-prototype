@@ -97,6 +97,8 @@ def get_v4_job_status(job_id: str):
         case_index=progress["case_index"],
         case_total=progress["case_total"],
         message=job.message,
+        resumed=job.resumed,
+        reuse=job.reuse,
         mock_models=mock_models,
         created_at=job.created_at.isoformat(),
         updated_at=job.updated_at.isoformat(),

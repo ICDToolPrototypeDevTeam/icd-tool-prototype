@@ -129,6 +129,8 @@ export default function CompletenessPage() {
           stageTotal={job.stageTotal}
           caseIndex={job.caseIndex}
           caseTotal={job.caseTotal}
+          resumed={job.resumed}
+          reuse={job.reuse}
         />
       )}
 

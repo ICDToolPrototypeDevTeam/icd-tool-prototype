@@ -2,11 +2,26 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-15
+
+### Added
+
+- **中断恢复可视化（恢复身份标记 + 运行中实时复用进度）**：恢复运行不再与首跑「长一个样」。任务模型新增 `resumed`（本次运行是否为恢复运行）与 `reuse`（实时复用/接续调用的模型调用次数）两个字段，随 `job.json` 持久化并经 `GET /api/v4/jobs/{id}` 暴露；`resume` 启动时置 `resumed=true` 并把计数从 0 重置（多次恢复不累加），管线内新增 `llm_cache.ReuseTracker` 累计 Step 4/5/5.5/5.6 的缓存命中与接续调用（每完成一个 case 即落盘，进程被杀计数不丢）。前端进度页据此显示恢复横幅「中断恢复执行 · 已完成的判定结果将直接复用，不重复调用模型」（完整性页为中性文案）与「已复用中断前结果 N 次 · 接续调用模型 M 次」实时计数行（沿用原有 10s 轮询节奏）。计数单位为**模型调用次数**：`reused` 为中断前已完成结果被直接复用、未发起请求的次数，`rerun` 为本次接续发起的调用次数；按步骤逐条累计、不去重（同一步骤 5.6 再次命中同一共识 key 会再计一次），与 `llm_cache.jsonl` 行数非同一口径，也与需求条数不同（一个需求对应多次调用）。tracker 仅在恢复运行构造，CLI 与首跑行为零变化。C 项（完成页汇总横幅）与正向管线缓存未做，正向恢复目前只显示横幅、`reuse` 恒为 0。
+
+### Changed
+
+- **反向管线 case 级断点续跑（V3）**：「继续」不再把多模型判定整段重跑，改为复用同一任务目录内**已完成的单条 LLM 判定结果**。失效判断采用内容寻址：`key = sha256(CACHE_VERSION, kind, provider, model, 调用参数, system_prompt, user_prompt)`，其中 prompt 即实际发给模型的完整载荷，因此 HLR 标签、匹配结果、候选块内容、提示词改字、profile 附加段等上游任何变化都会改变 key 自动失效（不做「改了 A 要作废 B」的依赖分析）。结果按完成顺序增量追加到 `output/v4/{job_id}/output/llm_cache.jsonl`（一行一条、立即 flush），中断最多丢「正在跑的那一个 case」。覆盖 Step 4（多模型判定）、Step 5（共识）、Step 5.5（1★/2★ 复查）三处 LLM 循环；仅缓存成功结果 —— 判定 `coverage_status == "error"`、超时占位、熔断 SKIPPED 一律不写，共识侧另用 `REVIEW_FAILURE_ANALYSIS` 哨兵识别 `_call_review_api` 重试耗尽后的「假成功」兜底对象，避免一次网络抖动被永久固化。新增 `backend/app/v4/llm_cache.py`；`pipeline.py` 装配缓存并新增 Step 4.5 drain 后的晚期判定幂等补写；`comparison/review_agent.py`、`comparison/re_review.py` 支持缓存查/写；三处 `llm.chat` 的 `temperature`/`max_tokens` 提为模块常量并编入 key，改参数即自动失效。`CACHE_VERSION` 为纪律型防线，需手工递增的场景（LLM client 内部 payload、`_extract_json` 解析修复逻辑、判定结果 schema）已写入模块 docstring。范围限反向管线、限同一任务目录，正向（完整性）管线仍整段重跑；CLI 二次运行到同一 `--output-dir` 同样复用（缓存路径取自输出目录）。详见 `docs/architecture/api.md` 第 13.2 节。
+
+### Fixed
+
+- **key 跨进程不可复现（隐患，会导致 Step 5/5.5/5.6 缓存永不命中）**：`_judge_with_degradation` 原先按 `concurrent.futures.wait()` 返回的 **set 迭代序**（`for f in done`）收集判定，该顺序与对象内存地址相关、跨进程会变。该顺序经 `case_judgments` 带进 `mr.judgments`，而下游共识/复查 prompt 正是按这个顺序拼「裁判 1/2/3」与「判断 B/C」，导致恢复运行后 prompt 与首次运行字节不同 → 下游缓存全部 miss。修复为**无条件**按 `providers` 固定顺序组装 `case_judgments`（首次运行与恢复运行走同一条路径；JSON 对象键序无语义，唯一可见变化是 prompt 内「裁判编号」的展示序）。
+- **全部命中缓存时 `filter_healthy([])` 抛异常**：`degradation/context.py::filter_healthy` 在 healthy 为空时抛 `AllProvidersUnhealthyError`，若某 case 的 provider 全部命中缓存，空 miss 列表会把整步炸掉。修复为 miss 为空时短路不调用；非空时仍传全量 `providers` 再与实际调用集求交，保持与原有相同的熔断抛错语义。
+
 ## [Unreleased] - 2026-09-14
 
 ### Added
 
-- **任务中断恢复（V1 重连 + V2 中断标记与重跑）**：因故或人为关闭程序后，可在工具入口页或各分析页的「未完成的任务」区选择**继续**（按原参数快照全量重跑，输入文件无需重新上传）或**放弃**；仍在运行的任务（如关闭浏览器后后端未退出）可直接重新挂上轮询查看进度。实现方式：任务元数据（含参数快照）随每步进度原子持久化到 `output/v4/{job_id}/job.json`，进程启动时扫描并把仍为 `pending`/`running` 的任务标记为 `interrupted`（保留原 `updated_at` 作为中断前最后进度时间）。新增 `GET /api/v4/jobs`、`POST /api/v4/jobs/{job_id}/resume`、`POST /api/v4/jobs/{job_id}/abandon` 三个接口与 `interrupted` / `abandoned` 两个任务状态；放弃仅标记状态，不删除任何文件。重跑时 Step 2（HLR 标注）命中 `hlr_labels.json` 缓存自动跳过，Step 4/5 会全部重新执行。CLI 直跑（无 `job_dir`）不写 manifest，行为不变。详见 `docs/architecture/api.md` 第 13 节。
+- **任务中断恢复（V1 重连 + V2 中断标记与重跑）**：因故或人为关闭程序后，可在工具入口页或各分析页的「未完成的任务」区选择**继续**（按原参数快照全量重跑，输入文件无需重新上传）或**放弃**；仍在运行的任务（如关闭浏览器后后端未退出）可直接重新挂上轮询查看进度。实现方式：任务元数据（含参数快照）随每步进度原子持久化到 `output/v4/{job_id}/job.json`，进程启动时扫描并把仍为 `pending`/`running` 的任务标记为 `interrupted`（保留原 `updated_at` 作为中断前最后进度时间）。新增 `GET /api/v4/jobs`、`POST /api/v4/jobs/{job_id}/resume`、`POST /api/v4/jobs/{job_id}/abandon` 三个接口与 `interrupted` / `abandoned` 两个任务状态；放弃仅标记状态，不删除任何文件。重跑时 Step 2（HLR 标注）命中 `hlr_labels.json` 缓存自动跳过，Step 4/5 会全部重新执行（该点已由下方 2026-09-15 的 V3 条目改进为 case 级复用）。CLI 直跑（无 `job_dir`）不写 manifest，行为不变。详见 `docs/architecture/api.md` 第 13 节。
 - **前端「未完成的任务」区**：新增 `InterruptedTasks` 组件（工具入口页展示全部类型、分析页按 `task_type` 过滤），上传态与工具入口页均可操作；分析页支持 `?job=<id>` 直接挂载已有任务。
 
 ### Fixed

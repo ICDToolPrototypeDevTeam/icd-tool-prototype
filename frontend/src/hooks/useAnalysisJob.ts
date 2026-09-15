@@ -13,6 +13,9 @@ export interface AnalysisJobState<T> {
   stageTotal: number
   caseIndex: number
   caseTotal: number
+  /** 恢复运行标记 / 实时复用计数（按模型调用次数计） */
+  resumed: boolean
+  reuse: { reused: number; rerun: number } | null
   resultData: T | null
   errorMessage: string
   start: (
@@ -32,6 +35,8 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
   const [stageTotal, setStageTotal] = useState(0)
   const [caseIndex, setCaseIndex] = useState(0)
   const [caseTotal, setCaseTotal] = useState(0)
+  const [resumed, setResumed] = useState(false)
+  const [reuse, setReuse] = useState<{ reused: number; rerun: number } | null>(null)
   const [resultData, setResultData] = useState<T | null>(null)
   const [errorMessage, setErrorMessage] = useState('')
 
@@ -63,6 +68,8 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
     setStageTotal(0)
     setCaseIndex(0)
     setCaseTotal(0)
+    setResumed(false)
+    setReuse(null)
     setErrorMessage('')
     setResultData(null)
   }
@@ -111,6 +118,9 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
         if (status.stage_total !== undefined) setStageTotal(status.stage_total)
         if (status.case_index !== undefined) setCaseIndex(status.case_index)
         if (status.case_total !== undefined) setCaseTotal(status.case_total)
+        if (status.resumed === true) setResumed(true)
+        // 后端可能给 null（非恢复运行），不能用 !== undefined 判空
+        setReuse(status.reuse ?? null)
 
         if (status.status === 'completed') {
           try {
@@ -167,6 +177,8 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
     stageTotal,
     caseIndex,
     caseTotal,
+    resumed,
+    reuse,
     resultData,
     errorMessage,
     start,

@@ -140,6 +140,9 @@ export default function CorrectnessPage() {
           stageTotal={job.stageTotal}
           caseIndex={job.caseIndex}
           caseTotal={job.caseTotal}
+          resumed={job.resumed}
+          reuse={job.reuse}
+          resumedHint="中断恢复执行 · 已完成的判定结果将直接复用，不重复调用模型"
         />
       )}
 

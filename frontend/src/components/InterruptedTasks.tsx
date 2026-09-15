@@ -81,7 +81,7 @@ export default function InterruptedTasks({ taskType, onOpen }: Props) {
       <div className="interrupted__header">
         <span className="interrupted__title">未完成的任务（{jobs.length}）</span>
         <span className="interrupted__hint">
-          「继续」将按原参数重新执行分析，已上传的文件无需再次提供
+          「继续」将按原参数继续分析，已上传的文件无需再次提供；正确性分析会复用已完成的判定结果
         </span>
       </div>
 

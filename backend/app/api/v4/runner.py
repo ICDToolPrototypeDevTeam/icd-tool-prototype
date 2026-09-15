@@ -392,6 +392,9 @@ def relaunch_from_manifest(job: Job, job_dir: Path) -> threading.Thread:
     if trace_dir is not None and not trace_dir.is_dir():
         raise FileNotFoundError(str(trace_dir))
 
+    # 恢复运行标记 + 计数重置（二次恢复不得累加上一轮的计数）
+    job.resumed = True
+    job.reuse = {"reused": 0, "rerun": 0}
     job.update(JobStatus.RUNNING, "任务继续执行中")
 
     if job.task_type == "completeness":

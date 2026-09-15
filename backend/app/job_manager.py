@@ -55,6 +55,9 @@ class Job:
         # 任务输出目录与参数快照；为 None 时不落盘（CLI 场景）
         self.job_dir: Optional[Path] = None
         self.params: dict = {}
+        # 恢复运行标记与实时复用计数（API 路径使用；随 manifest 持久化）
+        self.resumed: bool = False
+        self.reuse: Optional[dict] = None
 
     def set_dir(self, job_dir: Path, params: dict) -> None:
         """绑定输出目录与任务参数快照，并立即落盘 manifest。
@@ -79,6 +82,8 @@ class Job:
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat(),
             'params': self.params,
+            'resumed': self.resumed,
+            'reuse': self.reuse,
         }
         path = self.job_dir / MANIFEST_NAME
         text = json.dumps(payload, indent=2, ensure_ascii=False)
@@ -89,6 +94,12 @@ class Job:
         self.status = status
         if message is not None:
             self.message = message
+        self.updated_at = datetime.now(timezone.utc)
+        self._persist()
+
+    def set_reuse_stats(self, reused: int, rerun: int) -> None:
+        """更新恢复运行的实时复用计数并落盘（管线每完成一个 case 调用一次）。"""
+        self.reuse = {'reused': int(reused), 'rerun': int(rerun)}
         self.updated_at = datetime.now(timezone.utc)
         self._persist()
 
@@ -103,6 +114,9 @@ class Job:
         job.updated_at = datetime.fromisoformat(data['updated_at'])
         job.job_dir = Path(job_dir)
         job.params = data.get('params') or {}
+        job.resumed = bool(data.get('resumed', False))
+        raw_reuse = data.get('reuse')
+        job.reuse = raw_reuse if isinstance(raw_reuse, dict) else None
         return job
 
 
