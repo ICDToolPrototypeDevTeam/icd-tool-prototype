@@ -637,10 +637,10 @@ def _judge_with_degradation(
             f"  [multi] {case.case_id} ({idx + 1}/{total}) {statuses}",
             file=sys.stderr,
         )
-        if cache is not None:
+        # 仅命中时打缓存行（miss 不打印）：首跑全未命中时不再出现 hit=0/3 噪声
+        if cache is not None and hit:
             print(
-                f"  [cache] {case.case_id} hit={len(hit)}/{len(providers)} "
-                f"miss={len(miss)}",
+                f"  [cache] {case.case_id} hit={len(hit)}/{len(providers)}",
                 file=sys.stderr,
             )
 

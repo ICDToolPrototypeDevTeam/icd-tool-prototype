@@ -465,10 +465,10 @@ def re_review_judgments(
         )
         re_reviewed_count += 1
 
+        cache_note = f" (hit={len(hit)}/{len(active_providers)})" if hit else ""
         print(
             f"  [re-review] {case_id}: re-reviewed "
-            f"{len(active_providers)} providers "
-            f"(hit={len(hit)} miss={len(miss)})",
+            f"{len(active_providers)} providers{cache_note}",
             file=sys.stderr,
         )
 

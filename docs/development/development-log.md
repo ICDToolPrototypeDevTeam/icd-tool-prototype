@@ -3198,3 +3198,22 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   4. 计数按「调用事件」累计、不去重（同 key 在 5.6 再命中会再计），仍是展示口径而非缓存行数口径。
 
 - **下一步建议**：1) 如需要，下一轮把正向管线标注也接入（key 加 pipeline 维度）；2) 汇总提交本分支未提交的 V1/V2/V3/A+B/Step2 改动；3) C（完成页复用汇总）可选。
+
+## 2026-09-16 后端缓存日志口径统一（只打命中，不再打印 miss）
+
+- **背景**：用户复核恢复运行日志时提出，`MISS`/`miss` 字样有歧义且意义不大（首跑缓存本为空、全未命中是正常态，却与恢复未命中、失败重试混在同一字样下），且各阶段格式不一致（`... MISS`、`Cache: N hit / M miss`、`hit=0/3 miss=3`、`(hit=0 miss=3)`）。确认后统一为「只标命中」。
+
+- **修改口径**（只动打印字符串；tracker 计数、`reuse` 字段与前端复用可视化完全不变）：
+  1. `backend/app/v4/matching/hlr_labeler.py`：单条行只保留 `HIT` 标记，未命中不打标记（与无缓存路径格式一致）；失败不再打 `MISS(failed)`（失败原因仍由 `_call_label_api` 的 stderr 行「API error — ...」承载）；批末汇总改为**仅在有命中时**打印 `Cache: {n} hit`。
+  2. `backend/app/v4/comparison/review_agent.py`：`[review]` 行只保留 `HIT`，未命中不打标记。
+  3. `backend/app/v4/pipeline.py`：Step 4 `[cache]` 行改为仅命中时打印 `hit={hits}/{providers}`（删除 `miss=` 字段，未命中不再输出该行）。
+  4. `backend/app/v4/comparison/re_review.py`：Step 5.6 `[re-review]` 行改为仅命中时附 `(hit={hits}/{total})`。
+
+- **验证**（`USE_MOCK_LLM=1`，CLI 双跑 `backend/output/v4log_check`，16 HLR / 12 复查 case）：
+  1. 首跑：全日志 `grep -i miss` 为 0 条；16 条 label 行无任何标记、无 `Cache:` 汇总行；Step 4 `[cache]` 行与 re-review 括号均不出现（唯一的 `[cache]` 行是模块启动打印的 "llm_cache.jsonl not found"）（**已验证**）。
+  2. 二跑（删 `hlr_labels.json`、保留 `llm_cache.jsonl`）：label 16 行全 `HIT` + `Cache: 16 hit`；`[cache] ... hit=3/3` × 12；`[review] ... consensus HIT` × 12；`[re-review] ... (hit=3/3)` × 12；`grep -i miss` 仍为 0（**已验证**）。
+  3. 函数级脚本 `backend/tests/verify_hlr_label_cache.py` 断言同步更新（改为校验「有命中才出汇总、未命中行无标记」），重跑 21 项全 PASS，等价性/截断/失败不入缓存结论不变（**已验证**）。
+
+- **说明**：Step 5.6 的 `consensus(5.6) HIT` 在首跑日志中即可出现（同一次运行内，Step 5 写入的共识被 5.6 以相同 key 命中）——既有行为，与本次日志口径无关。本条目一并更新了 2026-09-15 条目中记载的日志格式（`Cache: N hit / M miss`、`MISS` 标记），该条目中的验证引用为当时原始日志，未回溯改写。
+
+- **修改文件**：`backend/app/v4/matching/hlr_labeler.py`、`backend/app/v4/comparison/review_agent.py`、`backend/app/v4/pipeline.py`、`backend/app/v4/comparison/re_review.py`；文档 `docs/development/development-log.md`（本条）。CHANGELOG 未变（纯日志格式调整，非版本级能力变化）。

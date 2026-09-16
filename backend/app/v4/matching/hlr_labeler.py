@@ -236,7 +236,6 @@ def label_hlrs(
     labels: dict[str, HLRLabel] = {}
     total = len(hlr_reqs)
     hits = 0
-    misses = 0
     # 注意：LLMCache 定义了 __len__，空缓存为假值，判空必须用 is not None
     model = resolve_model(LABEL_PROVIDER) if cache is not None else ""
 
@@ -265,10 +264,8 @@ def label_hlrs(
                 continue
 
         lbl = _call_label_api(llm, hlr, system_prompt, user_prompt, **LABEL_PARAMS)
-        misses += 1
-        failed = lbl is None
-        if failed:
-            lbl = _fallback_label(hlr)  # 失败结果不写缓存，下次运行仍会重试
+        if lbl is None:
+            lbl = _fallback_label(hlr)  # 失败结果不写缓存（失败原因见 _call_label_api 的 stderr 行），下次运行仍会重试
         elif cache is not None:
             cache.put(
                 key,
@@ -282,15 +279,14 @@ def label_hlrs(
         if tracker is not None:
             tracker.add(rerun=1)
         labels[hlr.requirement_id] = lbl
-        # 无缓存路径（CLI label-hlr、正向管线）不打标记，保持原有日志格式
-        tag = ("MISS(failed) " if failed else "MISS ") if cache is not None else ""
-        print(f"  [label] {idx + 1}/{total} {hlr.requirement_id} {tag}"
+        print(f"  [label] {idx + 1}/{total} {hlr.requirement_id} "
               f"bus={lbl.bus_types} devices={lbl.devices[:3]}...")
         if idx < total - 1:
             time.sleep(0.2)
 
-    if cache is not None:
-        print(f"  [label] Cache: {hits} hit / {misses} miss")
+    # 仅命中时打汇总（miss 不打印）：首跑与恢复未命中的日志格式一致，避免「全 MISS」歧义
+    if cache is not None and hits:
+        print(f"  [label] Cache: {hits} hit")
 
     # Persist cache
     if cache_path:

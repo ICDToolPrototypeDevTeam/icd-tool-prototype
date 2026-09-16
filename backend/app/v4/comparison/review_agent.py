@@ -103,7 +103,7 @@ def review_judgments(
 
         print(
             f"  [review] {mr.case_id} ({idx + 1}/{total}) {tag} "
-            f"{'HIT' if cached is not None else 'MISS'} "
+            f"{'HIT ' if cached is not None else ''}"
             f"stars={consensus.star_rating} agreement={consensus.agreement_level} "
             f"→ {consensus.final_coverage_status}",
             file=sys.stderr,
