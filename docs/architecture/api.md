@@ -21,7 +21,10 @@ API 设计应遵守以下原则：
 | `/api/v4/health`                               | `GET`  | 后端健康检查                          |
 | `/api/v4/coverage-analysis`                    | `POST` | 上传输入文件并创建 V4 反向管线任务               |
 | `/api/v4/completeness-analysis`                | `POST` | 上传输入文件并创建 V4 正向完整性分析任务            |
+| `/api/v4/jobs`                                 | `GET`  | 查询未完成/中断任务列表（可选 `status`、`task_type` 过滤） |
 | `/api/v4/jobs/{job_id}`                        | `GET`  | 查询任务状态                          |
+| `/api/v4/jobs/{job_id}/resume`                 | `POST` | 继续被中断的任务（按 manifest 参数快照重跑，已完成的 LLM 判定复用缓存） |
+| `/api/v4/jobs/{job_id}/abandon`                | `POST` | 放弃被中断的任务（仅标记，不删除文件）            |
 | `/api/v4/jobs/{job_id}/result`                 | `GET`  | 查询任务处理结果摘要（按 `task_type` 分发正确性/完整性两种 schema） |
 | `/api/v4/jobs/{job_id}/outputs/eoicd-xlsx`     | `GET`  | 下载 EoICD 条目化清单（xlsx）      |
 | `/api/v4/jobs/{job_id}/outputs/consensus-docx` | `GET`  | 下载多模型共识差异分析报告（docx）            |
@@ -93,13 +96,15 @@ GET /api/v4/jobs/{job_id}
 ```json
 {
   "job_id": "<uuid>",
-  "status": "pending | running | completed | failed",
+  "status": "pending | running | completed | failed | interrupted | abandoned",
   "stage": "parse | label | match | multi_judge | review | report | done",
   "stage_index": 3,
   "stage_total": 5,
   "case_index": 12,
   "case_total": 12,
   "message": "Step 3/5: Multi-agent judging",
+  "resumed": false,
+  "reuse": { "reused": 33, "rerun": 0 },
   "mock_models": ["minimax", "qwen"],
   "created_at": "ISO-8601",
   "updated_at": "ISO-8601"
@@ -107,6 +112,10 @@ GET /api/v4/jobs/{job_id}
 ```
 
 `mock_models` 按 ADR-001 D5 规则取值：`multi_judge_results.json.providers ∩ {"minimax", "qwen"}`；`USE_MOCK_LLM=1` 时所有 provider 都进 `mock_models`。
+
+`resumed` 表示本次运行是否为中断后的恢复运行（`resume` 启动后置 `true`，首跑为 `false`）。`reuse` 仅在恢复运行时非空，以**模型调用次数**为单位反映本次运行的两个去向：`reused` = 直接复用中断前已完成结果、未发起请求的调用次数；`rerun` = 本次接续发起的调用次数（含中断前未执行到的步骤，以及中断时正在执行或已失败、缓存中没有可用结果的调用）。计数按**反向管线的 Step 2（HLR 标注）/4/5/5.5/5.6** 与**正向管线的 Step 4（HLR 标注）/7（AI 三态复核）**逐条模型调用累计、不去重（同一结果在后续步骤再次命中会再计一次），因此与 `llm_cache.jsonl` 的行数不是同一口径；也与需求条数不同 —— 每个需求对应「每个模型一次判定 + 一次共识」等多次调用。其中两侧的 HLR 标注整批完成、命中 `hlr_labels.json` 直接加载时，加载的 N 条按 `reused` 计入。正向管线同样接入内容寻址缓存（Step 4 `kind=forward_hlr_label`、Step 7 `kind=forward_review`），恢复运行与反向一样实时反映复用/接续调用次数。
+
+`interrupted` / `abandoned` 为任务中断恢复相关状态，见第 13 节。
 
 ## 6. 查询任务结果摘要接口
 
@@ -213,7 +222,7 @@ V4 `input/traceability/` 子目录用于 `enable_traceability_prefilter=true` �
 
 ## 10. JSON 中间产物（不暴露）
 
-下列 7 个 JSON 是 V4 内部中间产物，**不**作为下载 API 暴露，**仅**保留在 `backend/output/v4/{job_id}/output/` 内供服务端日志与后续 Issue 调试：
+下列中间产物是 V4 内部数据，**不**作为下载 API 暴露，**仅**保留在 `backend/output/v4/{job_id}/output/` 内供服务端日志与后续 Issue 调试：
 
 - `multi_judge_results.json`
 - `consensus_results.json`
@@ -222,6 +231,7 @@ V4 `input/traceability/` 子目录用于 `enable_traceability_prefilter=true` �
 - `eoicd_requirements.json`
 - `hlr_requirements.json`
 - `hlr_labels.json`
+- `llm_cache.jsonl`（内容寻址 LLM 缓存，见第 13.2 节）
 
 如前端需要看这些数据，**不**通过 `GET /api/v4/jobs/{id}/outputs/{name}`；应在后续 Issue 加 `Accept: application/json` 内容协商或独立子路由。
 
@@ -337,6 +347,7 @@ GET /api/v4/jobs/{job_id}/outputs/forward-docx
 - `forward_deterministic.json`（C6 确定性判定）
 - `forward_ai_review.json`（C7 AI 三态复核）
 - `forward_coverage.json`（C8 最终覆盖结果）
+- `llm_cache.jsonl`（Step 4/7 的 LLM 调用内容寻址缓存，中断恢复时按条复用，见第 13.2 节）
 
 ### 12.5 正向错误响应
 
@@ -349,3 +360,111 @@ GET /api/v4/jobs/{job_id}/outputs/forward-docx
 | trace 模式缺追溯表 | 422 |
 | 任务 `running`/`failed` 时调 `/result` | 409 |
 | 正向 xlsx/docx 未生成时下载 | 404 |
+
+## 13. 任务中断恢复接口
+
+任务元数据随每步进度持久化到 `backend/output/v4/{job_id}/job.json`（manifest）。进程启动时扫描一次：仍为 `pending` / `running` 的 manifest 必然来自上一个已退出的进程 → 标记为 `interrupted`（保留原 `updated_at` 作为「中断前的最后进度时间」）并载入内存。已为 `interrupted` 的 manifest 同样载入，因此反复重启不会丢失中断任务。输入文件与各阶段中间产物均已落盘，无需重新上传。
+
+### 13.1 查询任务列表
+
+```text
+GET /api/v4/jobs?status=interrupted&task_type=correctness
+```
+
+（V4JobListItem，返回数组）
+
+```json
+[
+  {
+    "job_id": "<uuid>",
+    "task_type": "correctness | completeness",
+    "status": "pending | running | completed | failed | interrupted | abandoned",
+    "message": "Step 4/6: Multi-agent judging",
+    "created_at": "ISO-8601",
+    "updated_at": "ISO-8601",
+    "input_files": ["HLR.docx", "Publisher.xlsx"]
+  }
+]
+```
+
+- 两个 query 参数均可选：`status` 按状态精确过滤，`task_type` 按任务类型过滤。
+- 内存中只保留本次进程创建的任务与启动时载入的 `interrupted` 任务，因此该接口不会返回历史 `completed` / `failed` 任务。
+- `input_files` 取自 manifest 参数快照中的输入文件（仅文件名，不含路径）；CLI 等无 manifest 的任务为空数组。
+
+### 13.2 继续任务
+
+```text
+POST /api/v4/jobs/{job_id}/resume
+```
+
+按 manifest 中的参数快照（`judge_providers` / `use_mock_llm` / `controller_profile` / `no_refine` / `analysis_mode` / 追溯表等）重跑，走与新建任务完全相同的启动路径。前端不接受也不传递任何覆盖参数。
+
+返回：
+
+```json
+{ "job_id": "<uuid>", "status": "running", "message": "任务已继续执行（将重新运行分析流程）" }
+```
+
+重跑成本说明（反向/正确性管线）：
+
+- Step 2（HLR AI 标注）的每条标注按内容寻址复用（`output/llm_cache.jsonl`，`kind=hlr_label`），只有未完成的才真正调用模型；整批完成后 `output/hlr_labels.json` 落盘，此后直接整体加载跳过；
+- Step 4（多模型判定）、Step 5（共识）、Step 5.5（1★/2★ 复查）的**已完成的单条 LLM 判定结果**按内容寻址复用，只有未完成的才真正调用模型，结果随完成进度增量写入 `output/llm_cache.jsonl`。因此中断越晚、继续时省下的调用越多；
+- Step 1/3/6 等确定性步骤（解析、匹配、报告生成）本就很快，仍然全量重跑。
+
+重跑成本说明（正向/完整性管线）：
+
+- Step 4（HLR AI 标注）与反向 Step 2 同机制（`output/llm_cache.jsonl`，`kind=forward_hlr_label`）：每条标注按内容寻址复用，未完成的才真正调用模型；整批完成后 `output/hlr_labels.json` 落盘，此后直接整体加载跳过；
+- Step 7（AI 三态复核）的**已完成的单条复核结果**按内容寻址复用（`kind=forward_review`），只有未完成的才真正调用模型，随完成进度增量写入 `output/llm_cache.jsonl`。因此中断越晚、继续时省下的调用越多；
+- Step 1/2/3/5/6/8 等确定性步骤（解析、范围、块构建、召回、确定性判定、报告生成）仍全量重跑。
+
+复用只发生在**同一任务目录内**，不跨任务、也不跨管线（正/反向的缓存 `kind` 不同，即使两份 prompt 完全相同也不会互相命中）；换模型、改提示词、上游输入变化等会改变调用内容的情况都会自动失效并重新调用。
+
+恢复启动后任务标记 `resumed=true`，并从 0 重新累计 `reuse` 计数（多次恢复不累加上一轮）；`GET /jobs/{id}` 可实时看到 `reuse.reused` / `reuse.rerun` 递增，用于前端展示「已复用中断前结果 N 次 · 接续调用模型 M 次」（次数即模型调用次数，口径见第 5 节）。
+
+### 13.3 放弃任务
+
+```text
+POST /api/v4/jobs/{job_id}/abandon
+```
+
+只把状态标记为 `abandoned`，**不删除任何输入或输出文件**（磁盘清理不在本期范围）。
+
+返回：
+
+```json
+{ "job_id": "<uuid>", "status": "abandoned", "message": "任务已放弃（文件保留在输出目录，未删除）" }
+```
+
+### 13.4 中断恢复错误响应
+
+| 场景 | HTTP |
+| --- | --- |
+| `resume` / `abandon` 的任务不存在（如后端重启后该任务未留下可恢复记录） | 404 |
+| `resume` 的任务状态不是 `interrupted`（如 `completed` / `running` / `abandoned`） | 409 |
+| `abandon` 的任务状态不是 `interrupted` | 409 |
+| `resume` 时 manifest 记录的输入文件或追溯目录已不存在 | 409 |
+
+### 13.5 manifest 字段说明
+
+`output/v4/{job_id}/job.json` 由任务自身在每次 `update()` 时原子写入（`.tmp` + `os.replace`），字段：
+
+```json
+{
+  "schema_version": 1,
+  "job_id": "<uuid>",
+  "task_type": "correctness | completeness",
+  "status": "pending | running | completed | failed | interrupted | abandoned",
+  "message": "Step 1/6: Parsing input files",
+  "created_at": "ISO-8601",
+  "updated_at": "ISO-8601",
+  "params": { "hlr_path": "input/xxx.docx", "...": "..." },
+  "resumed": true,
+  "reuse": { "reused": 96, "rerun": 0 }
+}
+```
+
+`resumed` / `reuse` 为中断恢复可视化字段（见第 5 节）：恢复运行开始与每完成一条判定（反向按 case、正向按标注条/复核块）时随 `_persist` 落盘，进程被杀后计数不丢；旧 manifest 无这两键时按默认值（`false` / `null`）加载，无需迁移。
+
+`params` 中的路径一律为相对 `job_dir` 的相对路径，保证输出目录整体搬迁后仍可恢复。不持久化任务结果（重跑时重新生成）。无 `job_dir` 的任务（如 CLI 直跑 `app/v4/cli.py`）不写 manifest，行为与本次改动前一致。
+
+**部署前提（Docker）**：本能力依赖 `output/` 跨进程存活。`docker-compose.yml` 已把 `./backend/output` 以 bind mount 挂到容器内 `/app/output`（且未设置 `OUTPUT_DIR`），因此 `docker compose restart` / `down` + `up` 后 manifest 仍在、中断任务不丢。若把该卷去掉、改为匿名 volume 或设置 `OUTPUT_DIR` 指向容器内非挂载路径，本能力会静默失效（重启后任务列表为空）。

@@ -5,6 +5,12 @@ interface Props {
   stageTotal?: number
   caseIndex?: number
   caseTotal?: number
+  /** 本次运行是否为中断后的恢复运行 */
+  resumed?: boolean
+  /** 恢复运行的实时复用计数（按模型调用次数计：缓存复用 / 接续调用） */
+  reuse?: { reused: number; rerun: number } | null
+  /** 恢复横幅文案；不传用默认中性文案（正向管线无判定缓存） */
+  resumedHint?: string
 }
 
 const STAGE_LABELS: Record<string, string> = {
@@ -31,12 +37,20 @@ export default function ProcessingView({
   stageTotal,
   caseIndex,
   caseTotal,
+  resumed,
+  reuse,
+  resumedHint,
 }: Props) {
   const stageLabel = stage ? STAGE_LABELS[stage] || stage : null
   const hasV4Progress = stageLabel && stageTotal !== undefined && stageIndex !== undefined
 
   return (
     <div className="processing-state">
+      {resumed && (
+        <div className="processing-resumed">
+          {resumedHint || '中断恢复执行 · 中断前已完成的分析结果将被复用'}
+        </div>
+      )}
       <div className="processing-spinner" />
       <div className="processing-title">
         {progress || '任务正在处理'}
@@ -54,6 +68,11 @@ export default function ProcessingView({
               Case {caseIndex}/{caseTotal}
             </div>
           )}
+        </div>
+      )}
+      {resumed && reuse && reuse.reused > 0 && (
+        <div className="processing-reuse">
+          已复用中断前结果 {reuse.reused} 次 · 接续调用模型 {reuse.rerun} 次
         </div>
       )}
     </div>

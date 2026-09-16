@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.v4.config import (
@@ -27,6 +28,7 @@ from app.v4.config import (
     FORWARD_REVIEW_PROVIDER,
 )
 from app.v4.llm import get_llm
+from app.v4.llm_cache import KIND_FORWARD_REVIEW, compute_key, resolve_model
 from app.v4.models import (
     ForwardAIReviewOutput,
     ForwardAIReviewResult,
@@ -41,6 +43,9 @@ from app.v4.models import (
     HLRIdentityIndex,
 )
 from app.v4.prompts import load_prompt
+
+# 与发送给模型的参数保持同一常量来源，确保 llm_cache key 编入的就是实际参数
+FORWARD_REVIEW_PARAMS = {"temperature": 0.1, "max_tokens": 2048}
 
 
 def _extract_json(text: str) -> str:
@@ -118,23 +123,24 @@ def _build_user_prompt(
 def _review_one(
     llm,
     system_prompt: str,
-    block: ForwardICDBlock,
-    candidate_ids: list[str],
-    hlr_content: dict[str, str],
-    index: HLRIdentityIndex,
+    user_prompt: str,
+    boid: str,
     max_retries: int = 2,
 ) -> ForwardAIReviewResult:
-    """Review one block against its candidate HLRs (never raises)."""
-    boid = block.business_object_id
+    """Review one block against its candidate HLRs (never raises).
+
+    user_prompt 由调用方预先构建：查缓存与实际调用必须共用同一份 prompt，
+    否则缓存 key 会与真正发给模型的载荷漂移（要么永不命中、要么命中错误结果）。
+    """
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": _build_user_prompt(block, candidate_ids, hlr_content, index)},
+        {"role": "user", "content": user_prompt},
     ]
 
     last_error: str | None = None
     for attempt in range(max_retries + 1):
         try:
-            response = llm.chat(messages=messages, temperature=0.1, max_tokens=2048)
+            response = llm.chat(messages=messages, **FORWARD_REVIEW_PARAMS)
             data = json.loads(_extract_json(response["content"]))
             verdict = data.get("review_verdict", "unconfirmed")
             if verdict not in ("covered", "not_same_object", "unconfirmed"):
@@ -169,8 +175,15 @@ def review_blocks_with_ai(
     hlr_content: dict[str, str],
     provider: str = FORWARD_REVIEW_PROVIDER,
     llm=None,
+    cache=None,
+    tracker=None,
 ) -> ForwardAIReviewOutput:
-    """Run three-state AI review over all needs_ai blocks (C7)."""
+    """Run three-state AI review over all needs_ai blocks (C7).
+
+    ``cache`` / ``tracker``（可选）：已完成的单条复核结果按内容寻址复用
+    （kind=forward_review）、恢复运行计入 reuse 计数，机制与反向管线一致。
+    失败结果（error 非空）绝不写缓存，否则一次网络抖动会被固化进 llm_cache.jsonl。
+    """
     det_map: dict[str, ForwardDeterministicResult] = {
         r.business_object_id: r for r in deterministic.results
     }
@@ -181,19 +194,62 @@ def review_blocks_with_ai(
 
     llm = llm or get_llm(provider)
     system_prompt = load_prompt("forward_review")
+    # 注意：LLMCache 定义了 __len__，空缓存为假值，判空必须用 is not None
+    model = resolve_model(provider) if cache is not None else ""
 
     stats: dict[str, int] = {}
     results: list[ForwardAIReviewResult] = []
 
-    def run(block: ForwardICDBlock) -> ForwardAIReviewResult:
-        cand_ids = det_map[block.business_object_id].candidate_hlr_ids
+    def run(block: ForwardICDBlock) -> tuple[ForwardAIReviewResult, bool]:
+        boid = block.business_object_id
+        cand_ids = det_map[boid].candidate_hlr_ids
         top_n = cand_ids[:FORWARD_AI_CANDIDATE_TOP_N]
-        return _review_one(llm, system_prompt, block, top_n, hlr_content, index)
+        user_prompt = _build_user_prompt(block, top_n, hlr_content, index)
 
+        key = ""
+        if cache is not None:
+            key = compute_key(
+                kind=KIND_FORWARD_REVIEW,
+                provider=provider,
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                params=FORWARD_REVIEW_PARAMS,
+            )
+            payload = cache.get(key)
+            if payload is not None:
+                if tracker is not None:
+                    tracker.add(reused=1)
+                return ForwardAIReviewResult(**payload), True
+
+        result = _review_one(llm, system_prompt, user_prompt, boid)
+        if cache is not None and result.error is None:
+            cache.put(
+                key,
+                kind=KIND_FORWARD_REVIEW,
+                provider=provider,
+                model=model,
+                case_id=boid,
+                payload=result.model_dump(),
+                params=FORWARD_REVIEW_PARAMS,
+            )
+        if tracker is not None:
+            tracker.add(rerun=1)
+        return result, False
+
+    hits = 0
     with ThreadPoolExecutor(max_workers=FORWARD_AI_MAX_INFLIGHT) as pool:
         futures = {pool.submit(run, b): b for b in todo}
         for fut in as_completed(futures):
-            results.append(fut.result())
+            r, was_hit = fut.result()
+            results.append(r)
+            hits += was_hit
+            if was_hit:
+                print(f"  [forward-review] {r.business_object_id} HIT", file=sys.stderr)
+
+    # 仅命中时打汇总（miss 不打印）：首跑日志与改动前一致，避免「全 MISS」歧义
+    if cache is not None and hits:
+        print(f"  [forward-review] Cache: {hits} hit", file=sys.stderr)
 
     results.sort(key=lambda r: r.business_object_id)
     for r in results:

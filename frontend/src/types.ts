@@ -17,18 +17,42 @@ export type V4DownloadKind =
   | 'consistency/qwen'
   | 'consensus-docx'
 
+export type V4JobStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'interrupted'
+  | 'abandoned'
+
+export type V4TaskType = 'correctness' | 'completeness'
+
 export interface V4JobStatusResponse {
   job_id: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: V4JobStatus
   stage: string
   stage_index: number
   stage_total: number
   case_index: number
   case_total: number
   message: string
+  /** 本次运行是否为中断后的恢复运行 */
+  resumed?: boolean
+  /** 恢复运行的实时复用计数（按模型调用次数计：缓存复用 / 接续调用） */
+  reuse?: { reused: number; rerun: number } | null
   mock_models: string[]
   created_at: string
   updated_at: string
+}
+
+export interface V4JobListItem {
+  job_id: string
+  task_type: V4TaskType
+  status: V4JobStatus
+  message: string | null
+  created_at: string
+  updated_at: string
+  input_files: string[]
 }
 
 export interface V4JobResultResponse {

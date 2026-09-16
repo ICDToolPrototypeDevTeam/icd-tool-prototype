@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx'
 import type {
   V4JobStatusResponse,
   V4JobResultResponse,
+  V4JobListItem,
   V4DownloadKind,
   V4ForwardJobResultResponse,
   V4ForwardDownloadKind,
@@ -11,6 +12,15 @@ import type {
 // ========== V4 API ==========
 
 const API_V4_BASE = '/api/v4'
+
+/** 带 HTTP 状态码的错误；轮询据此区分「任务不存在(404)」与网络抖动。 */
+export class ApiError extends Error {
+  status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
 
 export async function analyzeFilesV4(formData: FormData): Promise<{ job_id: string; status: string; message: string }> {
   const res = await fetch(`${API_V4_BASE}/coverage-analysis`, {
@@ -38,7 +48,33 @@ export async function analyzeCompletenessV4(formData: FormData): Promise<{ job_i
 
 export async function getJobStatusV4(jobId: string): Promise<V4JobStatusResponse> {
   const res = await fetch(`${API_V4_BASE}/jobs/${jobId}`)
-  if (!res.ok) throw new Error(await res.text())
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+// ========== 中断任务：列表 / 继续 / 放弃 ==========
+
+export async function listJobsV4(
+  filter: { status?: string; taskType?: string } = {},
+): Promise<V4JobListItem[]> {
+  const query = new URLSearchParams()
+  if (filter.status) query.set('status', filter.status)
+  if (filter.taskType) query.set('task_type', filter.taskType)
+  const suffix = query.toString() ? `?${query.toString()}` : ''
+  const res = await fetch(`${API_V4_BASE}/jobs${suffix}`)
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+export async function resumeJobV4(jobId: string): Promise<{ job_id: string; status: string; message: string }> {
+  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/resume`, { method: 'POST' })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+export async function abandonJobV4(jobId: string): Promise<{ job_id: string; status: string; message: string }> {
+  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/abandon`, { method: 'POST' })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }
 

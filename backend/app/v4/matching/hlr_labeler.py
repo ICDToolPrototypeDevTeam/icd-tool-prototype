@@ -10,10 +10,21 @@ import time
 from pathlib import Path
 
 from app.v4.llm.factory import get_llm
+from app.v4.llm_cache import (
+    KIND_HLR_LABEL,
+    LLMCache,
+    ReuseTracker,
+    compute_key,
+    resolve_model,
+)
 from app.v4.models import HLRLabel, HLRLabelOutput, HLRRequirement
 
 DEFAULT_DEVICE_EXAMPLES = ("风扇", "RFAN", "FCM", "ADC")
 DEFAULT_SIGNAL_EXAMPLES = ("速度", "SPEED", "RPM", "温度", "状态")
+
+LABEL_PROVIDER = "deepseek"
+# 与发送给模型的参数保持同一常量来源，确保 llm_cache key 编入的就是实际参数
+LABEL_PARAMS = {"temperature": 0.1, "max_tokens": 2048}
 
 SYSTEM_PROMPT_TEMPLATE = """你是一个航空/车辆接口控制文档（ICD）的领域专家。你的任务是对一条软件高层需求（HLR）提取结构化标签，用于后续的匹配和检索。
 
@@ -82,10 +93,11 @@ def _call_label_api(
     llm,
     hlr: HLRRequirement,
     system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_tokens: int,
     max_retries: int = 2,
-    temperature: float = 0.1,
-    max_tokens: int = 2048,
-) -> HLRLabel:
+) -> HLRLabel | None:
     """Call DeepSeek API via factory `llm` to label one HLR requirement.
 
     Goes through `app.v4.llm.factory.get_llm` so retries / URL construction /
@@ -93,10 +105,13 @@ def _call_label_api(
       - JSON parse errors (model returned garbage)
       - any other exception (network, factory `ValueError` when missing key)
     Factory internal retry is disabled (max_retries=0) to avoid 3x3 retry storm.
+
+    Returns None when all attempts fail —— 调用方须用空标签兜底且不得把该
+    失败结果写入 llm_cache，否则失败会被固化成「已完成」。
     """
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": _build_label_prompt(hlr)},
+        {"role": "user", "content": user_prompt},
     ]
 
     for attempt in range(max_retries + 1):
@@ -132,7 +147,7 @@ def _call_label_api(
                 continue
             print(f"  [label] {hlr.requirement_id}: API error — {e}", file=sys.stderr)
 
-    return _fallback_label(hlr)
+    return None
 
 
 def _build_label_from_api(hlr: HLRRequirement, data: dict) -> HLRLabel:
@@ -171,16 +186,25 @@ def label_hlrs(
     hlr_reqs: list[HLRRequirement],
     cache_path: Path | None = None,
     profile: "ControllerProfile | None" = None,
+    cache: LLMCache | None = None,
+    tracker: ReuseTracker | None = None,
+    cache_kind: str = KIND_HLR_LABEL,
 ) -> dict[str, HLRLabel]:
-    """Label all HLR requirements via the LLM factory, with file-based caching.
+    """Label all HLR requirements via the LLM factory, with caching.
 
     Args:
         hlr_reqs: Parsed HLR requirements.
-        cache_path: Path to hlr_labels.json cache file.
+        cache_path: Path to hlr_labels.json cache file（整批结果，全部标注完成后才落盘）。
         profile: Optional controller profile. When provided, the SYSTEM_PROMPT
             is rebuilt from `profile.ai_labeling.device_examples` /
             `.signal_examples`. When None, AMS-default examples are used
             (backward-compatible).
+        cache: Optional 单条标注的内容寻址缓存（llm_cache.jsonl）。中断恢复时
+            命中即复用该条标注、不再调用模型；None 时不读不写（CLI 等调用方行为不变）。
+        tracker: Optional 复用计数回调，仅恢复运行传入。
+        cache_kind: 缓存 kind，编入 key。正向管线传 KIND_FORWARD_HLR_LABEL —— 正向与
+            反向的标注 prompt 在默认 profile 下逐字节相同（mock 靠 forward_label_context
+            区分），不带管线维度就可能把另一条管线的结果当成命中。
 
     Returns:
         dict mapping hlr_id → HLRLabel.
@@ -189,12 +213,16 @@ def label_hlrs(
     `app.v4.llm.factory.get_llm`. Per-arg overrides removed in 2026-07-27
     because every other LLM site in V4 also goes through this single channel.
     """
-    # Try cache first
+    # Try batch cache first
     if cache_path and cache_path.exists():
         print(f"  [label] Loading cached labels from {cache_path}")
         try:
             data = json.loads(cache_path.read_text(encoding="utf-8"))
-            return {hlr_id: HLRLabel(**lbl) for hlr_id, lbl in data.get("labels", {}).items()}
+            loaded = {hlr_id: HLRLabel(**lbl) for hlr_id, lbl in data.get("labels", {}).items()}
+            # 整批标注来自中断前 → 计入复用（tracker 仅恢复运行非 None）
+            if tracker is not None and loaded:
+                tracker.add(reused=len(loaded))
+            return loaded
         except Exception:
             print(f"  [label] Cache invalid, re-labeling...", file=sys.stderr)
 
@@ -202,7 +230,7 @@ def label_hlrs(
     system_prompt = _build_system_prompt(profile)
 
     try:
-        llm = get_llm("deepseek")
+        llm = get_llm(LABEL_PROVIDER)
     except Exception as e:
         # factory raises ValueError when API key is missing and mock is off;
         # fall back to empty labels (callers can store them in cache).
@@ -211,15 +239,58 @@ def label_hlrs(
 
     labels: dict[str, HLRLabel] = {}
     total = len(hlr_reqs)
+    hits = 0
+    # 注意：LLMCache 定义了 __len__，空缓存为假值，判空必须用 is not None
+    model = resolve_model(LABEL_PROVIDER) if cache is not None else ""
 
     print(f"  [label] Labeling {total} HLRs via {llm.model}...")
     for idx, hlr in enumerate(hlr_reqs):
-        lbl = _call_label_api(llm, hlr, system_prompt)
+        user_prompt = _build_label_prompt(hlr)
+        key = ""
+        if cache is not None:
+            key = compute_key(
+                kind=cache_kind,
+                provider=LABEL_PROVIDER,
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                params=LABEL_PARAMS,
+            )
+            payload = cache.get(key)
+            if payload is not None:
+                lbl = HLRLabel(**payload)
+                hits += 1
+                if tracker is not None:
+                    tracker.add(reused=1)
+                labels[hlr.requirement_id] = lbl
+                print(f"  [label] {idx + 1}/{total} {hlr.requirement_id} HIT "
+                      f"bus={lbl.bus_types} devices={lbl.devices[:3]}...")
+                continue
+
+        lbl = _call_label_api(llm, hlr, system_prompt, user_prompt, **LABEL_PARAMS)
+        if lbl is None:
+            lbl = _fallback_label(hlr)  # 失败结果不写缓存（失败原因见 _call_label_api 的 stderr 行），下次运行仍会重试
+        elif cache is not None:
+            cache.put(
+                key,
+                kind=cache_kind,
+                provider=LABEL_PROVIDER,
+                model=model,
+                case_id=hlr.requirement_id,
+                payload=lbl.model_dump(),
+                params=LABEL_PARAMS,
+            )
+        if tracker is not None:
+            tracker.add(rerun=1)
         labels[hlr.requirement_id] = lbl
         print(f"  [label] {idx + 1}/{total} {hlr.requirement_id} "
               f"bus={lbl.bus_types} devices={lbl.devices[:3]}...")
         if idx < total - 1:
             time.sleep(0.2)
+
+    # 仅命中时打汇总（miss 不打印）：首跑与恢复未命中的日志格式一致，避免「全 MISS」歧义
+    if cache is not None and hits:
+        print(f"  [label] Cache: {hits} hit")
 
     # Persist cache
     if cache_path:

@@ -39,6 +39,13 @@ class V4AnalyzeResponse(BaseModel):
 # ============================================================================
 
 
+class V4ReuseStats(BaseModel):
+    """恢复运行中的实时复用计数（判定条数：命中复用 / 重新分析）。"""
+
+    reused: int = 0
+    rerun: int = 0
+
+
 class V4JobStatusResponse(BaseModel):
     """GET /api/v4/jobs/{job_id} 响应。"""
 
@@ -51,9 +58,23 @@ class V4JobStatusResponse(BaseModel):
     case_index: Optional[int] = None
     case_total: Optional[int] = None
     message: Optional[str] = None
+    resumed: bool = False
+    reuse: Optional[V4ReuseStats] = None
     mock_models: list[str] = []
     created_at: str
     updated_at: str
+
+
+class V4JobListItem(BaseModel):
+    """GET /api/v4/jobs 列表项（轻量，不含结果字段）。"""
+
+    job_id: str
+    task_type: str = "correctness"
+    status: JobStatus
+    message: Optional[str] = None
+    created_at: str
+    updated_at: str
+    input_files: list[str] = []
 
 
 # ============================================================================

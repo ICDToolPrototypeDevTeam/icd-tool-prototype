@@ -32,6 +32,7 @@ from app.v4.matching.reverse_case_builder import build_reverse_cases
 from app.v4.matching.reverse_matcher import match_reverse
 from app.v4.matching.signal_profiler import build_profiles, build_blocks, ICDBlock
 from app.v4.matching.entry_filter import should_keep
+from app.v4.llm_cache import KIND_FORWARD_HLR_LABEL, ReuseTracker, open_llm_cache
 from app.v4.models import (
     ConsensusOutput,
     EoICDOutput,
@@ -515,6 +516,8 @@ def _judge_with_degradation(
     providers: list[str],
     ctx: DegradationContext,
     profile=None,
+    cache=None,
+    tracker=None,
 ) -> MultiJudgeOutput:
     """Judge cases with provider health tracking, timeout, and circuit breaking.
 
@@ -523,26 +526,64 @@ def _judge_with_degradation(
     - Case-level timeout via concurrent.futures.wait
     - Recording per-provider failures for circuit breaker
     - Handing timed-out judgments to ctx.drain for background finishing
+    - Reusing already-finished judgments from ``cache`` (同一 job 目录内)
+
+    ``cache`` 命中与否不改变语义：未命中的 provider 走原有调用与降级路径，
+    命中的直接落位且不占 executor / gate 名额。case_judgments 一律**按
+    providers 顺序**组装 —— 它决定下游 prompt 里「裁判 N」的编号，必须跨
+    进程可复现（原先取自 wait() 返回的 set 迭代序，恢复运行时会整体错位）。
     """
+    from app.v4.comparison.semantic_judge import (
+        REVERSE_JUDGE_PARAMS,
+        _build_reverse_user_prompt,
+    )
+    from app.v4.llm_cache import KIND_REVERSE_JUDGE, compute_key, resolve_model
     from app.v4.models import MultiJudgeOutput, MultiJudgeResult
 
     system_prompt = _build_judge_system_prompt(profile)
     total = len(cases)
     results: list[MultiJudgeResult] = []
     executor = _get_drain_executor()
+    models = {p: resolve_model(p) for p in providers} if cache is not None else {}
 
     for idx, case in enumerate(cases):
-        healthy = ctx.filter_healthy(providers)
+        hit: dict[str, dict] = {}
+        keys: dict[str, str] = {}
+        if cache is not None:
+            user_prompt = _build_reverse_user_prompt(case)
+            for p in providers:
+                keys[p] = compute_key(
+                    kind=KIND_REVERSE_JUDGE,
+                    provider=p,
+                    model=models[p],
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    params=REVERSE_JUDGE_PARAMS,
+                )
+                payload = cache.get(keys[p])
+                if payload is not None:
+                    hit[p] = payload
+        miss = [p for p in providers if p not in hit]
+
+        # filter_healthy([]) 会抛 AllProvidersUnhealthyError，全部命中时短路；
+        # 非空时仍传全量 providers，保持与现状一致的抛错语义。
+        healthy_all = ctx.filter_healthy(providers) if miss else []
+        healthy_miss = [p for p in miss if p in healthy_all]
+
+        # 恢复运行计数：命中即复用；rerun 只计实际重新发起调用的判定
+        # （被熔断 SKIPPED 的 provider 不算「重新分析」）
+        if tracker is not None:
+            tracker.add(reused=len(hit), rerun=len(healthy_miss))
 
         # Pre-fill skipped providers
         skipped = {
             p: make_error_judgment(p, "provider unhealthy", "SKIPPED")
-            for p in providers if p not in healthy
+            for p in miss if p not in healthy_all
         }
 
         # Parallel judge with adaptive timeout
         gathered, had_timeout, timed_out = _judge_case_with_timeout(
-            case, healthy, system_prompt,
+            case, healthy_miss, system_prompt,
             ceiling=ctx.config.case_total_timeout,
             extra_wait=ctx.config.extra_wait,
             executor=executor,
@@ -568,7 +609,24 @@ def _judge_with_degradation(
             else:
                 ctx.record_success(provider)
 
-        case_judgments = {**skipped, **gathered}
+        # 只固化成功判定：TIMEOUT 占位、SKIPPED、异常都不是判定结果
+        if cache is not None:
+            for provider, judgment in gathered.items():
+                if judgment.get("coverage_status") != "error":
+                    cache.put(
+                        keys[provider],
+                        kind=KIND_REVERSE_JUDGE,
+                        provider=provider,
+                        model=models[provider],
+                        case_id=case.case_id,
+                        payload=judgment,
+                        params=REVERSE_JUDGE_PARAMS,
+                    )
+
+        case_judgments = {
+            p: hit[p] if p in hit else (skipped[p] if p in skipped else gathered[p])
+            for p in providers
+        }
         results.append(MultiJudgeResult(
             case_id=case.case_id,
             judgments=case_judgments,
@@ -579,6 +637,12 @@ def _judge_with_degradation(
             f"  [multi] {case.case_id} ({idx + 1}/{total}) {statuses}",
             file=sys.stderr,
         )
+        # 仅命中时打缓存行（miss 不打印）：首跑全未命中时不再出现 hit=0/3 噪声
+        if cache is not None and hit:
+            print(
+                f"  [cache] {case.case_id} hit={len(hit)}/{len(providers)}",
+                file=sys.stderr,
+            )
 
         if idx < total - 1:
             time.sleep(0.3)
@@ -647,6 +711,64 @@ def _drain_and_rereview(
 
     ctx.drain.clear()
     return multi_out, updated
+
+
+def _backfill_judge_cache(
+    multi_out: MultiJudgeOutput,
+    cases: list,
+    providers: list[str],
+    profile,
+    cache,
+    case_ids: set[str],
+) -> int:
+    """把 Step 4.5 drain 回填的晚期判定补写进缓存（幂等，已存在的 key 跳过）。
+
+    首跑写盘时这些 case 上还是 TIMEOUT 占位，判定是 drain 之后才拿到的；
+    不补写的话恢复运行会重新排队等待这些慢 provider，等于白跑一次。
+    """
+    from app.v4.comparison.semantic_judge import (
+        REVERSE_JUDGE_PARAMS,
+        _build_reverse_user_prompt,
+    )
+    from app.v4.llm_cache import KIND_REVERSE_JUDGE, compute_key, resolve_model
+
+    system_prompt = _build_judge_system_prompt(profile)
+    models = {p: resolve_model(p) for p in providers}
+    case_map = {c.case_id: c for c in cases}
+    added = 0
+
+    for mr in multi_out.results:
+        if mr.case_id not in case_ids:
+            continue
+        case = case_map.get(mr.case_id)
+        if case is None:
+            continue
+        user_prompt = _build_reverse_user_prompt(case)
+        for p in providers:
+            judgment = (mr.judgments or {}).get(p)
+            if not judgment or judgment.get("coverage_status") == "error":
+                continue
+            key = compute_key(
+                kind=KIND_REVERSE_JUDGE,
+                provider=p,
+                model=models[p],
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                params=REVERSE_JUDGE_PARAMS,
+            )
+            # put 幂等：Step 4 已写入的 (case, provider) 返回 False，不重复追加
+            if cache.put(
+                key,
+                kind=KIND_REVERSE_JUDGE,
+                provider=p,
+                model=models[p],
+                case_id=mr.case_id,
+                payload=judgment,
+                params=REVERSE_JUDGE_PARAMS,
+            ):
+                added += 1
+
+    return added
 
 
 def _count_surviving_providers(judgments: dict[str, dict]) -> int:
@@ -794,6 +916,11 @@ def run_reverse_pipeline(
     eoicd_json_path = output_dir / "eoicd_requirements.json"
     generate_eoicd_excel(eoicd_json_path, output_dir / "EoICD条目化清单.xlsx")
 
+    # 同一 job 目录内的 LLM 判定缓存：内容寻址，命中即复用（见 app/v4/llm_cache.py）
+    cache = open_llm_cache(output_dir)
+    # 恢复运行才累计复用计数（首跑与 CLI 全程 None，行为与之前一致）
+    tracker = ReuseTracker(job.set_reuse_stats) if job.resumed else None
+
     # Step 2: HLR labeling
     print()
     print("=" * 50)
@@ -805,6 +932,8 @@ def run_reverse_pipeline(
         hlr_out.requirements,
         cache_path=labels_cache,
         profile=resolved_profile,
+        cache=cache,
+        tracker=tracker,
     )
     hlr_labels = enrich_all_labels(
         hlr_out.requirements,
@@ -884,7 +1013,8 @@ def run_reverse_pipeline(
     job.update(JobStatus.RUNNING, "Step 4/6: Multi-agent judging")
     ctx = DegradationContext(config=DegradationConfig.from_env())
     multi_out = _judge_with_degradation(
-        cases, JUDGE_PROVIDERS, ctx, profile=resolved_profile
+        cases, JUDGE_PROVIDERS, ctx, profile=resolved_profile, cache=cache,
+        tracker=tracker,
     )
 
     # Step 4.5: Drain timed-out judgments — late-but-valid outputs are kept
@@ -903,6 +1033,13 @@ def run_reverse_pipeline(
     else:
         drained_ids = set()
 
+    if drained_ids:
+        backfilled = _backfill_judge_cache(
+            multi_out, cases, JUDGE_PROVIDERS, resolved_profile, cache, drained_ids
+        )
+        if backfilled:
+            print(f"  [cache] drain backfill: {backfilled} late judgment(s) written")
+
     multi_path = output_dir / "multi_judge_results.json"
     multi_path.write_text(
         multi_out.model_dump_json(indent=2, ensure_ascii=False),
@@ -920,7 +1057,7 @@ def run_reverse_pipeline(
     print(f"Step 5/6: Review agent consensus ({len(multi_out.results)} cases)")
     print("=" * 50)
     job.update(JobStatus.RUNNING, "Step 5/6: Review agent consensus")
-    consensus_out = review_judgments(multi_out.results)
+    consensus_out = review_judgments(multi_out.results, cache=cache, tracker=tracker)
     consensus_out = _apply_degradation_review(consensus_out, ctx)
     consensus_path = output_dir / "consensus_results.json"
     consensus_data = json.loads(consensus_out.model_dump_json(indent=2, ensure_ascii=False))
@@ -945,6 +1082,8 @@ def run_reverse_pipeline(
         cases=cases,
         output_dir=output_dir,
         providers=frozen_providers,
+        cache=cache,
+        tracker=tracker,
     )
 
     # Step 5.6: Re-run consensus only for re-reviewed cases
@@ -961,7 +1100,7 @@ def run_reverse_pipeline(
             mr = next((m for m in multi_out.results if m.case_id == case_id), None)
             if mr is None:
                 continue
-            new_consensus = review_judgments([mr])
+            new_consensus = review_judgments([mr], cache=cache, tag="consensus(5.6)", tracker=tracker)
             if new_consensus.results:
                 consensus_map[case_id] = new_consensus.results[0]
         all_results = list(consensus_map.values())
@@ -1107,6 +1246,11 @@ def run_forward_pipeline(
     _save_forward(blocks, output_dir / "forward_blocks.json")
     print(f"  Total blocks: {blocks.total_blocks}")
 
+    # 同一 job 目录内的 LLM 调用缓存：内容寻址，命中即复用（见 app/v4/llm_cache.py）
+    cache = open_llm_cache(output_dir)
+    # 恢复运行才累计复用计数（首跑 tracker 为 None，行为与之前一致）
+    tracker = ReuseTracker(job.set_reuse_stats) if job.resumed else None
+
     # C4: HLR identity index (deterministic) + optional AI label recall enhancement.
     # label_hlrs() is recall-only and degrades gracefully to the deterministic
     # index on any failure — it never fails the forward task.
@@ -1124,6 +1268,9 @@ def run_forward_pipeline(
             hlr_labels = label_hlrs(
                 hlr_out.requirements,
                 cache_path=output_dir / "hlr_labels.json",
+                cache=cache,
+                tracker=tracker,
+                cache_kind=KIND_FORWARD_HLR_LABEL,
             )
         hlr_labels = enrich_all_labels(hlr_out.requirements, hlr_labels)
     except Exception as exc:  # noqa: BLE001 — label failure must not fail the task
@@ -1163,7 +1310,10 @@ def run_forward_pipeline(
     job.update(JobStatus.RUNNING, "Step 7/8: AI three-state review")
     hlr_content = {r.requirement_id: r.content for r in hlr_out.requirements}
     try:
-        ai_review = review_blocks_with_ai(blocks, deterministic, index, hlr_content)
+        ai_review = review_blocks_with_ai(
+            blocks, deterministic, index, hlr_content,
+            cache=cache, tracker=tracker,
+        )
     except Exception as exc:  # noqa: BLE001 — model unavailable / no API key
         ai_review = ForwardAIReviewOutput(total_reviewed=0, stats={"skipped": 1}, results=[])
         print(f"  [warn] AI review skipped ({type(exc).__name__}: {exc}); possible-tier blocks stay 'possible'")

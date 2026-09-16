@@ -1,6 +1,15 @@
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
+import InterruptedTasks from '../components/InterruptedTasks'
+import type { V4JobListItem } from '../types'
 
 export default function LandingPage() {
+  const navigate = useNavigate()
+
+  function handleOpen(item: V4JobListItem) {
+    const path = item.task_type === 'completeness' ? '/completeness' : '/correctness'
+    navigate(`${path}?job=${encodeURIComponent(item.job_id)}`)
+  }
+
   return (
     <div className="landing">
       <div className="landing-hero">
@@ -29,6 +38,9 @@ export default function LandingPage() {
           <div className="entry-card__cta">进入 ›</div>
         </Link>
       </div>
+
+      {/* 未完成的任务：被中断的可选择继续/放弃，运行中的可重新连上查看进度 */}
+      <InterruptedTasks onOpen={handleOpen} />
     </div>
   )
 }
