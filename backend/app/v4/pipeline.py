@@ -916,6 +916,11 @@ def run_reverse_pipeline(
     eoicd_json_path = output_dir / "eoicd_requirements.json"
     generate_eoicd_excel(eoicd_json_path, output_dir / "EoICD条目化清单.xlsx")
 
+    # 同一 job 目录内的 LLM 判定缓存：内容寻址，命中即复用（见 app/v4/llm_cache.py）
+    cache = open_llm_cache(output_dir)
+    # 恢复运行才累计复用计数（首跑与 CLI 全程 None，行为与之前一致）
+    tracker = ReuseTracker(job.set_reuse_stats) if job.resumed else None
+
     # Step 2: HLR labeling
     print()
     print("=" * 50)
@@ -927,6 +932,8 @@ def run_reverse_pipeline(
         hlr_out.requirements,
         cache_path=labels_cache,
         profile=resolved_profile,
+        cache=cache,
+        tracker=tracker,
     )
     hlr_labels = enrich_all_labels(
         hlr_out.requirements,
@@ -1004,10 +1011,6 @@ def run_reverse_pipeline(
     print(f"Step 4/6: Multi-agent judging ({len(cases)} cases, providers={JUDGE_PROVIDERS})")
     print("=" * 50)
     job.update(JobStatus.RUNNING, "Step 4/6: Multi-agent judging")
-    # 同一 job 目录内的 LLM 判定缓存：内容寻址，命中即复用（见 app/v4/llm_cache.py）
-    cache = open_llm_cache(output_dir)
-    # 恢复运行才累计复用计数（首跑与 CLI 全程 None，行为与之前一致）
-    tracker = ReuseTracker(job.set_reuse_stats) if job.resumed else None
     ctx = DegradationContext(config=DegradationConfig.from_env())
     multi_out = _judge_with_degradation(
         cases, JUDGE_PROVIDERS, ctx, profile=resolved_profile, cache=cache,

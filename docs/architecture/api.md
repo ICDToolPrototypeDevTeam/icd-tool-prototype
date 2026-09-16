@@ -113,7 +113,7 @@ GET /api/v4/jobs/{job_id}
 
 `mock_models` 按 ADR-001 D5 规则取值：`multi_judge_results.json.providers ∩ {"minimax", "qwen"}`；`USE_MOCK_LLM=1` 时所有 provider 都进 `mock_models`。
 
-`resumed` 表示本次运行是否为中断后的恢复运行（`resume` 启动后置 `true`，首跑为 `false`）。`reuse` 仅在恢复运行时非空，以**模型调用次数**为单位反映本次运行的两个去向：`reused` = 直接复用中断前已完成结果、未发起请求的调用次数；`rerun` = 本次接续发起的调用次数（含中断前未执行到的步骤，以及中断时正在执行或已失败、缓存中没有可用结果的调用）。计数按 Step 4/5/5.5/5.6 逐条判定/共识调用累计、不去重（同一判定在后续步骤再次命中会再计一次），因此与 `llm_cache.jsonl` 的行数不是同一口径；也与需求条数不同 —— 每个需求对应「每个模型一次判定 + 一次共识」等多次调用。正向（完整性）管线无判定缓存，`reuse` 恒为 `{"reused": 0, "rerun": 0}`。
+`resumed` 表示本次运行是否为中断后的恢复运行（`resume` 启动后置 `true`，首跑为 `false`）。`reuse` 仅在恢复运行时非空，以**模型调用次数**为单位反映本次运行的两个去向：`reused` = 直接复用中断前已完成结果、未发起请求的调用次数；`rerun` = 本次接续发起的调用次数（含中断前未执行到的步骤，以及中断时正在执行或已失败、缓存中没有可用结果的调用）。计数按 Step 2（HLR 标注）/4/5/5.5/5.6 逐条模型调用累计、不去重（同一结果在后续步骤再次命中会再计一次），因此与 `llm_cache.jsonl` 的行数不是同一口径；也与需求条数不同 —— 每个需求对应「每个模型一次判定 + 一次共识」等多次调用。其中 Step 2 整批完成、命中 `hlr_labels.json` 直接加载时，加载的 N 条按 `reused` 计入。正向（完整性）管线无判定缓存，`reuse` 恒为 `{"reused": 0, "rerun": 0}`。
 
 `interrupted` / `abandoned` 为任务中断恢复相关状态，见第 13 节。
 
@@ -222,7 +222,7 @@ V4 `input/traceability/` 子目录用于 `enable_traceability_prefilter=true` �
 
 ## 10. JSON 中间产物（不暴露）
 
-下列 7 个 JSON 是 V4 内部中间产物，**不**作为下载 API 暴露，**仅**保留在 `backend/output/v4/{job_id}/output/` 内供服务端日志与后续 Issue 调试：
+下列中间产物是 V4 内部数据，**不**作为下载 API 暴露，**仅**保留在 `backend/output/v4/{job_id}/output/` 内供服务端日志与后续 Issue 调试：
 
 - `multi_judge_results.json`
 - `consensus_results.json`
@@ -231,6 +231,7 @@ V4 `input/traceability/` 子目录用于 `enable_traceability_prefilter=true` �
 - `eoicd_requirements.json`
 - `hlr_requirements.json`
 - `hlr_labels.json`
+- `llm_cache.jsonl`（内容寻址 LLM 缓存，见第 13.2 节）
 
 如前端需要看这些数据，**不**通过 `GET /api/v4/jobs/{id}/outputs/{name}`；应在后续 Issue 加 `Accept: application/json` 内容协商或独立子路由。
 
@@ -405,10 +406,10 @@ POST /api/v4/jobs/{job_id}/resume
 
 重跑成本说明（反向/正确性管线）：
 
-- Step 2（HLR AI 标注）命中 `output/hlr_labels.json` 缓存自动跳过；
+- Step 2（HLR AI 标注）的每条标注按内容寻址复用（`output/llm_cache.jsonl`，`kind=hlr_label`），只有未完成的才真正调用模型；整批完成后 `output/hlr_labels.json` 落盘，此后直接整体加载跳过；
 - Step 4（多模型判定）、Step 5（共识）、Step 5.5（1★/2★ 复查）的**已完成的单条 LLM 判定结果**按内容寻址复用，只有未完成的才真正调用模型，结果随完成进度增量写入 `output/llm_cache.jsonl`。因此中断越晚、继续时省下的调用越多；
 - 复用只发生在**同一任务目录内**，不跨任务；换模型、改提示词、上游输入变化等会改变判定内容的情况都会自动失效并重新判定；
-- Step 1/2/3/6 等确定性步骤（解析、匹配、报告生成）本就很快，仍然全量重跑；
+- Step 1/3/6 等确定性步骤（解析、匹配、报告生成）本就很快，仍然全量重跑；
 - 正向（完整性）管线暂未按 case 复用，`resume` 仍为整段重跑。
 
 恢复启动后任务标记 `resumed=true`，并从 0 重新累计 `reuse` 计数（多次恢复不累加上一轮）；`GET /jobs/{id}` 可实时看到 `reuse.reused` / `reuse.rerun` 递增，用于前端展示「已复用中断前结果 N 次 · 接续调用模型 M 次」（次数即模型调用次数，口径见第 5 节）。

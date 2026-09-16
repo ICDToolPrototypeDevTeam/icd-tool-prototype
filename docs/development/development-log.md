@@ -3166,3 +3166,35 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   5. C（完成页汇总横幅）与正向管线 case 级缓存仍未做；第 2 项「并发双 resume」既有问题本次未引入新状态。
 
 - **下一步建议**：1) 手工浏览器验证恢复态视觉（两个保留任务可直接「继续」）；2) 如需要，补 C：完成页交代「本次恢复复用了多少」；3) 下一期正向管线 case 级复用，届时正向的 `reuse` 计数自动生效（tracker 透传结构已就位）。
+
+## 2026-09-15 HLR 标注接入中断恢复缓存（Step 2 按条复用，方案 A）
+
+- **背景**：V3 的 `llm_cache` 只覆盖 Step 4/5/5.5/5.6 的模型判定；Step 2（HLR AI 标注）的 `hlr_labels.json` 只在整批复标完成后才落盘，标注中途中断 = 已标注结果全部丢失、恢复后从头全量重标。用户确认按「方案 A」把标注也接入内容寻址缓存。
+
+- **实现要点**：
+  1. **按条内容寻址**：新增 `KIND_HLR_LABEL = "hlr_label"`（不升 `CACHE_VERSION`，新增 kind 不改既有 key 语义）。key 编入 profile 构建的 system prompt、`_build_label_prompt(hlr)`（requirement_id + 归一化正文）、provider/model、`LABEL_PARAMS` —— temperature/max_tokens 提为模块常量并**显式**传给 `_call_label_api`，保证 key 里编入的参数与实际发送参数同源（改参数即自动失效）。
+  2. **失败绝不入缓存**：`_call_label_api` 重试耗尽的返回值由「内部返回 fallback」改为返回 `None`，由 `label_hlrs` 用 `_fallback_label` 兜底且**不 put** —— 否则全空标签会被缓存成「已完成」永久固话。失败调用仍计 1 次 `rerun`（调用已发出）；`get_llm` 构造失败（缺 key）路径不发起调用、不计数、不落盘（保持现状）。
+  3. **fast path 保留并计数**：`hlr_labels.json` 存在时仍整体加载跳过（防老 job 目录重标）；恢复运行时加载的 N 条按 `reused` 计入（它们是中断前完成、本次未发起调用的标注，符合「已复用中断前结果」口径）。
+  4. **装配位置上移**：`run_reverse_pipeline` 中原在 Step 4 前创建的 `cache` / `tracker` 上移到 Step 2 之前，Step 2 与 Step 4-6 共用同一实例；tracker 仍仅恢复运行非 `None`。
+  5. **计数口径延伸**：恢复运行的 `reuse` 现按 Step 2 + Step 4/5/5.5/5.6 累计，单位仍为模型调用次数；单条 HLR 内部重试（最多 3 次 HTTP）只记 1 次。
+  6. **范围隔离（正向零影响）**：正向管线调用点不传 `cache`/`tracker` → 不读不写缓存、不计数；`run_forward_pipeline` 一行未动；无缓存时日志也不打 HIT/MISS 标记（保持旧格式）。
+  7. **踩坑记录**：`LLMCache` 定义了 `__len__`，判空若写 `if cache:` 会把「空缓存」当假值 —— 首跑（缓存 0 行）时 Step 2 的查/写被静默跳过、不报错。首跑验证时发现（JSONL 里没有 `hlr_label` 行），统一改为 `is not None`，与既有 Step 4 代码风格一致。
+
+- **修改文件**：后端 `backend/app/v4/llm_cache.py`（新增常量）、`backend/app/v4/matching/hlr_labeler.py`（缓存接入 + 失败语义 + 日志）、`backend/app/v4/pipeline.py`（cache/tracker 上移并透传 Step 2）；文档 `docs/architecture/api.md`（§5 口径、§10 中间产物、§13.2 重跑成本）、`CHANGELOG.md`。
+
+- **验证方式与结果**（全部 `USE_MOCK_LLM=1`；仓库无测试框架，用临时脚本 + CLI 多跑 + 本地 uvicorn `127.0.0.1:8010` 手工验证。mock 下 LLM 输出恒定，只能靠日志 HIT/MISS 标记与 JSONL 行数判断命中）：
+  1. **函数级等价性**（临时脚本 `backend/tests/verify_hlr_label_cache.py`，16 HLR）：无缓存（旧行为路径）== 全 MISS == 全 HIT 三种方式得到的 labels 完全一致；全 MISS 后 JSONL 恰为 16 行 `kind=hlr_label`；全 HIT 后行数不变（**已验证**）。
+  2. **截断模拟中断**：JSONL 只留前 5 条 `hlr_label`、删除 `hlr_labels.json` → 重跑 `5 HIT / 11 MISS`，最终 labels 与首跑逐条相等，JSONL 补回 16 行（**已验证**；CLI 层同样复现）。
+  3. **失败不入缓存**：`DEEPSEEK_BASE_URL=http://127.0.0.1:9`（连接拒绝）+ 无效 key → 返回全空 fallback、JSONL 无任何 `hlr_label` 行、`hlr_labels.json` 照常写出 fallback；改回 mock 重跑同 HLR 仍 MISS（证明失败未被固化成命中）（**已验证**）。
+  4. **API 恢复路径**（本地 uvicorn 8010，mock，AMS 输入，任务 `a93e900e-39d6-4d98-ba3b-e86fbe028f63`）：首跑 completed（`resumed=false / reuse=null`；缓存 = 16 标注 + 27 判定 + 9 共识 + 27 复查）。
+     - **中断现场 A**（删 `hlr_labels.json`、`hlr_label` 行截到 5 条、伪造 `job.json` 为 running）→ 重启扫描标记 `interrupted` → `resume` 后 ~1s 采样：Step 2 日志 `Cache: 5 hit / 11 miss`（HIT 行 5、MISS 行 11），计数从 5 起步、随 Step 4-6 逐 case 递增至终值 `{"reused": 77, "rerun": 11}` —— `rerun` 恰为被截断的 11 条重标；77 = 5（标注）+ 72（判定/共识/复查事件）（**已验证**）。
+     - **中断现场 B**（缓存与 `hlr_labels.json` 完整、伪造 running）→ 二次 `resume`：计数从 0 重新累计（非在 77 上叠加），Step 2 直接 `Loading cached labels` 并按 16 计入 `reused`，终值 `{"reused": 88, "rerun": 0}`（88 = 16 + 72），全程 `rerun=0`（**已验证**）。
+  5. **回归**：`label-hlr` CLI（`cache_path=None`、无 cache）日志格式与改动前一致、不产生任何 `llm_cache.jsonl`（**已验证**）；正向管线本轮零改动（调用点不传参，`reuse` 恒 0）。
+
+- **遗留问题**：
+  1. 正向（完整性）管线 Step 4/8 的标注仍未接入缓存（本轮刻意不做）；**下一轮若接入，必须在 key 中加 pipeline 维度** —— mock 的 `forward_label_context` 是 threading.local 标志，同一 prompt 在正/反向返回不同结果，不隔离会互相污染。
+  2. `hlr_labels.json` fast path 优先级不变：文件存在即整体加载，不看 prompt/profile 是否变化（现状语义，未在本次改动）。
+  3. 失败产生的空标签 fallback 仍会写入 `hlr_labels.json`（现状语义），下次运行因 fast path 继续沿用 —— 与本次「失败不入 llm_cache」是两个层面。
+  4. 计数按「调用事件」累计、不去重（同 key 在 5.6 再命中会再计），仍是展示口径而非缓存行数口径。
+
+- **下一步建议**：1) 如需要，下一轮把正向管线标注也接入（key 加 pipeline 维度）；2) 汇总提交本分支未提交的 V1/V2/V3/A+B/Step2 改动；3) C（完成页复用汇总）可选。

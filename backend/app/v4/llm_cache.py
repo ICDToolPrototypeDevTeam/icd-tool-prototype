@@ -28,6 +28,7 @@ CACHE_FILENAME = "llm_cache.jsonl"
 KIND_REVERSE_JUDGE = "reverse_judge"
 KIND_CONSENSUS = "consensus"
 KIND_RE_REVIEW = "re_review"
+KIND_HLR_LABEL = "hlr_label"
 
 
 def compute_key(
