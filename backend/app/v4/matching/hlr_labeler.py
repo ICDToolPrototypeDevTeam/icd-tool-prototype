@@ -188,6 +188,7 @@ def label_hlrs(
     profile: "ControllerProfile | None" = None,
     cache: LLMCache | None = None,
     tracker: ReuseTracker | None = None,
+    cache_kind: str = KIND_HLR_LABEL,
 ) -> dict[str, HLRLabel]:
     """Label all HLR requirements via the LLM factory, with caching.
 
@@ -199,8 +200,11 @@ def label_hlrs(
             `.signal_examples`. When None, AMS-default examples are used
             (backward-compatible).
         cache: Optional 单条标注的内容寻址缓存（llm_cache.jsonl）。中断恢复时
-            命中即复用该条标注、不再调用模型；None 时不读不写（CLI、正向管线行为不变）。
+            命中即复用该条标注、不再调用模型；None 时不读不写（CLI 等调用方行为不变）。
         tracker: Optional 复用计数回调，仅恢复运行传入。
+        cache_kind: 缓存 kind，编入 key。正向管线传 KIND_FORWARD_HLR_LABEL —— 正向与
+            反向的标注 prompt 在默认 profile 下逐字节相同（mock 靠 forward_label_context
+            区分），不带管线维度就可能把另一条管线的结果当成命中。
 
     Returns:
         dict mapping hlr_id → HLRLabel.
@@ -245,7 +249,7 @@ def label_hlrs(
         key = ""
         if cache is not None:
             key = compute_key(
-                kind=KIND_HLR_LABEL,
+                kind=cache_kind,
                 provider=LABEL_PROVIDER,
                 model=model,
                 system_prompt=system_prompt,
@@ -269,7 +273,7 @@ def label_hlrs(
         elif cache is not None:
             cache.put(
                 key,
-                kind=KIND_HLR_LABEL,
+                kind=cache_kind,
                 provider=LABEL_PROVIDER,
                 model=model,
                 case_id=hlr.requirement_id,

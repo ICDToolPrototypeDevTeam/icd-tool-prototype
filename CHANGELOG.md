@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-16
+
+### Added
+
+- **正向（完整性）管线中断恢复复用（Step 4 标注 + Step 7 AI 三态复核按条复用）**：正向管线的 `resume` 不再把 LLM 调用整段重跑。Step 4（HLR AI 标注）复用反向 Step 2 的机制，正向以新 kind `forward_hlr_label` 写入同一 `output/llm_cache.jsonl`；Step 7（AI 三态复核）的**已完成的单条复核结果**按内容寻址写入（`kind=forward_review`，`temperature`/`max_tokens` 提为 `FORWARD_REVIEW_PARAMS` 常量并编入 key），未完成的才真正调用模型，失败结果（`error` 非空）绝不入缓存，避免一次网络抖动被固化。两个 kind 是 key 中的**管线维度**：正/反向的标注 prompt 在默认 profile 下逐字节相同（mock 靠 `forward_label_context` 区分），不区分就可能把另一条管线的结果当成命中。复用计数口径相应延伸：恢复运行的 `reuse` 现按**反向 Step 2/4/5/5.5/5.6 + 正向 Step 4/7** 累计，正向恢复的横幅与实时计数行（前端零改动）自然生效；日志沿用「只打命中、汇总仅在有命中时打印」口径。涉及 `llm_cache.py`（2 个 KIND 常量）、`matching/hlr_labeler.py`（`label_hlrs` 新增 `cache_kind` 参数，默认值与反向行为逐字节不变）、`comparison/coverage_reviewer.py`（可选 `cache`/`tracker`、prompt 预构建共用一条路径）、`pipeline.py`（`run_forward_pipeline` 内装配缓存与 tracker，反向管线零改动）。详见 `docs/architecture/api.md` 第 5 节与第 13.2 节。
+
 ## [Unreleased] - 2026-09-15
 
 ### Added

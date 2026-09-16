@@ -32,7 +32,7 @@ from app.v4.matching.reverse_case_builder import build_reverse_cases
 from app.v4.matching.reverse_matcher import match_reverse
 from app.v4.matching.signal_profiler import build_profiles, build_blocks, ICDBlock
 from app.v4.matching.entry_filter import should_keep
-from app.v4.llm_cache import ReuseTracker, open_llm_cache
+from app.v4.llm_cache import KIND_FORWARD_HLR_LABEL, ReuseTracker, open_llm_cache
 from app.v4.models import (
     ConsensusOutput,
     EoICDOutput,
@@ -1246,6 +1246,11 @@ def run_forward_pipeline(
     _save_forward(blocks, output_dir / "forward_blocks.json")
     print(f"  Total blocks: {blocks.total_blocks}")
 
+    # 同一 job 目录内的 LLM 调用缓存：内容寻址，命中即复用（见 app/v4/llm_cache.py）
+    cache = open_llm_cache(output_dir)
+    # 恢复运行才累计复用计数（首跑 tracker 为 None，行为与之前一致）
+    tracker = ReuseTracker(job.set_reuse_stats) if job.resumed else None
+
     # C4: HLR identity index (deterministic) + optional AI label recall enhancement.
     # label_hlrs() is recall-only and degrades gracefully to the deterministic
     # index on any failure — it never fails the forward task.
@@ -1263,6 +1268,9 @@ def run_forward_pipeline(
             hlr_labels = label_hlrs(
                 hlr_out.requirements,
                 cache_path=output_dir / "hlr_labels.json",
+                cache=cache,
+                tracker=tracker,
+                cache_kind=KIND_FORWARD_HLR_LABEL,
             )
         hlr_labels = enrich_all_labels(hlr_out.requirements, hlr_labels)
     except Exception as exc:  # noqa: BLE001 — label failure must not fail the task
@@ -1302,7 +1310,10 @@ def run_forward_pipeline(
     job.update(JobStatus.RUNNING, "Step 7/8: AI three-state review")
     hlr_content = {r.requirement_id: r.content for r in hlr_out.requirements}
     try:
-        ai_review = review_blocks_with_ai(blocks, deterministic, index, hlr_content)
+        ai_review = review_blocks_with_ai(
+            blocks, deterministic, index, hlr_content,
+            cache=cache, tracker=tracker,
+        )
     except Exception as exc:  # noqa: BLE001 — model unavailable / no API key
         ai_review = ForwardAIReviewOutput(total_reviewed=0, stats={"skipped": 1}, results=[])
         print(f"  [warn] AI review skipped ({type(exc).__name__}: {exc}); possible-tier blocks stay 'possible'")

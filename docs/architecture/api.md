@@ -113,7 +113,7 @@ GET /api/v4/jobs/{job_id}
 
 `mock_models` 按 ADR-001 D5 规则取值：`multi_judge_results.json.providers ∩ {"minimax", "qwen"}`；`USE_MOCK_LLM=1` 时所有 provider 都进 `mock_models`。
 
-`resumed` 表示本次运行是否为中断后的恢复运行（`resume` 启动后置 `true`，首跑为 `false`）。`reuse` 仅在恢复运行时非空，以**模型调用次数**为单位反映本次运行的两个去向：`reused` = 直接复用中断前已完成结果、未发起请求的调用次数；`rerun` = 本次接续发起的调用次数（含中断前未执行到的步骤，以及中断时正在执行或已失败、缓存中没有可用结果的调用）。计数按 Step 2（HLR 标注）/4/5/5.5/5.6 逐条模型调用累计、不去重（同一结果在后续步骤再次命中会再计一次），因此与 `llm_cache.jsonl` 的行数不是同一口径；也与需求条数不同 —— 每个需求对应「每个模型一次判定 + 一次共识」等多次调用。其中 Step 2 整批完成、命中 `hlr_labels.json` 直接加载时，加载的 N 条按 `reused` 计入。正向（完整性）管线无判定缓存，`reuse` 恒为 `{"reused": 0, "rerun": 0}`。
+`resumed` 表示本次运行是否为中断后的恢复运行（`resume` 启动后置 `true`，首跑为 `false`）。`reuse` 仅在恢复运行时非空，以**模型调用次数**为单位反映本次运行的两个去向：`reused` = 直接复用中断前已完成结果、未发起请求的调用次数；`rerun` = 本次接续发起的调用次数（含中断前未执行到的步骤，以及中断时正在执行或已失败、缓存中没有可用结果的调用）。计数按**反向管线的 Step 2（HLR 标注）/4/5/5.5/5.6** 与**正向管线的 Step 4（HLR 标注）/7（AI 三态复核）**逐条模型调用累计、不去重（同一结果在后续步骤再次命中会再计一次），因此与 `llm_cache.jsonl` 的行数不是同一口径；也与需求条数不同 —— 每个需求对应「每个模型一次判定 + 一次共识」等多次调用。其中两侧的 HLR 标注整批完成、命中 `hlr_labels.json` 直接加载时，加载的 N 条按 `reused` 计入。正向管线同样接入内容寻址缓存（Step 4 `kind=forward_hlr_label`、Step 7 `kind=forward_review`），恢复运行与反向一样实时反映复用/接续调用次数。
 
 `interrupted` / `abandoned` 为任务中断恢复相关状态，见第 13 节。
 
@@ -347,6 +347,7 @@ GET /api/v4/jobs/{job_id}/outputs/forward-docx
 - `forward_deterministic.json`（C6 确定性判定）
 - `forward_ai_review.json`（C7 AI 三态复核）
 - `forward_coverage.json`（C8 最终覆盖结果）
+- `llm_cache.jsonl`（Step 4/7 的 LLM 调用内容寻址缓存，中断恢复时按条复用，见第 13.2 节）
 
 ### 12.5 正向错误响应
 
@@ -408,9 +409,15 @@ POST /api/v4/jobs/{job_id}/resume
 
 - Step 2（HLR AI 标注）的每条标注按内容寻址复用（`output/llm_cache.jsonl`，`kind=hlr_label`），只有未完成的才真正调用模型；整批完成后 `output/hlr_labels.json` 落盘，此后直接整体加载跳过；
 - Step 4（多模型判定）、Step 5（共识）、Step 5.5（1★/2★ 复查）的**已完成的单条 LLM 判定结果**按内容寻址复用，只有未完成的才真正调用模型，结果随完成进度增量写入 `output/llm_cache.jsonl`。因此中断越晚、继续时省下的调用越多；
-- 复用只发生在**同一任务目录内**，不跨任务；换模型、改提示词、上游输入变化等会改变判定内容的情况都会自动失效并重新判定；
-- Step 1/3/6 等确定性步骤（解析、匹配、报告生成）本就很快，仍然全量重跑；
-- 正向（完整性）管线暂未按 case 复用，`resume` 仍为整段重跑。
+- Step 1/3/6 等确定性步骤（解析、匹配、报告生成）本就很快，仍然全量重跑。
+
+重跑成本说明（正向/完整性管线）：
+
+- Step 4（HLR AI 标注）与反向 Step 2 同机制（`output/llm_cache.jsonl`，`kind=forward_hlr_label`）：每条标注按内容寻址复用，未完成的才真正调用模型；整批完成后 `output/hlr_labels.json` 落盘，此后直接整体加载跳过；
+- Step 7（AI 三态复核）的**已完成的单条复核结果**按内容寻址复用（`kind=forward_review`），只有未完成的才真正调用模型，随完成进度增量写入 `output/llm_cache.jsonl`。因此中断越晚、继续时省下的调用越多；
+- Step 1/2/3/5/6/8 等确定性步骤（解析、范围、块构建、召回、确定性判定、报告生成）仍全量重跑。
+
+复用只发生在**同一任务目录内**，不跨任务、也不跨管线（正/反向的缓存 `kind` 不同，即使两份 prompt 完全相同也不会互相命中）；换模型、改提示词、上游输入变化等会改变调用内容的情况都会自动失效并重新调用。
 
 恢复启动后任务标记 `resumed=true`，并从 0 重新累计 `reuse` 计数（多次恢复不累加上一轮）；`GET /jobs/{id}` 可实时看到 `reuse.reused` / `reuse.rerun` 递增，用于前端展示「已复用中断前结果 N 次 · 接续调用模型 M 次」（次数即模型调用次数，口径见第 5 节）。
 
@@ -456,7 +463,7 @@ POST /api/v4/jobs/{job_id}/abandon
 }
 ```
 
-`resumed` / `reuse` 为中断恢复可视化字段（见第 5 节）：恢复运行开始与每完成一个 case 时随 `_persist` 落盘，进程被杀后计数不丢；旧 manifest 无这两键时按默认值（`false` / `null`）加载，无需迁移。
+`resumed` / `reuse` 为中断恢复可视化字段（见第 5 节）：恢复运行开始与每完成一条判定（反向按 case、正向按标注条/复核块）时随 `_persist` 落盘，进程被杀后计数不丢；旧 manifest 无这两键时按默认值（`false` / `null`）加载，无需迁移。
 
 `params` 中的路径一律为相对 `job_dir` 的相对路径，保证输出目录整体搬迁后仍可恢复。不持久化任务结果（重跑时重新生成）。无 `job_dir` 的任务（如 CLI 直跑 `app/v4/cli.py`）不写 manifest，行为与本次改动前一致。
 

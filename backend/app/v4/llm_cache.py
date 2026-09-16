@@ -29,6 +29,8 @@ KIND_REVERSE_JUDGE = "reverse_judge"
 KIND_CONSENSUS = "consensus"
 KIND_RE_REVIEW = "re_review"
 KIND_HLR_LABEL = "hlr_label"
+KIND_FORWARD_HLR_LABEL = "forward_hlr_label"
+KIND_FORWARD_REVIEW = "forward_review"
 
 
 def compute_key(

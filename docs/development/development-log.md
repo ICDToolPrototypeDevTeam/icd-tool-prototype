@@ -3217,3 +3217,32 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
 - **说明**：Step 5.6 的 `consensus(5.6) HIT` 在首跑日志中即可出现（同一次运行内，Step 5 写入的共识被 5.6 以相同 key 命中）——既有行为，与本次日志口径无关。本条目一并更新了 2026-09-15 条目中记载的日志格式（`Cache: N hit / M miss`、`MISS` 标记），该条目中的验证引用为当时原始日志，未回溯改写。
 
 - **修改文件**：`backend/app/v4/matching/hlr_labeler.py`、`backend/app/v4/comparison/review_agent.py`、`backend/app/v4/pipeline.py`、`backend/app/v4/comparison/re_review.py`；文档 `docs/development/development-log.md`（本条）。CHANGELOG 未变（纯日志格式调整，非版本级能力变化）。
+
+## 2026-09-16 正向（完整性）管线中断恢复复用（Step 4 标注 + Step 7 三态复核接入 llm_cache）
+
+- **背景**：截至 09-15，反向管线（Step 2 标注 + Step 4/5/5.5/5.6 判定）已全部接入内容寻址缓存，正向（完整性）管线虽已支持 `interrupted → resume`，但恢复即整段重跑 —— Step 4 的 HLR 标注（每条一次调用）与 Step 7 的 AI 三态复核（典型 52–650 块）全部重新发请求，`reuse` 恒为 `{"reused":0,"rerun":0}`。本轮把正向这两步接入同一 `output/llm_cache.jsonl`，机制、日志口径与计数口径与反向完全一致。确定性步骤（S1/2/3/5/6/8：解析、范围、块构建、召回、确定性判定、报告生成）本就很快，仍全量重跑，不在本轮范围。
+
+- **实现要点**：
+  1. **kind 承载管线维度**：新增 `KIND_FORWARD_HLR_LABEL = "forward_hlr_label"`、`KIND_FORWARD_REVIEW = "forward_review"`。这是隔离正/反向的关键 —— 两条管线的标注 system prompt 在默认 profile 下**逐字节相同**（mock 正是靠 threading.local 的 `forward_label_context` 才让同一 prompt 返回不同结果），而 kind 已编入 `compute_key` 的 canonical payload，加 kind 即天然隔离；未动 `*_PARAMS` 契约（其语义是「与真实发送参数一一对应」，不宜塞管线字段）。不升 `CACHE_VERSION`（新增 kind 不改既有 key 语义）。
+  2. **Step 4（标注）复用反向机制**：`label_hlrs` 仅新增 `cache_kind: str = KIND_HLR_LABEL` 参数，用于 `compute_key` 与 `cache.put` 两处。反向/CLI 调用方不传 → key 与现状逐字节一致、既有反向缓存照常命中。单条 HIT、失败不写缓存（`_call_label_api` 返回 None → `_fallback_label` 且不 put）、fast path（`hlr_labels.json` 存在即整批加载并按 N 条计 `reused`）全部沿用。
+  3. **Step 7（三态复核）逐块接入**：`temperature`/`max_tokens` 提为 `FORWARD_REVIEW_PARAMS` 常量并显式传入 `llm.chat`（与 `RE_REVIEW_PARAMS`/`LABEL_PARAMS` 同模式，改参数即自动失效）；`_review_one` 改为接收调用方预先构建好的 prompt，保证「查缓存」与「实际调用」共用同一条 prompt（避免 key 漂移）；命中直接以 `ForwardAIReviewResult(**payload)` 返回、不打 API；仅 `result.error is None` 时才 `put`（失败结果绝不固化）。命中判定与 tracker 计数在 worker 内完成（`ReuseTracker` 自带锁），HIT 行与批末汇总（有命中才打）在主线程统一打印，避免多线程输出交错。
+  4. **装配镜像反向**：`run_forward_pipeline` 在 Step 3（blocks 落盘）之后组装 `cache = open_llm_cache(output_dir)`、`tracker = ReuseTracker(job.set_reuse_stats) if job.resumed else None`，Step 4/7 两处调用透传。`reuse` 计数口径从「反向 Step 2/4/5/5.5/5.6」延伸为「反向 Step 2/4/5/5.5/5.6 + 正向 Step 4/7」，单位仍为模型调用次数，仅恢复运行（tracker 非 None）计数。
+  5. **正/反独立性专项确认（用户要求，4 层审计 + 实测）**：①文件级 —— 两条管线输出目录均为 `output/v4/{job_id}/output/`，job_id 为建任务时的 uuid、task_type 建时固定写入 manifest，resume 不可改 → 缓存文件天然只属单个任务；②key 级 —— kind 编入 key，实测同一载荷下 `hlr_label` 与 `forward_hlr_label` 的 key 不同；③代码级 —— `cache_kind` 为带默认值的参数，反向路径零变动，`coverage_reviewer` 仅正向使用，`pipeline.py` 改动全部在 `run_forward_pipeline` 内；④mock —— `forward_label_context` 为 threading.local、任务各自线程。唯一进程级共享点（既存、非本次引入）：`USE_MOCK_LLM`/`JUDGE_PROVIDERS` env 在任务线程内设置并 finally 恢复，并发任务 mock 设置不同会互相影响 —— 与本轮改动无关，超出范围。
+
+- **修改文件**：后端 `backend/app/v4/llm_cache.py`（两个新常量）、`backend/app/v4/matching/hlr_labeler.py`（`cache_kind` 参数）、`backend/app/v4/comparison/coverage_reviewer.py`（`FORWARD_REVIEW_PARAMS` + 缓存接入 + `_review_one` 重构）、`backend/app/v4/pipeline.py`（正向体装配 cache/tracker + 两处调用透传 + import）；文档 `docs/architecture/api.md`（§5 计数口径、§12.4 中间产物、§13.2 重跑成本与复用说明）、`CHANGELOG.md`。反向管线代码路径、CLI、`runner.py` / `job_manager.py` / `schemas.py` / 前端（`reused` 计数器与轮询此前已就位）零改动。
+
+- **验证方式与结果**（全部 `USE_MOCK_LLM=1`；fixture 为既有正向任务目录 `backend/output/v4/02bb3cec-.../output`，blocks=504 / needs_ai=52）：
+  1. **函数级脚本** `backend/tests/verify_forward_cache.py`（27 项断言）：①无缓存基线 vs 空缓存首跑结果（按 boid 排序 model_dump）逐条相等，日志无 HIT、无 `Cache:` 汇总，JSONL 新增 52 行 `kind=forward_review`；②二跑全 HIT + `Cache: 52 hit`、JSONL 行数不变、结果仍等于基线；③截断前 5 行模拟中断 → 5 HIT + 其余静默重跑、结果仍等于基线、JSONL 补回 52 行；④失败不入缓存（`USE_MOCK_LLM=0` + `DEEPSEEK_BASE_URL=http://127.0.0.1:9` → 全部 error、零 `forward_review` 行，换回 mock 重跑仍非 HIT）；⑤正/反向隔离（同一缓存目录内 3 个 HLR 分别以两种 kind 各跑一遍：JSONL 3+3 行各归各 kind，反向仍空标签、正向仍非空标签，二跑各自全 HIT，无跨 kind 写入）。**ALL PASS**（**已验证**）。
+  2. **API 恢复路径**（本地 uvicorn 8010，mock，正向任务真实上传，任务 `47ab96ff-ce53-4253-9a17-f965e2faf4d6`）：三轮恢复运行，计数与日志逐项对账 —— 首轮 `{"reused": 16, "rerun": 52}`（Step 4 走 `hlr_labels.json` fast path 整批计 16 + Step 7 全部 52 条未命中重跑，日志 HIT=0）；第二轮前把 `llm_cache.jsonl` 截到只剩前 10 条 `forward_review` → `{"reused": 26, "rerun": 42}`（日志 10 条 HIT + `Cache: 10 hit`，26 = 16 + 10）；第三轮（缓存完整）→ `{"reused": 68, "rerun": 0}`（日志 52 条 HIT + `Cache: 52 hit`，68 = 16 标注 + 52 复核）。每轮重启进程，二次 resume 计数从 0 重新累计、不翻倍；计数与日志 HIT 行数逐项吻合（**已验证**）。
+  3. **产物一致性**：三轮恢复后的 `forward_ai_review.json` 等中间产物与 09-14 原始产物逐字段相同（仅 `generated_at` 不同）；`job.json` 终态 `status=completed / resumed=true / reuse={68, 0}`，`llm_cache.jsonl` 恰 52 行 `forward_review`（该任务 Step 4 走 fast path 未写 `forward_hlr_label` 行，与预期一致）（**已验证**）。
+  4. **回归**：反向函数级脚本 `verify_hlr_label_cache.py` 仍 ALL PASS；反向 CLI 双跑（`output/v4fwd_check`，16 HLR）：首跑日志仅出现同 run 内 Step 5.6 `consensus(5.6) HIT` ×12（既有行为，见上一条说明），二跑 `[cache] hit=3/3` ×12 + `[review] consensus HIT` ×12 + `[re-review] (hit=3/3)` ×12 + 5.6 HIT ×12，全日志零 miss 字样；缓存文件 kinds 为 `reverse_judge` 36 / `re_review` 36 / `hlr_label` 16 / `consensus` 12，无任何正向 kind 混入（**已验证**）。
+  5. **污染检查**：fixture 原目录无新增 `llm_cache.jsonl`、mtime 保持 09-14；`git status` 仅 4 个源码文件改动（后接文档改动）（**已验证**）。
+
+- **遗留问题**：
+  1. 正向 Step 4 的 `hlr_labels.json` fast path 优先级不变（文件存在即整体加载，不看 prompt/profile 是否变化）—— 现状语义，与反向一致。
+  2. 正向 Step 7 无 per-call 超时（`FORWARD_AI_TIMEOUT` 当前未在 reviewer 内使用），沿用现状，未在本轮改动。
+  3. 恢复运行下 Step 7 逐条回调 `job.set_reuse_stats`（典型 52–650 次原子小文件写），比反向「每 case 一次」更密；已有 `ReuseTracker` 锁 + `Job._LOCK` 原子写，量级可控，若实测卡顿可后续改为节流。
+  4. `get_llm` 构造失败（缺 key 等）仍整步跳过（现状降级语义：possible 保持 possible），缓存命中不会「救回」该步。
+  5. mock 下 `model == "mock"`，换模型名自动失效未在真实 provider 上复验（与 09-15 条目同）。
+
+- **下一步建议**：1) 用真实 provider 跑一次正向「Step 7 跑到一半杀 → 继续」，确认省下的调用数与产物差异符合预期；2) 汇总提交本分支未提交的 V1/V2/V3/A+B/Step 2/日志口径/正向复用改动；3) 正向确定性步骤（S1/2/3/5/6/8）如后续出现性能痛点，再评估产物级跳过（本轮不做）。
