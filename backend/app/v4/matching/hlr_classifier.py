@@ -76,6 +76,30 @@ _CN_BIT_RANGE_RE = re.compile(r"第\s*(\d+)\s*(?:到|至|~|～|-|—)\s*第?\s*(
 _CN_BIT_AND_RE = re.compile(r"第\s*(\d+)\s*[和、与]\s*(?:第)?\s*(\d+)\s*位")
 _CN_BIT_SINGLE_RE = re.compile(r"第\s*(\d+)\s*位")
 
+# —— 位赋值断言（"第9和10位分别设置为'1'和'0'"）——
+# 与 extract_bit_fields 分离：后者为位匹配做 min/max 归一（丢失书写顺序），
+# 而"分别"语义要求按书写顺序配对位号与值，且需保留值本身。此提取器只服务
+# 裁判 prompt 的确定性推导注入，不参与任何匹配。
+_CN_BIT_VALUE_PAIR_RE = re.compile(
+    r"第\s*(\d+)\s*位?\s*[和、与]\s*第?\s*(\d+)\s*位"
+    r"[^。；\n]{0,20}?"
+    r"(?:分别\s*)?(?:设置为|设为|置为|为|=|＝)\s*[“\"‘']?\s*([01])\s*[”\"’']?\s*"
+    r"[和、与,，]\s*[“\"‘']?\s*([01])\s*[”\"’']?"
+)
+_CN_BIT_VALUE_SINGLE_RE = re.compile(
+    r"第\s*(\d+)\s*位[^。；\n]{0,10}?(?:设置为|设为|置为|为|=|＝)\s*[“\"‘']?([01])\s*[”\"’']?"
+)
+# 英文位号变体（"bit8=0，bit9=0"）：位号与 ICD BitOffsetWithinDS 同基准（0 基），
+# 与中文"第N位"（1 基物理位）差 1——偏移映射差异由断言的 convention 字段携带。
+_EN_BIT_VALUE_SINGLE_RE = re.compile(
+    r"(?<![A-Za-z])[Bb]it\s*(\d+)[^。；\n]{0,10}?(?:设置为|设为|置为|为|=|＝)\s*[“\"‘']?([01])[”\"’']?"
+)
+# 断言片段内部出现否定词 ⇒ 该句在否定这个赋值，不能当断言用（保守跳过）。
+# 句子前缀出现强否定短语（不得/禁止/…）同理。
+_NEG_IN_SPAN_RE = re.compile(r"[不未非禁勿]")
+_NEG_PREFIX_RE = re.compile(r"不得|禁止|不应|不可|不能|不允许|无需|无须|不要|切勿")
+_SENT_BOUNDARY_RE = re.compile(r"[。；\n]")
+
 
 def classify_hlr(
     text: str, keywords: "ClassifierKeywords | None" = None
@@ -199,6 +223,93 @@ def extract_bit_fields(text: str) -> list[dict]:
                 "text": m.group(0), "convention": "cn-physical",
             })
     return fields
+
+
+def _sentence_prefix(text: str, idx: int) -> str:
+    """Return the text from the sentence start up to ``idx`` (exclusive)."""
+    boundary = 0
+    for m in _SENT_BOUNDARY_RE.finditer(text, 0, idx):
+        boundary = m.end()
+    return text[boundary:idx]
+
+
+def extract_bit_value_assertions(text: str) -> list[dict]:
+    """Extract two-bit value assertions like ``第9和10位分别设置为“1”和“0”``
+    or ``bit8=0，bit9=0``.
+
+    Returns assertions in text order; each is
+    ``{"positions": [9, 10], "values": ["1", "0"], "text": "<原文片段>",
+    "convention": "cn-physical"}`` with ``positions`` and ``values`` paired by
+    index, both in writing order ("分别" semantics — no min/max normalization,
+    unlike extract_bit_fields). ``convention`` tells the caller how positions
+    map to ICD offsets: Chinese 第N位 is a 1-based physical bit (offset N-1),
+    English bitN uses the same numbering as ICD BitOffsetWithinDS (offset N).
+
+    Conservative: exactly two distinct adjacent positions of the same
+    convention with exactly two 0/1 values qualify. Ranges, single bits,
+    non-adjacent pairs and negated sentences yield nothing, so callers can
+    treat "no assertion" as a silent no-op.
+    """
+    if not text:
+        return []
+
+    groups: list[tuple[int, dict]] = []
+    consumed: list[tuple[int, int]] = []
+    for m in _CN_BIT_VALUE_PAIR_RE.finditer(text):
+        consumed.append((m.start(), m.end()))
+        if _NEG_IN_SPAN_RE.search(m.group(0)):
+            continue
+        if _NEG_PREFIX_RE.search(_sentence_prefix(text, m.start())):
+            continue
+        a, b = int(m.group(1)), int(m.group(2))
+        if a == b or abs(a - b) != 1:
+            continue
+        groups.append((
+            m.start(),
+            {"positions": [a, b], "values": [m.group(3), m.group(4)],
+             "text": m.group(0), "convention": "cn-physical"},
+        ))
+
+    singles: list[tuple[int, int, int, str, str]] = []
+    for rex, convention in (
+        (_CN_BIT_VALUE_SINGLE_RE, "cn-physical"),
+        (_EN_BIT_VALUE_SINGLE_RE, "en-offset"),
+    ):
+        for m in rex.finditer(text):
+            if any(s <= m.start() < e for s, e in consumed):
+                continue
+            if _NEG_IN_SPAN_RE.search(m.group(0)):
+                continue
+            if _NEG_PREFIX_RE.search(_sentence_prefix(text, m.start())):
+                continue
+            singles.append((m.start(), m.end(), int(m.group(1)), m.group(2), convention))
+    singles.sort(key=lambda t: t[0])
+
+    runs: list[list[tuple[int, int, int, str, str]]] = []
+    for item in singles:
+        same_sentence = runs and not _SENT_BOUNDARY_RE.search(
+            text[runs[-1][-1][1]:item[0]]
+        )
+        if (runs and same_sentence and item[4] == runs[-1][-1][4]
+                and abs(item[2] - runs[-1][-1][2]) == 1):
+            runs[-1].append(item)
+        else:
+            runs.append([item])
+    for run in runs:
+        if len(run) != 2:
+            continue
+        groups.append((
+            run[0][0],
+            {
+                "positions": [run[0][2], run[1][2]],
+                "values": [run[0][3], run[1][3]],
+                "text": text[run[0][0]:run[1][1]],
+                "convention": run[0][4],
+            },
+        ))
+
+    groups.sort(key=lambda g: g[0])
+    return [g[1] for g in groups]
 
 
 def extract_sdi(text: str) -> str:

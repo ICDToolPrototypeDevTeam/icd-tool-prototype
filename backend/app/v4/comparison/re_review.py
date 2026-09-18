@@ -26,7 +26,10 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future
 from pathlib import Path
 
-from app.v4.comparison.semantic_judge import _extract_json
+from app.v4.comparison.semantic_judge import (
+    _append_bit_assembly_derivation,
+    _extract_json,
+)
 from app.v4.config import JUDGE_PROVIDERS
 from app.v4.degradation.config import DegradationConfig
 from app.v4.degradation.concurrency import (
@@ -110,6 +113,9 @@ def _build_re_review_user_prompt(
     parts.append(f"- 内容: {hlr.get('content', 'N/A')}")
     if hlr.get("rationale"):
         parts.append(f"- 基本原理: {hlr.get('rationale', '')}")
+    _append_bit_assembly_derivation(
+        parts, hlr.get('content', ''), case.matched_profiles
+    )
     parts.append("")
 
     # ── ICD Block (benchmark) ──
