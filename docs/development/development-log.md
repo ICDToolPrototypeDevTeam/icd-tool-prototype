@@ -3246,3 +3246,32 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   5. mock 下 `model == "mock"`，换模型名自动失效未在真实 provider 上复验（与 09-15 条目同）。
 
 - **下一步建议**：1) 用真实 provider 跑一次正向「Step 7 跑到一半杀 → 继续」，确认省下的调用数与产物差异符合预期；2) 汇总提交本分支未提交的 V1/V2/V3/A+B/Step 2/日志口径/正向复用改动；3) 正向确定性步骤（S1/2/3/5/6/8）如后续出现性能痛点，再评估产物级跳过（本轮不做）。
+
+## 2026-09-20 EoICD 逐字段引用行被全局去重折叠修复（子信号位宽/类型串台）
+
+- **背景**：AMS 任务 `b12f36a4-bc8d-49af-9e72-b94cadf13749` 中，HLR_313（L74 通风 FWDBFAN1 交流电 C 相接通状态，声明 bit11）裁判证据显示 `SSPC_ON: bit11, 18bit, BNR`，而 EoICD 实际为 1bit、BOOL。该错误证据直接进入 AI 裁判 user prompt（「字内子信号明细」行），可导致假阳性/假阴性判定。
+
+- **根因**：
+  1. **D1（数据折叠）**：`parse()` 末尾的全局去重键为 `(side, layer_type, signal_name, attribute_name, str(value), is_dp_ref)`，缺 `dp_ref_name`。P2.4 为每个 DP 字段生成的逐字段引用行（`is_dp_ref=True`）在同一 RP 信号下常出现同一 (属性, 值)——同一信号 12 个 DP 字段的 `DataFormatType` 全是 BOOL、`ParameterSize` 全是 1——全局去重只保留行序第一个（CB_CLOSED），其余 10 个字段的尺寸/类型行全部被折叠，跨 Pub/Sub 表同样如此。注意每 sheet 的 `row_dedup` 键**本就含** `dp_ref_name`，唯一折叠点就是全局去重。
+  2. **D2（放大回退）**：`signal_profiler` 的 per_ref 表落空后，`size = per_ref_size or dp_size or group_size` 回退借 `label_bit_dp[label][bit]` 槽位（仅按 label 号键控、last-writer-wins）。实测该 label 74 的 `label_bit_dp` 全表只有一格：bit11 → `ACS_CKPT_TAV_COMMAND_degs` 18/BNR —— 即 SSPC_ON 的「18bit BNR」来源。
+  3. 修复思路：让正确的 per-leaf 数据在回退链第一优先位命中；D2 结构本轮不动。
+
+- **方案（三选一做探针实测后定 V2）**：V0=现状键（保留 122674 行）；V1=所有引用行统一补 `dp_ref_name`（161698 行，+39024，其中 91.1% 为 description 模板不含字段名的同描述重复行，且放大 CodedSet 值拼接）；**V2=收窄补键**：仅 `attribute_name ∈ {BitOffsetWithinDS, ParameterSize, DataFormatType}` 时把 `dp_ref_name` 计入键（134094 行，+11420，全部为上述三类属性的引用行）。V2 与 V1 的 sub_signal 修正逐条等价（差异 (0,0,0)），且 block.attributes / word_protocol_fields 与 V0 一致（V2 比 V1 少 2 块 CodedSet 放大差异）。
+
+- **修改**：`backend/app/v4/parsers/eoicd_excel_parser.py` 新增模块常量 `_DP_REF_DEDUP_ATTRS`，全局去重键追加 `req.dp_ref_name if req.attribute_name in _DP_REF_DEDUP_ATTRS else ""`。仅此一处代码改动（+7 行）；`ird_id` 生成、`total_after_dedup` / `duplicates_removed`、下游 per_ref 表、LLM 缓存均自动跟随。
+
+- **验证方式与结果**（`backend/tests/` 临时脚本，gitignored；全程 `USE_MOCK_LLM=1`，未调用真实 provider）：
+  1. **等价性**（`tests/verify_dedup_v2.py`）：真实 `parse()` 输出 vs 探针仿真 V2 逐行逐字段比对，134094 行**全等**（14 字段 0 不匹配），`total_generated=634794 / duplicates_removed=500700`（**已验证**）。
+  2. **prompt 修复**（`tests/verify_dedup_v2_prompt.py`）：同一 HLR_313 case 重建裁判 user prompt，`- SSPC_ON: bit11, 18bit, BNR` → `- SSPC_ON: bit11, 1bit, BOOL`（**已验证**）。
+  3. **匹配维度**（同真实标签隔离比对，仅换 EoICD）：两个 L74 block 的 `bit_field` 维度 12 → 20（offset 11 + size 1 全中），总分 55 → 63（**已验证**）。注：mock 重跑产物里显示 55 → 50 是 mock LLM 返回空标签（devices/keywords 为空导致 signal_name / device_bus 归零）的假象，非修复引入。
+  4. **Mock E2E**：`USE_MOCK_LLM=1` CLI 全管线重跑该任务输入（输出 `c:/tmp/v2_fix_mock_run`），exit 0、产物齐全，条目化清单 134095 行（含表头）= 134094 条（**已验证**）。
+  5. **回归**：`python -m py_compile` 通过；4 个仿真实例（`probe_d1_variants.py` 等）结论一致（**已验证**）。
+
+- **影响面**：全表 +11420 行（均 PS/DFT/BitOffset 引用行）；183 个 sub_signal 的位宽/类型修正（反向 bit_field 维度与正向 `_derive_bit_fields` 的 size_rows 输入随之更准）；`ird_id` 按位置顺延；LLM 缓存为内容寻址，受影响 case 的 prompt 变化 → key 自然失效重判（`CACHE_VERSION` 无需递增）；已跑过的任务需重跑才有修复效果。
+
+- **遗留问题**：
+  1. **R2 同描述重复行**：description 模板不含字段名，同一 (属性, 值) 的多条引用行在条目化清单中描述文本相同（如 20 条「…的数据格式类型（DataFormatType）应为BOOL」）。本轮不动模板；是否把字段名加入描述属独立决策。
+  2. **R7 残余借值**：没有任何 per-field 引用行的字段仍会走 D2 回退链借 dp_map 槽（结构保留），本轮不以个案补丁处理。
+  3. 其余属性（CodedSet / TransmissionIntervalMinimum / PublishedLatency 等）维持现状折叠，未纳入本次补键。
+
+- **下一步建议**：1) 在真实 provider 上复跑该任务做 A/B，确认 HLR_313 判定不再引用错误位宽；2) 若确认有效再决定是否扩展到其余属性或 D2 结构；3) 由用户提交本分支改动。

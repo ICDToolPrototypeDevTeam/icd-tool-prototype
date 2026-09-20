@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-20
+
+### Fixed
+
+- **EoICD 逐字段引用行被全局去重折叠，导致子信号位宽/类型串台**：`parse()` 末尾的全局去重键缺 `dp_ref_name`，使 P2.4 生成的逐字段引用行中同一 (属性, 值) 只保留行序第一个 DP 字段（如同一 RP 信号下 12 个 DP 字段均为 `DataFormatType=BOOL` / `ParameterSize=1` 时，仅 CB_CLOSED 存活，其余被折叠）。下游 `signal_profiler` 的 per_ref 表落空后回退借 `label_bit_dp` 同 label 槽位，产生错误证据（实测 AMS 任务：`SSPC_ON` 被判成 bit11、18bit、BNR，实际为 1bit、BOOL，直接污染相关 HLR 的 AI 裁判输入）。修复为**收窄补键**：仅当属性 ∈ {BitOffsetWithinDS, ParameterSize, DataFormatType} 时把 `dp_ref_name` 计入全局去重键，其余属性保持现状（避免条目化清单大量同描述重复行与 CodedSet 值拼接放大）。修复后全表 122674 → 134094 行（+11420，均为上述三类属性的引用行），183 个子信号的位宽/类型修正；`ird_id` 按位置顺延（既有机制，格式不变）。LLM 判定缓存为内容寻址，受影响 case 自动失效重判（`CACHE_VERSION` 不变）；已跑过的任务需重跑才生效。1 文件 / +7 / -0 行。
+
 ## [Unreleased] - 2026-09-16
 
 ### Added

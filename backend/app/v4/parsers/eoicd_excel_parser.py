@@ -29,6 +29,12 @@ from app.v4.config import (
 from app.v4.models import EoICDOutput, EoICDRequirement
 
 
+# 这三类布局属性的 P2.4 逐字段引用行，同一 (属性, 值) 会对应多个 DP 字段名，
+# 全局去重键必须带上 dp_ref_name，否则跨字段折叠（其余属性键不含 dp_ref_name，
+# 保持现状，避免条目化清单大量同描述重复行）
+_DP_REF_DEDUP_ATTRS = {"BitOffsetWithinDS", "ParameterSize", "DataFormatType"}
+
+
 @dataclass
 class LayerBlock:
     """Represents one layer's column range within a sheet."""
@@ -349,6 +355,7 @@ class EoICDExcelParser:
                 req.attribute_name,
                 str(req.attribute_value),
                 req.is_dp_ref,
+                req.dp_ref_name if req.attribute_name in _DP_REF_DEDUP_ATTRS else "",
             )
             if key not in dedup_set:
                 dedup_set.add(key)
