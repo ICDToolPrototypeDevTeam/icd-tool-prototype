@@ -28,6 +28,7 @@ from pathlib import Path
 
 from app.v4.comparison.semantic_judge import (
     _append_bit_assembly_derivation,
+    _append_bit_range_derivation,
     _extract_json,
 )
 from app.v4.config import JUDGE_PROVIDERS
@@ -116,6 +117,7 @@ def _build_re_review_user_prompt(
     _append_bit_assembly_derivation(
         parts, hlr.get('content', ''), case.matched_profiles
     )
+    _append_bit_range_derivation(parts, hlr.get('content', ''))
     parts.append("")
 
     # ── ICD Block (benchmark) ──

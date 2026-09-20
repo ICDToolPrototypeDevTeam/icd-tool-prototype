@@ -94,6 +94,12 @@ _CN_BIT_VALUE_SINGLE_RE = re.compile(
 _EN_BIT_VALUE_SINGLE_RE = re.compile(
     r"(?<![A-Za-z])[Bb]it\s*(\d+)[^。；\n]{0,10}?(?:设置为|设为|置为|为|=|＝)\s*[“\"‘']?([01])[”\"’']?"
 )
+# 英文范围式（"bit17至bit28"）：与英文位号同基准（bitN 即 0 基 offset N）。
+# 此正则只服务裁判 prompt 的范围式推导注入，不参与匹配——extract_bit_fields 的
+# _BIT_RANGE_RE 保持原样（复制锚定风格，分隔符额外兼容"到/～/—"）。
+_EN_BIT_RANGE_ASSERT_RE = re.compile(
+    r"[Bb]it\s*(\d+)\s*[至到~～\-—]\s*[Bb]it\s*(\d+)"
+)
 # 断言片段内部出现否定词 ⇒ 该句在否定这个赋值，不能当断言用（保守跳过）。
 # 句子前缀出现强否定短语（不得/禁止/…）同理。
 _NEG_IN_SPAN_RE = re.compile(r"[不未非禁勿]")
@@ -310,6 +316,29 @@ def extract_bit_value_assertions(text: str) -> list[dict]:
 
     groups.sort(key=lambda g: g[0])
     return [g[1] for g in groups]
+
+
+def extract_bit_range_assertions(text: str) -> list[dict]:
+    """Extract English range assertions like ``bit17至bit28``.
+
+    Returns ``[{"lo": 17, "hi": 28, "text": "bit17至bit28"}]`` in text order,
+    deduped by (lo, hi); a degenerate ``bitN至bitN`` yields nothing. English
+    bitN shares the ICD offset base (bitN = 0-based offset N), so lo/hi are
+    already offsets — no conversion happens here. Serves only the
+    deterministic derivation injection in judge prompts: without it the
+    judges have applied the Chinese "第N位" -1 conversion to this English
+    form too, flipping a range identical to the ICD field to inconsistent.
+    """
+    out: list[dict] = []
+    seen: set[tuple[int, int]] = set()
+    for m in _EN_BIT_RANGE_ASSERT_RE.finditer(text):
+        a, b = int(m.group(1)), int(m.group(2))
+        lo, hi = min(a, b), max(a, b)
+        if lo == hi or (lo, hi) in seen:
+            continue
+        seen.add((lo, hi))
+        out.append({"lo": lo, "hi": hi, "text": m.group(0)})
+    return out
 
 
 def extract_sdi(text: str) -> str:

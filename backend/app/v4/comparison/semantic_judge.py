@@ -9,6 +9,7 @@ import time
 
 from app.v4.matching.hlr_classifier import (
     extract_bit_fields,
+    extract_bit_range_assertions,
     extract_bit_value_assertions,
 )
 from app.v4.models import ReverseCase, ReverseJudgmentResult
@@ -131,6 +132,32 @@ def _append_bit_assembly_derivation(
                 line += f"，其取值定义：{codedsets[0]}"
         line += f"。比对时请直接采用编码值 {assembled}，勿再按书写顺序自行组装位对。"
         parts.append(line)
+
+
+def _append_bit_range_derivation(parts: list[str], hlr_content: str) -> None:
+    """Spell out the normalized 0-based span for "bitN至bitM" range assertions.
+
+    English bitN shares the ICD offset base (bitN = 0-based offset N =
+    physical position N+1), but the anchor note only teaches the Chinese
+    "第N位" physical→0-based conversion. Left to their own arithmetic the
+    judges have applied that -1 to English range forms too — a range
+    identical to the ICD field ("bit17至bit28" vs offset=17, size=12) was
+    flipped to inconsistent by all three providers; another case showed the
+    reverse over-conversion on the ICD side. Computed here once and injected
+    as data. A pure no-op when no range assertion is present, keeping other
+    prompts byte-identical (and their cached judgments valid).
+    """
+    if not hlr_content:
+        return
+    for a in extract_bit_range_assertions(hlr_content):
+        lo, hi = a["lo"], a["hi"]
+        parts.append(
+            f"- [推导] 位段声明：{a['text']} ⇒ 英文 bitN 与 ICD "
+            f"BitOffsetWithinDS 同一基准（bitN 即 0 基 offset N，对应物理第 N+1 位）"
+            f"⇒ 归一化位段 = offset {lo}~{hi}"
+            f"（物理第{lo + 1}~{hi + 1}位，共{hi - lo + 1}位）；"
+            f"比对时请直接采用该归一化位段，勿再自行做 ±1 换算。"
+        )
 
 
 def _extract_json(text: str) -> str:
@@ -289,6 +316,7 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
     _append_bit_assembly_derivation(
         parts, hlr.get('content', ''), case.matched_profiles
     )
+    _append_bit_range_derivation(parts, hlr.get('content', ''))
     parts.append("")
 
     # ── Match evidence ──

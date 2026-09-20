@@ -3387,3 +3387,29 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   3. CodedSet 去重按**原始串**比较，乱序变体（如 `3=AMSC2B/2=AMSC2A/1=AMSC1B/0=AMSC1A` 与乱序版）在语义上等价但会被视为 2 种 → 省略；属保守方向（略过而非展示歧义），可接受。
   4. 触发 case（825c1e8b 仅 REV-0003）的 Step 4/5.5 旧缓存 key 自然失效并重判（期望行为）；FGMC 两 case 与全部中文/非触发 case prompt 逐字节不变、缓存照常命中（由验证 1⑥/2 断言）。
 - **下一步建议**：1) 用户以真实 provider 复跑 `825c1e8b` 与 FGMC-SDI-test 做 A/B；2) 汇总提交本分支两段修复（CN + EN）改动；3) 英文并列式与范围式按真实语料再评估。
+
+## 2026-09-18 反向判定位段基准不稳定修复：英文范围式位段推导确定性注入（分支 fix/issue-xxx-SDI-rules-prompt）
+
+- **背景（用户发现新误判）**：用户要求在 job `96da3513`（故障注入1.0，14 例反向 case）中核查 HLR_378/HLR_478 的 bit/位数/offset 误判。排查结论：
+  1. REV-0007（HLR_478「bit17至bit28为有效数据位」）：与 ICD 字段（`BitOffsetWithinDS=17 Bits`/`ParameterSize=12 Bits` ⇔ offset 17~28）**逐位一致，三家全票 inconsistent 5★ —— 假阳性**。三家都把英文 `bitN` 当中文「第N位」做 -1 换算（「起始位 17 vs 18」）；提示内「HLR 位声明」块已给出正确折算 `bit17至bit28 → offset=17, size=12` 却被三家无视。
+  2. REV-0004（HLR_378「bit10至bit26为气压高度」，17 位 vs ICD 19 位）：结论 inconsistent **成立**，但某家理由含同一基准错误（把「起始位 10 vs 11」当差异）；正确差异是宽度 17 vs 19。该 HLR 的 rationale「具体解析协议见…7.2.1节」未给位段依据，需人工复核。
+  3. REV-0013（HLR_4373「bit16至bit28」）：位段与 ICD 逐位一致，但有一裁判对 ICD 侧 `offset=16` 强行 +1 读成物理 17~29 虚构冲突（5.5 复盘记录 deepseek 原话「核心分歧在位编号基准」）；终局 covered 2★。
+  4. 量化：14 例中 5 例含英文范围式（REV-0003/0004/0006/0007/0013）。其中 REV-0006（HLR_473）的 inconsistent 源于语义错配（「飞机温度」vs `OHMS_Flight_Leg`）与基准无关；REV-0003 的位段读对属运气。
+- **约定基准（用户拍板，一套标准）**：A429 32 位，bit31(MSB)…bit0(LSB) ⇔ 物理第32位…第1位 ⇔ ICD offset 31…0；即 **bitN = 0 基 offset N = 物理第 N+1 位**（英文写法），**只有中文「第N位」做 -1 换算**（1 基物理位 → offset N-1）。用户明确否决「0基/1基两套标准」的表述 —— 是一套标准、两种书写形式。
+- **方案（方案三瘦身版，用户确认；区别于 SDI 行的做法）**：只注入**一行归一化推导**（三连等式 + offset lo~hi），**不引用** ICD 字段/CodedSet（范围式命中时跨块字段引用易生歧义，且一行推导已足够）。不改任何 system prompt；`re_review.md` 规则真空仍属独立问题。git 历史核查确认：中文 -1 归一化从未被移除、一直原样在位（d3590b7 引入至今），本次不是「改回来」而是补英文范围式盲区。
+- **实现要点**：
+  1. `hlr_classifier` 新增 `_EN_BIT_RANGE_ASSERT_RE`（`[Bb]it\s*(\d+)\s*[至到~～\-—]\s*[Bb]it\s*(\d+)`）与 `extract_bit_range_assertions()`：逆序归一 lo<hi、按 (lo,hi) 去重、退化同号 no-op；**不参与匹配**（`_BIT_RANGE_RE`/`extract_bit_fields` 及其 4 个调用方零改动）。
+  2. `semantic_judge._append_bit_range_derivation()`：每个断言追加一行 ——「- [推导] 位段声明：{原文} ⇒ 英文 bitN 与 ICD BitOffsetWithinDS 同一基准（bitN 即 0 基 offset N，对应物理第 N+1 位）⇒ 归一化位段 = offset lo~hi（物理第 lo+1~hi+1 位，共 N 位）；比对时请直接采用该归一化位段，勿再自行做 ±1 换算。」
+  3. 两处调用点与 SDI 行相同：`_build_reverse_user_prompt`（位声明块/赋值推导之后）+ `_build_re_review_user_prompt`（经 `_make_re_review_prompt` 与缓存 key 预计算同源）。
+- **修改文件**：`backend/app/v4/matching/hlr_classifier.py`、`backend/app/v4/comparison/semantic_judge.py`、`backend/app/v4/comparison/re_review.py`；文档 `CHANGELOG.md`、`docs/development/development-log.md`（本条）。新增（gitignored）：`backend/tests/verify_range_derivation.py`。system prompt、`multi_judge.py`、consensus、正向管线、`CACHE_VERSION` 零改动。
+- **验证方式与结果**：
+  1. **单元 + 等价性**（`backend/tests/verify_range_derivation.py`，38 项 **ALL PASS**）：①提取器：478/378 原文、7 种变体（波浪号/到/连字符/全角波浪/破折号/大小写/含空格）、7 类反例不误报（单 bit 为式、单 bit 有效数据位、英文值断言、中文位对、中文范围式盲区、Label/ARINC 干扰串、退化同号）、去重、逆序归一、确定性两遍一致；②构建器：478 推导行逐字符精确匹配、Step 4 出现一次、Step 5.5 同含、与位赋值断言共存并排各一次；③**逐字节等价**：非触发 case（已匹配/待确定+空块）的 Step 4 与 Step 5.5 prompt 与 `git show HEAD:` 旧版模块（importlib 加载）输出逐字节相等；触发 case 与旧版逐行对照仅多 1 行推导；④**真实 job 96da3513 全量 14 例**：差异集 == 提取器命中集（5 例：REV-0003/0004/0006/0007/0013）、全部差异仅为追加的推导行、REV-0007 行含「offset 17~28（物理第18~29位，共12位）」（**已验证**）。
+  2. **Mock E2E 双跑**（`USE_MOCK_LLM=1`，输入取 `96da3513` 的 input/，输出 `backend/output`）：两遍均「Reverse pipeline complete」、产物齐全（4 份报告 docx 与全部 json）；二跑 Step 4 与 Step 5.5 全部 12 case × 3 provider **`hit=3/3`**（缓存 key 与实际载荷同源验证）（**已验证**）。
+  3. **回归**：三个改动文件 `py_compile` 通过；`tests/verify_sdi_derivation.py` / `verify_sdi_realdata.py` 与本次无交集（不同提取器/构建器）未重跑（**已验证**）。
+- **遗留问题**：
+  1. **真实 provider A/B 未跑**（按约定由用户执行）：复跑 `96da3513` 同一输入，预期 REV-0007 不再三家全票 inconsistent；REV-0004 结论应仍 inconsistent 但理由应改为宽度 17 vs 19。
+  2. **HLR_478 rationale 疑含数据笔误**：「bit17是LSB，bit18是MSB」—— 12 位字段（bit17~bit28）MSB 应在 bit28，对照同文档 HLR_473「bit21是LSB，bit28是MSB」可证「bit18」疑为「bit28」笔误；是否按笔误处理（输入数据侧修正）**待用户拍板**，与本修复独立。
+  3. 触发盲区（中文范围式「第N到M位」、单 bit、非相邻位对）保守 no-op，行为与现状一致、不劣化；真实语料出现再扩展。
+  4. 模型仍可无视推导（RUN-B 先例）—— 推导行是「case 数据 + 基准声明」，强于规则行，不承诺 100% 收敛；以真实 A/B 观察。
+  5. 触发 case（本 job 5 例）的 Step 4/5.5 旧缓存 key 自然失效并重判（期望行为）；非触发 case prompt 逐字节不变、缓存照常命中（由验证 1③④ 断言）。
+- **下一步建议**：1) 用户以真实 provider 复跑 `96da3513` 输入做 A/B；2) HLR_478 rationale 笔误拍板后如需修正，属输入数据侧改动、与本修复独立；3) 中文范围式盲区按真实语料评估；4) 汇总提交本分支三段修复（CN 位对 + EN 逐位 + EN 范围式）。
