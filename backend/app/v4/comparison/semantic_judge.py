@@ -141,11 +141,20 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
             if sub_signals:
                 parts.append("- 字内子信号明细:")
                 for ss in sub_signals:
+                    state_suffix = ""
+                    if (
+                        ss.get("one_state") is not None
+                        or ss.get("zero_state") is not None
+                    ):
+                        state_suffix = (
+                            f"（OneState={ss.get('one_state', '—')} / "
+                            f"ZeroState={ss.get('zero_state', '—')}）"
+                        )
                     parts.append(
                         f"  - {ss.get('dp_name', '?')}: "
                         f"bit{ss.get('bit_offset', '?')}, "
                         f"{ss.get('size', '?')}bit, "
-                        f"{ss.get('dtype', '?')}"
+                        f"{ss.get('dtype', '?')}{state_suffix}"
                     )
 
             # Same-word protocol field definitions — context only, not a

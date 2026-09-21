@@ -2,6 +2,24 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-21
+
+### Fixed
+
+- **HLR 正文重复 label 提及导致反向候选重复入列并挤占 top-K 窗口**：`extract_labels` 原按文本逐次产出标签（`L(\d+)` 为子串匹配，"LABEL270" 亦命中），正文提及 N 次即产出 N 条；`_match_path1_label` 按标签条目逐次追加候选，同一候选块重复入列（实测基线 job `37fb82f0`：`FSF21000101_HLR_4928` 正文 24 次 "LABEL270" → 20 条 `matched_profile_keys` 中 18 条重复、`top_k=20` 窗口被 `L270/L_ENG_BLEED_AREA_OVHT_A/B` 各 10 条占满，排序靠后的 `L270/Fire_AREA_OVHT_A/B` 两块被挤出；`a508e191`：同 HLR 同现象，`HLR_4852` 14 条 keys 中 12 条重复）。修复为**保序去重**（首见顺序、大小写不敏感）。实测：受影响 HLR 候选 key 由重复清单变为 4 条 distinct（37fb82f0）/ 2 条（a508e191），裁判 prompt 行数 809→201、809→125、300→60，`match_evidence.hlr_labels` 去重为 `['L270']`/`['L52']`，`match_type` 不变；未受影响 HLR 的匹配结果与裁判 prompt 逐字节相等；正向 A/B 除 `hlr_identity_index.json` 的 `labels` 展示字段（7→1 / 24→1）外全部产物逐字段相等、确定性/覆盖 stats 零差异。LLM 判定缓存为内容寻址，仅触发 case 自动失效重判（`CACHE_VERSION` 不变）；已跑过的任务需重跑才生效。1 文件 / +11 / -1 行。
+
+## [Unreleased] - 2026-09-20
+
+### Changed
+
+- **反向判定输入下沉字段级 OneState/ZeroState（S2 挂载）**：裁判 user prompt 的「字内子信号明细」由 bit/位宽/类型三要素扩为内联字段状态定义（`- INSTANTANEOUS_TRIP: bit13, 1bit, BOOL（OneState=Trip / ZeroState=In）`），使「接通/断开状态」类断言可对「该 bit 的 1/0 各代表什么」做比对，不再依赖 LLM 从块级合并状态猜测归属。实现：`build_reverse_cases` 序列化块时，若块含子信号、至少一个字段有逐字段状态行、且所有有状态字段均存在于 sub_signals（无孤儿），则从块级 `merged_attributes` 剥离 OneState/ZeroState，并把逐字段状态以 `one_state`/`zero_state` 键挂载到子信号**副本**（不就地修改 `block.sub_signals`）；不满足触发条件时静默 no-op，与旧行为逐字节一致（实测基线 job 的 7 个 REV case：5 个裁判 prompt 逐字节相同；触发 case 行数变化恰等于被剥离的块级状态行数，REV-0005 87→83、REV-0006 849→809）。5.5 复查 prompt 只渲染固定键、不受影响；正向管线产物结构不变（前向 A/B：6 件产物结构一致，确定性/覆盖 stats 零差异）；LLM 判定缓存为内容寻址，仅触发 case 自动失效重判（`CACHE_VERSION` 不变）。3 文件 / +64 / -7 行。
+
+### Fixed
+
+- **EoICD 逐字段引用行被全局去重折叠，导致子信号位宽/类型串台**：`parse()` 末尾的全局去重键缺 `dp_ref_name`，使 P2.4 生成的逐字段引用行中同一 (属性, 值) 只保留行序第一个 DP 字段（如同一 RP 信号下 12 个 DP 字段均为 `DataFormatType=BOOL` / `ParameterSize=1` 时，仅 CB_CLOSED 存活，其余被折叠）。下游 `signal_profiler` 的 per_ref 表落空后回退借 `label_bit_dp` 同 label 槽位，产生错误证据（实测 AMS 任务：`SSPC_ON` 被判成 bit11、18bit、BNR，实际为 1bit、BOOL，直接污染相关 HLR 的 AI 裁判输入）。修复为**收窄补键**：仅当属性 ∈ {BitOffsetWithinDS, ParameterSize, DataFormatType} 时把 `dp_ref_name` 计入全局去重键，其余属性保持现状（避免条目化清单大量同描述重复行与 CodedSet 值拼接放大）。修复后全表 122674 → 134094 行（+11420，均为上述三类属性的引用行），183 个子信号的位宽/类型修正；`ird_id` 按位置顺延（既有机制，格式不变）。LLM 判定缓存为内容寻址，受影响 case 自动失效重判（`CACHE_VERSION` 不变）；已跑过的任务需重跑才生效。1 文件 / +7 / -0 行。
+
+- **逐字段 OneState/ZeroState 引用行被全局去重折叠（子信号无状态可引用）**：承接上一条 V2 收窄补键，`_DP_REF_DEDUP_ATTRS` 增补 `OneState`/`ZeroState` —— 同一 word 内多个布尔字段常共用同一状态值（如 'Trip'/'In'），全局去重会把后出现字段的状态行吞并到首个同值字段（实测 `INSTANTANEOUS_TRIP` 等子信号无状态）。修复后全表 134094 → 137758 行（+3664，均为 RP 侧 OneState/ZeroState 逐字段引用行且全部通过 should_keep，无行丢失），条目化清单 xlsx 数据行同步 +3664；块键集合、block 级 attributes / sub_signals 与旧版零差异；`ird_id` 按位置顺延（既有机制）。LLM 判定缓存为内容寻址，受影响 case 自动失效重判；已跑过的任务需重跑才生效。
+
 ## [Unreleased] - 2026-09-16
 
 ### Added

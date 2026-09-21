@@ -3246,3 +3246,94 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   5. mock 下 `model == "mock"`，换模型名自动失效未在真实 provider 上复验（与 09-15 条目同）。
 
 - **下一步建议**：1) 用真实 provider 跑一次正向「Step 7 跑到一半杀 → 继续」，确认省下的调用数与产物差异符合预期；2) 汇总提交本分支未提交的 V1/V2/V3/A+B/Step 2/日志口径/正向复用改动；3) 正向确定性步骤（S1/2/3/5/6/8）如后续出现性能痛点，再评估产物级跳过（本轮不做）。
+
+## 2026-09-20 EoICD 逐字段引用行被全局去重折叠修复（子信号位宽/类型串台）
+
+- **背景**：AMS 任务 `b12f36a4-bc8d-49af-9e72-b94cadf13749` 中，HLR_313（L74 通风 FWDBFAN1 交流电 C 相接通状态，声明 bit11）裁判证据显示 `SSPC_ON: bit11, 18bit, BNR`，而 EoICD 实际为 1bit、BOOL。该错误证据直接进入 AI 裁判 user prompt（「字内子信号明细」行），可导致假阳性/假阴性判定。
+
+- **根因**：
+  1. **D1（数据折叠）**：`parse()` 末尾的全局去重键为 `(side, layer_type, signal_name, attribute_name, str(value), is_dp_ref)`，缺 `dp_ref_name`。P2.4 为每个 DP 字段生成的逐字段引用行（`is_dp_ref=True`）在同一 RP 信号下常出现同一 (属性, 值)——同一信号 12 个 DP 字段的 `DataFormatType` 全是 BOOL、`ParameterSize` 全是 1——全局去重只保留行序第一个（CB_CLOSED），其余 10 个字段的尺寸/类型行全部被折叠，跨 Pub/Sub 表同样如此。注意每 sheet 的 `row_dedup` 键**本就含** `dp_ref_name`，唯一折叠点就是全局去重。
+  2. **D2（放大回退）**：`signal_profiler` 的 per_ref 表落空后，`size = per_ref_size or dp_size or group_size` 回退借 `label_bit_dp[label][bit]` 槽位（仅按 label 号键控、last-writer-wins）。实测该 label 74 的 `label_bit_dp` 全表只有一格：bit11 → `ACS_CKPT_TAV_COMMAND_degs` 18/BNR —— 即 SSPC_ON 的「18bit BNR」来源。
+  3. 修复思路：让正确的 per-leaf 数据在回退链第一优先位命中；D2 结构本轮不动。
+
+- **方案（三选一做探针实测后定 V2）**：V0=现状键（保留 122674 行）；V1=所有引用行统一补 `dp_ref_name`（161698 行，+39024，其中 91.1% 为 description 模板不含字段名的同描述重复行，且放大 CodedSet 值拼接）；**V2=收窄补键**：仅 `attribute_name ∈ {BitOffsetWithinDS, ParameterSize, DataFormatType}` 时把 `dp_ref_name` 计入键（134094 行，+11420，全部为上述三类属性的引用行）。V2 与 V1 的 sub_signal 修正逐条等价（差异 (0,0,0)），且 block.attributes / word_protocol_fields 与 V0 一致（V2 比 V1 少 2 块 CodedSet 放大差异）。
+
+- **修改**：`backend/app/v4/parsers/eoicd_excel_parser.py` 新增模块常量 `_DP_REF_DEDUP_ATTRS`，全局去重键追加 `req.dp_ref_name if req.attribute_name in _DP_REF_DEDUP_ATTRS else ""`。仅此一处代码改动（+7 行）；`ird_id` 生成、`total_after_dedup` / `duplicates_removed`、下游 per_ref 表、LLM 缓存均自动跟随。
+
+- **验证方式与结果**（`backend/tests/` 临时脚本，gitignored；全程 `USE_MOCK_LLM=1`，未调用真实 provider）：
+  1. **等价性**（`tests/verify_dedup_v2.py`）：真实 `parse()` 输出 vs 探针仿真 V2 逐行逐字段比对，134094 行**全等**（14 字段 0 不匹配），`total_generated=634794 / duplicates_removed=500700`（**已验证**）。
+  2. **prompt 修复**（`tests/verify_dedup_v2_prompt.py`）：同一 HLR_313 case 重建裁判 user prompt，`- SSPC_ON: bit11, 18bit, BNR` → `- SSPC_ON: bit11, 1bit, BOOL`（**已验证**）。
+  3. **匹配维度**（同真实标签隔离比对，仅换 EoICD）：两个 L74 block 的 `bit_field` 维度 12 → 20（offset 11 + size 1 全中），总分 55 → 63（**已验证**）。注：mock 重跑产物里显示 55 → 50 是 mock LLM 返回空标签（devices/keywords 为空导致 signal_name / device_bus 归零）的假象，非修复引入。
+  4. **Mock E2E**：`USE_MOCK_LLM=1` CLI 全管线重跑该任务输入（输出 `c:/tmp/v2_fix_mock_run`），exit 0、产物齐全，条目化清单 134095 行（含表头）= 134094 条（**已验证**）。
+  5. **回归**：`python -m py_compile` 通过；4 个仿真实例（`probe_d1_variants.py` 等）结论一致（**已验证**）。
+
+- **影响面**：全表 +11420 行（均 PS/DFT/BitOffset 引用行）；183 个 sub_signal 的位宽/类型修正（反向 bit_field 维度与正向 `_derive_bit_fields` 的 size_rows 输入随之更准）；`ird_id` 按位置顺延；LLM 缓存为内容寻址，受影响 case 的 prompt 变化 → key 自然失效重判（`CACHE_VERSION` 无需递增）；已跑过的任务需重跑才有修复效果。
+
+- **遗留问题**：
+  1. **R2 同描述重复行**：description 模板不含字段名，同一 (属性, 值) 的多条引用行在条目化清单中描述文本相同（如 20 条「…的数据格式类型（DataFormatType）应为BOOL」）。本轮不动模板；是否把字段名加入描述属独立决策。
+  2. **R7 残余借值**：没有任何 per-field 引用行的字段仍会走 D2 回退链借 dp_map 槽（结构保留），本轮不以个案补丁处理。
+  3. 其余属性（CodedSet / TransmissionIntervalMinimum / PublishedLatency 等）维持现状折叠，未纳入本次补键。
+
+- **下一步建议**：1) 在真实 provider 上复跑该任务做 A/B，确认 HLR_313 判定不再引用错误位宽；2) 若确认有效再决定是否扩展到其余属性或 D2 结构；3) 由用户提交本分支改动。
+
+## 2026-09-20 逐字段 OneState/ZeroState 去重键补齐 + 反向判定字段级 state 挂载（S2）
+
+- **背景**：承接上一条 V2 收窄补键（仅覆盖 BitOffsetWithinDS / ParameterSize / DataFormatType）。用户核查子信号时发现 `INSTANTANEOUS_TRIP`（基线 job `a508e191-7cad-4d27-aa7c-63bd826b2347`）没有状态值可引用；反向裁判输入的「字内子信号明细」只有 bit/位宽/类型，块级合并状态无法归因到具体字段，LLM 无法把「接通/断开状态」类 HLR 映射到「该 bit 的 1/0 各代表什么」。
+
+- **根因**：
+  1. 全局去重键的 `_DP_REF_DEDUP_ATTRS` 不含 OneState/ZeroState —— 同一 word 内多个布尔字段常共用同一状态值（如 'Trip'/'In'），全局去重把后出现字段的状态行吞并到首个同值字段（与上条同机制，属性集合不同）。
+  2. 反向 case 的裁判输入缺字段级状态数据，状态归属靠 LLM 从块级合并状态猜测。
+
+- **方案（联合改动：一处补键 + 一处挂载 + 一处渲染，均不改 system prompt）**：
+  1. `_DP_REF_DEDUP_ATTRS` 增补 OneState/ZeroState（延续收窄补键策略，不让其余属性进入键，避免条目化清单同描述重复行放大）。
+  2. **S2 挂载**：`build_reverse_cases` 块序列化时，若块含子信号、至少一个字段有逐字段状态行、且所有有状态字段均存在于 sub_signals（无孤儿），则从块级 `merged_attributes` 剥离 OneState/ZeroState，并把各字段状态以 `one_state`/`zero_state` 键挂载到子信号**副本**（不就地修改 `block.sub_signals`）；不满足触发条件即静默 no-op，与旧行为逐字节一致。
+  3. 裁判 user prompt「字内子信号明细」内联状态后缀：`- INSTANTANEOUS_TRIP: bit13, 1bit, BOOL（OneState=Trip / ZeroState=In）`（两值均缺省时不加后缀）。
+
+- **修改**（3 文件 / +64 / -7）：
+  1. `backend/app/v4/parsers/eoicd_excel_parser.py`（+10/-4）：`_DP_REF_DEDUP_ATTRS` 增补 `OneState`、`ZeroState`，注释同步说明布局/状态两类属性各自的折叠后果。
+  2. `backend/app/v4/matching/reverse_case_builder.py`（+44/-2）：新增 `_STATE_ATTRS` 与 `_field_state_map(block)`（从 block.profiles 的 is_dp_ref 行取 `{dp_ref_name: {attr: value}}`）；`_serialize_block` 增加触发判定与副本式挂载。
+  3. `backend/app/v4/comparison/semantic_judge.py`（+10/-1）：子信号行渲染追加状态后缀。
+
+- **验证方式与结果**（`backend/tests/` 临时脚本，gitignored；全程 `USE_MOCK_LLM=1`，未调用真实 provider；基线 job `a508e191-7cad-4d27-aa7c-63bd826b2347`）：
+  1. **单元/等价性**（`tests/verify_state_dedup_s2.py` → `_verify_state_dedup_s2_a508e191.out`，VERIFY_OK，全部断言 PASS）：旧版（HEAD `5b605c5`）经 importlib 加载与新工作区对比——行数 134094 → 137758（+3664，全部为 RP 侧 OneState/ZeroState 逐字段行、全部通过 should_keep、无行丢失）；旧版 parse 与产物 json 逐行全等（含 ird_id）；块键集合相同、块级 attributes 与 sub_signals 0 差异；7 个 REV case 的裁判 prompt 中 5 个逐字节相同，REV-0005（87→83，删 4 行块级 state / 22 个子信号行加后缀）与 REV-0006（849→809，删 40 / 加后缀 280）行数变化恰等于被剥离的块级状态行数，且与探针预测 83 / 809 完全一致；REV-0005 内联实测 `bit13 INSTANTANEOUS_TRIP（Trip / In）`、`bit15 SSPC_SERIES_ARC_FAULT（Fault / Good）`、`bit20 LOAD_VOLTAGE_AVAIL（AVAIL / UNAVAIL）`；原 `block.sub_signals` 未被就地修改（无 one_state 键）。
+  2. **Mock E2E**（`tests/verify_state_dedup_s2_e2e.py` → `_verify_state_dedup_s2_e2e.out`，VERIFY_OK）：同输入真实反向管线跑两遍（22.9s / 22.6s），无 errors、产物齐全（4 份 docx）；`eoicd_requirements.json` 137758 行；`llm_cache.jsonl` 56 → 56 行（全部命中、二跑未发起新 LLM 调用）；忽略 `generated_at` 后 4 件产物结构一致。
+  3. **正向 A/B**（`tests/verify_state_dedup_s2_forward.py` → `_verify_state_dedup_s2_forward.out`，VERIFY_OK）：旧 json（134094 行）vs 新 json（137758 行）同 HLR 各跑一遍前向管线（5.9s / 6.0s）——6 件产物结构一致；`forward_blocks.json` 47912 处差异全部局限于 `rp_entry_ids` / `dp_entry_ids` 列表（新增引用 + ird_id 顺延）；`forward_deterministic.json` stats 完全一致（uncovered 1397 / covered_direct 136 / parent_referenced 45 / possible 40）、`forward_coverage.json` stats 完全一致（uncovered 1397 / covered_direct 221）。
+  4. **条目化清单**：xlsx 数据行 134094 → 137758（+3664，与 json 一致）。
+
+- **影响面**：条目化清单 +3664 行（均为 OneState/ZeroState 引用行，description 模板不含字段名、同值描述重复行随之增加，与上条 R2 同类）；反向裁判输入仅「状态行齐备的块」形态变化，未触发块逐字节不变；5.5 复查 prompt 只渲染固定键（Label/方向/DataFormatType/BitOffsetWithinDS/ParameterSize/FullScaleRngMin/Max/Units），不受影响；无 system prompt / prompt 模板文件改动；正向管线产物结构不变；LLM 缓存内容寻址，仅触发 case 自动失效重判（`CACHE_VERSION` 不变）；已跑过的任务需重跑才有修复效果。
+
+- **遗留问题**：
+  1. **含孤儿状态的块**（存在有状态字段不在 sub_signals）：保守 no-op，块级状态行保留、子信号无内联——状态仍不可归因，待真实语料出现再扩展触发条件。
+  2. **无任何逐字段状态行的字段**无从挂载（与上条 R7 残余借值同类，本轮不补结构）。
+  3. CodedSet / TransmissionIntervalMinimum 等其余属性维持现状折叠，未纳入本次补键。
+  4. 真实 provider A/B 未跑（用户侧执行）。
+
+- **下一步建议**：1) 在真实 provider 上复跑 AMS 任务做 A/B，确认「接通/断开状态」类 HLR 的裁判证据含字段级状态后判定更稳定；2) 由用户提交本分支改动。
+
+## 2026-09-21 extract_labels 重复 label 提及去重（反向 top-K 挤占 / 裁判输入冗余）
+
+- **背景**：用户核查基线 job `37fb82f0-2f9c-4ce1-a38a-c5f3973830e1` 的 `reverse_matches.json`，发现 `FSF21000101_HLR_4928` 的 `matched_profile_keys` 大量重复（`L270/L_ENG_BLEED_AREA_OVHT_A`/`_B` 各 10 条、共 20 条中 18 条重复），且该 label 下预期命中的 `L270/Fire_AREA_OVHT_A/B` 反而不在列表内。
+
+- **根因**：
+  1. `_LABEL_RE = L(\d+)`（IGNORECASE）为**子串**匹配（"LABEL270" 亦命中 "L270"）；`extract_labels` 原按文本逐次产出、不去重——HLR_4928 正文 24 次提及 "LABEL270" → 标签列表 24 条 "L270"。
+  2. `_match_path1_label` 按标签条目逐次扫描块索引前缀追加候选（`for lbl in hlr_prof.labels` 双层循环），同一 block 被追加 N 次。
+  3. 候选经评分后 `scored[:enhancements.top_k]`（默认 top_k=20）截断：24 条重复标签 × 4 个达标块 = 96 条候选，窗口被 10×A + 10×B 占满，排序靠后的 Fire 两块被挤出（该现象自 V4 引入即存在；HLR_4852 类 14 条候选未触顶 top-K，表现为纯冗余而非挤出）。
+
+- **方案**：`extract_labels` 改为**保序去重**（首见顺序、大小写不敏感）。只改这一个纯函数，匹配/评分/裁判逻辑与 system prompt 零改动。下游消费点核对：`build_hlr_profile`（标签）、`enrich_label`（追加式、集合判重）、`hlr_identity_index`（`token_index` 用 set）均为附加式或集合语义，去重不改变其行为，仅消除重复。
+
+- **修改**（1 文件 / +11 / -1）：`backend/app/v4/matching/hlr_classifier.py`。
+
+- **验证方式与结果**（`backend/tests/` 临时脚本，gitignored；全程 `USE_MOCK_LLM=1`，未调用真实 provider；两个真实基线 job：37fb82f0（3 HLR）/ a508e191（7 HLR））：
+  1. **单元/等价性**（`tests/verify_labels_dedup.py` → `_verify_labels_dedup.out`，VERIFY_OK）：单元 5 例（同 label 多提及、首见顺序、大小写不敏感、无标签、多 label 混合）；旧版（HEAD）经 importlib 加载确认基线不去重。受影响 HLR：37fb82f0 HLR_4928 旧 20 keys（18 重复）/裁判 prompt 809 行 → 新 4 keys/201 行、distinct 2 → 4（收回 Fire 两块）、`- HLR Labels:` 行 206 → 22 字符；a508e191 HLR_4852 14 keys/300 行 → 2 keys/60 行、HLR_4928 20 keys/809 行 → 2 keys/125 行（该 job 标注下 Fire 块 `signal_name=0`，被 `_filter_sn_zero_within_label` 剔除，旧新 distinct 均 2）。`match_evidence.hlr_labels` 去重为 `['L270']`/`['L52']`，`match_type` 不变；其余 5 个 HLR 匹配结果与裁判 prompt **逐字节相等**。
+  2. **Mock E2E 反向双跑**（`tests/verify_labels_dedup_e2e.py` → `_verify_labels_dedup_e2e.out`，VERIFY_OK）：37fb82f0 同输入（预置真实 `hlr_labels.json` 走批量缓存 fast path，匹配输入与真实 job 一致）跑两遍（18.6s / 20.0s），无 errors、产物齐全（4 份 docx）；HLR_4928 keys == 4 条 distinct（含 Fire 两块）；全部 HLR 无重复；未受影响 HLR 与真实 job 基线逐条相等、新 key 集合 ⊇ 基线 key 集合；忽略 `generated_at` 后 4 件产物结构一致；`llm_cache.jsonl` 21 → 21 行（二跑全部命中，未发起新调用）。
+  3. **正向 A/B**（`tests/verify_labels_dedup_forward.py` → `_verify_labels_dedup_forward.out`，VERIFY_OK）：a508e191 输入同跑两遍（5.9s / 5.9s，旧/新 `extract_labels` 经 monkeypatch 两处绑定切换），8 件 json 产物 + xlsx/docx 齐全；6 件产物逐字段相等；`hlr_identity_index.json` 除 `labels` 展示字段外逐字段相等（4852: 7 → 1、4928: 24 → 1，变化集合恰为这两个 HLR）；`hlr_labels.json` 逐字段相等（mock 标注已含该 label，追加路径未触发，零差异）；确定性/覆盖 stats 完全一致（uncovered 1397 / covered_direct 136 / parent_referenced 45 / possible 40；coverage uncovered 1397 / covered_direct 221）。
+  4. **真实运行观察**（用户执行，job `a6a66a8f`，2026-09-21，真实 provider：deepseek-v4-flash / MiniMax-M2.5 / qwen3.6-35b-a3b，7 HLR，缓存 39 次调用含 1 次 5.5 复查）：去重生效——`HLR_4928`/`HLR_4852` 各 2 条 distinct key、无重复，`evidence.hlr_labels` 去重（`['L270']`/`['L52']`）。`HLR_4928` 的 Fire 两块未入列，经三个组合探针定位为既有 `_filter_sn_zero_within_label` 命中（本次 AI 标注 `signal_keywords` 缺 `'1A'` 词元，致 Fire 块 `signal_name=0`，被同 label 下 sn>0 的块按规则剔除），与去重无关；补 `'1A'` 单测即恢复 sn=8。用户判定影响有限（接收信号匹配的 DP 端发送信号一致），不再跟进。
+
+- **影响面**：反向——仅「同一 label 号被多次提及」的 HLR 的候选清单与裁判输入变化（重复消除、prompt 变短；top-K 窗口释放后可能收回被挤出的块，37fb82f0 即收回 Fire 两块），其余 HLR 逐字节不变；LLM 缓存内容寻址，仅触发 case 自动失效重判（`CACHE_VERSION` 不变）；已跑过的任务需重跑才生效。正向——仅 `hlr_identity_index.json` 的 `labels` 展示字段变化，召回 token / 候选 / 判定 / 覆盖全链零差异。无 system prompt / 模板文件改动。
+
+- **遗留问题**：
+  1. 37fb82f0（副本输入）在真实 provider 上的复跑 A/B 未做；本 Issue 的真实运行观察见验证第 4 条（去重生效、判定正常，无待跟进项）。
+  2. `_LABEL_RE` 子串匹配语义未动（"LABEL270" 仍解析为 L270，历史行为）；本轮只去重不改语义。
+  3. `enrich_label` 内 `existing` 集合在追加循环中不更新（若 `classifier_labels` 自身含重复会重复追加）——本轮 `extract_labels` 去重后该隐患自然消失，未动该函数。
+
+- **下一步建议**：由用户提交本分支改动（真实运行已确认修复生效、无待跟进项；Fire 块类标注词元召回差异属 labeler 侧独立话题，用户判定影响有限）。
