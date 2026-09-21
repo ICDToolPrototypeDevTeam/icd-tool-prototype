@@ -16,12 +16,37 @@ from app.v4.models import (
 )
 
 
+_STATE_ATTRS = ("OneState", "ZeroState")
+
+
+def _field_state_map(block: ICDBlock) -> dict[str, dict[str, str]]:
+    """Per-field state values from DP-ref rows: {dp_ref_name: {attr: value}}."""
+    states: dict[str, dict[str, str]] = {}
+    for prof in block.profiles:
+        for entry in prof.entries:
+            if (
+                entry.is_dp_ref
+                and entry.dp_ref_name
+                and entry.attribute_name in _STATE_ATTRS
+            ):
+                states.setdefault(entry.dp_ref_name, {})[
+                    entry.attribute_name
+                ] = str(entry.attribute_value)
+    return states
+
+
 def _serialize_block(block: ICDBlock, include_protocol_fields: bool = True) -> dict:
     """Serialize an ICDBlock into a judge-friendly dict.
 
     Block-level only: signal_family, direction, bus_types, merged attributes.
     Per-channel detail is intentionally omitted — merged_attributes covers the
     common attributes across all channels.
+
+    When the block carries per-field OneState/ZeroState rows and every such
+    field appears in ``sub_signals``, the states move from the block-level
+    merged attributes onto the matching sub-signal rows (``one_state`` /
+    ``zero_state``), so the judge sees each state attached to its own field
+    instead of a same-value block-level pair.
 
     ``include_protocol_fields`` attaches the same-word SSM bit definitions
     (``word_protocol_fields``) once per label per case — see build_reverse_cases.
@@ -30,6 +55,23 @@ def _serialize_block(block: ICDBlock, include_protocol_fields: bool = True) -> d
     for k, v in block.attributes.items():
         if k in REVERSE_KEY_ATTRS:
             merged_attrs[k] = v["value"] + (f" {v['unit']}" if v.get("unit") else "")
+
+    sub_signals = block.sub_signals
+    if sub_signals:
+        states = _field_state_map(block)
+        field_names = {ss.get("dp_name") for ss in sub_signals}
+        if states and all(name in field_names for name in states):
+            merged_attrs = {
+                k: v for k, v in merged_attrs.items() if k not in _STATE_ATTRS
+            }
+            sub_signals = [
+                dict(
+                    ss,
+                    one_state=states.get(ss.get("dp_name"), {}).get("OneState"),
+                    zero_state=states.get(ss.get("dp_name"), {}).get("ZeroState"),
+                )
+                for ss in sub_signals
+            ]
 
     result = {
         "block_key": block.block_key,
@@ -40,8 +82,8 @@ def _serialize_block(block: ICDBlock, include_protocol_fields: bool = True) -> d
         "channel_count": block.channel_count,
         "merged_attributes": merged_attrs,
     }
-    if block.sub_signals:
-        result["sub_signals"] = block.sub_signals
+    if sub_signals:
+        result["sub_signals"] = sub_signals
     if include_protocol_fields and block.word_protocol_fields:
         result["word_protocol_fields"] = block.word_protocol_fields
     return result

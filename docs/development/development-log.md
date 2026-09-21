@@ -3275,3 +3275,37 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   3. 其余属性（CodedSet / TransmissionIntervalMinimum / PublishedLatency 等）维持现状折叠，未纳入本次补键。
 
 - **下一步建议**：1) 在真实 provider 上复跑该任务做 A/B，确认 HLR_313 判定不再引用错误位宽；2) 若确认有效再决定是否扩展到其余属性或 D2 结构；3) 由用户提交本分支改动。
+
+## 2026-09-20 逐字段 OneState/ZeroState 去重键补齐 + 反向判定字段级 state 挂载（S2）
+
+- **背景**：承接上一条 V2 收窄补键（仅覆盖 BitOffsetWithinDS / ParameterSize / DataFormatType）。用户核查子信号时发现 `INSTANTANEOUS_TRIP`（基线 job `a508e191-7cad-4d27-aa7c-63bd826b2347`）没有状态值可引用；反向裁判输入的「字内子信号明细」只有 bit/位宽/类型，块级合并状态无法归因到具体字段，LLM 无法把「接通/断开状态」类 HLR 映射到「该 bit 的 1/0 各代表什么」。
+
+- **根因**：
+  1. 全局去重键的 `_DP_REF_DEDUP_ATTRS` 不含 OneState/ZeroState —— 同一 word 内多个布尔字段常共用同一状态值（如 'Trip'/'In'），全局去重把后出现字段的状态行吞并到首个同值字段（与上条同机制，属性集合不同）。
+  2. 反向 case 的裁判输入缺字段级状态数据，状态归属靠 LLM 从块级合并状态猜测。
+
+- **方案（联合改动：一处补键 + 一处挂载 + 一处渲染，均不改 system prompt）**：
+  1. `_DP_REF_DEDUP_ATTRS` 增补 OneState/ZeroState（延续收窄补键策略，不让其余属性进入键，避免条目化清单同描述重复行放大）。
+  2. **S2 挂载**：`build_reverse_cases` 块序列化时，若块含子信号、至少一个字段有逐字段状态行、且所有有状态字段均存在于 sub_signals（无孤儿），则从块级 `merged_attributes` 剥离 OneState/ZeroState，并把各字段状态以 `one_state`/`zero_state` 键挂载到子信号**副本**（不就地修改 `block.sub_signals`）；不满足触发条件即静默 no-op，与旧行为逐字节一致。
+  3. 裁判 user prompt「字内子信号明细」内联状态后缀：`- INSTANTANEOUS_TRIP: bit13, 1bit, BOOL（OneState=Trip / ZeroState=In）`（两值均缺省时不加后缀）。
+
+- **修改**（3 文件 / +64 / -7）：
+  1. `backend/app/v4/parsers/eoicd_excel_parser.py`（+10/-4）：`_DP_REF_DEDUP_ATTRS` 增补 `OneState`、`ZeroState`，注释同步说明布局/状态两类属性各自的折叠后果。
+  2. `backend/app/v4/matching/reverse_case_builder.py`（+44/-2）：新增 `_STATE_ATTRS` 与 `_field_state_map(block)`（从 block.profiles 的 is_dp_ref 行取 `{dp_ref_name: {attr: value}}`）；`_serialize_block` 增加触发判定与副本式挂载。
+  3. `backend/app/v4/comparison/semantic_judge.py`（+10/-1）：子信号行渲染追加状态后缀。
+
+- **验证方式与结果**（`backend/tests/` 临时脚本，gitignored；全程 `USE_MOCK_LLM=1`，未调用真实 provider；基线 job `a508e191-7cad-4d27-aa7c-63bd826b2347`）：
+  1. **单元/等价性**（`tests/verify_state_dedup_s2.py` → `_verify_state_dedup_s2_a508e191.out`，VERIFY_OK，全部断言 PASS）：旧版（HEAD `5b605c5`）经 importlib 加载与新工作区对比——行数 134094 → 137758（+3664，全部为 RP 侧 OneState/ZeroState 逐字段行、全部通过 should_keep、无行丢失）；旧版 parse 与产物 json 逐行全等（含 ird_id）；块键集合相同、块级 attributes 与 sub_signals 0 差异；7 个 REV case 的裁判 prompt 中 5 个逐字节相同，REV-0005（87→83，删 4 行块级 state / 22 个子信号行加后缀）与 REV-0006（849→809，删 40 / 加后缀 280）行数变化恰等于被剥离的块级状态行数，且与探针预测 83 / 809 完全一致；REV-0005 内联实测 `bit13 INSTANTANEOUS_TRIP（Trip / In）`、`bit15 SSPC_SERIES_ARC_FAULT（Fault / Good）`、`bit20 LOAD_VOLTAGE_AVAIL（AVAIL / UNAVAIL）`；原 `block.sub_signals` 未被就地修改（无 one_state 键）。
+  2. **Mock E2E**（`tests/verify_state_dedup_s2_e2e.py` → `_verify_state_dedup_s2_e2e.out`，VERIFY_OK）：同输入真实反向管线跑两遍（22.9s / 22.6s），无 errors、产物齐全（4 份 docx）；`eoicd_requirements.json` 137758 行；`llm_cache.jsonl` 56 → 56 行（全部命中、二跑未发起新 LLM 调用）；忽略 `generated_at` 后 4 件产物结构一致。
+  3. **正向 A/B**（`tests/verify_state_dedup_s2_forward.py` → `_verify_state_dedup_s2_forward.out`，VERIFY_OK）：旧 json（134094 行）vs 新 json（137758 行）同 HLR 各跑一遍前向管线（5.9s / 6.0s）——6 件产物结构一致；`forward_blocks.json` 47912 处差异全部局限于 `rp_entry_ids` / `dp_entry_ids` 列表（新增引用 + ird_id 顺延）；`forward_deterministic.json` stats 完全一致（uncovered 1397 / covered_direct 136 / parent_referenced 45 / possible 40）、`forward_coverage.json` stats 完全一致（uncovered 1397 / covered_direct 221）。
+  4. **条目化清单**：xlsx 数据行 134094 → 137758（+3664，与 json 一致）。
+
+- **影响面**：条目化清单 +3664 行（均为 OneState/ZeroState 引用行，description 模板不含字段名、同值描述重复行随之增加，与上条 R2 同类）；反向裁判输入仅「状态行齐备的块」形态变化，未触发块逐字节不变；5.5 复查 prompt 只渲染固定键（Label/方向/DataFormatType/BitOffsetWithinDS/ParameterSize/FullScaleRngMin/Max/Units），不受影响；无 system prompt / prompt 模板文件改动；正向管线产物结构不变；LLM 缓存内容寻址，仅触发 case 自动失效重判（`CACHE_VERSION` 不变）；已跑过的任务需重跑才有修复效果。
+
+- **遗留问题**：
+  1. **含孤儿状态的块**（存在有状态字段不在 sub_signals）：保守 no-op，块级状态行保留、子信号无内联——状态仍不可归因，待真实语料出现再扩展触发条件。
+  2. **无任何逐字段状态行的字段**无从挂载（与上条 R7 残余借值同类，本轮不补结构）。
+  3. CodedSet / TransmissionIntervalMinimum 等其余属性维持现状折叠，未纳入本次补键。
+  4. 真实 provider A/B 未跑（用户侧执行）。
+
+- **下一步建议**：1) 在真实 provider 上复跑 AMS 任务做 A/B，确认「接通/断开状态」类 HLR 的裁判证据含字段级状态后判定更稳定；2) 由用户提交本分支改动。
