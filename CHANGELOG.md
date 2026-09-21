@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-21
+
+### Fixed
+
+- **HLR 正文重复 label 提及导致反向候选重复入列并挤占 top-K 窗口**：`extract_labels` 原按文本逐次产出标签（`L(\d+)` 为子串匹配，"LABEL270" 亦命中），正文提及 N 次即产出 N 条；`_match_path1_label` 按标签条目逐次追加候选，同一候选块重复入列（实测基线 job `37fb82f0`：`FSF21000101_HLR_4928` 正文 24 次 "LABEL270" → 20 条 `matched_profile_keys` 中 18 条重复、`top_k=20` 窗口被 `L270/L_ENG_BLEED_AREA_OVHT_A/B` 各 10 条占满，排序靠后的 `L270/Fire_AREA_OVHT_A/B` 两块被挤出；`a508e191`：同 HLR 同现象，`HLR_4852` 14 条 keys 中 12 条重复）。修复为**保序去重**（首见顺序、大小写不敏感）。实测：受影响 HLR 候选 key 由重复清单变为 4 条 distinct（37fb82f0）/ 2 条（a508e191），裁判 prompt 行数 809→201、809→125、300→60，`match_evidence.hlr_labels` 去重为 `['L270']`/`['L52']`，`match_type` 不变；未受影响 HLR 的匹配结果与裁判 prompt 逐字节相等；正向 A/B 除 `hlr_identity_index.json` 的 `labels` 展示字段（7→1 / 24→1）外全部产物逐字段相等、确定性/覆盖 stats 零差异。LLM 判定缓存为内容寻址，仅触发 case 自动失效重判（`CACHE_VERSION` 不变）；已跑过的任务需重跑才生效。1 文件 / +11 / -1 行。
+
 ## [Unreleased] - 2026-09-20
 
 ### Changed

@@ -100,7 +100,17 @@ def classify_hlr(
 
 
 def extract_labels(text: str) -> list[str]:
-    return [f"L{m.group(1)}" for m in _LABEL_RE.finditer(text)]
+    # 同一 label 号在正文多次提及只保留一条（按首见顺序）：下游
+    # _match_path1_label 按条目逐次追加候选，重复条目会让同一 block 重复
+    # 入列并挤占 top-K 窗口。
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _LABEL_RE.finditer(text):
+        lab = f"L{m.group(1)}"
+        if lab not in seen:
+            seen.add(lab)
+            out.append(lab)
+    return out
 
 
 def extract_bit_fields(text: str) -> list[dict]:

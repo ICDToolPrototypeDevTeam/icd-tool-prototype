@@ -3309,3 +3309,31 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   4. 真实 provider A/B 未跑（用户侧执行）。
 
 - **下一步建议**：1) 在真实 provider 上复跑 AMS 任务做 A/B，确认「接通/断开状态」类 HLR 的裁判证据含字段级状态后判定更稳定；2) 由用户提交本分支改动。
+
+## 2026-09-21 extract_labels 重复 label 提及去重（反向 top-K 挤占 / 裁判输入冗余）
+
+- **背景**：用户核查基线 job `37fb82f0-2f9c-4ce1-a38a-c5f3973830e1` 的 `reverse_matches.json`，发现 `FSF21000101_HLR_4928` 的 `matched_profile_keys` 大量重复（`L270/L_ENG_BLEED_AREA_OVHT_A`/`_B` 各 10 条、共 20 条中 18 条重复），且该 label 下预期命中的 `L270/Fire_AREA_OVHT_A/B` 反而不在列表内。
+
+- **根因**：
+  1. `_LABEL_RE = L(\d+)`（IGNORECASE）为**子串**匹配（"LABEL270" 亦命中 "L270"）；`extract_labels` 原按文本逐次产出、不去重——HLR_4928 正文 24 次提及 "LABEL270" → 标签列表 24 条 "L270"。
+  2. `_match_path1_label` 按标签条目逐次扫描块索引前缀追加候选（`for lbl in hlr_prof.labels` 双层循环），同一 block 被追加 N 次。
+  3. 候选经评分后 `scored[:enhancements.top_k]`（默认 top_k=20）截断：24 条重复标签 × 4 个达标块 = 96 条候选，窗口被 10×A + 10×B 占满，排序靠后的 Fire 两块被挤出（该现象自 V4 引入即存在；HLR_4852 类 14 条候选未触顶 top-K，表现为纯冗余而非挤出）。
+
+- **方案**：`extract_labels` 改为**保序去重**（首见顺序、大小写不敏感）。只改这一个纯函数，匹配/评分/裁判逻辑与 system prompt 零改动。下游消费点核对：`build_hlr_profile`（标签）、`enrich_label`（追加式、集合判重）、`hlr_identity_index`（`token_index` 用 set）均为附加式或集合语义，去重不改变其行为，仅消除重复。
+
+- **修改**（1 文件 / +11 / -1）：`backend/app/v4/matching/hlr_classifier.py`。
+
+- **验证方式与结果**（`backend/tests/` 临时脚本，gitignored；全程 `USE_MOCK_LLM=1`，未调用真实 provider；两个真实基线 job：37fb82f0（3 HLR）/ a508e191（7 HLR））：
+  1. **单元/等价性**（`tests/verify_labels_dedup.py` → `_verify_labels_dedup.out`，VERIFY_OK）：单元 5 例（同 label 多提及、首见顺序、大小写不敏感、无标签、多 label 混合）；旧版（HEAD）经 importlib 加载确认基线不去重。受影响 HLR：37fb82f0 HLR_4928 旧 20 keys（18 重复）/裁判 prompt 809 行 → 新 4 keys/201 行、distinct 2 → 4（收回 Fire 两块）、`- HLR Labels:` 行 206 → 22 字符；a508e191 HLR_4852 14 keys/300 行 → 2 keys/60 行、HLR_4928 20 keys/809 行 → 2 keys/125 行（该 job 标注下 Fire 块 `signal_name=0`，被 `_filter_sn_zero_within_label` 剔除，旧新 distinct 均 2）。`match_evidence.hlr_labels` 去重为 `['L270']`/`['L52']`，`match_type` 不变；其余 5 个 HLR 匹配结果与裁判 prompt **逐字节相等**。
+  2. **Mock E2E 反向双跑**（`tests/verify_labels_dedup_e2e.py` → `_verify_labels_dedup_e2e.out`，VERIFY_OK）：37fb82f0 同输入（预置真实 `hlr_labels.json` 走批量缓存 fast path，匹配输入与真实 job 一致）跑两遍（18.6s / 20.0s），无 errors、产物齐全（4 份 docx）；HLR_4928 keys == 4 条 distinct（含 Fire 两块）；全部 HLR 无重复；未受影响 HLR 与真实 job 基线逐条相等、新 key 集合 ⊇ 基线 key 集合；忽略 `generated_at` 后 4 件产物结构一致；`llm_cache.jsonl` 21 → 21 行（二跑全部命中，未发起新调用）。
+  3. **正向 A/B**（`tests/verify_labels_dedup_forward.py` → `_verify_labels_dedup_forward.out`，VERIFY_OK）：a508e191 输入同跑两遍（5.9s / 5.9s，旧/新 `extract_labels` 经 monkeypatch 两处绑定切换），8 件 json 产物 + xlsx/docx 齐全；6 件产物逐字段相等；`hlr_identity_index.json` 除 `labels` 展示字段外逐字段相等（4852: 7 → 1、4928: 24 → 1，变化集合恰为这两个 HLR）；`hlr_labels.json` 逐字段相等（mock 标注已含该 label，追加路径未触发，零差异）；确定性/覆盖 stats 完全一致（uncovered 1397 / covered_direct 136 / parent_referenced 45 / possible 40；coverage uncovered 1397 / covered_direct 221）。
+  4. **真实运行观察**（用户执行，job `a6a66a8f`，2026-09-21，真实 provider：deepseek-v4-flash / MiniMax-M2.5 / qwen3.6-35b-a3b，7 HLR，缓存 39 次调用含 1 次 5.5 复查）：去重生效——`HLR_4928`/`HLR_4852` 各 2 条 distinct key、无重复，`evidence.hlr_labels` 去重（`['L270']`/`['L52']`）。`HLR_4928` 的 Fire 两块未入列，经三个组合探针定位为既有 `_filter_sn_zero_within_label` 命中（本次 AI 标注 `signal_keywords` 缺 `'1A'` 词元，致 Fire 块 `signal_name=0`，被同 label 下 sn>0 的块按规则剔除），与去重无关；补 `'1A'` 单测即恢复 sn=8。用户判定影响有限（接收信号匹配的 DP 端发送信号一致），不再跟进。
+
+- **影响面**：反向——仅「同一 label 号被多次提及」的 HLR 的候选清单与裁判输入变化（重复消除、prompt 变短；top-K 窗口释放后可能收回被挤出的块，37fb82f0 即收回 Fire 两块），其余 HLR 逐字节不变；LLM 缓存内容寻址，仅触发 case 自动失效重判（`CACHE_VERSION` 不变）；已跑过的任务需重跑才生效。正向——仅 `hlr_identity_index.json` 的 `labels` 展示字段变化，召回 token / 候选 / 判定 / 覆盖全链零差异。无 system prompt / 模板文件改动。
+
+- **遗留问题**：
+  1. 37fb82f0（副本输入）在真实 provider 上的复跑 A/B 未做；本 Issue 的真实运行观察见验证第 4 条（去重生效、判定正常，无待跟进项）。
+  2. `_LABEL_RE` 子串匹配语义未动（"LABEL270" 仍解析为 L270，历史行为）；本轮只去重不改语义。
+  3. `enrich_label` 内 `existing` 集合在追加循环中不更新（若 `classifier_labels` 自身含重复会重复追加）——本轮 `extract_labels` 去重后该隐患自然消失，未动该函数。
+
+- **下一步建议**：由用户提交本分支改动（真实运行已确认修复生效、无待跟进项；Fire 块类标注词元召回差异属 labeler 侧独立话题，用户判定影响有限）。
