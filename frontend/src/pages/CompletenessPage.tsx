@@ -6,11 +6,17 @@ import InterruptedTasks from '../components/InterruptedTasks'
 import ProcessingView from '../components/ProcessingView'
 import WorkflowSteps from '../components/WorkflowSteps'
 import { useAnalysisJob } from '../hooks/useAnalysisJob'
+import ErrorDiagnostics from '../components/ErrorDiagnostics'
+import JobLogPanel from '../components/JobLogPanel'
+import { useJobLogs } from '../hooks/useJobLogs'
+import { useMockMode } from '../hooks/useMockMode'
 import { analyzeCompletenessV4, getForwardJobResultV4 } from '../api'
 import type { FileItem, ForwardAnalysisMode, V4ForwardJobResultResponse, V4JobListItem } from '../types'
 
 export default function CompletenessPage() {
   const job = useAnalysisJob<V4ForwardJobResultResponse>()
+  const { mockMode } = useMockMode()
+  const { lines: logLines, truncated: logTruncated } = useJobLogs(job.jobId)
 
   const [searchParams, setSearchParams] = useSearchParams()
   const attachRef = useRef(false)
@@ -69,6 +75,9 @@ export default function CompletenessPage() {
     if (deviceIcdTraceFile?.file) formData.append('device_icd_trace_file', deviceIcdTraceFile.file)
     if (systemDeviceTraceFile?.file) formData.append('system_device_trace_file', systemDeviceTraceFile.file)
     // 注意：不向接口提交 analysis_mode，后端按追溯表上传情况自动判定
+    // 显式传值（而不是「不传即沿用容器配置」）：容器 .env 可能已开 mock，
+    // 只有显式 false 才能让顶栏开关双向可用。
+    formData.append('use_mock_llm', mockMode ? 'true' : 'false')
 
     job.start(
       () => analyzeCompletenessV4(formData),
@@ -131,24 +140,45 @@ export default function CompletenessPage() {
           caseTotal={job.caseTotal}
           resumed={job.resumed}
           reuse={job.reuse}
-        />
+          resumedHint="中断恢复执行 · 已完成的判定结果将直接复用，不重复调用模型"
+          onCancel={job.jobId !== null ? job.cancel : undefined}
+          cancelRequested={job.cancelRequested}
+        >
+          <JobLogPanel lines={logLines} truncated={logTruncated} defaultOpen={false} />
+        </ProcessingView>
       )}
 
       {job.pageState === 'success' && job.resultData && (
-        <CompletenessResultView
-          data={job.resultData}
-          jobId={job.resultData.job_id}
-          onNewTask={handleReset}
-        />
+        <>
+          {job.mock && (
+            <div className="mock-banner mock-banner--inline">
+              本次任务运行于 MOCK 模式：以下为模拟数据，不可用于验收。
+            </div>
+          )}
+          <CompletenessResultView
+            data={job.resultData}
+            jobId={job.resultData.job_id}
+            onNewTask={handleReset}
+          />
+        </>
       )}
 
       {job.pageState === 'error' && (
         <div className="error-state">
-          <div className="error-icon">⚠️</div>
-          <h3 className="error-title">处理失败</h3>
-          <p className="error-message">
-            {job.errorMessage || '请检查文件格式是否正确，或稍后重试'}
-          </p>
+          <div className="error-icon">{job.jobStatus === 'canceled' ? '⏹' : '⚠️'}</div>
+          <h3 className="error-title">
+            {job.jobStatus === 'canceled' ? '任务已终止' : '处理失败'}
+          </h3>
+          <p className="error-message">{job.errorMessage}</p>
+          <ErrorDiagnostics
+            error={job.error}
+            jobId={job.jobId}
+            taskType="completeness"
+            mockMode={job.mock}
+            jobStatus={job.jobStatus}
+            lines={logLines}
+          />
+          <JobLogPanel lines={logLines} truncated={logTruncated} defaultOpen />
           <button className="btn btn--new" onClick={handleReset}>
             重新尝试
           </button>

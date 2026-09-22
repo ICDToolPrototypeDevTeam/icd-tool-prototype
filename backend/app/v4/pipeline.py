@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """Pipeline orchestration: reverse analysis workflow."""
 
+# 取消检查点策略：每个 Step 开头 + Step 4 / Step 5.5 的每个 case 边界。
+# 取消是协作式的——已发出的 HTTP 请求无法中断，其结果会被丢弃。
+# 模块级 raise_if_cancelled / report_progress 在未绑定 job（CLI 路径）时静默 no-op。
+
 from __future__ import annotations
 
 import concurrent.futures
@@ -24,7 +28,7 @@ from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.v4.doc_generators.excel_generator import generate_eoicd_excel
 from app.v4.doc_generators.word_generator import generate_consistency_report
 from app.v4.doc_generators.consensus_word_generator import generate_consensus_report as gen_consensus_word
-from app.job_manager import Job, JobStatus
+from app.job_manager import Job, JobStatus, raise_if_cancelled, report_progress
 from app.v4.matching.hlr_classifier import enrich_all_labels
 from app.v4.matching.hlr_labeler import label_hlrs
 from app.v4.llm.mock_llm import forward_label_context
@@ -506,6 +510,28 @@ def _judge_case_with_timeout(
     return results, had_timeout, timed_out
 
 
+class _StepClock:
+    """步骤耗时计时器：``mark(label)`` 报告 ``label`` 这一步用了多久。
+
+    每行命名并计时的是**刚结束**的那一步（第 1 次 mark 即第 1 步自己的耗时，不特殊），
+    mark 插在该步收尾处、与该步自己的 ``job.update(...)`` 相邻，因此它相对**下一步
+    横幅**的落点随插桩点而变：16 处中 2 处在其之前、12 处在其之后、末步 2 处落在输出末尾。
+
+    目的是让「慢在哪一步」在日志面板里直接可见——MOCK 模式耗时 65s 而真实模式
+    Step 4 要 11 分钟，此前日志里只有步骤横幅、没有耗时，无法判断。
+
+    用「插入一行 mark」而不是 ``with`` 包裹，是为了避免在 1300 行的既有函数里
+    做大规模重排缩进。
+    """
+
+    def __init__(self) -> None:
+        self._t = time.monotonic()
+
+    def mark(self, label: str) -> None:
+        print(f'  [timing] {label}: {time.monotonic() - self._t:.1f}s', flush=True)
+        self._t = time.monotonic()
+
+
 def _is_failure(judgment: dict) -> bool:
     """Check if a judgment dict represents a failure (error or very low confidence)."""
     return judgment.get("coverage_status") == "error"
@@ -547,6 +573,8 @@ def _judge_with_degradation(
     models = {p: resolve_model(p) for p in providers} if cache is not None else {}
 
     for idx, case in enumerate(cases):
+        raise_if_cancelled()
+        report_progress(case_index=idx + 1, case_total=total)
         hit: dict[str, dict] = {}
         keys: dict[str, str] = {}
         if cache is not None:
@@ -877,6 +905,7 @@ def run_reverse_pipeline(
     cases for the standard Step 4-6. ``refine=False`` keeps byte-identical
     original behaviour.
     """
+    clock = _StepClock()
     if not (eoicd_json or publisher or subscriber):
         raise ValueError("need eoicd (parsed JSON) or publisher/subscriber (Excel)")
 
@@ -926,6 +955,8 @@ def run_reverse_pipeline(
     print("=" * 50)
     print("Step 2/6: HLR AI labeling")
     print("=" * 50)
+    clock.mark("Step 1/6: Parsing input files")
+    raise_if_cancelled()
     job.update(JobStatus.RUNNING, "Step 2/6: HLR AI labeling")
     labels_cache = output_dir / "hlr_labels.json"
     hlr_labels = label_hlrs(
@@ -942,6 +973,8 @@ def run_reverse_pipeline(
     )
     print(f"  HLRs labeled: {len(hlr_labels)}")
 
+    clock.mark("Step 2/6: HLR AI labeling")
+    raise_if_cancelled()
     # Step 3: Reverse match
     print()
     print("=" * 50)
@@ -1005,6 +1038,9 @@ def run_reverse_pipeline(
 
         cases = build_reverse_cases(match_result, block_index)
 
+    clock.mark("Step 3/6: Reverse matching")
+    raise_if_cancelled()
+    report_progress(message="Step 4/6: Multi-agent judging", stage="multi_judge", stage_index=4, stage_total=6, force_flush=True)
     # Step 4: Multi-agent judging (with degradation)
     print()
     print("=" * 50)
@@ -1056,6 +1092,8 @@ def run_reverse_pipeline(
     print("=" * 50)
     print(f"Step 5/6: Review agent consensus ({len(multi_out.results)} cases)")
     print("=" * 50)
+    clock.mark("Step 4/6: Multi-agent judging + drain")
+    raise_if_cancelled()
     job.update(JobStatus.RUNNING, "Step 5/6: Review agent consensus")
     consensus_out = review_judgments(multi_out.results, cache=cache, tracker=tracker)
     consensus_out = _apply_degradation_review(consensus_out, ctx)
@@ -1075,6 +1113,8 @@ def run_reverse_pipeline(
     print("=" * 50)
     print("Step 5.5/6: Re-review low-confidence cases (1★/2★)")
     print("=" * 50)
+    clock.mark("Step 5/6: Review agent consensus")
+    raise_if_cancelled()
     job.update(JobStatus.RUNNING, "Step 5.5/6: Re-review low-confidence cases")
     multi_out, re_reviewed_ids = re_review_judgments(
         multi_out=multi_out,
@@ -1091,6 +1131,8 @@ def run_reverse_pipeline(
     print("=" * 50)
     print("Step 5.6/6: Re-run consensus after re-review")
     print("=" * 50)
+    clock.mark("Step 5.5/6: Re-review")
+    raise_if_cancelled()
     job.update(JobStatus.RUNNING, "Step 5.6/6: Re-run consensus after re-review")
 
     if re_reviewed_ids:
@@ -1131,6 +1173,8 @@ def run_reverse_pipeline(
     print("=" * 50)
     print("Step 6/6: Generating report")
     print("=" * 50)
+    clock.mark("Step 5.6/6: Re-run consensus")
+    raise_if_cancelled()
     job.update(JobStatus.RUNNING, "Step 6/6: Generating report")
     report = generate_consensus_reverse_report(
         consensus_out,
@@ -1167,6 +1211,8 @@ def run_reverse_pipeline(
     print()
     print("Reverse pipeline complete.")
 
+    clock.mark("Step 6/6: Generating report")
+    report_progress(force_flush=True)
     job.update(JobStatus.COMPLETED, "Reverse pipeline complete")
     return PipelineResult(
         parsed_count=len(hlr_out.requirements),
@@ -1199,6 +1245,7 @@ def run_forward_pipeline(
     system_device_trace_file: Path | None = None,
 ) -> PipelineResult:
     """Run forward completeness pipeline: parse → scope → blocks → index → recall → judge → AI → report."""
+    clock = _StepClock()
     if not (eoicd_json or publisher or subscriber):
         raise ValueError("need eoicd (parsed JSON) or publisher/subscriber (Excel)")
 
@@ -1225,6 +1272,8 @@ def run_forward_pipeline(
     print("=" * 50)
     print(f"Step 2/8: Forward scope ({analysis_mode} mode)")
     print("=" * 50)
+    clock.mark("Step 1/8: Parsing input files")
+    raise_if_cancelled()
     job.update(JobStatus.RUNNING, f"Step 2/8: Forward scope ({analysis_mode} mode)")
     scope = build_forward_scope(
         eoicd_out, hlr_out, analysis_mode,
@@ -1241,6 +1290,8 @@ def run_forward_pipeline(
     print("=" * 50)
     print("Step 3/8: Building forward ICD blocks")
     print("=" * 50)
+    clock.mark("Step 2/8: Forward scope")
+    raise_if_cancelled()
     job.update(JobStatus.RUNNING, "Step 3/8: Building forward ICD blocks")
     blocks = build_forward_blocks(eoicd_out, scope)
     _save_forward(blocks, output_dir / "forward_blocks.json")
@@ -1258,6 +1309,8 @@ def run_forward_pipeline(
     print("=" * 50)
     print("Step 4/8: Building HLR identity index")
     print("=" * 50)
+    clock.mark("Step 3/8: Building forward ICD blocks")
+    raise_if_cancelled()
     job.update(JobStatus.RUNNING, "Step 4/8: Building HLR identity index")
     hlr_labels: dict = {}
     try:
@@ -1288,6 +1341,8 @@ def run_forward_pipeline(
     print("=" * 50)
     print("Step 5/8: Candidate recall")
     print("=" * 50)
+    clock.mark("Step 4/8: Building HLR identity index")
+    raise_if_cancelled()
     job.update(JobStatus.RUNNING, "Step 5/8: Candidate recall")
     candidates = build_forward_candidates(blocks, index)
     _save_forward(candidates, output_dir / "forward_candidates.json")
@@ -1297,6 +1352,8 @@ def run_forward_pipeline(
     print("=" * 50)
     print("Step 6/8: Deterministic coverage judgment")
     print("=" * 50)
+    clock.mark("Step 5/8: Candidate recall")
+    raise_if_cancelled()
     job.update(JobStatus.RUNNING, "Step 6/8: Deterministic coverage judgment")
     deterministic = build_deterministic_results(blocks, candidates, index)
     _save_forward(deterministic, output_dir / "forward_deterministic.json")
@@ -1307,6 +1364,9 @@ def run_forward_pipeline(
     print("=" * 50)
     print("Step 7/8: AI three-state review")
     print("=" * 50)
+    clock.mark("Step 6/8: Deterministic coverage judgment")
+    raise_if_cancelled()
+    report_progress(message="Step 7/8: AI three-state review", stage="ai_review", stage_index=7, stage_total=8, force_flush=True)
     job.update(JobStatus.RUNNING, "Step 7/8: AI three-state review")
     hlr_content = {r.requirement_id: r.content for r in hlr_out.requirements}
     try:
@@ -1325,6 +1385,8 @@ def run_forward_pipeline(
     print("=" * 50)
     print("Step 8/8: Consolidating coverage + generating reports")
     print("=" * 50)
+    clock.mark("Step 7/8: AI three-state review")
+    raise_if_cancelled()
     job.update(JobStatus.RUNNING, "Step 8/8: Consolidating coverage + generating reports")
     coverage = consolidate_forward_coverage(blocks, scope, deterministic, ai_review)
     # 正向缺陷修正 #8：两类独立 AI 调用计数（标签 + 正向复核）写入最终 coverage，
@@ -1336,6 +1398,8 @@ def run_forward_pipeline(
     generate_forward_word(coverage, blocks, output_dir / "EoICD至HLR正向完整性分析报告.docx")
     print(f"  Final stats: {coverage.stats}")
 
+    clock.mark("Step 8/8: Consolidating coverage + generating reports")
+    report_progress(force_flush=True)
     job.update(JobStatus.COMPLETED, "Forward pipeline complete")
     covered = coverage.stats.get("covered_direct", 0) + coverage.stats.get("covered_aggregate", 0)
     return PipelineResult(

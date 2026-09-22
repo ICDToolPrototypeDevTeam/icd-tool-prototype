@@ -4,6 +4,7 @@ import type {
   V4JobStatusResponse,
   V4JobResultResponse,
   V4JobListItem,
+  V4JobLogsResponse,
   V4DownloadKind,
   V4ForwardJobResultResponse,
   V4ForwardDownloadKind,
@@ -74,6 +75,26 @@ export async function resumeJobV4(jobId: string): Promise<{ job_id: string; stat
 
 export async function abandonJobV4(jobId: string): Promise<{ job_id: string; status: string; message: string }> {
   const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/abandon`, { method: 'POST' })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+/** MOCK 开关的 localStorage 键（顶栏开关与提交参数共用同一来源）。 */
+export const MOCK_STORAGE_KEY = 'icd.useMock'
+
+export async function cancelJobV4(jobId: string): Promise<{ job_id: string; status: string; message: string }> {
+  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/cancel`, { method: 'POST' })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+export async function getJobLogsV4(
+  jobId: string,
+  offset: number,
+  limit = 500,
+): Promise<V4JobLogsResponse> {
+  const query = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/logs?${query.toString()}`)
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }

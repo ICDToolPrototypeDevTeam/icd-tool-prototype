@@ -6,6 +6,8 @@
 - GET  /api/v4/jobs                   任务列表（可选 status / task_type 过滤）
 - POST /api/v4/jobs/{job_id}/resume   继续被中断的任务（按参数快照重新执行）
 - POST /api/v4/jobs/{job_id}/abandon  放弃被中断的任务（不删除文件）
+- POST /api/v4/jobs/{job_id}/cancel  终止运行中的任务（不删除文件）
+- GET  /api/v4/jobs/{job_id}/logs    任务日志增量拉取
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from typing import Optional, Union
 from fastapi import APIRouter, HTTPException
 
 from app.api.v4.runner import (
-    _parse_progress,
+    _merged_progress,
     derive_consensus_summary,
     derive_eoicd_hlr_counts,
     derive_forward_outputs,
@@ -31,11 +33,13 @@ from app.api.v4.schemas import (
     V4ForwardJobResultResponse,
     V4ForwardJobResultSummary,
     V4JobListItem,
+    V4JobLogsResponse,
     V4JobOutputs,
     V4JobResultResponse,
     V4JobResultSummary,
     V4JobStatusResponse,
 )
+from app.job_log import LOG_FILE_NAME, job_log_store
 from app.job_manager import JobStatus, job_manager
 from app.v4.config import get_output_root
 
@@ -51,6 +55,11 @@ def _get_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail='job not found')
     return job
+
+
+def _job_log_path(job) -> Path:
+    job_dir = job.job_dir if job.job_dir is not None else (get_output_root() / 'v4' / job.job_id)
+    return Path(job_dir) / LOG_FILE_NAME
 
 
 @router.get('/jobs', response_model=list[V4JobListItem])
@@ -83,7 +92,10 @@ def list_v4_jobs(status: Optional[str] = None, task_type: Optional[str] = None):
 @router.get('/jobs/{job_id}', response_model=V4JobStatusResponse)
 def get_v4_job_status(job_id: str):
     job = _get_job(job_id)
-    progress = _parse_progress(job.message)
+    # 优先用 pipeline 上报的结构化进度；老 manifest 没有该字段时回落到
+    # 从 message 正则解析（保证向后兼容，行为与改动前一致）。
+    progress = _merged_progress(job)
+
     mock_models: list[str] = []
     if job.result and "mock_models" in job.result:
         mock_models = list(job.result["mock_models"])  # type: ignore[arg-type]
@@ -91,15 +103,18 @@ def get_v4_job_status(job_id: str):
         job_id=job.job_id,
         status=job.status,
         task_type=job.task_type,
-        stage=progress["stage"],
-        stage_index=progress["stage_index"],
-        stage_total=progress["stage_total"],
-        case_index=progress["case_index"],
-        case_total=progress["case_total"],
+        stage=progress.get("stage") or "",
+        stage_index=progress.get("stage_index"),
+        stage_total=progress.get("stage_total"),
+        case_index=progress.get("case_index"),
+        case_total=progress.get("case_total"),
         message=job.message,
         resumed=job.resumed,
         reuse=job.reuse,
         mock_models=mock_models,
+        mock=bool(job.mock),
+        cancel_requested=bool(job.cancel_requested),
+        error=job.error or None,
         created_at=job.created_at.isoformat(),
         updated_at=job.updated_at.isoformat(),
     )
@@ -249,3 +264,46 @@ def abandon_v4_job(job_id: str):
         status=job.status.value,
         message='任务已放弃（文件保留在输出目录，未删除）',
     )
+
+
+@router.post('/jobs/{job_id}/cancel', response_model=V4AnalyzeResponse)
+def cancel_v4_job(job_id: str):
+    """终止一个运行中的任务（协作式）。
+
+    只置取消标志，管线在下一个检查点（步骤开头 / 每个 case）抛出
+    ``JobCancelled`` 并以 ``canceled`` 结束。**不删除**已产出的文件，也不写
+    ``job.result``（避免半成品被当成结果展示）。
+
+    返回体里的 ``status`` 是**当前真实状态**（``running`` / ``pending``），不是
+    虚构的 ``canceling``：前端靠 ``cancel_requested`` 展示「正在终止…」，
+    避免再出现「同一个词表示两件事」的歧义。
+    """
+    job = _get_job(job_id)
+    if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
+        raise HTTPException(
+            status_code=409,
+            detail=f'job not cancelable: status={job.status.value}',
+        )
+
+    job.request_cancel()
+    return V4AnalyzeResponse(
+        job_id=job.job_id,
+        status=job.status.value,
+        message='已请求终止，任务将在当前步骤/Case 边界停止（已产出文件保留）',
+    )
+
+
+@router.get('/jobs/{job_id}/logs', response_model=V4JobLogsResponse)
+def get_v4_job_logs(job_id: str, offset: int = 0, limit: int = 500):
+    """任务日志增量拉取。
+
+    ``offset`` 传上一次返回的 ``next_offset``（首次传 0）。内存 buffer 为空
+    （进程重启后）时，``register`` 会从输出目录的 job.log 尾部恢复，因此
+    服务器重启后仍能看到重启前的日志。
+    """
+    job = _get_job(job_id)
+    safe_limit = max(1, min(limit, 2000))
+    safe_offset = max(0, offset)
+    buf = job_log_store.register(job_id, _job_log_path(job))
+    data = buf.read(offset=safe_offset, limit=safe_limit)
+    return V4JobLogsResponse(job_id=job_id, **data)

@@ -11,12 +11,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import threading
 import traceback
 from pathlib import Path
 from typing import Optional
 
-from app.job_manager import Job, JobStatus
+from app.job_log import (
+    LOG_FILE_NAME,
+    bind_job_log,
+    config_lines,
+    job_log_store,
+    restore_job_log,
+)
+from app.job_manager import Job, JobCancelled, JobStatus
+from app.v4.errors import classify_pipeline_error
+from app.v4.llm.factory import use_mock_llm as mock_mode_enabled
 from app.v4.pipeline import run_forward_pipeline, run_reverse_pipeline
 from app.v4.profiles import ProfileRegistry
 
@@ -74,6 +84,84 @@ def _require_file(job_dir: Path, rel: Optional[str]) -> Optional[Path]:
     if p is not None and not p.exists():
         raise FileNotFoundError(str(p))
     return p
+
+
+def _begin_job_run(job: Job, job_dir: Path, requested_mock: Optional[bool]) -> Optional[tuple]:
+    """进入管线线程的统一开场：绑定日志上下文 + 写日志头 + 记录模式与来源。
+
+    必须在调用方设置 ``USE_MOCK_LLM`` **之后**调用，否则记录的模式不准。
+    ``requested_mock`` 是前端传来的参数（``None`` 表示未传、沿用容器配置）；
+    记下来源是为了让「容器配置」与「前端开关」谁生效在日志面板里一眼可辨 ——
+    本次实测中曾因本地容器未关闭而误判 mock 状态，正是缺少这条信息。
+    返回上一层线程绑定，供 finally 中 :func:`restore_job_log`；返回 ``None``
+    表示「本次未绑定成功」，调用方据此跳过恢复。
+
+    **本函数刻意不抛异常**：日志绑定与日志头只是可观测性，不得让一个正常任务
+    失败（约束见 spec「日志/进度持久化失败不得影响主流程」）。调用方传入的对象
+    未必是完整 Job（既有测试用只实现 ``update`` 的 stub 驱动本线程），因此注册
+    或取字段失败时一律降级为「不进任务日志」。
+
+    降级告警写进该任务**自己的** buffer，用户据此在日志面板与 ``job.log`` 里
+    看到「日志为什么是空的」；只有连 buffer 都没拿到的残余情形才退回 stderr，
+    那条通道对用户不可见（详见下方分支注释）。
+    """
+    prev: Optional[tuple] = None
+    buf = None
+    try:
+        buf = job_log_store.register(job.job_id, job_dir / LOG_FILE_NAME)
+        prev = bind_job_log(job.job_id, job)
+        job.mock = mock_mode_enabled()
+        source = '前端参数' if requested_mock is not None else '继承容器配置'
+        buf.append(
+            f'===== 任务开始 task={job.task_type} mock={job.mock} (来源: {source}) '
+            f'resumed={job.resumed} job_id={job.job_id} =====',
+            'info',
+        )
+        for line in config_lines():
+            buf.append(line, 'info')
+        return prev
+    except Exception as e:  # noqa: BLE001 — 见 docstring：日志失败不得影响任务
+        if prev is not None:
+            restore_job_log(prev)
+        warning = f'[job] 任务日志绑定失败，本次降级为不进任务日志: {type(e).__name__}: {e}'
+        if buf is not None:
+            # 已经拿到该任务的 buffer：告警写进它，用户就能在日志面板与 job.log
+            # 里看到「日志为什么是空的」。这条写入同为 best-effort —— 告警自身
+            # 失败不得影响任务，因此就地兜住，绝不外抛。
+            try:
+                buf.append(warning, 'error')
+            except Exception:  # noqa: BLE001 — 告警写不进去就放弃，绝不外抛
+                pass
+        else:
+            # 残余情形：连该任务的 buffer 都没拿到（register 本身失败，或调用方
+            # 传入的不是完整 Job）。此时告警只能进 stderr；装了 Tee 后它落在
+            # global_buffer，而该 buffer 没有任何接口暴露给前端、服务上也没有
+            # SSH —— 这条告警**用户看不到**。不假装它可见：此处只保证不静默
+            # （留在容器日志里），用户侧的可见性由后续任务承接。
+            print(warning, file=sys.stderr)
+        return None
+
+
+def _fail_job(job: Job, exc: BaseException, label: str) -> None:
+    """统一的失败收尾：分类 → 结构化错误 → 状态。
+
+    ``JobCancelled`` 单独走 canceled 分支：它是用户主动终止，不是失败，
+    也不应写 ``job.result``（半成品不得被当成结果展示）。
+    """
+    progress = _merged_progress(job)
+    stage = progress.get('stage') or ''
+    stage_index = progress.get('stage_index')
+    error = classify_pipeline_error(exc, stage=stage, stage_index=stage_index)
+
+    if isinstance(exc, JobCancelled):
+        job.set_error(error)
+        job.update(JobStatus.CANCELED, '任务已被用户终止')
+        print(f'[job] cancelled by user at stage={stage or "(未知)"}', file=sys.stderr)
+        return
+
+    job.set_error(error)
+    job.update(JobStatus.FAILED, f'{label} failed: {type(exc).__name__}: {exc}')
+    traceback.print_exc()
 
 
 def job_input_filenames(job: Job) -> list[str]:
@@ -139,6 +227,18 @@ def _parse_progress(message: Optional[str]) -> dict:
     if m2:
         out["case_total"] = int(m2.group(1))
     return out
+
+
+def _merged_progress(job: Job) -> dict:
+    """合并 pipeline 上报的结构化进度与 message 正则兜底。
+
+    I-1：错误分类（_fail_job）与状态查询（jobs.get_v4_job_status）必须用
+    同一个 stage 来源，否则同一次失败的 error.stage 会为空、而顶层 stage 非空。
+    """
+    progress = dict(job.progress or {})
+    for key, value in _parse_progress(job.message).items():
+        progress.setdefault(key, value)
+    return progress
 
 
 def derive_outputs(output_dir: Path) -> dict:
@@ -259,11 +359,18 @@ def run_v4_pipeline_thread(
     # —— ADR-001 Issue A 修正 #2：进入线程前保存旧 env；finally 中按 None/赋值恢复 ——
     saved_judge_providers = os.environ.get("JUDGE_PROVIDERS")
     saved_use_mock_llm = os.environ.get("USE_MOCK_LLM")
+    prev_binding = None
     try:
         if judge_providers:
             os.environ["JUDGE_PROVIDERS"] = ",".join(judge_providers)
+        # 注意：USE_MOCK_LLM 是进程级变量，本任务在 finally 之前一直「占有」它。
+        # 由此本工具假定同一时刻只有一个分析任务在跑（单飞）：两个任务重叠时，
+        # 后提交者会改写先提交者的 mock 模式，两边的日志与结果页警告都会失真（I-2）。
         if use_mock_llm is not None:
             os.environ["USE_MOCK_LLM"] = "1" if use_mock_llm else "0"
+
+        # 必须在设置 env 之后调用：_begin_job_run 会读取生效后的 USE_MOCK_LLM
+        prev_binding = _begin_job_run(job, job_dir, use_mock_llm)
 
         job.update(JobStatus.RUNNING, "Step 1/6: Parsing input files")
 
@@ -313,6 +420,10 @@ def run_v4_pipeline_thread(
             "errors": [],
         }
         job.update(JobStatus.COMPLETED, "V4 reverse pipeline complete")
+    except JobCancelled as e:
+        # 必须先于 Exception：JobCancelled 继承 BaseException，本不会被下面的
+        # except Exception 捕获；显式列出是为了让取消走 canceled 而非 failed 分支。
+        _fail_job(job, e, "V4 pipeline")
     except Exception as e:
         job.result = {
             "requirement_count": 0,
@@ -326,9 +437,11 @@ def run_v4_pipeline_thread(
             "degradation": {},
             "errors": [f"{type(e).__name__}: {e}"],
         }
-        job.update(JobStatus.FAILED, f"V4 pipeline failed: {type(e).__name__}: {e}")
-        traceback.print_exc()
+        _fail_job(job, e, "V4 pipeline")
     finally:
+        # 恢复线程绑定，避免污染同线程的后续任务
+        if prev_binding is not None:
+            restore_job_log(prev_binding)
         # —— ADR-001 Issue A 修正 #2：env 恢复 ——
         if saved_judge_providers is None:
             os.environ.pop("JUDGE_PROVIDERS", None)
@@ -516,9 +629,16 @@ def run_forward_pipeline_thread(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     saved_use_mock_llm = os.environ.get("USE_MOCK_LLM")
+    prev_binding = None
     try:
+        # 注意：USE_MOCK_LLM 是进程级变量，本任务在 finally 之前一直「占有」它。
+        # 由此本工具假定同一时刻只有一个分析任务在跑（单飞）：两个任务重叠时，
+        # 后提交者会改写先提交者的 mock 模式，两边的日志与结果页警告都会失真（I-2）。
         if use_mock_llm is not None:
             os.environ["USE_MOCK_LLM"] = "1" if use_mock_llm else "0"
+
+        # 必须在设置 env 之后调用：_begin_job_run 会读取生效后的 USE_MOCK_LLM
+        prev_binding = _begin_job_run(job, job_dir, use_mock_llm)
 
         job.update(JobStatus.RUNNING, "Step 1/8: Parsing input files")
 
@@ -555,6 +675,10 @@ def run_forward_pipeline_thread(
             "errors": [],
         }
         job.update(JobStatus.COMPLETED, "V4 forward pipeline complete")
+    except JobCancelled as e:
+        # 必须先于 Exception：JobCancelled 继承 BaseException，本不会被下面的
+        # except Exception 捕获；显式列出是为了让取消走 canceled 而非 failed 分支。
+        _fail_job(job, e, "V4 forward pipeline")
     except Exception as e:
         job.result = {
             "forward_xlsx": (output_dir / FORWARD_OUTPUT_FILES["forward_xlsx"]).exists(),
@@ -563,9 +687,10 @@ def run_forward_pipeline_thread(
             "total_blocks": 0,
             "errors": [f"{type(e).__name__}: {e}"],
         }
-        job.update(JobStatus.FAILED, f"V4 forward pipeline failed: {type(e).__name__}: {e}")
-        traceback.print_exc()
+        _fail_job(job, e, "V4 forward pipeline")
     finally:
+        if prev_binding is not None:
+            restore_job_log(prev_binding)
         if saved_use_mock_llm is None:
             os.environ.pop("USE_MOCK_LLM", None)
         else:

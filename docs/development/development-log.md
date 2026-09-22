@@ -3246,3 +3246,49 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   5. mock 下 `model == "mock"`，换模型名自动失效未在真实 provider 上复验（与 09-15 条目同）。
 
 - **下一步建议**：1) 用真实 provider 跑一次正向「Step 7 跑到一半杀 → 继续」，确认省下的调用数与产物差异符合预期；2) 汇总提交本分支未提交的 V1/V2/V3/A+B/Step 2/日志口径/正向复用改动；3) 正向确定性步骤（S1/2/3/5/6/8）如后续出现性能痛点，再评估产物级跳过（本轮不做）。
+
+## 2026-09-22 服务器可观测与任务控制（MOCK 开关 / 任务日志面板 / 任务终止 / 失败根因分类）
+
+- **背景**：工程已按 Docker 单端口形态部署到内网服务器（`docker-compose.server.yml`），但服务器上不能 SSH 查看容器日志，实测暴露 5 个问题：① MOCK 模式也跑很久，看不出时间花在哪；② 前端没有 MOCK 开关，只能改 `.env` 重启容器；③ 前端看不到后端日志，卡住 / 失败只能猜；④ 任务开始后无法终止，只能重启容器、丢掉全部进度；⑤ 跑久后报错但信息无区分，分不清「后端失败」与「前端等待超时」。本轮实施前四项的可观测 / 可控能力，并对第 ⑤ 项做根因修复（设计过程记录见 `docs/superpowers/specs/2026-09-22-服务器可观测与任务控制-design.md`，不作为事实源）。
+
+- **实现要点**：
+  1. **日志采集（新增 `backend/app/job_log.py`）**：不把 150+ 处 `print()` 改写成 `logging`（既有日志文案在本项目被当契约看待），而是由 `main.py` 在导入时 `install_log_tee()` 用 Tee 接管 `sys.stdout` / `sys.stderr`；线程归属用 thread-local，线程池提交前用 `bind_current_job` 包装（池内工作线程不继承 thread-local，否则池内输出会串到别的任务或全局 buffer）。每个任务同时把日志追加到 `{job_dir}/job.log`（封顶 5MB），进程重启后内存 buffer 为空时从该文件**尾部**恢复。该模块不 import 任何 `app.*`（它被 `app.job_manager` 导入，引入依赖即形成环）。
+  2. **启动自检与任务首行**：`main.py` 在 lifespan 里 `set_config_lines(_config_snapshot())` 记录容器配置（`USE_MOCK_LLM` / 三个 API Key 是否存在 / `JUDGE_PROVIDERS` / 输出与静态目录）；runner 在每个任务开头把这几行**重放进该任务自己的 buffer**，并先打印 `===== 任务开始 task=... mock=... (来源: 前端参数|继承容器配置) ... =====`。「本次实际生效值」看任务首行，「容器配置」看 `[config]` 行 —— 两行一起才是判别开关是否真正生效的证据（`[config]` 行取自 `os.getenv` 且冻结在进程启动时，不随前端开关变化）。
+  3. **`GET /api/v4/jobs/{job_id}/logs`**：增量拉取（`offset` 取上次返回的 `next_offset`，首次 0；`limit` 默认 500、上限 2000），响应 `{job_id, lines:[{seq,ts,level,text}], next_offset, truncated}`。前端每 3 秒轮询；检测到 `next_offset < offset`（后端重启、buffer 重建、seq 从头）时把偏移归零重拉。
+  4. **`POST /api/v4/jobs/{job_id}/cancel`（协作式终止）**：只置取消标志，`running` / `pending` → 200，其余状态 → 409；管线在步骤开头与每个 case 的检查点抛出 `JobCancelled`，任务以新增状态 `canceled` 结束。`JobCancelled` 刻意继承 `BaseException`：仓库内有十余处 `except Exception` 兜底，继承 `Exception` 会被吞成「一条失败判定」使取消静默失效。**不删除**任何文件，也不写 `job.result`（半成品不得被当成结果展示）。
+  5. **失败分类（新增 `backend/app/v4/errors.py`）**：把管线异常映射为 12 类 category + 面向用户的 title 与可执行 hint，随 `job.error` 经 `GET /jobs/{job_id}` 新增的 `error` 字段下发。LLM 层细分复用 `degradation.fallback.classify_exception`，但按**异常类型**把关：后者的 `"timeout" in msg` 子串匹配会把网络盘写盘 `OSError("... timed out")` 报成模型超时、把解析 `KeyError` 报成模型输出异常，因此只有确实来自模型调用层的异常才交给它细分。
+  6. **前端**：顶栏全局 MOCK 开关（`useMockMode`，localStorage 持久化；提交任务时**显式**传 `use_mock_llm`，因此可在容器已配 MOCK 的环境下双向切换）；任务日志面板（`JobLogPanel` + `useJobLogs`）；「终止任务」按钮（`cancel_requested` 为真时显示「正在终止…」）；错误页按分类展示 + 「一键复制诊断信息」（`copyText` 在非安全上下文走 `execCommand` 兜底，失败时露出只读文本框供手动复制）。终止按钮只在**任务创建完成前不显示**（`CorrectnessPage` / `CompletenessPage` 仅在 `jobId !== null` 时传入 `onCancel`）—— 提交窗口内点击无人接收，故干脆不显示。
+  7. **失败信息取值链路**：`GET /jobs/{id}/result` 非 `completed` 仍返回 409（契约**不变**），失败原因改从 `GET /jobs/{id}` 的 `error` 字段读取；`useAnalysisJob` 的 `failed` / `canceled` 分支把结构化错误写进错误页，前端等待超时改按**时间上限**并在文案里明确「任务可能仍在服务器上运行」，与后端失败彻底分开。
+  8. **MOCK 下跳过标注节流**：`hlr_labeler._throttle_seconds()` 按要求时的模式返回 0.0 或 0.2，**不缓存**成模块常量 —— runner 会在同一进程内按前端参数切换 `USE_MOCK_LLM`，缓存会读到错误模式。
+
+- **修改文件**：
+  - 后端新增：`backend/app/job_log.py`、`backend/app/v4/errors.py`；
+  - 后端修改：`backend/app/main.py`、`backend/app/job_manager.py`、`backend/app/api/v4/runner.py`、`backend/app/api/v4/jobs.py`、`backend/app/api/v4/schemas.py`、`backend/app/v4/pipeline.py`、`backend/app/v4/matching/hlr_labeler.py`、`backend/app/v4/comparison/re_review.py`、`backend/app/v4/comparison/coverage_reviewer.py`、`backend/app/v4/degradation/concurrency.py`；
+  - 前端新增：`frontend/src/components/JobLogPanel.tsx`、`frontend/src/components/ErrorDiagnostics.tsx`、`frontend/src/hooks/useJobLogs.ts`、`frontend/src/hooks/useMockMode.ts`；
+  - 前端修改：`frontend/src/App.tsx`、`frontend/src/api/index.ts`、`frontend/src/types.ts`、`frontend/src/index.css`、`frontend/src/components/ProcessingView.tsx`、`frontend/src/hooks/useAnalysisJob.ts`、`frontend/src/pages/CorrectnessPage.tsx`、`frontend/src/pages/CompletenessPage.tsx`；
+  - 文档：`docs/architecture/api.md`、`docs/architecture/current-architecture.md`、`CHANGELOG.md`、`docs/development/development-log.md`（本条）、`docs/development/debug-log.md`（BUG-20260922-001）、新增 `docs/testing/服务器部署验收清单.md`。
+
+- **验证方式与结果**：
+  1. 后端回归：`cd backend && python -m pytest tests/ -q --continue-on-collection-errors` → **81 passed, 10 errors**（**已验证**；最终修复轮新增 1 个用例后由 80 → 81；本计划新增的 8 个测试文件（`test_job_log` / `test_pipeline_errors` / `test_job_cancel` / `test_job_api_ext` / `test_job_log_pool` / `test_runner_cancel` / `test_pipeline_checkpoints` / `test_hlr_labeler_throttle`）单独跑为 **76 passed**）。10 个 collection error 全部为既有、与本轮无关（进行中的反向架构重构导致 `app.v4.reverse.*` / `app.v4.shared.parsing.*` 导入失败），同源现象见 `docs/development/debug-log.md` 的 BUG-20260911-001 遗留问题第 1 条（当时 9 个，现为 10 个）。命令必须带 `--continue-on-collection-errors`：pytest 默认遇 collection error 即中断整个会话，此时 passed 数为 0、得不到可用计数。`test_reverse_base_stages.py` 基线 5/7/4/12 因该文件落在上述 10 个 error 中而**无法运行**，本轮**未执行**，其不变性结论只能靠代码审查，不得表述为「已跑过基线」。
+  2. 前端静态检查：`cd frontend && npx tsc --noEmit && npm run build` → 无错误（**已验证**）。注意：该次构建产出的 `frontend/dist` 早于最终前端改动（09-22 15:36 对 16:19–16:20），**验收前须按 `docs/testing/服务器部署验收清单.md` 的「产物前提」段重新构建**，现存 `dist` 不能直接用于验收。
+  3. MOCK 全流程探针（仓库外临时脚本 `%TEMP%/icd_profile_mock.py`，`USE_MOCK_LLM=1`，AMS 16 HLR）→ 全流程 57.6s，Step 2 **0.0s**，每一步都有 `[timing]` 行输出，任务 `completed`（**已验证**）。说明：该脚本直跑管线、**未安装 Tee**，因此它验证的是「Step 2 不再白等节流」与「`[timing]` 行确实会被打印」，不是日志面板的渲染路径；全流程绝对值随机器负载波动（本轮 Step 1 为 35.0s），只有 Step 2 的 3.1s → 0.0s（15 次节流等待、末条不等待，理论值 15 × 0.2 = 3.0s）可归因于本轮改动。
+  4. 前端运行时行为（MOCK 开关实际提交与双向切换、日志面板渲染与 3 秒增量、终止按钮的显示与交互、错误页四类文案、复制诊断信息与 `execCommand` 兜底）**尚未验证**：无浏览器环境，未新增前端测试运行器（本计划禁止），仅经代码审查 + 上述 `tsc` / `build` 通过。不得表述为「点过按钮 / 看到过面板」。
+  5. 服务器端到端（`docker compose -f docker-compose.server.yml up -d`；镜像需先外部构建并 `docker load`，该编排文件无 `build` 段）**尚未验证**：需按新增的 `docs/testing/服务器部署验收清单.md` 逐条手工验收（**含其新增的「产物前提」段**）。
+
+- **遗留问题**：
+  1. **服务器端到端未跑**：本 Issue 的可观测 / 可控能力全部依赖真实浏览器与容器部署形态，尚未在服务器上执行验收；`docs/testing/服务器部署验收清单.md`（11 项，含 5b / 8b）即为验收依据，验收前不得认为本 Issue 已验收。
+  2. 重启后的日志只恢复 `job.log` **尾部**（最多 256KB / 2000 行），更早的行不再可见。该上限已判定为**不修**的已知限制，已写入验收清单 8b 行，避免被当成缺陷上报。
+  3. ~~日志面板的 `truncated` 标志在单任务生命周期内单调~~ —— **已在最终修复轮修掉**（`frontend/src/hooks/useJobLogs.ts` 的重启分支补 `setTruncated(false)`）；**未在浏览器实测**，仍以验收清单为准。
+  4. 取消后错误页标题为「任务已终止」（前端按 `jobStatus === 'canceled'` 判定），结构化错误的 `error.title` 为「任务已取消」（后端 `CATEGORY_TITLES['CANCELLED']`）；两者用词不同但语义各自正确（前者指本次运行终止了，后者指这次失败的性质是取消），**不是不一致**，无需统一、也不要为此改代码。
+  5. EoICD 解析（约 19–35s，随机器负载浮动）与 12.3 万行 xlsx 生成（约 11s）等与模型无关的耗时未优化 —— 设计非目标，建议单开 Issue 评估。
+  6. **跟进 Issue 候选（最终审查已定位、本轮未做）**：`M-1` 重启边界日志拼接不连续与恢复行 level/ts 丢失；`M-3` `backend/app/api/v4/coverage.py` 提交路径上 `_detect_system_type` 未受保护（损坏 HLR 文件会 500 + 留下幽灵 PENDING 任务，与前端「任务未创建」文案矛盾）；`M-4` 日志面板截断提示指向容器内文件、错误徽章 12 类仅 1 种配色；`M-5(c)` `config.py` 死常量 `USE_MOCK_LLM`、`LogBuffer` 每任务常驻无淘汰；`M-6` 代码半（`review_agent.py` 在逐项 try 之外构造 deepseek 客户端 → 清空 Key 会整体失败）；`I-2` 深修（线程局部 mock 绑定，与 `bind_job_log` 对称）；以及 `P16`–`P24`。
+  7. **测试文件未被 git 跟踪**：`backend/tests/` 被 `.gitignore:50` 忽略（`git ls-files backend/tests/` 为 0），本计划新增的 8 个测试文件与最终修复轮的用例如需纳入版本控制，须由用户显式 `git add -f`。
+
+- **最终定审与修复轮（2026-09-22）**：
+  1. **I-1（错误页「失败步骤」在反向 Step 1–3 为空）已修**：`backend/app/api/v4/runner.py` 抽出 `_merged_progress(job)`，让 `_fail_job` 与 `jobs.get_v4_job_status` **共用同一个 stage 来源**（此前 `_fail_job` 只读结构化 `job.progress`，而结构化 stage 只在反向 Step 4 / 正向 Step 7 才写入）；前端 `ErrorDiagnostics` 改用 `ProcessingView` 导出的 `STAGE_LABELS` 翻译 token（未知值保留原文），复制文本写成「中文（token）」。
+  2. **I-2（MOCK 开关是进程级 `os.environ`、无单飞保护）判定为已知限制**：两个任务重叠提交会互相改写 mock 模式，两边的日志与结果页警告都会失真。本轮只做「验收清单第 3 行写明须等前一次任务结束 + 两处 env 赋值点加注释说明单飞前提」，**不做**线程局部绑定，也**不加**队列（被 Global Constraint 6 挡住）—— 转跟进 Issue。
+  3. **QF-1 / QF-2 已修**：日志面板 `truncated` 在重启分支复位；日志时间列标注「时间列为 UTC」（不做时区换算，界面须与 `job.log` 可 grep 的字符串一致），验收清单追加第 11 行。
+  4. **文档更正**：`api.md` 把 `LLM_AUTH` 标注为**预留分类**（当前不可达）、`mock_models` 只可能出现 `minimax` / `qwen`、`use_mock_llm` 说明改为「当前前端总是显式提交本字段」；`current-architecture.md` 的 derive_* 计数 5 → **7**；`CHANGELOG.md` 类别枚举删去「模型认证」；验收清单第 3 行补「两次提交不得重叠」前提、第 7 行括注补「清空 Key 会以『服务配置缺失』整体失败」。
+  5. **本轮引入的、用户不可见的不一致**：`_fail_job` 先算 stage、再 `job.update(FAILED, …)` 覆盖 `job.message`，故失败后 `GET /jobs/{id}` 的顶层 `stage` 为空、而同响应 `error.stage` 有值。前端两个状态互斥渲染（`ProcessingView` 仅在 `pageState === 'processing'`），故**用户不可见**；列为跟进项（修法二选一：改 `_fail_job` 的 message 写法，或让查询侧读 `progress['message']`）。
+
+- **下一步建议**：1) 在服务器上按 `docs/testing/服务器部署验收清单.md` 手工验收并回填「实际」列；2) 前端行为一经浏览器实测，据实更新本纪要的「尚未验证」项；3) 如需继续压缩 MOCK 全流程耗时，另开 Issue 评估 EoICD 解析与 xlsx 生成；4) 按跟进 Issue 候选（`M-1` / `M-3` / `M-6` 代码半 / `I-2` 深修 优先）分单。

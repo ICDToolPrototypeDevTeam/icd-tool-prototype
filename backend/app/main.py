@@ -18,8 +18,37 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.v4.router import router as v4_router
+from app.job_log import install_log_tee, set_config_lines
 from app.job_manager import job_manager
 from app.v4.config import get_output_root
+
+# 安装 stdout/stderr Tee（幂等）。必须尽早执行，使应用自身的 print 都能被
+# 任务日志面板采集。uvicorn 的 logging handler 可能在本模块之后构造，其访问
+# 日志会流经 Tee，但运行在事件循环线程（无 job 归属）→ 只落进全局 buffer，
+# 不会污染任何任务的日志，而全局 buffer 不对外暴露。
+install_log_tee()
+
+
+def _config_snapshot() -> list[str]:
+    """启动配置自检：只报「有没有」，绝不打印 key 内容。
+
+    依据：实测中曾因「本地容器未关闭」误判 mock 生效情况，无从核对运行配置。
+    本行会写进每个任务的日志头部，让「跑的是哪个模式 / 哪份配置」在 UI 上始终可见。
+    """
+    key_state = ' '.join(
+        f'{name}={"yes" if (os.getenv(f"{name}_API_KEY") or "").strip() else "no"}'
+        for name in ('DEEPSEEK', 'MINIMAX', 'QWEN')
+    )
+    return [
+        '[config] USE_MOCK_LLM={} (容器配置) | {} | JUDGE_PROVIDERS={} | '
+        'OUTPUT_DIR={} | STATIC_DIR={}'.format(
+            os.getenv('USE_MOCK_LLM', '0'),
+            key_state,
+            os.getenv('JUDGE_PROVIDERS', '(默认)'),
+            get_output_root(),
+            os.getenv('ICD_STATIC_DIR', '(未设置)'),
+        )
+    ]
 
 
 @asynccontextmanager
@@ -30,6 +59,8 @@ async def lifespan(app: FastAPI):
         job_manager.load_interrupted(get_output_root() / 'v4')
     except Exception as e:  # noqa: BLE001
         print(f'[job] interrupted-job scan failed: {type(e).__name__}: {e}', file=sys.stderr)
+    # 启动配置自检：写进全局日志缓冲，并在每个任务日志开头重复
+    set_config_lines(_config_snapshot())
     yield
 
 

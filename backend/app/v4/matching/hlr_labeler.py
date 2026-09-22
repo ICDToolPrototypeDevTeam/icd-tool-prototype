@@ -9,7 +9,8 @@ import sys
 import time
 from pathlib import Path
 
-from app.v4.llm.factory import get_llm
+from app.job_manager import raise_if_cancelled
+from app.v4.llm.factory import get_llm, use_mock_llm
 from app.v4.llm_cache import (
     KIND_HLR_LABEL,
     LLMCache,
@@ -25,6 +26,21 @@ DEFAULT_SIGNAL_EXAMPLES = ("速度", "SPEED", "RPM", "温度", "状态")
 LABEL_PROVIDER = "deepseek"
 # 与发送给模型的参数保持同一常量来源，确保 llm_cache key 编入的就是实际参数
 LABEL_PARAMS = {"temperature": 0.1, "max_tokens": 2048}
+
+# 逐条节流间隔（真实模式）。MOCK 模式下取 0：实测 16 条 HLR 白等 3.1s（15 次
+# 节流等待，末条不等待；理论 3.0s），且随 HLR 数线性增长（500 条 = 100s）。
+# 真实模式必须保留，避免触发模型服务速率限制。
+_LABEL_THROTTLE_S = 0.2
+
+
+def _throttle_seconds() -> float:
+    """按**当前**模式判定节流间隔，不做缓存。
+
+    不缓存是必需的：runner 会在同一进程内按前端参数切换 ``USE_MOCK_LLM``，
+    模块级缓存的常量会读到错误模式。
+    """
+    return 0.0 if use_mock_llm() else _LABEL_THROTTLE_S
+
 
 SYSTEM_PROMPT_TEMPLATE = """你是一个航空/车辆接口控制文档（ICD）的领域专家。你的任务是对一条软件高层需求（HLR）提取结构化标签，用于后续的匹配和检索。
 
@@ -239,12 +255,15 @@ def label_hlrs(
 
     labels: dict[str, HLRLabel] = {}
     total = len(hlr_reqs)
+    throttle_s = _throttle_seconds()
     hits = 0
     # 注意：LLMCache 定义了 __len__，空缓存为假值，判空必须用 is not None
     model = resolve_model(LABEL_PROVIDER) if cache is not None else ""
 
     print(f"  [label] Labeling {total} HLRs via {llm.model}...")
     for idx, hlr in enumerate(hlr_reqs):
+        if idx % 20 == 0:
+            raise_if_cancelled()  # 每 20 条一个取消检查点，长批次可被终止
         user_prompt = _build_label_prompt(hlr)
         key = ""
         if cache is not None:
@@ -285,8 +304,8 @@ def label_hlrs(
         labels[hlr.requirement_id] = lbl
         print(f"  [label] {idx + 1}/{total} {hlr.requirement_id} "
               f"bus={lbl.bus_types} devices={lbl.devices[:3]}...")
-        if idx < total - 1:
-            time.sleep(0.2)
+        if throttle_s and idx < total - 1:
+            time.sleep(throttle_s)
 
     # 仅命中时打汇总（miss 不打印）：首跑与恢复未命中的日志格式一致，避免「全 MISS」歧义
     if cache is not None and hits:

@@ -1073,3 +1073,133 @@ runner 里 `is not None` 判断原本就是为「未显式提供则不动 env」
 
 1. `backend/tests/` 中 9 个 `app.v4.reverse.*` 测试文件因反向架构重构源码未提交而收集失败（只余 `__pycache__`），为既有状态，与本次修复无关。
 2. `config.JUDGE_PROVIDERS` 为 import-time 常量，runner 线程内 `os.environ["JUDGE_PROVIDERS"]` 覆盖对 `pipeline.py` 引用的模块级常量不生效（provider 白名单实际由 `.env` 决定）；与 Mock 无关，本次不动。
+
+---
+
+### BUG-20260922-001：长时运行后任务失败但界面无法判断根因（失败原因取值链路缺失）
+
+#### 状态
+
+fixed（前端运行时行为尚未验证：无浏览器环境，仅经代码审查 + `tsc` / `build` 通过）
+
+#### 发现日期
+
+2026-09-22
+
+#### 问题现象
+
+服务器部署形态下（不能 SSH 看容器日志、也不能在前端看日志），任务跑久后进入错误页，但页面只有一个笼统的「处理失败」，看不出根因：分不清是输入文件缺失、模型 Key 失效、模型返回格式异常，还是**前端自己**等待超时；同时没有任何后端日志可看。
+
+#### 复现方式
+
+1. 在服务器形态下提交一次必然失败的任务（把一个纯文本文件改名为 `publisher.xlsx`，与一个正常的 HLR 文件一起提交）；
+2. 任务失败后观察错误页：只有兜底文案「请检查文件格式是否正确，或稍后重试」，无分类、无建议；
+3. 另可断开网络让前端持续取不到状态（或让任务长时间不返回）：进入的是**同一个**错误页、同样没有有效文案。
+
+#### 影响范围
+
+- `backend/app/api/v4/jobs.py`（`/result` 非 `completed` 即 409，失败任务的 `errors` 前端拿不到）
+- `backend/app/job_manager.py`（失败原因此前只写入一句 `message`，前端无从消费）
+- `frontend/src/hooks/useAnalysisJob.ts`（`failed` 分支不写 `errorMessage`；轮询超时与后端失败同形）
+- `frontend/src/pages/CorrectnessPage.tsx` / `frontend/src/pages/CompletenessPage.tsx`（错误页永远渲染兜底文案）
+
+#### 原因分析
+
+1. **失败原因没有可读通道**：后端**有**失败信息，但 `GET /jobs/{id}/result` 仅在 `status == completed` 时返回 200、其余一律 409，失败任务的 `result["errors"]` 前端根本读不到；`job.message` 只有一句 `V4 pipeline failed: <类型>: <信息>`，不稳定也没有面向用户的建议。
+2. **前端没有消费失败原因**：`useAnalysisJob` 的 `status === 'failed'` 分支只 `setPageState('error')`，**不写 `errorMessage`**，错误页因此永远渲染兜底文案。
+3. **两条完全不同的路径在 UI 上同形**：前端轮询原实现为 `MAX_RETRIES=120 × 10s = 20 分钟`，超时后同样进错误页且 `errorMessage` 为空 ——「后端真的失败」与「前端放弃轮询」在界面上完全一样。
+4. **关联（不是本次新增的缺陷）**：MOCK 开关此前无法从界面双向切换，即「前端**要能**发送 `use_mock_llm` 字段」这一环缺失。这是 `BUG-20260911-001` 的**下游**：09-11 修的是「前端不发送该字段时 `.env` 被 Form 默认值（`bool = Form(False)`）覆盖为 `"0"`」，本次修的是「前端**显式**发送该字段（`Optional[bool] = Form(None)` 的契约因而真正生效），从而能在容器 `.env` 已配 MOCK 的环境下双向切换」。两者是同一条链路的上下游，不是两个独立缺陷。
+
+#### 修复方案
+
+后端新增结构化失败信息并下发给前端，前端把两类原因分开呈现：
+
+1. 新增 `backend/app/v4/errors.py`：把管线异常映射为 12 类 category + title + 可执行 hint；LLM 层细分复用 `degradation.fallback.classify_exception`，并按异常类型把关，避免与模型无关的失败（网络盘写盘 `OSError`、文档解析 `KeyError`）被贴成模型故障。
+2. `Job` 新增 `error` 字段（连同 `mock`、`cancel_requested`），`GET /api/v4/jobs/{job_id}` 新增 `error: {category, title, stage, stage_index, error_type, message, detail, traceback_tail, hint, at} | null`；`/result` 的 409 契约**不变**，失败原因改从状态接口读取。
+3. `useAnalysisJob` 的 `failed` / `canceled` 分支写入结构化错误；前端等待超时改按**时间上限**（6 小时）并在文案里明确「任务可能仍在服务器上运行」，与后端失败彻底分开。
+4. 前端错误页展示分类 + 建议，并提供「一键复制诊断信息」（含任务 ID、失败分类、堆栈尾部与日志尾部）。
+
+#### 修改文件
+
+1. `backend/app/v4/errors.py`（新增）
+2. `backend/app/job_manager.py`（`Job.error` / `mock` / `cancel_requested` 与取消检查点）
+3. `backend/app/api/v4/schemas.py`（`V4JobError` + 状态响应新字段）
+4. `backend/app/api/v4/jobs.py`（状态接口回填新字段）
+5. `backend/app/api/v4/runner.py`（失败 / 取消时写入分类结果）
+6. `frontend/src/hooks/useAnalysisJob.ts`、`frontend/src/components/ErrorDiagnostics.tsx`（新增）、`frontend/src/pages/CorrectnessPage.tsx`、`frontend/src/pages/CompletenessPage.tsx`、`frontend/src/types.ts`
+7. `docs/architecture/api.md`（字段契约同步）
+
+#### 验证方式
+
+1. `cd backend && python -m pytest tests/ -q --continue-on-collection-errors`
+2. `cd frontend && npx tsc --noEmit && npm run build`
+3. 浏览器端人工核对：失败任务显示分类与建议、「复制诊断信息」粘贴出的文本完整（本条**未执行**）
+
+#### 验证结果
+
+1. 后端回归 **80 passed, 10 errors**（10 个 collection error 为既有、与本次无关，同 BUG-20260911-001 遗留问题第 1 条）—— **已验证**。
+2. 前端类型检查与构建通过 —— **已验证**（仅静态层面）。
+3. 浏览器端行为（错误页分类渲染、明文 HTTP 下复制走 `execCommand` 兜底）**尚未验证**：无浏览器环境、未新增前端测试运行器；需按 `docs/testing/服务器部署验收清单.md` 第 6 / 7 行手工验收。
+
+#### 遗留问题
+
+1. 取消后错误页标题为「任务已终止」（前端按 `jobStatus === 'canceled'` 判定），而结构化错误的 `error.title` 为「任务已取消」（后端 `CATEGORY_TITLES['CANCELLED']`）。两者用词不同但语义各自正确（前者说这次运行终止了，后者说这次失败的性质是取消），**不是不一致**，无需统一、也不要为此改代码。
+2. 错误页与「一键复制诊断信息」的运行时行为未在浏览器中实测（见验证结果 3）。
+3. 本条目涉及的服务端到端验收未执行，清单见 `docs/testing/服务器部署验收清单.md`。
+
+#### 经验总结
+
+1. **「有数据」不等于「可诊断」**：后端一直持有失败信息，但取值通道（`/result` 409 + 前端不写 `errorMessage`）断在两端，UI 上就等价于「没有」。定位时应顺着「这条信息从产生到渲染，中间有哪几跳」逐跳核对，而不是只看末端页面的表现。
+2. **不同原因必须有不同的呈现**：「后端失败」与「前端等待超时」是两类事件，混用同一个兜底文案会把用户的判断引向错误方向（本轮实测中曾因此误判为模型故障）。
+3. **跨会话缺陷要写清上下游**：本次的开关能力是 09-11 修复的下游，若把它写成两个独立缺陷，后续会话会重复排查同一条链路。
+
+### BUG-20260922-002：错误页「失败步骤」在反向 Step 1–3 失败时为空，Step 4 之后显示未翻译 token
+
+#### 状态
+
+fixed
+
+#### 发现日期
+
+2026-09-22
+
+#### 关联 Issue / PR
+
+本次「服务器可观测与任务控制」Issue（5 个问题合并；纪要见 development-log 同名条目）
+
+#### 问题现象
+
+正确性分析在反向 Step 1–3（解析 / HLR 标注 / 反向匹配）失败时，错误页**不显示**「失败步骤」行，「复制诊断信息」的文本里写成 `失败步骤: (未知)`；Step 4 之后失败时该行虽有值，显示的却是 `multi_judge` 这类未翻译 token（同屏处理页显示的是中文标签）。失败分类本身是正确的。
+
+#### 复现方式
+
+把 `.txt` 改名成 `publisher.xlsx` 与正常 HLR 一起提交一次正确性分析（失败发生在 Step 1 解析）：错误页有「失败分类：文件无法解析」，但不显示「失败步骤」行，复制出的诊断文本里是 `失败步骤: (未知)`。
+
+#### 影响范围
+
+错误页与「一键复制诊断信息」的文本（`frontend/src/components/ErrorDiagnostics.tsx`）；`GET /api/v4/jobs/{job_id}` 的 `error.stage` / `error.stage_index` 取值。
+
+#### 原因分析
+
+同一个逻辑字段（失败发生在第几步）有**两个不同来源**：状态查询（`backend/app/api/v4/jobs.py`）先取结构化 `job.progress`、再回落到 `_parse_progress(job.message)` 的正则解析；而 `_fail_job`（`backend/app/api/v4/runner.py`）**只**取结构化进度。结构化 `stage` 只在反向 Step 4 与正向 Step 7 才被写入，因此反向 Step 1–3 失败时 `error.stage` 为空 —— 不是「没有数据」，而是「两个来源不一致」。
+
+#### 修复方案
+
+抽出 `_merged_progress(job)`（`runner.py`）作为 stage 的唯一推导入口，`_fail_job` 与 `jobs.get_v4_job_status` 共用；前端 `ErrorDiagnostics` 改用 `ProcessingView` 导出的 `STAGE_LABELS` 翻译 token（未知值保留原文），复制文本写成「中文（token）」两种形式都给。
+
+#### 修改文件
+
+`backend/app/api/v4/runner.py`、`backend/app/api/v4/jobs.py`、`frontend/src/components/ProcessingView.tsx`、`frontend/src/components/ErrorDiagnostics.tsx`、`backend/tests/test_job_api_ext.py`
+
+#### 验证方式
+
+`cd backend && python -m pytest tests/test_job_api_ext.py -v` —— 新增用例 `test_fail_job_stage_shared_with_status_response`（修复前 `error.stage` 为空，必红；修复后为 `multi_judge`）。
+
+#### 验证结果
+
+**已验证（单元层面）**：该文件 11 passed；本计划 8 个测试文件 76 passed（`test_job_log` / `test_pipeline_errors` / `test_job_cancel` / `test_job_api_ext` / `test_job_log_pool` / `test_runner_cancel` / `test_pipeline_checkpoints` / `test_hlr_labeler_throttle`）；全量套件 81 passed / 10 errors（修复轮前为 80 passed，+1 为本轮新增用例；10 个 error 与本轮无关）；`npx tsc --noEmit` exit=0。**尚未验证**：错误页在浏览器中的实际渲染（本仓库无浏览器环境，未新增前端测试运行器）。
+
+#### 遗留问题
+
+1. `_fail_job` 先算 stage、再用失败文案覆盖 `job.message`，故失败后状态查询的顶层 `stage` 为空、而同响应 `error.stage` 有值 —— 这是本次修复**引入**的、方向相反的不一致；前端两个状态互斥渲染，用户不可见。列为跟进项（修法：改 message 写法，或让查询侧读 `progress['message']`）。
+2. 同轮最终审查另发现 `I-2`（MOCK 开关是进程级环境变量、无单飞保护）与 `M-1` / `M-3` / `M-4` / `M-5(c)` / `M-6` 代码半，均为跟进 Issue 候选，详见 development-log 同名条目的「最终定审与修复轮」。

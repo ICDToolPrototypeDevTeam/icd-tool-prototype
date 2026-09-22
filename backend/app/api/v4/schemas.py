@@ -46,6 +46,43 @@ class V4ReuseStats(BaseModel):
     rerun: int = 0
 
 
+class V4JobError(BaseModel):
+    """结构化失败信息。
+
+    问题 5 的根因修复：后端此前只把原因塞进一句 message，且 `/result` 在非
+    completed 时返回 409，前端拿不到 → 所有失败在 UI 上同形。
+    """
+
+    category: str = 'INTERNAL'
+    title: str = ''
+    stage: str = ''
+    stage_index: Optional[int] = None
+    error_type: str = ''
+    message: str = ''
+    detail: str = ''
+    traceback_tail: str = ''
+    hint: str = ''
+    at: str = ''
+
+
+class V4LogLine(BaseModel):
+    """任务日志单行。seq 在单个任务内单调递增，供增量拉取做偏移。"""
+
+    seq: int
+    ts: str = ''
+    level: str = 'info'
+    text: str
+
+
+class V4JobLogsResponse(BaseModel):
+    """GET /api/v4/jobs/{job_id}/logs 响应。"""
+
+    job_id: str
+    lines: list[V4LogLine] = []
+    next_offset: int = 0
+    truncated: bool = False
+
+
 class V4JobStatusResponse(BaseModel):
     """GET /api/v4/jobs/{job_id} 响应。"""
 
@@ -61,6 +98,12 @@ class V4JobStatusResponse(BaseModel):
     resumed: bool = False
     reuse: Optional[V4ReuseStats] = None
     mock_models: list[str] = []
+    # 本次运行是否 MOCK 模式（结果页据此提示「模拟数据不可用于验收」）
+    mock: bool = False
+    # 已请求终止、等待管线在检查点停止
+    cancel_requested: bool = False
+    # 结构化失败信息；成功 / 运行中为 None
+    error: Optional[V4JobError] = None
     created_at: str
     updated_at: str
 

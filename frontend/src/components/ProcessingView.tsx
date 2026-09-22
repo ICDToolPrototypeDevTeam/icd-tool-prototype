@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react'
+
 interface Props {
   progress?: string
   stage?: string
@@ -11,9 +13,15 @@ interface Props {
   reuse?: { reused: number; rerun: number } | null
   /** 恢复横幅文案；不传用默认中性文案（正向管线无判定缓存） */
   resumedHint?: string
+  /** 请求终止任务；不传则不显示终止按钮 */
+  onCancel?: () => void
+  /** 已请求终止，等待管线在检查点停止 */
+  cancelRequested?: boolean
+  /** 日志面板等附加内容 */
+  children?: ReactNode
 }
 
-const STAGE_LABELS: Record<string, string> = {
+export const STAGE_LABELS: Record<string, string> = {
   parse: '解析文件',
   label: 'HLR标注',
   match: '反向匹配',
@@ -40,6 +48,9 @@ export default function ProcessingView({
   resumed,
   reuse,
   resumedHint,
+  onCancel,
+  cancelRequested,
+  children,
 }: Props) {
   const stageLabel = stage ? STAGE_LABELS[stage] || stage : null
   const hasV4Progress = stageLabel && stageTotal !== undefined && stageIndex !== undefined
@@ -75,6 +86,23 @@ export default function ProcessingView({
           已复用中断前结果 {reuse.reused} 次 · 接续调用模型 {reuse.rerun} 次
         </div>
       )}
+      {onCancel && (
+        <div className="processing-actions">
+          <button
+            className="btn btn--secondary"
+            onClick={onCancel}
+            disabled={cancelRequested}
+          >
+            {cancelRequested ? '正在终止…' : '终止任务'}
+          </button>
+          <span className="processing-actions__hint">
+            {cancelRequested
+              ? '已请求终止，任务会在当前步骤/Case 结束时停止；已产出的文件会保留。'
+              : '终止后不删除已产出的文件，但任务不会有结果页。'}
+          </span>
+        </div>
+      )}
+      {children}
     </div>
   )
 }

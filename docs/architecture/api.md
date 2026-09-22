@@ -23,8 +23,10 @@ API 设计应遵守以下原则：
 | `/api/v4/completeness-analysis`                | `POST` | 上传输入文件并创建 V4 正向完整性分析任务            |
 | `/api/v4/jobs`                                 | `GET`  | 查询未完成/中断任务列表（可选 `status`、`task_type` 过滤） |
 | `/api/v4/jobs/{job_id}`                        | `GET`  | 查询任务状态                          |
+| `/api/v4/jobs/{job_id}/logs`                   | `GET`  | 任务日志增量拉取（`offset` 取上次返回的 `next_offset`，首次 0；`limit` 默认 500、上限 2000；进程重启后可从 `job.log` 尾部恢复） |
 | `/api/v4/jobs/{job_id}/resume`                 | `POST` | 继续被中断的任务（按 manifest 参数快照重跑，已完成的 LLM 判定复用缓存） |
 | `/api/v4/jobs/{job_id}/abandon`                | `POST` | 放弃被中断的任务（仅标记，不删除文件）            |
+| `/api/v4/jobs/{job_id}/cancel`                 | `POST` | 终止运行中的任务（`running` / `pending` → 200，其余状态 → 409；不删除任何文件，任务最终以 `canceled` 结束） |
 | `/api/v4/jobs/{job_id}/result`                 | `GET`  | 查询任务处理结果摘要（按 `task_type` 分发正确性/完整性两种 schema） |
 | `/api/v4/jobs/{job_id}/outputs/eoicd-xlsx`     | `GET`  | 下载 EoICD 条目化清单（xlsx）      |
 | `/api/v4/jobs/{job_id}/outputs/consensus-docx` | `GET`  | 下载多模型共识差异分析报告（docx）            |
@@ -61,7 +63,7 @@ Content-Type: multipart/form-data
 | `eoicd_publisher_file` | UploadFile (.xlsx) | 二选一 | EoICD Publisher PubSub Excel |
 | `eoicd_subscriber_file` | UploadFile (.xlsx) | 二选一 | EoICD Subscriber PubSub Excel |
 | `traceability_files` | list[UploadFile] (.xlsx) | 否 | 0-N 追溯 Excel；启用预筛选时必传 |
-| `use_mock_llm` | bool (form) | 否（默认不覆盖） | 显式覆盖 mock 开关；未提供时以 `.env` 的 `USE_MOCK_LLM` 为准（Mock 仅由 env 控制） |
+| `use_mock_llm` | bool (form) | 否（默认不覆盖） | 显式覆盖 mock 开关；未提供时以 `.env` 的 `USE_MOCK_LLM` 为准（当前前端总是显式提交本字段） |
 | `judge_providers` | list[str] (form) | 否（默认 `["deepseek"]`） | 多模型 panel provider 白名单 ∈ `{deepseek, minimax, qwen}` |
 | `enable_traceability_prefilter` | bool (form) | 否（默认 false） | 是否启用追溯预筛选 |
 | `controller_profile` | str (form) | 否（默认 `ams`） | 控制器 profile id ∈ `{ams, fgmc, hscu, rpdu, fsecu}`，决定 HLR 解析规则、分类关键词、追溯表配置与 AI 标注示例 |
@@ -96,7 +98,7 @@ GET /api/v4/jobs/{job_id}
 ```json
 {
   "job_id": "<uuid>",
-  "status": "pending | running | completed | failed | interrupted | abandoned",
+  "status": "pending | running | completed | failed | interrupted | abandoned | canceled",
   "stage": "parse | label | match | multi_judge | review | report | done",
   "stage_index": 3,
   "stage_total": 5,
@@ -106,16 +108,42 @@ GET /api/v4/jobs/{job_id}
   "resumed": false,
   "reuse": { "reused": 33, "rerun": 0 },
   "mock_models": ["minimax", "qwen"],
+  "mock": false,
+  "cancel_requested": false,
+  "error": null,
   "created_at": "ISO-8601",
   "updated_at": "ISO-8601"
 }
 ```
 
-`mock_models` 按 ADR-001 D5 规则取值：`multi_judge_results.json.providers ∩ {"minimax", "qwen"}`；`USE_MOCK_LLM=1` 时所有 provider 都进 `mock_models`。
+`mock_models` 按 ADR-001 D5 规则取值：`multi_judge_results.json.providers ∩ {"minimax", "qwen"}`；该交集**总是**执行，故该字段只会出现 `minimax` / `qwen`（`deepseek` 不会出现）。`USE_MOCK_LLM=1` 时三个模型的判定都由 Mock 产生，但该字段的取值规则不变。
 
 `resumed` 表示本次运行是否为中断后的恢复运行（`resume` 启动后置 `true`，首跑为 `false`）。`reuse` 仅在恢复运行时非空，以**模型调用次数**为单位反映本次运行的两个去向：`reused` = 直接复用中断前已完成结果、未发起请求的调用次数；`rerun` = 本次接续发起的调用次数（含中断前未执行到的步骤，以及中断时正在执行或已失败、缓存中没有可用结果的调用）。计数按**反向管线的 Step 2（HLR 标注）/4/5/5.5/5.6** 与**正向管线的 Step 4（HLR 标注）/7（AI 三态复核）**逐条模型调用累计、不去重（同一结果在后续步骤再次命中会再计一次），因此与 `llm_cache.jsonl` 的行数不是同一口径；也与需求条数不同 —— 每个需求对应「每个模型一次判定 + 一次共识」等多次调用。其中两侧的 HLR 标注整批完成、命中 `hlr_labels.json` 直接加载时，加载的 N 条按 `reused` 计入。正向管线同样接入内容寻址缓存（Step 4 `kind=forward_hlr_label`、Step 7 `kind=forward_review`），恢复运行与反向一样实时反映复用/接续调用次数。
 
 `interrupted` / `abandoned` 为任务中断恢复相关状态，见第 13 节。
+
+`mock` 表示本次运行是否按 MOCK 模式执行（结果页据此提示「模拟数据不可用于验收」）；`cancel_requested` 表示已请求终止、正等待管线在检查点停止，前端据此把终止按钮显示为「正在终止…」。
+
+`canceled` 表示运行中的任务被用户主动终止（`POST /api/v4/jobs/{job_id}/cancel`，见第 2 节）；它与 `abandoned` 语义不同：`abandoned` 指**被中断**的任务被用户放弃，`canceled` 指**仍在运行**的任务被终止。两者都不删除任何文件；终止是协作式的，`status` 会保持 `running` / `pending` 直至管线在检查点停止，接口不返回虚构的中间状态。
+
+`error` 为结构化失败信息，仅在任务 `failed` 或 `canceled` 时非空，运行中与成功时为 `null`：
+
+```json
+{
+  "category": "INPUT_FILE | INPUT_FORMAT | CONFIG | LLM_AUTH | LLM_NETWORK | LLM_TIMEOUT | LLM_RATE_LIMITED | LLM_OUTPUT | ALL_PROVIDERS_UNHEALTHY | OUTPUT_DISK | CANCELLED | INTERNAL",
+  "title": "模型服务认证失败",
+  "stage": "multi_judge",
+  "stage_index": 4,
+  "error_type": "HTTPError",
+  "message": "401 Client Error: Unauthorized for url: https://api.deepseek.com/v1/chat/completions",
+  "detail": "HTTPError: 401 Client Error: Unauthorized for url: https://api.deepseek.com/v1/chat/completions (HTTP 401)",
+  "traceback_tail": "Traceback (most recent call last): ...",
+  "hint": "请联系管理员检查模型 API Key 是否有效或已过期。",
+  "at": "ISO-8601"
+}
+```
+
+`category` 与 `title` 的取值：`INPUT_FILE` 输入文件缺失 / `INPUT_FORMAT` 文件无法解析 / `CONFIG` 服务配置缺失 / `LLM_AUTH` 模型服务认证失败 / `LLM_NETWORK` 无法连接模型服务 / `LLM_TIMEOUT` 模型服务超时 / `LLM_RATE_LIMITED` 模型服务限流 / `LLM_OUTPUT` 模型返回格式异常 / `ALL_PROVIDERS_UNHEALTHY` 所有模型服务均不可用 / `OUTPUT_DISK` 输出写入失败 / `CANCELLED` 任务已取消 / `INTERNAL` 内部错误。`hint` 为面向用户的可执行建议，`traceback_tail` 为堆栈尾部（最多 20 行），`at` 为分类发生时间。 其中 `LLM_AUTH` 为**预留分类**，当前版本不会产生该取值：单个模型的 401/403 会被逐条兜底（判官降级为 error judgment、HLR 标注退化为兜底标签），只有全部模型都不可用时才以 `ALL_PROVIDERS_UNHEALTHY` 报出。
 
 ## 6. 查询任务结果摘要接口
 
@@ -124,6 +152,8 @@ GET /api/v4/jobs/{job_id}/result
 ```
 
 仅当 `status == completed` 时返 200 + 完整结果，否则 409。
+
+任务失败时的失败原因请改从 `GET /api/v4/jobs/{job_id}` 的 `error` 字段读取（见第 5 节）。
 
 预期返回（V4JobResultResponse）：
 
@@ -272,7 +302,7 @@ Content-Type: multipart/form-data
 | `analysis_mode` | str (form) | 否（默认 `full`） | `full`（全量）或 `trace`（追溯范围） |
 | `device_icd_trace_file` | UploadFile (.xlsx) | trace 模式必填 | 表1：设备→ICD 追溯表 |
 | `system_device_trace_file` | UploadFile (.xlsx) | trace 模式必填 | 表2：设备→高层需求追溯表 |
-| `use_mock_llm` | bool (form) | 否（默认不覆盖） | 显式覆盖 mock 开关；未提供时以 `.env` 的 `USE_MOCK_LLM` 为准（Mock 仅由 env 控制） |
+| `use_mock_llm` | bool (form) | 否（默认不覆盖） | 显式覆盖 mock 开关；未提供时以 `.env` 的 `USE_MOCK_LLM` 为准（当前前端总是显式提交本字段） |
 
 `analysis_mode` 不在 `{full, trace}` → 422；trace 模式缺任意一张追溯表 → 422。
 
@@ -378,7 +408,7 @@ GET /api/v4/jobs?status=interrupted&task_type=correctness
   {
     "job_id": "<uuid>",
     "task_type": "correctness | completeness",
-    "status": "pending | running | completed | failed | interrupted | abandoned",
+    "status": "pending | running | completed | failed | interrupted | abandoned | canceled",
     "message": "Step 4/6: Multi-agent judging",
     "created_at": "ISO-8601",
     "updated_at": "ISO-8601",
@@ -453,7 +483,7 @@ POST /api/v4/jobs/{job_id}/abandon
   "schema_version": 1,
   "job_id": "<uuid>",
   "task_type": "correctness | completeness",
-  "status": "pending | running | completed | failed | interrupted | abandoned",
+  "status": "pending | running | completed | failed | interrupted | abandoned | canceled",
   "message": "Step 1/6: Parsing input files",
   "created_at": "ISO-8601",
   "updated_at": "ISO-8601",

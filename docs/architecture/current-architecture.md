@@ -77,9 +77,11 @@ V4 反向管线 pipeline（6 步）
 | -------------- | ----------------------------- |
 | `main.py`      | FastAPI 应用入口，仅 CORS + `/api/v4` 路由装载 |
 | `job_manager.py` | 内存任务状态管理（`JobStatus` / `Job` / `JobManager`） |
-| `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（后台线程 + 5 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` |
+| `job_log.py`   | 进程级任务日志缓冲、stdout/stderr Tee、线程归属与 job.log 落盘；不依赖任何 `app.*` 模块 |
+| `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（后台线程 + 7 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` |
 | `v4/pipeline.py` | V4 管线编排：反向 `run_reverse_pipeline`（6 步）+ 正向 `run_forward_pipeline`（8 步） |
 | `v4/config.py` | V4 env 加载（DEEPSEEK_* / USE_MOCK_LLM / JUDGE_PROVIDERS）+ 业务常量 |
+| `v4/errors.py` | 管线异常 → 面向用户的错误分类与建议；复用 `degradation.fallback.classify_exception` |
 | `v4/models.py` | V4 Pydantic 模型（EoICDRequirement / HLRLabel / ReverseCase / ConsensusResult 等） |
 | `v4/parsers/`  | EoICD PubSub Excel + HLR Word 解析 |
 | `v4/matching/` | HLR 标注、条目过滤、信号画像、Block 聚合、HLR 分类、反向匹配、追溯预筛选；正向 `forward_block_builder` / `forward_matcher` / `hlr_identity_index` |
@@ -263,17 +265,19 @@ backend/output/v4/{job_id}/
 backend/app/
 ├── main.py                 # 顶层 FastAPI 入口（仅 CORS + V4 router 装载）
 ├── job_manager.py          # 共享 Job / JobManager（JobStatus 唯一来源）
+├── job_log.py              # 进程级日志缓冲 / stdout-stderr Tee / job.log 落盘与恢复（不 import app.*）
 ├── api/
 │   └── v4/
 │       ├── router.py       # V4 路由聚合（health + coverage + jobs + outputs）
 │       ├── schemas.py      # V4Job* Pydantic
-│       ├── runner.py       # V4 后台线程 + env 保存/恢复 + 5 个 derive_* 函数
+│       ├── runner.py       # V4 后台线程 + env 保存/恢复 + 7 个 derive_* 函数
 │       ├── coverage.py     # POST /api/v4/coverage-analysis
 │       ├── jobs.py         # GET /api/v4/jobs/{id}[/result]
 │       └── outputs.py      # GET /api/v4/jobs/{id}/outputs/{kind}
 └── v4/                     # V4 业务子包
     ├── cli.py              # V4 CLI 入口
     ├── config.py           # V4 env 加载 + 业务常量
+    ├── errors.py           # 管线异常 → 用户可读的错误分类与建议
     ├── models.py           # V4 Pydantic 模型
     ├── pipeline.py         # V4 管线编排（run_reverse_pipeline / run_forward_pipeline）
     ├── parsers/            # EoICD Excel + HLR Word 解析

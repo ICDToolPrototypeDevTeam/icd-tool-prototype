@@ -1,11 +1,13 @@
 import { NavLink, Routes, Route } from 'react-router-dom'
 import { useV4Health } from './hooks/useV4Health'
+import { useMockMode } from './hooks/useMockMode'
 import LandingPage from './pages/LandingPage'
 import CorrectnessPage from './pages/CorrectnessPage'
 import CompletenessPage from './pages/CompletenessPage'
 
 export default function App() {
   const { v4Online } = useV4Health()
+  const { mockMode, setMockMode } = useMockMode()
 
   return (
     <div className="app">
@@ -48,10 +50,27 @@ export default function App() {
         </nav>
 
         <div className="header__status">
+          <label
+            className={`mock-switch ${mockMode ? 'mock-switch--on' : ''}`}
+            title="MOCK 模式：模型调用返回模拟数据，用于验证流程本身"
+          >
+            <input
+              type="checkbox"
+              checked={mockMode}
+              onChange={(e) => setMockMode(e.target.checked)}
+            />
+            <span>MOCK 模式</span>
+          </label>
           <div className={`status-dot ${!v4Online ? 'status-dot--offline' : ''}`} />
           <span>{!v4Online ? 'V4 服务不可用' : '在线服务'}</span>
         </div>
       </header>
+
+      {mockMode && (
+        <div className="mock-banner">
+          MOCK 模式已开启：所有模型调用返回模拟数据，分析结果不可用于验收。正式分析前请关闭。
+        </div>
+      )}
 
       {/* Main */}
       <main className="main">

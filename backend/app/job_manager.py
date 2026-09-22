@@ -12,15 +12,27 @@ import json
 import os
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from app.job_log import current_job
+
 
 MANIFEST_NAME = 'job.json'
 MANIFEST_SCHEMA_VERSION = 1
+
+# set_progress 的落盘节流窗口：每个 case 都写一次磁盘会让 12 万条场景产生
+# 大量原子写；阶段切换或超过该间隔才落盘（内存值始终即时更新）。
+PROGRESS_PERSIST_INTERVAL_S = 5.0
+
+# 终态：进入后写入 finished_at
+_TERMINAL_STATUSES = frozenset({
+    'completed', 'failed', 'canceled', 'abandoned',
+})
 
 # 保护 manifest 写盘（写盘来自管线线程，启动扫描来自主线程）
 _LOCK = threading.Lock()
@@ -35,6 +47,22 @@ class JobStatus(str, Enum):
     INTERRUPTED = 'interrupted'
     # 用户主动放弃继续（不删除任何文件）
     ABANDONED = 'abandoned'
+    # 用户在前端主动终止（不删除任何文件；与 ABANDONED 语义不同：
+    # ABANDONED 指「中断任务被用户放弃」，本状态指「运行中的任务被终止」）
+    CANCELED = 'canceled'
+
+
+class JobCancelled(BaseException):
+    """用户请求终止任务。
+
+    刻意继承 ``BaseException`` 而非 ``Exception``：仓库内存在十余处
+    ``except Exception`` 兜底（``comparison/semantic_judge.py``、
+    ``comparison/re_review.py``、``matching/hlr_labeler.py`` 等）。若继承
+    ``Exception``，取消会被这些兜底吞成「一条失败判定」，取消静默失效。
+    与 ``KeyboardInterrupt`` / ``asyncio.CancelledError`` 的处理惯例一致。
+
+    调用方必须**先**捕获 ``JobCancelled``，再捕获 ``Exception``。
+    """
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -58,6 +86,21 @@ class Job:
         # 恢复运行标记与实时复用计数（API 路径使用；随 manifest 持久化）
         self.resumed: bool = False
         self.reuse: Optional[dict] = None
+        # —— 可观测性与任务控制（Issue：服务器可观测与任务控制）——
+        # 结构化进度：由 pipeline 每步 / 每 case 上报，避免从 message 正则解析
+        self.progress: Optional[dict] = None
+        # 结构化失败信息：{category, title, stage, ..., hint, at}
+        self.error: Optional[dict] = None
+        # 本次运行是否 MOCK 模式（结果页据此提示「模拟数据不可用于验收」）
+        self.mock: bool = False
+        self.finished_at: Optional[datetime] = None
+        # 取消：Event 供管线检查点轮询，cancel_requested 供前端展示「正在终止…」
+        self.cancel_event = threading.Event()
+        self.cancel_requested: bool = False
+        # 节流窗口的起点取「构造时刻」：若取 0.0，首条进度必然满足
+        # ``now - 0.0 >= 5.0``（time.monotonic 是系统运行时长），
+        # 于是每个任务的第一次上报都会写盘，节流对首个 case 形同虚设。
+        self._last_progress_persist: float = time.monotonic()
 
     def set_dir(self, job_dir: Path, params: dict) -> None:
         """绑定输出目录与任务参数快照，并立即落盘 manifest。
@@ -71,6 +114,13 @@ class Job:
         self._persist()
 
     def _persist(self) -> None:
+        """原子写 manifest；任何 I/O / 序列化异常都不得影响任务本身。
+
+        ``set_progress`` 在管线热循环里被每个 case 调用一次，落盘失败（磁盘满、
+        输出目录被删、Windows 文件锁、值不可序列化）若向上抛，会被 ``runner``
+        的 ``except Exception`` 转成 FAILED —— 进度持久化失败就影响了主流程。
+        因此与 :meth:`app.job_log.LogBuffer._persist` 一致，静默降级为「仅内存」。
+        """
         if self.job_dir is None:
             return
         payload = {
@@ -84,17 +134,27 @@ class Job:
             'params': self.params,
             'resumed': self.resumed,
             'reuse': self.reuse,
+            'progress': self.progress,
+            'error': self.error,
+            'mock': self.mock,
+            'finished_at': self.finished_at.isoformat() if self.finished_at else None,
+            'cancel_requested': self.cancel_requested,
         }
         path = self.job_dir / MANIFEST_NAME
-        text = json.dumps(payload, indent=2, ensure_ascii=False)
-        with _LOCK:
-            _atomic_write(path, text)
+        try:
+            text = json.dumps(payload, indent=2, ensure_ascii=False)
+            with _LOCK:
+                _atomic_write(path, text)
+        except Exception:  # noqa: BLE001 — 磁盘满 / 权限不足 / 目录被删时静默降级为「仅内存」
+            pass
 
     def update(self, status: JobStatus, message: Optional[str] = None):
         self.status = status
         if message is not None:
             self.message = message
         self.updated_at = datetime.now(timezone.utc)
+        if status.value in _TERMINAL_STATUSES:
+            self.finished_at = self.updated_at
         self._persist()
 
     def set_reuse_stats(self, reused: int, rerun: int) -> None:
@@ -102,6 +162,72 @@ class Job:
         self.reuse = {'reused': int(reused), 'rerun': int(rerun)}
         self.updated_at = datetime.now(timezone.utc)
         self._persist()
+
+    def set_progress(
+        self,
+        *,
+        message: Optional[str] = None,
+        stage: Optional[str] = None,
+        stage_index: Optional[int] = None,
+        stage_total: Optional[int] = None,
+        case_index: Optional[int] = None,
+        case_total: Optional[int] = None,
+        force_flush: bool = False,
+    ) -> None:
+        """上报结构化进度。内存立即更新；job.json 按窗口节流落盘。
+
+        ``message`` 与既有契约一致（``_parse_progress`` 仍在解析它），额外的
+        stage_* / case_* 字段让前端不必再靠正则从 message 里猜。
+        """
+        if message is not None:
+            self.message = message
+        progress = dict(self.progress or {})
+        for key, value in (
+            ('stage', stage),
+            ('stage_index', stage_index),
+            ('stage_total', stage_total),
+            ('case_index', case_index),
+            ('case_total', case_total),
+        ):
+            if value is not None:
+                progress[key] = value
+        progress['message'] = self.message
+        self.progress = progress
+        self.updated_at = datetime.now(timezone.utc)
+
+        now = time.monotonic()
+        if force_flush or (now - self._last_progress_persist) >= PROGRESS_PERSIST_INTERVAL_S:
+            self._last_progress_persist = now
+            self._persist()
+
+    def set_error(self, error: dict) -> None:
+        """记录结构化失败信息；``result`` 已存在时同步刷新其 ``errors`` 字段。
+
+        刻意**不**为不存在的 ``result`` 建字典：取消的任务不得留下任何
+        ``job.result``，否则半成品有被当作结果展示的风险（spec §6.C）。
+        """
+        self.error = dict(error)
+        if self.result is not None:
+            self.result['errors'] = [
+                f"{error.get('error_type', 'Error')}: {error.get('message', '')}"
+            ]
+        self.updated_at = datetime.now(timezone.utc)
+        self._persist()
+
+    def request_cancel(self) -> None:
+        """请求终止任务（协作式：管线在检查点抛出 JobCancelled）。
+
+        **不覆盖** ``self.message``：前端仍靠它解析「当前在第几步」。
+        """
+        self.cancel_event.set()
+        self.cancel_requested = True
+        self.updated_at = datetime.now(timezone.utc)
+        self._persist()
+
+    def raise_if_cancelled(self) -> None:
+        """取消检查点：被请求取消时抛出 JobCancelled。"""
+        if self.cancel_event.is_set():
+            raise JobCancelled('任务已被用户终止')
 
     @classmethod
     def from_manifest(cls, data: dict, job_dir: Path) -> 'Job':
@@ -117,7 +243,41 @@ class Job:
         job.resumed = bool(data.get('resumed', False))
         raw_reuse = data.get('reuse')
         job.reuse = raw_reuse if isinstance(raw_reuse, dict) else None
+        raw_progress = data.get('progress')
+        job.progress = raw_progress if isinstance(raw_progress, dict) else None
+        raw_error = data.get('error')
+        job.error = raw_error if isinstance(raw_error, dict) else None
+        job.mock = bool(data.get('mock', False))
+        raw_finished = data.get('finished_at')
+        job.finished_at = datetime.fromisoformat(raw_finished) if raw_finished else None
+        # 刻意不恢复「已请求取消」：重启后新进程应从干净状态开始
+        job.cancel_requested = False
         return job
+
+
+def _bound_job() -> Optional[Job]:
+    """当前线程绑定的 Job；CLI / 单元测试未绑定时为 None。"""
+    job = current_job()
+    return job if isinstance(job, Job) else None
+
+
+def raise_if_cancelled() -> None:
+    """取消检查点（模块级）。
+
+    供无法直接拿到 ``job`` 对象的深层层级（``_judge_with_degradation``、
+    ``re_review``、``coverage_reviewer``）调用。无绑定任务时静默 no-op，
+    因此 CLI 路径行为完全不变。
+    """
+    job = _bound_job()
+    if job is not None:
+        job.raise_if_cancelled()
+
+
+def report_progress(**kwargs) -> None:
+    """进度上报（模块级）；无绑定任务时静默 no-op。"""
+    job = _bound_job()
+    if job is not None:
+        job.set_progress(**kwargs)
 
 
 class JobManager:

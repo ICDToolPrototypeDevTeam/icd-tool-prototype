@@ -34,6 +34,7 @@ from app.v4.degradation.concurrency import (
     _submit_with_gate,
 )
 from app.v4.degradation.fallback import classify_exception, make_error_judgment
+from app.job_manager import raise_if_cancelled, report_progress
 from app.v4.llm import get_llm
 from app.v4.llm_cache import KIND_RE_REVIEW, compute_key, resolve_model
 from app.v4.models import (
@@ -340,6 +341,8 @@ def re_review_judgments(
     re_reviewed_count = 0
 
     for case_id in sorted(low_confidence_ids):
+        raise_if_cancelled()
+        report_progress(case_index=len(re_review_meta) + 1, case_total=len(low_confidence_ids))
         mjr = mjr_map.get(case_id)
         case = case_map.get(case_id)
         if mjr is None or case is None:
