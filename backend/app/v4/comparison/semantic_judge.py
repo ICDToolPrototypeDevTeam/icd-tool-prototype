@@ -7,7 +7,11 @@ import json
 import re
 import time
 
-from app.v4.matching.hlr_classifier import extract_bit_fields
+from app.v4.matching.hlr_classifier import (
+    extract_bit_fields,
+    extract_bit_range_assertions,
+    extract_bit_value_assertions,
+)
 from app.v4.models import ReverseCase, ReverseJudgmentResult
 
 # 调用参数指纹：既用于实际调用，也编入缓存 key（llm_cache.compute_key）。
@@ -51,6 +55,109 @@ def _append_bnr_sign_derivation(parts: list[str], merged: dict) -> None:
         f"最高位(0基 offset={top_off}，物理第{top_phys}位)为符号位，已包含在 "
         f"ParameterSize={merged.get('ParameterSize')} 之内。"
     )
+
+
+def _dedupe_coded_fields(
+    matched_profiles: list[dict] | None, offset: int, size: int
+) -> list[tuple[str, str]]:
+    """Collect (field name, CodedSet) for protocol fields whose bit span
+    equals ``offset``/``size``, deduped by first occurrence (no set
+    iteration — order must stay deterministic for prompt/cache stability)."""
+    seen: list[tuple[str, str]] = []
+    for blk in matched_profiles or []:
+        for pf in blk.get("word_protocol_fields", []) or []:
+            attrs = pf.get("attrs", {}) or {}
+            if _to_float(attrs.get("BitOffsetWithinDS")) != offset:
+                continue
+            if _to_float(attrs.get("ParameterSize")) != size:
+                continue
+            coded = str(attrs.get("CodedSet", "") or "").strip()
+            if not coded:
+                continue
+            entry = (str(pf.get("name", "")), coded)
+            if entry not in seen:
+                seen.append(entry)
+    return seen
+
+
+def _append_bit_assembly_derivation(
+    parts: list[str], hlr_content: str, matched_profiles: list[dict] | None
+) -> None:
+    """Spell out the deterministic bit-pair → code-value assembly for HLR
+    assertions like "第9和10位分别设置为“1”和“0”" or "bit8=0，bit9=0".
+
+    Judging this needs the chain bit-number → weight → assembled value →
+    ICD CodedSet mapping. Left to each model's own mental arithmetic the
+    chain is unstable (the same input has flipped verdicts across runs), so
+    it is computed here from the word's own convention (larger bit number =
+    more significant within the ARINC 429 word) and injected as data. The
+    field's CodedSet definition is quoted only when it is unique across
+    matched blocks — heterogeneous definitions cannot be summarized by
+    joining them without ambiguity, and each block's own CodedSet is already
+    visible in the matched evidence. A pure no-op when no qualifying
+    assertion is present, keeping prompts of other cases byte-identical
+    (and their cached judgments valid).
+    """
+    if not hlr_content:
+        return
+    for a in extract_bit_value_assertions(hlr_content):
+        positions, values = a["positions"], a["values"]
+        pair = dict(zip(positions, values))
+        lo = min(positions)
+        size = max(positions) - lo + 1
+        terms = []
+        assembled = 0
+        for pos in sorted(positions):
+            value = int(pair[pos])
+            weight = 2 ** (pos - lo)
+            terms.append(f"{value}×{weight}")
+            assembled += value * weight
+        # 中文"第N位"是 1 基物理位（offset=N-1）；英文 bitN 与 ICD 偏移同基准。
+        offset = lo - 1 if a["convention"] == "cn-physical" else lo
+        line = (
+            f"- [推导] 位赋值组合：{a['text']} ⇒ 按位号约定（ARINC 429 字内位号"
+            f"越大越高位）组装编码值 = {' + '.join(terms)} = {assembled}"
+        )
+        entries = _dedupe_coded_fields(matched_profiles, offset, size)
+        if entries:
+            line += (
+                f"；该位置对应 ICD 字段 {entries[0][0]}"
+                f"（offset={offset}, size={size}）"
+            )
+            codedsets = [entries[0][1]]
+            for _, coded in entries[1:]:
+                if coded not in codedsets:
+                    codedsets.append(coded)
+            if len(codedsets) == 1:
+                line += f"，其取值定义：{codedsets[0]}"
+        line += f"。比对时请直接采用编码值 {assembled}，勿再按书写顺序自行组装位对。"
+        parts.append(line)
+
+
+def _append_bit_range_derivation(parts: list[str], hlr_content: str) -> None:
+    """Spell out the normalized 0-based span for "bitN至bitM" range assertions.
+
+    English bitN shares the ICD offset base (bitN = 0-based offset N =
+    physical position N+1), but the anchor note only teaches the Chinese
+    "第N位" physical→0-based conversion. Left to their own arithmetic the
+    judges have applied that -1 to English range forms too — a range
+    identical to the ICD field ("bit17至bit28" vs offset=17, size=12) was
+    flipped to inconsistent by all three providers; another case showed the
+    reverse over-conversion on the ICD side. Computed here once and injected
+    as data. A pure no-op when no range assertion is present, keeping other
+    prompts byte-identical (and their cached judgments valid).
+    """
+    if not hlr_content:
+        return
+    for a in extract_bit_range_assertions(hlr_content):
+        lo, hi = a["lo"], a["hi"]
+        parts.append(
+            f"- [推导] 位段声明：{a['text']} ⇒ 英文 bitN 与 ICD "
+            f"BitOffsetWithinDS 同一基准（bitN 即 0 基 offset N，对应物理第 N+1 位）"
+            f"⇒ 归一化位段 = offset {lo}~{hi}"
+            f"（物理第{lo + 1}~{hi + 1}位，共{hi - lo + 1}位）；"
+            f"比对时请直接采用该归一化位段，勿再自行做 ±1 换算。"
+        )
 
 
 def _extract_json(text: str) -> str:
@@ -206,6 +313,10 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
             parts.append(
                 f"  - {bf.get('text', '?')} → offset={bf.get('offset')}, size={bf.get('size')}"
             )
+    _append_bit_assembly_derivation(
+        parts, hlr.get('content', ''), case.matched_profiles
+    )
+    _append_bit_range_derivation(parts, hlr.get('content', ''))
     parts.append("")
 
     # ── Match evidence ──
