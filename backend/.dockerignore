@@ -16,6 +16,7 @@ venv/
 .env.*
 
 # Output / runtime files (generated at runtime, don't belong in the image)
+output/
 app/output/
 *.tmp
 *.log

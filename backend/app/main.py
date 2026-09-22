@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -45,11 +46,16 @@ app.add_middleware(
 # V4: /api/v4/* 路由（V4 反向管线 + 3 类下载）
 app.include_router(v4_router, prefix='/api/v4')
 
-# 桌面打包环境：从可执行文件同级 static/ 目录挂载前端静态资源 + SPA fallback。
-# 仅当 PyInstaller 打包（sys.frozen=True）且 static/ 存在时生效；Docker / 开发
-# 环境（非 frozen）不执行，后端保持纯 API 服务，行为不变。
-if getattr(sys, 'frozen', False):
-    _static_dir = Path(sys.executable).resolve().parent / 'static'
+# 前端静态资源挂载 + SPA fallback，两种触发方式：
+#   1) 桌面打包：PyInstaller 运行时（sys.frozen=True），取可执行文件同级 static/；
+#   2) 单端口部署：ICD_STATIC_DIR 环境变量指定目录（前端产物由后端同源托管）。
+# 两者都不满足时（本地开发 / 双容器 compose）不挂载，后端保持纯 API 服务，行为不变。
+_static_env = os.getenv('ICD_STATIC_DIR')
+if _static_env or getattr(sys, 'frozen', False):
+    _static_dir = (
+        Path(_static_env) if _static_env
+        else Path(sys.executable).resolve().parent / 'static'
+    )
     if _static_dir.exists():
         _assets_dir = _static_dir / 'assets'
         if _assets_dir.exists():

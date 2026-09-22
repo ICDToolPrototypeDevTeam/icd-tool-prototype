@@ -1,0 +1,35 @@
+# 服务器单端口交付形态：一个后端容器同时提供 API 与前端页面。
+#
+# 与本地开发用的 docker-compose.yml 的区别：
+#   - 无 build 段：镜像在外部构建后 docker load 进来，服务器无需联网构建；
+#   - 无前端容器：前端构建产物由后端同源托管（ICD_STATIC_DIR），只暴露 8000 一个端口。
+#
+# 使用前提（与仓库目录结构保持一致，交付时请原样带过去）：
+#   frontend/dist/     前端构建产物（npm run build 生成）
+#   backend/.env       模型服务配置
+#   backend/output/    分析输出落盘目录
+#
+# 部署步骤与验收方式见 部署说明.md。
+#
+# 独立项目名：避免与本地开发的 docker-compose.yml（项目名默认取目录名）互相覆盖容器。
+name: icd-tool-server
+
+services:
+  backend:
+    image: icd-tool-backend-v4.0
+    # 内网服务器无外网出口：镜像缺失时直接报错，而不是尝试联网拉取
+    pull_policy: never
+    ports:
+      - '8000:8000'
+    volumes:
+      # 前端产物只读挂载，后端按 ICD_STATIC_DIR 同源托管
+      - ./frontend/dist:/app/static:ro
+      # 分析输出落宿主机，容器重建不丢
+      - ./backend/output:/app/output
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      - PYTHONUNBUFFERED=1
+      - ICD_STATIC_DIR=/app/static
+    restart: unless-stopped
