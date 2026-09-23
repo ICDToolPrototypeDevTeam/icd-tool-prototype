@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { V4JobError, V4LogLine } from '../types'
 import { STAGE_LABELS } from './ProcessingView'
 
-interface Props {
+export interface ErrorDiagnosticsProps {
   error: V4JobError | null
   jobId: string | null
   taskType: 'correctness' | 'completeness'
@@ -11,7 +11,7 @@ interface Props {
   lines: V4LogLine[]
 }
 
-export function buildDiagnosticsText(input: Props): string {
+export function buildDiagnosticsText(input: ErrorDiagnosticsProps): string {
   const e = input.error
   const tail = input.lines
     .slice(-200)
@@ -80,8 +80,13 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-export default function ErrorDiagnostics(props: Props) {
-  const { error } = props
+/**
+ * 「复制诊断信息」按钮。
+ *
+ * 它是错误视图的一个**动作**，由页面放在底部动作行里与「继续执行 / 放弃 / 重新尝试」
+ * 同排，而不是埋在诊断卡片内部 —— 三颗按钮分处两地、两种对齐，收尾动作看起来是散的。
+ */
+export function DiagnosticsCopyButton(props: ErrorDiagnosticsProps) {
   const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle')
 
   const resetTimerRef = useRef<number | null>(null)
@@ -101,6 +106,28 @@ export default function ErrorDiagnostics(props: Props) {
       setCopied('idle')
     }, 3000)
   }
+
+  return (
+    <>
+      <button className="btn btn--ghost" onClick={handleCopy}>
+        {copied === 'ok' ? '已复制' : copied === 'fail' ? '复制失败：请手动全选下方文本' : '复制诊断信息'}
+      </button>
+      {copied === 'fail' && (
+        <textarea
+          className="error-diagnostics__fallback"
+          readOnly
+          rows={10}
+          value={buildDiagnosticsText(props)}
+          onFocus={(e) => e.currentTarget.select()}
+        />
+      )}
+    </>
+  )
+}
+
+/** 失败分类 / 失败步骤 / 原始信息 / 建议 —— 只呈现事实，动作在页面的动作行里。 */
+export default function ErrorDiagnostics(props: ErrorDiagnosticsProps) {
+  const { error } = props
 
   return (
     <div className="error-diagnostics">
@@ -137,18 +164,6 @@ export default function ErrorDiagnostics(props: Props) {
             ? '任务未创建：提交失败，后端没有开始执行。'
             : '未取得后端终态：前端未能等到任务结束，具体原因见上方提示。'}
         </p>
-      )}
-      <button className="btn btn--secondary" onClick={handleCopy}>
-        {copied === 'ok' ? '已复制' : copied === 'fail' ? '复制失败：请手动全选下方文本' : '复制诊断信息'}
-      </button>
-      {copied === 'fail' && (
-        <textarea
-          className="error-diagnostics__fallback"
-          readOnly
-          rows={10}
-          value={buildDiagnosticsText(props)}
-          onFocus={(e) => e.currentTarget.select()}
-        />
       )}
     </div>
   )

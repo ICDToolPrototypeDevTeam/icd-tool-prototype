@@ -262,8 +262,10 @@ def label_hlrs(
 
     print(f"  [label] Labeling {total} HLRs via {llm.model}...")
     for idx, hlr in enumerate(hlr_reqs):
-        if idx % 20 == 0:
-            raise_if_cancelled()  # 每 20 条一个取消检查点，长批次可被终止
+        # 每条一个取消检查点：单条标注就是一次秒级模型调用，检查只是一次 Event 读取，
+        # 成本可忽略。原先按步长（每 20 条）落位时，十几条的批次在整批之内只有 idx=0
+        # 那一次检查 —— 用户点终止后要等剩余条目全部标完才停。
+        raise_if_cancelled()
         user_prompt = _build_label_prompt(hlr)
         key = ""
         if cache is not None:

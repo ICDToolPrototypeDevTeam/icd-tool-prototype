@@ -93,6 +93,18 @@ def _resolve_profile(profile: ControllerProfile | None) -> ControllerProfile:
         ) from e
 
 
+def _write_text_atomic(path: Path, text: str) -> None:
+    """先写同目录临时文件再原子改名，避免留下半截 JSON。
+
+    续跑会把落盘的解析产物直接当成解析结果加载（见 runner._reuse_parse_inputs），
+    因此半截文件不只是让本次运行失败 —— 该任务此后每次续跑都会解析失败，只能
+    放弃重传。退出码非 0 或容器在写盘窗口内被重启都会造成这种残留。
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)  # POSIX/Windows 均为原子替换
+
+
 def _parse_eoicd(
     publisher_path: Path | None,
     subscriber_path: Path | None,
@@ -116,9 +128,8 @@ def _parse_eoicd(
     result: EoICDOutput = parser.parse()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        result.model_dump_json(indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    _write_text_atomic(
+        output_path, result.model_dump_json(indent=2, ensure_ascii=False)
     )
 
     print(f"  Output: {output_path}")
@@ -166,9 +177,8 @@ def _parse_hlr(
     result.source_file = _saved_source_file
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        result.model_dump_json(indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    _write_text_atomic(
+        output_path, result.model_dump_json(indent=2, ensure_ascii=False)
     )
 
     print(f"  Output: {output_path}")

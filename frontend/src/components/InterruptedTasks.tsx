@@ -9,8 +9,11 @@ interface Props {
   onOpen: (job: V4JobListItem) => void
 }
 
-// 只展示「还没跑完」的任务：运行中（重开后重新连上）与被中断（可选择继续/放弃）
-const VISIBLE_STATUSES = new Set(['pending', 'running', 'interrupted'])
+// 只展示「还没跑完」的任务：运行中（重开后重新连上）、被中断、被用户终止
+const VISIBLE_STATUSES = new Set(['pending', 'running', 'interrupted', 'canceled'])
+
+// 可续跑 / 可放弃的状态：续跑按参数快照重启，放弃只改状态（终态）
+const RESUMABLE = new Set(['interrupted', 'canceled'])
 
 const TASK_LABEL: Record<V4TaskType, string> = {
   correctness: '正确性分析',
@@ -21,6 +24,7 @@ const STAGE_LABEL: Record<string, string> = {
   pending: '等待开始',
   running: '正在分析',
   interrupted: '已中断',
+  canceled: '已终止',
 }
 
 function formatTime(iso: string): string {
@@ -44,8 +48,8 @@ export default function InterruptedTasks({ taskType, onOpen }: Props) {
   useEffect(load, [taskType])
 
   async function handleContinue(item: V4JobListItem) {
-    // 被中断的任务需要先请后端按参数快照重启，再挂上轮询
-    if (item.status === 'interrupted') {
+    // 被中断 / 被终止的任务需要先请后端按参数快照重启，再挂上轮询
+    if (RESUMABLE.has(item.status)) {
       setBusyId(item.job_id)
       setError('')
       try {
@@ -109,9 +113,9 @@ export default function InterruptedTasks({ taskType, onOpen }: Props) {
                 disabled={busyId === j.job_id}
                 onClick={() => void handleContinue(j)}
               >
-                {j.status === 'interrupted' ? '继续' : '查看进度'}
+                {RESUMABLE.has(j.status) ? '继续' : '查看进度'}
               </button>
-              {j.status === 'interrupted' && (
+              {RESUMABLE.has(j.status) && (
                 <button
                   className="btn btn--secondary"
                   disabled={busyId === j.job_id}

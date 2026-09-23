@@ -4,8 +4,8 @@
 - GET  /api/v4/jobs/{job_id}          状态查询
 - GET  /api/v4/jobs/{job_id}/result   结果查询
 - GET  /api/v4/jobs                   任务列表（可选 status / task_type 过滤）
-- POST /api/v4/jobs/{job_id}/resume   继续被中断的任务（按参数快照重新执行）
-- POST /api/v4/jobs/{job_id}/abandon  放弃被中断的任务（不删除文件）
+- POST /api/v4/jobs/{job_id}/resume   继续被中断/被终止的任务（按参数快照重新执行）
+- POST /api/v4/jobs/{job_id}/abandon  放弃被中断/被终止的任务（不删除文件）
 - POST /api/v4/jobs/{job_id}/cancel  终止运行中的任务（不删除文件）
 - GET  /api/v4/jobs/{job_id}/logs    任务日志增量拉取
 """
@@ -219,14 +219,15 @@ def get_v4_job_result(job_id: str):
 
 @router.post('/jobs/{job_id}/resume', response_model=V4AnalyzeResponse)
 def resume_v4_job(job_id: str):
-    """继续一个被中断的任务。
+    """继续一个被中断或被用户终止的任务。
 
     按 manifest 中落盘的参数快照重新执行整条管线（已上传的输入文件直接复用，
-    Step 2 HLR 标签走缓存）。任务状态不是 interrupted → 409；输入文件缺失
-    → 409，且任务状态保持不变。
+    Step 2 HLR 标签走缓存）。任务状态不是 ``interrupted`` / ``canceled`` → 409；
+    输入文件缺失 → 409，且任务状态保持不变。续跑前由 ``relaunch_from_manifest``
+    复位取消标志，否则第一个检查点会立刻再次取消。
     """
     job = _get_job(job_id)
-    if job.status != JobStatus.INTERRUPTED:
+    if job.status not in (JobStatus.INTERRUPTED, JobStatus.CANCELED):
         raise HTTPException(
             status_code=409,
             detail=f'job not resumable: status={job.status.value}',
@@ -250,9 +251,13 @@ def resume_v4_job(job_id: str):
 
 @router.post('/jobs/{job_id}/abandon', response_model=V4AnalyzeResponse)
 def abandon_v4_job(job_id: str):
-    """放弃一个被中断的任务；只改状态，不删除输入与中间产物。"""
+    """放弃一个被中断或被用户终止的任务；只改状态，不删除输入与中间产物。
+
+    ``abandoned`` 是这套状态机里的**终态**：任务被中断/终止后，用户要么续跑，
+    要么放弃。因此 ``canceled`` 同样可以放弃 —— 否则已终止的任务没有收尾方式。
+    """
     job = _get_job(job_id)
-    if job.status != JobStatus.INTERRUPTED:
+    if job.status not in (JobStatus.INTERRUPTED, JobStatus.CANCELED):
         raise HTTPException(
             status_code=409,
             detail=f'job not abandonable: status={job.status.value}',

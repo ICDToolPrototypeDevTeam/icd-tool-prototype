@@ -1203,3 +1203,122 @@ fixed
 
 1. `_fail_job` 先算 stage、再用失败文案覆盖 `job.message`，故失败后状态查询的顶层 `stage` 为空、而同响应 `error.stage` 有值 —— 这是本次修复**引入**的、方向相反的不一致；前端两个状态互斥渲染，用户不可见。列为跟进项（修法：改 message 写法，或让查询侧读 `progress['message']`）。
 2. 同轮最终审查另发现 `I-2`（MOCK 开关是进程级环境变量、无单飞保护）与 `M-1` / `M-3` / `M-4` / `M-5(c)` / `M-6` 代码半，均为跟进 Issue 候选，详见 development-log 同名条目的「最终定审与修复轮」。
+
+### BUG-20260922-003：续跑已终止的任务时 Step 1 文件解析整段重跑（约 38s）
+
+#### 状态
+
+fixed（2026-09-22 用户改判「现在做」，按下方方案 1+2 实施）
+
+#### 发现日期
+
+2026-09-22
+
+#### 关联 Issue / PR
+
+本次「服务器可观测与任务控制」Issue 的后续（终止任务可续跑能力上线后的用户反馈）
+
+#### 问题现象
+
+正确性分析任务在反向 Step 1（`Parsing input files`）跑完后被终止，点「继续执行」续跑时，Step 1 整段重跑：两次日志给出完全相同的 `Generated (before any dedup): 634794` → `After global dedup: 122674`，`[timing] Step 1/6: Parsing input files` 两次都是 38.2s / 35s 量级。从用户视角就是「终止之后还是从第一步重新执行」。
+
+#### 复现方式
+
+提交一次正确性分析 → 等日志出现 `[timing] Step 1/6: Parsing input files: 38.2s` → 终止 → 点「继续执行」→ 日志再次出现完整 Step 1 解析。
+
+#### 影响范围
+
+仅影响**续跑的耗时**（每条续跑多花 Step 1 的时间，本次实测约 38s：EoICD 解析约 26s + HLR 解析与《EoICD条目化清单.xlsx》生成合计约 12s）。不影响结果正确性：解析产物与首跑逐字节一致。
+
+#### 原因分析
+
+1. 「继续执行」的语义是**重跑整条管线 + 复用 LLM 结果**，不是「从第 N 步接着跑」。管线内具备复用能力的只有 LLM 调用层：`output_dir/llm_cache.jsonl`（内容寻址）与 `output_dir/hlr_labels.json`。
+2. Step 1 的文件解析**本来也有复用路径**，但 API 侧从不使用它：`run_reverse_pipeline` 支持 `eoicd_json`（命中则打印 `[skip] Using cached EoICD JSON`）与 `hlr.suffix == ".json"`（命中则 `[skip] Using cached HLR JSON`）（`backend/app/v4/pipeline.py:923-942`），而 `backend/app/api/v4/runner.py:381-391` 硬传 `eoicd_json=None`（注释：缓存路径不在 API 暴露）并把原始 `.docx` / `.xlsx` 传给 `hlr` / `publisher` / `subscriber`，因此每次都落到重解析分支；正向管线 `runner.py:647-651` 同理。
+3. 本次案例中「没有任何东西可复用」被放大成「看起来从零开始」：取消是在 Step 1 的计时标记之后、Step 2 的第一个检查点（`pipeline.py:959` 的 `raise_if_cancelled()`）抛出的，此时一条 LLM 调用都还没发生 —— 日志里 `[cache] llm_cache.jsonl not found, starting empty` 与「Step 2/6 横幅已打印、stage 仍显示 `parse`」的组合（`job.update` 在检查点之后，故 stage 未推进）都是这个落点的证据。
+
+#### 修复方案（已实施）
+
+1. `runner.py` 反向与正向两处：新增 `_reuse_parse_inputs(job, output_dir, hlr_path)` —— 只有 `job.resumed` 为真**且** `output/` 下 `eoicd_requirements.json` 与 `hlr_requirements.json` 同时存在时，才改传这两份 JSON（走管线**已有的** `[skip]` 分支）；其余情况一律 `(hlr_path, None)`，与改动前逐字一致。两份 JSON 就是 `EoICDOutput` / `HLROutput` 的 `model_dump_json(indent=2)` 原样回读，判定逻辑不变；`hlr` 路径在 Step 1 之后无任何下游使用（已核对 `pipeline.py:880-1250`），输入文件名不会流进输出文档。首跑不复用是刻意的：首跑时同名文件可能是上一轮残留，当成解析结果用会让新上传的输入文件完全不生效。
+2. 前置安全项：`pipeline.py` 新增 `_write_text_atomic(path, text)`（写 `<name>.tmp` + `Path.replace` 原子改名），`_parse_eoicd` / `_parse_hlr` 的落盘改走它。复用之后，「JSON 半截（容器在写盘窗口内被重启）」的后果会从「白跑 38s」升级为「该任务永远续跑失败、只能放弃重传」，故先堵住。
+3. 预期效果（**推算，非本轮实测**）：Step 1 从约 38s 降到约 11s 量级 —— 剩下的只有 `EoICD条目化清单.xlsx` 的生成（交付物，仍须重新生成，原「影响范围」段测得约 11s）。两次解析（EoICD 约 26s、HLR 若干秒）都被跳过，其中 26s 可明确归因；HLR 解析与 xlsx 生成在原记录里合并计为 12s，未单独拆分，故只报「下降量级」不报精确秒数。
+
+#### 修改文件
+
+- `backend/app/v4/pipeline.py`（新增 `_write_text_atomic`；`_parse_eoicd`、`_parse_hlr` 落盘改原子写）
+- `backend/app/api/v4/runner.py`（新增 `_reuse_parse_inputs`；`run_v4_pipeline_thread`、`run_forward_pipeline_thread` 两处调用点接线）
+- `backend/tests/test_parse_artifact_reuse.py`（新增 6 个测试）
+- `backend/tests/test_api_mock_env_default.py`（`_StubJob` 补 `resumed = False`，见下方验证结果）
+
+#### 验证方式
+
+```bash
+cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/ --continue-on-collection-errors -q
+```
+
+端到端（未执行，需服务器环境）：提交正确性分析 → Step 1 跑完后终止 → 「继续执行」→ 日志应打印 `[skip] Using cached EoICD JSON` / `[skip] Using cached HLR JSON`，`[timing] Step 1/6` 应降到约 11s。
+
+#### 验证结果
+
+单元测试通过：`94 passed, 10 errors`（10 项为既有的 `app.v4.reverse.*` / `app.v4.shared.parsing.*` collection error，数量与本次修改前一致；新增 6 个测试，全量通过数 88 → 94）。红/绿证据：
+
+- `test_reverse_launcher_reuses_parsed_json_on_resume`：把 `git show HEAD:backend/app/api/v4/runner.py` 载入为独立模块、只替换 profile 注册表（临时路径下旧模块以自身 `__file__` 定位 profiles 目录）后跑同一入参，记录到 `hlr = <原始 hlr.docx>`、`eoicd_json = None` —— 断言在旧代码上不成立；当前代码为 `hlr = output/hlr_requirements.json`、`eoicd_json = output/eoicd_requirements.json`。
+- `test_pipeline_skips_parsing_when_given_json`：钉住管线侧契约（`eoicd_json` 存在 + `hlr` 为 `.json` ⇒ 必须走 `[skip]`，`_parse_eoicd`/`_parse_hlr` 被替换为「一调用就 AssertionError」的桩）。选择这条契约是因为复用若静默失效只会「变慢、不报错」，没有任何其它测试能发现。
+- `_write_text_atomic` 两条：写盘中途抛错时旧文件逐字节不变；成功路径不留 `.tmp`。
+
+回归发现与处理：`test_api_mock_env_default.py::test_runner_thread_env_authoritative_when_none` 因新增的 `job.resumed` 读取而失败（`_StubJob` 只实现了 `result` / `update`，缺该属性时 `_fail_job` 又因缺 `progress` 二次抛错，报错点落在 `runner.py:238`）。`Job.__init__` 必设 `resumed = False`（`job_manager.py:87`），故真实 Job 不受影响，判定为测试替身与真实接口不同构，仅补 `_StubJob.resumed = False`；未在生产代码加 `getattr` 兜底（那会把「Job 接口残缺」静默当成「非续跑」，正是本 Bug 的失效模式）。
+
+端到端 `[skip]` 实跑尚未验证，原因是：需在服务器/Docker 环境提交真实输入并触发一次「终止 → 继续执行」。
+
+#### 遗留问题
+
+「从第 N 步断点续跑」是另一件事：即便按上述方案复用解析产物，Step 2 之后仍会在每个 `raise_if_cancelled()` 处重跑非 LLM 的确定性计算（匹配、构例、聚合），只是 LLM 判定不会重复调用。
+
+### BUG-20260922-004：HLR 标注的取消检查点按「每 20 条」落位，十几条的批次内没有检查点
+
+#### 状态
+
+fixed
+
+#### 发现日期
+
+2026-09-22
+
+#### 关联 Issue / PR
+
+本次「服务器可观测与任务控制」Issue 的后续（用户提问：「只打了 10/14 个标签，不能立刻终止吗？」）
+
+#### 问题现象
+
+Step 2（HLR AI 标注）点「终止」后不立刻生效：HLR 只有十几条时，界面会一直停在「正在终止…」，直到整批标注跑完、走到 Step 2 之后的检查点才转「已终止」。
+
+#### 复现方式
+
+`backend/tests/test_pipeline_checkpoints.py::test_label_hlrs_stops_on_cancel_between_items`（修复前必红）：第 1 条标完后 `request_cancel()`，观察是否还会继续标第 2、3 条 —— 修复前仍会标注完（用例捕获的 stdout 为 `1/3 H1` / `2/3 H2` / `3/3 H3`）。
+
+#### 影响范围
+
+终止任务的响应粒度（反向 Step 2 / 正向 Step 4 共用 `label_hrls`）。只影响「多久停下」，不影响结果与已标注条目的复用（每条标完即追加进 `llm_cache.jsonl`，续跑逐条命中）。
+
+#### 原因分析
+
+检查点写成步长式：`if idx % 20 == 0: raise_if_cancelled()`。索引 0 已含在批次内，因此**少于 20 条的批次在整个批次内只有这一次检查**，之后要等 Step 2 结束（`pipeline.py` 中 Step 2 之后的检查点）才消费取消事件。逐条标注本身是秒级调用，用步长省下的检查成本（一次 Event 读取）远小于「终止不生效」的代价。
+
+#### 修复方案
+
+改为**每条**一个检查点（`hlr_labeler.py` 循环内无条件 `raise_if_cancelled()`）。语义：终止在下一条开始前生效，正在跑的那一条跑完并把结果写入缓存（不浪费）。不做「掐断正在飞的那次模型调用」—— 需要 LLM 客户端支持中止，是另一件事。
+
+#### 修改文件
+
+`backend/app/v4/matching/hlr_labeler.py`、`backend/tests/test_pipeline_checkpoints.py`
+
+#### 验证方式
+
+`cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/test_pipeline_checkpoints.py tests/test_hlr_labeler_throttle.py -v`
+
+#### 验证结果
+
+**已通过（单元层面）**：新增用例修复前 `Failed: DID NOT RAISE JobCancelled`（且 stdout 显示 3 条全被标注），修复后 7 passed；本计划 8 个测试文件 83 passed（修复前 82，+1 为本轮新增用例）；全量套件 88 passed / 10 errors（10 个 error 为 `app.v4.reverse.*` 采集错误，与本轮无关）。**尚未验证**：容器内在真实模型调用下点终止的实际观感。
+
+#### 遗留问题
+
+同类「步长式检查点」若在别处出现（HLR 标注是唯一一处按索引取模的），需一并核对：`coverage_reviewer`（每个 block 边界）与 `pipeline.py` 各步边界已是较细粒度。

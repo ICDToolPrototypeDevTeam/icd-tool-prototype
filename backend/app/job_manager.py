@@ -229,6 +229,18 @@ class Job:
         if self.cancel_event.is_set():
             raise JobCancelled('任务已被用户终止')
 
+    def clear_cancel(self) -> None:
+        """复位取消标志，使任务可以再次运行（续跑已终止的任务前调用）。
+
+        取消分两步落位：``cancel_event`` 置位 + ``cancel_requested`` 落盘。
+        进程重启重建 Job 时由 ``from_manifest`` 复位，但**同一进程内**续跑一个
+        已终止的任务没有这道保障 —— 不复位则续跑后的第一个检查点会立刻再抛
+        ``JobCancelled``，任务刚从 ``canceled`` 转 ``running`` 就又变回去。
+        """
+        self.cancel_event.clear()
+        self.cancel_requested = False
+        self._persist()
+
     @classmethod
     def from_manifest(cls, data: dict, job_dir: Path) -> 'Job':
         """按 manifest 重建 Job；字段缺失 / 格式非法时抛异常，由调用方跳过。"""

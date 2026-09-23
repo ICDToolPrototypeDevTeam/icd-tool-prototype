@@ -644,6 +644,24 @@ body {
   box-shadow: 0 4px 12px rgba(0, 102, 204, 0.15);
 }
 
+/* 弱化文字按钮：用于「复制诊断信息」这类工具型动作，不与主/次按钮抢视觉 */
+.btn--ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: transparent;
+  color: var(--primary);
+  transform: none;
+  box-shadow: none;
+  text-decoration: underline;
+}
+
 /* ========== Action Bar ========== */
 .action-bar {
   display: flex;
@@ -895,6 +913,16 @@ body {
   font-size: 14px;
   color: var(--text-secondary);
   margin-bottom: 24px;
+}
+
+/* 错误视图的动作行：诊断卡片与日志之后，所有收尾动作集中在这一行 */
+.error-state__actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 24px;
 }
 
 /* ========== Footer ========== */
@@ -1290,6 +1318,11 @@ body {
   color: #b45309;
 }
 
+.interrupted__status--canceled {
+  background: rgba(71, 85, 105, 0.15);
+  color: #334155;
+}
+
 .interrupted__meta {
   font-size: 11px;
   color: var(--text-secondary);
@@ -1504,10 +1537,6 @@ body {
   margin: 8px 0;
 }
 
-.error-diagnostics .btn {
-  margin-top: 8px;
-}
-
 .error-badge {
   display: inline-block;
   padding: 1px 8px;
@@ -1523,6 +1552,8 @@ body {
 }
 
 .error-diagnostics__fallback {
+  /* 动作行是 flex + wrap：复制失败时让兜底文本独占一行 */
+  flex: 1 0 100%;
   width: 100%;
   margin-top: 8px;
   padding: 8px;

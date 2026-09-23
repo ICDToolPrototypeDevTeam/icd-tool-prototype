@@ -24,8 +24,8 @@ API 设计应遵守以下原则：
 | `/api/v4/jobs`                                 | `GET`  | 查询未完成/中断任务列表（可选 `status`、`task_type` 过滤） |
 | `/api/v4/jobs/{job_id}`                        | `GET`  | 查询任务状态                          |
 | `/api/v4/jobs/{job_id}/logs`                   | `GET`  | 任务日志增量拉取（`offset` 取上次返回的 `next_offset`，首次 0；`limit` 默认 500、上限 2000；进程重启后可从 `job.log` 尾部恢复） |
-| `/api/v4/jobs/{job_id}/resume`                 | `POST` | 继续被中断的任务（按 manifest 参数快照重跑，已完成的 LLM 判定复用缓存） |
-| `/api/v4/jobs/{job_id}/abandon`                | `POST` | 放弃被中断的任务（仅标记，不删除文件）            |
+| `/api/v4/jobs/{job_id}/resume`                 | `POST` | 继续被中断 / 被终止的任务（按 manifest 参数快照重跑，已完成的 LLM 判定与已落盘的解析产物复用缓存） |
+| `/api/v4/jobs/{job_id}/abandon`                | `POST` | 放弃被中断 / 被终止的任务（仅标记，不删除文件）        |
 | `/api/v4/jobs/{job_id}/cancel`                 | `POST` | 终止运行中的任务（`running` / `pending` → 200，其余状态 → 409；不删除任何文件，任务最终以 `canceled` 结束） |
 | `/api/v4/jobs/{job_id}/result`                 | `GET`  | 查询任务处理结果摘要（按 `task_type` 分发正确性/完整性两种 schema） |
 | `/api/v4/jobs/{job_id}/outputs/eoicd-xlsx`     | `GET`  | 下载 EoICD 条目化清单（xlsx）      |
@@ -124,7 +124,7 @@ GET /api/v4/jobs/{job_id}
 
 `mock` 表示本次运行是否按 MOCK 模式执行（结果页据此提示「模拟数据不可用于验收」）；`cancel_requested` 表示已请求终止、正等待管线在检查点停止，前端据此把终止按钮显示为「正在终止…」。
 
-`canceled` 表示运行中的任务被用户主动终止（`POST /api/v4/jobs/{job_id}/cancel`，见第 2 节）；它与 `abandoned` 语义不同：`abandoned` 指**被中断**的任务被用户放弃，`canceled` 指**仍在运行**的任务被终止。两者都不删除任何文件；终止是协作式的，`status` 会保持 `running` / `pending` 直至管线在检查点停止，接口不返回虚构的中间状态。
+`canceled` 表示运行中的任务被用户主动终止（`POST /api/v4/jobs/{job_id}/cancel`，见第 2 节）；它与 `abandoned` 语义不同：`abandoned` 指任务被中断 / 被终止后由用户放弃，是**终态**，`canceled` 指**仍在运行**的任务被终止，**不是终态** —— 被终止的任务可 `resume` 续跑（按参数快照重跑，续跑前复位取消标志）或 `abandon` 收尾。两者都不删除任何文件；终止是协作式的，`status` 会保持 `running` / `pending` 直至管线在检查点停止，接口不返回虚构的中间状态。
 
 `error` 为结构化失败信息，仅在任务 `failed` 或 `canceled` 时非空，运行中与成功时为 `null`：
 
@@ -418,7 +418,7 @@ GET /api/v4/jobs?status=interrupted&task_type=correctness
 ```
 
 - 两个 query 参数均可选：`status` 按状态精确过滤，`task_type` 按任务类型过滤。
-- 内存中只保留本次进程创建的任务与启动时载入的 `interrupted` 任务，因此该接口不会返回历史 `completed` / `failed` 任务。
+- 内存中只保留本次进程创建的任务与启动时载入的 `interrupted` 任务，因此该接口不会返回历史 `completed` / `failed` 任务。`canceled` 同样**不在**启动载入范围内：被终止的任务只在**本次进程存活期间**可续跑 / 可放弃，容器重启后即从列表中消失（与 `completed` / `failed` 同待遇）。
 - `input_files` 取自 manifest 参数快照中的输入文件（仅文件名，不含路径）；CLI 等无 manifest 的任务为空数组。
 
 ### 13.2 继续任务
@@ -426,6 +426,8 @@ GET /api/v4/jobs?status=interrupted&task_type=correctness
 ```text
 POST /api/v4/jobs/{job_id}/resume
 ```
+
+可继续的任务状态为 `interrupted`（进程中断）与 `canceled`（用户终止）；其余状态一律 409。续跑前会先**复位取消标志**（`cancel_requested` 与内部取消事件）—— 同一进程内被终止的任务仍带着上次置位的取消标志，不复位则第一个检查点会立即再次取消。
 
 按 manifest 中的参数快照（`judge_providers` / `use_mock_llm` / `controller_profile` / `no_refine` / `analysis_mode` / 追溯表等）重跑，走与新建任务完全相同的启动路径。前端不接受也不传递任何覆盖参数。
 
@@ -437,15 +439,18 @@ POST /api/v4/jobs/{job_id}/resume
 
 重跑成本说明（反向/正确性管线）：
 
+- Step 1（文件解析）复用上一轮已落盘的 `output/eoicd_requirements.json` 与 `output/hlr_requirements.json`（走管线自带的 `[skip] Using cached EoICD JSON / HLR JSON` 分支），不再重新解析 Excel/Word，实测约 38s → 约 11s（省下的 11s 是 `EoICD条目化清单.xlsx` 的重新生成，那是交付物）。**两份产物缺一不可**，且只在 `resumed=true` 时启用：首跑时同名文件可能是上一轮残留，当成解析结果用会让新上传的输入文件完全不生效；
 - Step 2（HLR AI 标注）的每条标注按内容寻址复用（`output/llm_cache.jsonl`，`kind=hlr_label`），只有未完成的才真正调用模型；整批完成后 `output/hlr_labels.json` 落盘，此后直接整体加载跳过；
 - Step 4（多模型判定）、Step 5（共识）、Step 5.5（1★/2★ 复查）的**已完成的单条 LLM 判定结果**按内容寻址复用，只有未完成的才真正调用模型，结果随完成进度增量写入 `output/llm_cache.jsonl`。因此中断越晚、继续时省下的调用越多；
-- Step 1/3/6 等确定性步骤（解析、匹配、报告生成）本就很快，仍然全量重跑。
+- Step 3/6 等确定性步骤（匹配、报告生成）本就很快，仍然全量重跑。
+- Step 1 的解析复用不计入 `reuse` 计数：那是文件解析、不是模型调用，两个计数仍严格等于模型调用次数。
 
 重跑成本说明（正向/完整性管线）：
 
 - Step 4（HLR AI 标注）与反向 Step 2 同机制（`output/llm_cache.jsonl`，`kind=forward_hlr_label`）：每条标注按内容寻址复用，未完成的才真正调用模型；整批完成后 `output/hlr_labels.json` 落盘，此后直接整体加载跳过；
 - Step 7（AI 三态复核）的**已完成的单条复核结果**按内容寻址复用（`kind=forward_review`），只有未完成的才真正调用模型，随完成进度增量写入 `output/llm_cache.jsonl`。因此中断越晚、继续时省下的调用越多；
-- Step 1/2/3/5/6/8 等确定性步骤（解析、范围、块构建、召回、确定性判定、报告生成）仍全量重跑。
+- Step 1（文件解析）与反向同一机制，复用 `output/eoicd_requirements.json` 与 `output/hlr_requirements.json`；
+- Step 2/3/5/6/8 等确定性步骤（范围、块构建、召回、确定性判定、报告生成）仍全量重跑。
 
 复用只发生在**同一任务目录内**，不跨任务、也不跨管线（正/反向的缓存 `kind` 不同，即使两份 prompt 完全相同也不会互相命中）；换模型、改提示词、上游输入变化等会改变调用内容的情况都会自动失效并重新调用。
 
@@ -457,7 +462,7 @@ POST /api/v4/jobs/{job_id}/resume
 POST /api/v4/jobs/{job_id}/abandon
 ```
 
-只把状态标记为 `abandoned`，**不删除任何输入或输出文件**（磁盘清理不在本期范围）。
+只把状态标记为 `abandoned`，**不删除任何输入或输出文件**（磁盘清理不在本期范围）。可放弃的任务状态为 `interrupted` 与 `canceled`（与 `resume` 同一门槛）：放弃是这套状态机里的终态，被终止的任务同样需要一个收尾方式。
 
 返回：
 
@@ -470,8 +475,8 @@ POST /api/v4/jobs/{job_id}/abandon
 | 场景 | HTTP |
 | --- | --- |
 | `resume` / `abandon` 的任务不存在（如后端重启后该任务未留下可恢复记录） | 404 |
-| `resume` 的任务状态不是 `interrupted`（如 `completed` / `running` / `abandoned`） | 409 |
-| `abandon` 的任务状态不是 `interrupted` | 409 |
+| `resume` 的任务状态不是 `interrupted` / `canceled`（如 `completed` / `running` / `abandoned`） | 409 |
+| `abandon` 的任务状态不是 `interrupted` / `canceled` | 409 |
 | `resume` 时 manifest 记录的输入文件或追溯目录已不存在 | 409 |
 
 ### 13.5 manifest 字段说明

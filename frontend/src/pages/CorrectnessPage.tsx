@@ -6,11 +6,12 @@ import InterruptedTasks from '../components/InterruptedTasks'
 import ProcessingView from '../components/ProcessingView'
 import WorkflowSteps from '../components/WorkflowSteps'
 import { useAnalysisJob } from '../hooks/useAnalysisJob'
-import ErrorDiagnostics from '../components/ErrorDiagnostics'
+import ErrorDiagnostics, { DiagnosticsCopyButton } from '../components/ErrorDiagnostics'
+import type { ErrorDiagnosticsProps } from '../components/ErrorDiagnostics'
 import JobLogPanel from '../components/JobLogPanel'
 import { useJobLogs } from '../hooks/useJobLogs'
 import { useMockMode } from '../hooks/useMockMode'
-import { analyzeFilesV4, getJobResultV4 } from '../api'
+import { abandonJobV4, analyzeFilesV4, getJobResultV4, resumeJobV4 } from '../api'
 import type { FileItem, V4JobListItem, V4JobResultResponse } from '../types'
 
 export default function CorrectnessPage() {
@@ -82,6 +83,40 @@ export default function CorrectnessPage() {
     setSubscriberFile(null)
     setTraceabilityFiles([])
     setSelectedPreviewFile(null)
+  }
+
+  /** 已终止的任务：就地续跑（后端按参数快照重启并复位取消标志），再挂回轮询 */
+  function handleResume() {
+    const id = job.jobId
+    if (!id) return
+    resumeJobV4(id)
+      .then(() => job.attach(id, (jid) => getJobResultV4(jid)))
+      .catch((e) => {
+        console.error(e)
+        alert('继续任务失败，请返回上传页重试')
+      })
+  }
+
+  /** 已终止的任务：放弃（终态，不删除输入与中间产物），收尾后回到上传页 */
+  function handleAbandon() {
+    const id = job.jobId
+    if (!id) return
+    abandonJobV4(id)
+      .then(() => handleReset())
+      .catch((e) => {
+        console.error(e)
+        alert('放弃任务失败，请返回上传页操作')
+      })
+  }
+
+  // 错误视图的公共入参：诊断卡片与「复制诊断信息」按钮共用同一份
+  const diagProps: ErrorDiagnosticsProps = {
+    error: job.error,
+    jobId: job.jobId,
+    taskType: 'correctness',
+    mockMode: job.mock,
+    jobStatus: job.jobStatus,
+    lines: logLines,
   }
 
   return (
@@ -181,18 +216,25 @@ export default function CorrectnessPage() {
             {job.jobStatus === 'canceled' ? '任务已终止' : '处理失败'}
           </h3>
           <p className="error-message">{job.errorMessage}</p>
-          <ErrorDiagnostics
-            error={job.error}
-            jobId={job.jobId}
-            taskType="correctness"
-            mockMode={job.mock}
-            jobStatus={job.jobStatus}
-            lines={logLines}
-          />
+          <ErrorDiagnostics {...diagProps} />
           <JobLogPanel lines={logLines} truncated={logTruncated} defaultOpen />
-          <button className="btn btn--new" onClick={handleReset}>
-            重新尝试
-          </button>
+          <div className="error-state__actions">
+            {job.jobStatus === 'canceled' ? (
+              <>
+                <button className="btn btn--primary" onClick={handleResume}>
+                  继续执行
+                </button>
+                <button className="btn btn--secondary" onClick={handleAbandon}>
+                  放弃
+                </button>
+              </>
+            ) : (
+              <button className="btn btn--new" onClick={handleReset}>
+                重新尝试
+              </button>
+            )}
+            <DiagnosticsCopyButton {...diagProps} />
+          </div>
         </div>
       )}
     </div>

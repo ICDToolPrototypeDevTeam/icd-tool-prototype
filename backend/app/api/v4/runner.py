@@ -334,6 +334,29 @@ def derive_eoicd_hlr_counts(output_dir: Path) -> dict:
     return out
 
 
+def _reuse_parse_inputs(
+    job: Job, output_dir: Path, hlr_path: Path
+) -> tuple[Path, Optional[Path]]:
+    """续跑时改传已落盘的解析产物，走管线自带的 ``[skip]`` 分支。
+
+    Step 1 的解析（Excel/Word → JSON）不含 LLM 调用，产物落盘后即可复用：
+    实测每次续跑省 ~26s（38s → 11s）。复用条件必须是**续跑**（job.resumed）——
+    首跑时同名文件可能是上一轮的残留，当成解析结果用会让新上传的输入文件
+    完全不生效。两份产物缺一不可：只复用其中一份会把两次不同的输入拼在一起。
+
+    Returns:
+        ``(hlr_arg, eoicd_json_arg)``。不满足复用条件时返回
+        ``(hlr_path, None)``，与改动前的调用完全一致。
+    """
+    if not job.resumed:
+        return hlr_path, None
+    eoicd_json = output_dir / V4_INTERMEDIATE_JSON["eoicd_requirements"]
+    hlr_json = output_dir / V4_INTERMEDIATE_JSON["hlr_requirements"]
+    if eoicd_json.exists() and hlr_json.exists():
+        return hlr_json, eoicd_json
+    return hlr_path, None
+
+
 def run_v4_pipeline_thread(
     job: Job,
     job_dir: Path,
@@ -378,9 +401,11 @@ def run_v4_pipeline_thread(
         refine = (profile.profile_id == "rpdu") and (not no_refine)
 
         # 调 V4 in-process 流水线
+        # 续跑时改传已落盘的解析产物（首跑仍传原始输入，eoicd_json=None）
+        hlr_arg, eoicd_json_arg = _reuse_parse_inputs(job, output_dir, hlr_path)
         result = run_reverse_pipeline(
-            hlr=hlr_path,
-            eoicd_json=None,  # 缓存路径不在 API 暴露，避免触发 _v4_backend_raw 已澄清的设计假设分歧
+            hlr=hlr_arg,
+            eoicd_json=eoicd_json_arg,
             publisher=publisher_path,
             subscriber=subscriber_path,
             output_dir=output_dir,
@@ -505,6 +530,10 @@ def relaunch_from_manifest(job: Job, job_dir: Path) -> threading.Thread:
     if trace_dir is not None and not trace_dir.is_dir():
         raise FileNotFoundError(str(trace_dir))
 
+    # 复位取消标志：同一进程内续跑一个已终止的任务时，Job 仍带着上次取消置位
+    # 的 Event（``from_manifest`` 的复位只在进程重启重建 Job 时发生）。不复位
+    # 则管线第一个检查点立刻再抛 JobCancelled。
+    job.clear_cancel()
     # 恢复运行标记 + 计数重置（二次恢复不得累加上一轮的计数）
     job.resumed = True
     job.reuse = {"reused": 0, "rerun": 0}
@@ -642,9 +671,11 @@ def run_forward_pipeline_thread(
 
         job.update(JobStatus.RUNNING, "Step 1/8: Parsing input files")
 
+        # 续跑时改传已落盘的解析产物（首跑仍传原始输入，eoicd_json=None）
+        hlr_arg, eoicd_json_arg = _reuse_parse_inputs(job, output_dir, hlr_path)
         result = run_forward_pipeline(
-            hlr=hlr_path,
-            eoicd_json=None,
+            hlr=hlr_arg,
+            eoicd_json=eoicd_json_arg,
             publisher=publisher_path,
             subscriber=subscriber_path,
             output_dir=output_dir,
