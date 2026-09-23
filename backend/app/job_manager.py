@@ -302,6 +302,23 @@ class JobManager:
         self._jobs[job.job_id] = job
         return job
 
+    def new_job(self, task_type: str = "correctness") -> Job:
+        """构造一个**尚未登记**的任务（不进任务列表）。
+
+        上传接口按此创建：请求还要经过「保存上传文件」与「自动识别系统类型」
+        两步，任一步失败（文件过大 413、追溯表格式错 422、识别不出系统类型）请求
+        就结束了，管线线程根本不会启动。若在创建时就登记，这条记录会永远停在
+        ``pending``：前端显示「等待开始」，没有线程可终止，也不满足 abandon 的
+        门槛 —— 用户只能看着它，没有任何操作能去掉它。登记因此推迟到真正要启动
+        线程的 :meth:`register`（由 ``launch_*_pipeline`` 调用）。
+        """
+        return Job(task_type=task_type)
+
+    def register(self, job: Job) -> Job:
+        """把任务登记进任务列表（幂等）。"""
+        self._jobs[job.job_id] = job
+        return job
+
     def get_job(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
 

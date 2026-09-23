@@ -1,4 +1,5 @@
 import { Link, useNavigate } from 'react-router-dom'
+import { Puzzle, Search } from 'lucide-react'
 import InterruptedTasks from '../components/InterruptedTasks'
 import type { V4JobListItem } from '../types'
 
@@ -21,7 +22,7 @@ export default function LandingPage() {
 
       <div className="landing-cards">
         <Link to="/correctness" className="entry-card">
-          <div className="entry-card__icon">🔍</div>
+          <div className="entry-card__icon"><Search size={40} /></div>
           <div className="entry-card__title">正确性分析</div>
           <div className="entry-card__desc">
             由软件高层需求（HLR）反向比对 EoICD 条目，识别差异与不一致
@@ -30,7 +31,7 @@ export default function LandingPage() {
         </Link>
 
         <Link to="/completeness" className="entry-card">
-          <div className="entry-card__icon">🧩</div>
+          <div className="entry-card__icon"><Puzzle size={40} /></div>
           <div className="entry-card__title">完整性分析</div>
           <div className="entry-card__desc">
             由 EoICD 条目正向检查高层需求覆盖情况，识别漏写与缺失

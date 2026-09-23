@@ -220,7 +220,10 @@ async def coverage_analysis(
                 )
 
     # —— 创建 Job 与目录（V4 路径：backend/output/v4/{job_id}/input/ + output/）——
-    job = job_manager.create_job(task_type="correctness")
+    # 此刻**不登记**进任务列表：下面的保存上传与自动识别都可能抛错（413/422/500），
+    # 那样请求就结束了、线程不会启动，登记了就是一条永远停在「等待开始」的幽灵任务。
+    # 登记推迟到 launch_v4_pipeline（JobManager.new_job 有详细说明）。
+    job = job_manager.new_job(task_type="correctness")
     job_dir = get_output_root() / 'v4' / job.job_id
     input_dir = job_dir / 'input'
     input_dir.mkdir(parents=True, exist_ok=True)

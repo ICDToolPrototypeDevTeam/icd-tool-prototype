@@ -1,0 +1,4 @@
+# Shell 脚本一律以 LF 存放与检出：这些脚本要拷到 Linux 服务器上执行，
+# 带着 CRLF 过去会报「\r: command not found」之类的怪错。
+# （本机 core.autocrlf=true，若不加这条，检出到工作区就会变成 CRLF。）
+*.sh text eol=lf

@@ -24,7 +24,7 @@ from app.job_log import (
     job_log_store,
     restore_job_log,
 )
-from app.job_manager import Job, JobCancelled, JobStatus
+from app.job_manager import Job, JobCancelled, JobStatus, job_manager
 from app.v4.errors import classify_pipeline_error
 from app.v4.llm.factory import use_mock_llm as mock_mode_enabled
 from app.v4.pipeline import run_forward_pipeline, run_reverse_pipeline
@@ -503,6 +503,9 @@ def launch_v4_pipeline(
         "controller_profile": controller_profile,
         "no_refine": no_refine,
     })
+    # 登记即「已承诺运行」：在此之前失败的上传请求不会留下 pending 幽灵任务
+    # （见 JobManager.new_job）。
+    job_manager.register(job)
     t = threading.Thread(
         target=run_v4_pipeline_thread,
         args=(job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir, judge_providers, use_mock_llm, controller_profile, no_refine),
@@ -750,6 +753,8 @@ def launch_forward_pipeline(
         "system_device_trace_file": _rel_path(job_dir, system_device_trace_file),
         "use_mock_llm": use_mock_llm,
     })
+    # 登记即「已承诺运行」；语义同 launch_v4_pipeline
+    job_manager.register(job)
     t = threading.Thread(
         target=run_forward_pipeline_thread,
         args=(

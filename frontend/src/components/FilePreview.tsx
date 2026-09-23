@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { FileSpreadsheet, FileText, Hourglass, TriangleAlert } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import mammoth from 'mammoth'
 import { normalizeZipEntryNames } from '../utils/zipEntryNames'
@@ -88,7 +89,7 @@ export default function FilePreview({ file }: Props) {
     return (
       <div className="preview-content">
         <div className="preview-empty">
-          <div className="preview-empty__icon">📄</div>
+          <div className="preview-empty__icon"><FileText size={48} /></div>
           <p>选择文件后即可预览内容</p>
         </div>
       </div>
@@ -99,7 +100,7 @@ export default function FilePreview({ file }: Props) {
     return (
       <div className="preview-content">
         <div className="preview-empty">
-          <div className="preview-empty__icon">⏳</div>
+          <div className="preview-empty__icon"><Hourglass size={48} /></div>
           <p>正在加载预览...</p>
         </div>
       </div>
@@ -110,7 +111,7 @@ export default function FilePreview({ file }: Props) {
     return (
       <div className="preview-content">
         <div className="preview-empty">
-          <div className="preview-empty__icon">⚠️</div>
+          <div className="preview-empty__icon"><TriangleAlert size={48} /></div>
           <p>{error}</p>
         </div>
       </div>
@@ -128,7 +129,7 @@ export default function FilePreview({ file }: Props) {
   return (
     <div>
       <div className="file-info">
-        <div className="file-icon">{isExcel ? '📊' : '📄'}</div>
+        <div className="file-icon">{isExcel ? <FileSpreadsheet size={20} /> : <FileText size={20} />}</div>
         <div className="file-details">
           <div className="file-name">{file.name}</div>
           <div className="file-size">{formatSize(file.size)} · 已加载</div>

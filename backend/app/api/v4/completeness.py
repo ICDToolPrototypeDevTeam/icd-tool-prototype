@@ -71,7 +71,9 @@ async def completeness_analysis(
                 raise HTTPException(status_code=422, detail=f"{field} must be .xlsx")
 
     # —— 创建 Job 与目录（正向与反向共用 output/v4/{job_id}/ 结构）——
-    job = job_manager.create_job(task_type="completeness")
+    # 不登记：保存上传可能抛错（413/422），登记了就会留下停在「等待开始」的
+    # 幽灵任务。登记推迟到 launch_forward_pipeline（见 JobManager.new_job）。
+    job = job_manager.new_job(task_type="completeness")
     job_dir = get_output_root() / 'v4' / job.job_id
     input_dir = job_dir / 'input'
     input_dir.mkdir(parents=True, exist_ok=True)

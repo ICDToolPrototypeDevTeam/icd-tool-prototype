@@ -12,8 +12,12 @@ interface Props {
 // 只展示「还没跑完」的任务：运行中（重开后重新连上）、被中断、被用户终止
 const VISIBLE_STATUSES = new Set(['pending', 'running', 'interrupted', 'canceled'])
 
-// 可续跑 / 可放弃的状态：续跑按参数快照重启，放弃只改状态（终态）
+// 可续跑的状态：续跑按参数快照重启（pending 没有参数快照，也无进度可续）
 const RESUMABLE = new Set(['interrupted', 'canceled'])
+
+// 可放弃的状态：上述两种之外，还有**从未启动过**的 pending（后端以无线程为门槛，
+// 见 abandon 接口）。这类记录若不给出「放弃」就没有任何操作能把它从列表里去掉。
+const ABANDONABLE = new Set(['pending', 'interrupted', 'canceled'])
 
 const TASK_LABEL: Record<V4TaskType, string> = {
   correctness: '正确性分析',
@@ -115,7 +119,7 @@ export default function InterruptedTasks({ taskType, onOpen }: Props) {
               >
                 {RESUMABLE.has(j.status) ? '继续' : '查看进度'}
               </button>
-              {RESUMABLE.has(j.status) && (
+              {ABANDONABLE.has(j.status) && (
                 <button
                   className="btn btn--secondary"
                   disabled={busyId === j.job_id}

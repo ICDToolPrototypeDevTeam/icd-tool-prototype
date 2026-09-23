@@ -25,7 +25,7 @@ API 设计应遵守以下原则：
 | `/api/v4/jobs/{job_id}`                        | `GET`  | 查询任务状态                          |
 | `/api/v4/jobs/{job_id}/logs`                   | `GET`  | 任务日志增量拉取（`offset` 取上次返回的 `next_offset`，首次 0；`limit` 默认 500、上限 2000；进程重启后可从 `job.log` 尾部恢复） |
 | `/api/v4/jobs/{job_id}/resume`                 | `POST` | 继续被中断 / 被终止的任务（按 manifest 参数快照重跑，已完成的 LLM 判定与已落盘的解析产物复用缓存） |
-| `/api/v4/jobs/{job_id}/abandon`                | `POST` | 放弃被中断 / 被终止的任务（仅标记，不删除文件）        |
+| `/api/v4/jobs/{job_id}/abandon`                | `POST` | 放弃被中断 / 被终止 / 从未启动的任务（仅标记，不删除文件） |
 | `/api/v4/jobs/{job_id}/cancel`                 | `POST` | 终止运行中的任务（`running` / `pending` → 200，其余状态 → 409；不删除任何文件，任务最终以 `canceled` 结束） |
 | `/api/v4/jobs/{job_id}/result`                 | `GET`  | 查询任务处理结果摘要（按 `task_type` 分发正确性/完整性两种 schema） |
 | `/api/v4/jobs/{job_id}/outputs/eoicd-xlsx`     | `GET`  | 下载 EoICD 条目化清单（xlsx）      |
@@ -462,7 +462,9 @@ POST /api/v4/jobs/{job_id}/resume
 POST /api/v4/jobs/{job_id}/abandon
 ```
 
-只把状态标记为 `abandoned`，**不删除任何输入或输出文件**（磁盘清理不在本期范围）。可放弃的任务状态为 `interrupted` 与 `canceled`（与 `resume` 同一门槛）：放弃是这套状态机里的终态，被终止的任务同样需要一个收尾方式。
+只把状态标记为 `abandoned`，**不删除任何输入或输出文件**（磁盘清理不在本期范围）。可放弃的任务为 `interrupted` 与 `canceled`（与 `resume` 同一门槛），**外加「从未启动过」的 `pending`**（`job_dir is None`，即管线线程没跑过 `set_dir`）：放弃是这套状态机里的终态，被终止的任务需要一个收尾方式，而这类 `pending` 没有线程、「终止」对它无效（`cancel` 只是置一个没人检查的标志），不放行就没有任何操作能把它从任务列表里去掉。门槛的实质是「**没有任何线程在跑**」——已进入启动窗口（`job_dir` 非空）的 `pending` 仍属运行中的任务，只能先 `cancel`。
+
+配套的不变量是「**登记即承诺运行**」：创建任务的接口用 `JobManager.new_job()` 只构造、不登记，由 `launch_*_pipeline` 在起线程前 `register()`。上传接口还有保存文件与识别系统类型两步，任一步失败请求就结束了、线程不会启动，若在创建时就登记，失败的上传会在列表里留下永远停在 `pending` 的空记录（既无进度也无日志，且当时无法放弃）。
 
 返回：
 
@@ -476,7 +478,7 @@ POST /api/v4/jobs/{job_id}/abandon
 | --- | --- |
 | `resume` / `abandon` 的任务不存在（如后端重启后该任务未留下可恢复记录） | 404 |
 | `resume` 的任务状态不是 `interrupted` / `canceled`（如 `completed` / `running` / `abandoned`） | 409 |
-| `abandon` 的任务状态不是 `interrupted` / `canceled` | 409 |
+| `abandon` 的任务状态既不是 `interrupted` / `canceled`，也不是「从未启动」的 `pending`（如 `running`、已 `set_dir` 的 `pending`、`completed`） | 409 |
 | `resume` 时 manifest 记录的输入文件或追溯目录已不存在 | 409 |
 
 ### 13.5 manifest 字段说明

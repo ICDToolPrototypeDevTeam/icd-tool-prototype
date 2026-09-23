@@ -1,4 +1,5 @@
-import { useRef } from 'react'
+import { useRef, type ReactNode } from 'react'
+import { Eye, FileSpreadsheet, FileText, FolderOpen, Paperclip, X } from 'lucide-react'
 import type { FileItem } from '../types'
 import FilePreview from './FilePreview'
 
@@ -71,7 +72,7 @@ export default function CorrectnessFileUpload({
   function renderFileItem(
     file: FileItem | null,
     onChange: (f: FileItem | null) => void,
-    icon: string
+    icon: ReactNode
   ) {
     if (!file) return null
     return (
@@ -93,7 +94,7 @@ export default function CorrectnessFileUpload({
               if (selectedPreviewFile?.id === file.id) onPreviewSelect(null)
             }}
           >
-            ✕
+            <X size={14} />
           </button>
         </div>
       </div>
@@ -128,7 +129,7 @@ export default function CorrectnessFileUpload({
     <div className="content-grid">
       <div className="card" style={{ height: 480 }}>
         <div className="card__header">
-          <div className="card__icon card__icon--blue">📁</div>
+          <div className="card__icon card__icon--blue"><FolderOpen size={20} /></div>
           <div>
             <div className="card__title">文件上传</div>
             <div className="card__subtitle">上传 HLR Word、EoICD Pub/Sub Excel 与追溯表</div>
@@ -138,9 +139,9 @@ export default function CorrectnessFileUpload({
           {/* HLR Word (required) */}
           <div className="file-section">
             <div className="file-section__title">
-              📄 HLR Word 文件 <span className="file-section__required">*必填</span>
+              <FileText size={16} /> HLR Word 文件 <span className="file-section__required">*必填</span>
             </div>
-            {renderFileItem(hlrWordFile, onHlrWordChange, '📄')}
+            {renderFileItem(hlrWordFile, onHlrWordChange, <FileText size={18} />)}
             {!hlrWordFile &&
               renderUploadButton('上传 HLR Word 文件', hlrWordInputRef, '.docx', (e) =>
                 handleSingleFile(e, onHlrWordChange)
@@ -150,9 +151,9 @@ export default function CorrectnessFileUpload({
           {/* EoICD Publisher Excel */}
           <div className="file-section">
             <div className="file-section__title">
-              📊 EoICD Publisher Excel <span className="file-section__required">*至少填一</span>
+              <FileSpreadsheet size={16} /> EoICD Publisher Excel <span className="file-section__required">*至少填一</span>
             </div>
-            {renderFileItem(eoicdPublisherFile, onEoicdPublisherChange, '📊')}
+            {renderFileItem(eoicdPublisherFile, onEoicdPublisherChange, <FileSpreadsheet size={18} />)}
             {!eoicdPublisherFile &&
               renderUploadButton('上传 Publisher Excel', publisherInputRef, '.xlsx,.xls', (e) =>
                 handleSingleFile(e, onEoicdPublisherChange)
@@ -162,9 +163,9 @@ export default function CorrectnessFileUpload({
           {/* EoICD Subscriber Excel */}
           <div className="file-section">
             <div className="file-section__title">
-              📊 EoICD Subscriber Excel <span className="file-section__required">*至少填一</span>
+              <FileSpreadsheet size={16} /> EoICD Subscriber Excel <span className="file-section__required">*至少填一</span>
             </div>
-            {renderFileItem(eoicdSubscriberFile, onEoicdSubscriberChange, '📊')}
+            {renderFileItem(eoicdSubscriberFile, onEoicdSubscriberChange, <FileSpreadsheet size={18} />)}
             {!eoicdSubscriberFile &&
               renderUploadButton('上传 Subscriber Excel', subscriberInputRef, '.xlsx,.xls', (e) =>
                 handleSingleFile(e, onEoicdSubscriberChange)
@@ -174,7 +175,7 @@ export default function CorrectnessFileUpload({
           {/* Traceability files (optional, multi) */}
           <div className="file-section">
             <div className="file-section__title">
-              📎 追溯表 <span className="file-section__optional">选填（0-N）</span>
+              <Paperclip size={16} /> 追溯表 <span className="file-section__optional">选填（0-N）</span>
             </div>
             {traceabilityFiles.length > 0 && (
               <div className="file-list">
@@ -184,7 +185,7 @@ export default function CorrectnessFileUpload({
                     className={`file-item ${selectedPreviewFile?.id === f.id ? 'selected' : ''}`}
                     onClick={() => onPreviewSelect(f)}
                   >
-                    <div className="file-item__icon">📎</div>
+                    <div className="file-item__icon"><Paperclip size={18} /></div>
                     <div className="file-item__info">
                       <div className="file-item__name">{f.name}</div>
                       <div className="file-item__meta">{formatSize(f.size)} · Excel</div>
@@ -200,7 +201,7 @@ export default function CorrectnessFileUpload({
                         }
                       }}
                     >
-                      ✕
+                      <X size={14} />
                     </button>
                   </div>
                 ))}
@@ -220,7 +221,7 @@ export default function CorrectnessFileUpload({
       {/* Preview Panel */}
       <div className="card" style={{ height: 480 }}>
         <div className="card__header">
-          <div className="card__icon card__icon--blue">👁️</div>
+          <div className="card__icon card__icon--blue"><Eye size={20} /></div>
           <div>
             <div className="card__title">文件预览</div>
             <div className="card__subtitle">查看选中文件的内容</div>

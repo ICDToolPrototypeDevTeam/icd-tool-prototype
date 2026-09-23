@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { CircleStop, TriangleAlert } from 'lucide-react'
 import CorrectnessFileUpload from '../components/CorrectnessFileUpload'
 import CorrectnessResultView from '../components/CorrectnessResultView'
 import InterruptedTasks from '../components/InterruptedTasks'
@@ -211,7 +212,9 @@ export default function CorrectnessPage() {
 
       {job.pageState === 'error' && (
         <div className="error-state">
-          <div className="error-icon">{job.jobStatus === 'canceled' ? '⏹' : '⚠️'}</div>
+          <div className="error-icon">
+            {job.jobStatus === 'canceled' ? <CircleStop size={56} /> : <TriangleAlert size={56} />}
+          </div>
           <h3 className="error-title">
             {job.jobStatus === 'canceled' ? '任务已终止' : '处理失败'}
           </h3>

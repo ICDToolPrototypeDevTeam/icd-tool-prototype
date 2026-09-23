@@ -1,4 +1,5 @@
-import { useRef } from 'react'
+import { useRef, type ReactNode } from 'react'
+import { Eye, FileSpreadsheet, FileText, FolderOpen, Paperclip, X } from 'lucide-react'
 import type { FileItem, ForwardAnalysisMode } from '../types'
 import FilePreview from './FilePreview'
 
@@ -73,7 +74,7 @@ export default function CompletenessFileUpload({
   function renderFileItem(
     file: FileItem | null,
     onChange: (f: FileItem | null) => void,
-    icon: string
+    icon: ReactNode
   ) {
     if (!file) return null
     return (
@@ -95,7 +96,7 @@ export default function CompletenessFileUpload({
               if (selectedPreviewFile?.id === file.id) onPreviewSelect(null)
             }}
           >
-            ✕
+            <X size={14} />
           </button>
         </div>
       </div>
@@ -130,7 +131,7 @@ export default function CompletenessFileUpload({
     <div className="content-grid">
       <div className="card" style={{ height: 480 }}>
         <div className="card__header">
-          <div className="card__icon card__icon--blue">📁</div>
+          <div className="card__icon card__icon--blue"><FolderOpen size={20} /></div>
           <div>
             <div className="card__title">文件上传</div>
             <div className="card__subtitle">上传 HLR Word、EoICD Pub/Sub Excel 与追溯表</div>
@@ -156,9 +157,9 @@ export default function CompletenessFileUpload({
           {/* HLR Word (required) */}
           <div className="file-section">
             <div className="file-section__title">
-              📄 HLR Word 文件 <span className="file-section__required">*必填</span>
+              <FileText size={16} /> HLR Word 文件 <span className="file-section__required">*必填</span>
             </div>
-            {renderFileItem(hlrWordFile, onHlrWordChange, '📄')}
+            {renderFileItem(hlrWordFile, onHlrWordChange, <FileText size={18} />)}
             {!hlrWordFile &&
               renderUploadButton('上传 HLR Word 文件', hlrWordInputRef, '.docx', (e) =>
                 handleSingleFile(e, onHlrWordChange)
@@ -168,9 +169,9 @@ export default function CompletenessFileUpload({
           {/* EoICD Publisher Excel */}
           <div className="file-section">
             <div className="file-section__title">
-              📊 EoICD Publisher Excel <span className="file-section__required">*至少填一</span>
+              <FileSpreadsheet size={16} /> EoICD Publisher Excel <span className="file-section__required">*至少填一</span>
             </div>
-            {renderFileItem(eoicdPublisherFile, onEoicdPublisherChange, '📊')}
+            {renderFileItem(eoicdPublisherFile, onEoicdPublisherChange, <FileSpreadsheet size={18} />)}
             {!eoicdPublisherFile &&
               renderUploadButton('上传 Publisher Excel', publisherInputRef, '.xlsx,.xls', (e) =>
                 handleSingleFile(e, onEoicdPublisherChange)
@@ -180,9 +181,9 @@ export default function CompletenessFileUpload({
           {/* EoICD Subscriber Excel */}
           <div className="file-section">
             <div className="file-section__title">
-              📊 EoICD Subscriber Excel <span className="file-section__required">*至少填一</span>
+              <FileSpreadsheet size={16} /> EoICD Subscriber Excel <span className="file-section__required">*至少填一</span>
             </div>
-            {renderFileItem(eoicdSubscriberFile, onEoicdSubscriberChange, '📊')}
+            {renderFileItem(eoicdSubscriberFile, onEoicdSubscriberChange, <FileSpreadsheet size={18} />)}
             {!eoicdSubscriberFile &&
               renderUploadButton('上传 Subscriber Excel', subscriberInputRef, '.xlsx,.xls', (e) =>
                 handleSingleFile(e, onEoicdSubscriberChange)
@@ -194,9 +195,9 @@ export default function CompletenessFileUpload({
             <>
               <div className="file-section">
                 <div className="file-section__title">
-                  📎 设备→ICD 追溯表 <span className="file-section__required">*追溯模式必填</span>
+                  <Paperclip size={16} /> 设备→ICD 追溯表 <span className="file-section__required">*追溯模式必填</span>
                 </div>
-                {renderFileItem(deviceIcdTraceFile, onDeviceIcdTraceChange, '📎')}
+                {renderFileItem(deviceIcdTraceFile, onDeviceIcdTraceChange, <Paperclip size={18} />)}
                 {!deviceIcdTraceFile &&
                   renderUploadButton('上传 设备→ICD 追溯表', deviceIcdTraceInputRef, '.xlsx,.xls', (e) =>
                     handleSingleFile(e, onDeviceIcdTraceChange)
@@ -205,9 +206,9 @@ export default function CompletenessFileUpload({
 
               <div className="file-section">
                 <div className="file-section__title">
-                  📎 设备→高层需求 追溯表 <span className="file-section__required">*追溯模式必填</span>
+                  <Paperclip size={16} /> 设备→高层需求 追溯表 <span className="file-section__required">*追溯模式必填</span>
                 </div>
-                {renderFileItem(systemDeviceTraceFile, onSystemDeviceTraceChange, '📎')}
+                {renderFileItem(systemDeviceTraceFile, onSystemDeviceTraceChange, <Paperclip size={18} />)}
                 {!systemDeviceTraceFile &&
                   renderUploadButton('上传 设备→高层需求 追溯表', systemDeviceTraceInputRef, '.xlsx,.xls', (e) =>
                     handleSingleFile(e, onSystemDeviceTraceChange)
@@ -221,7 +222,7 @@ export default function CompletenessFileUpload({
       {/* Preview Panel */}
       <div className="card" style={{ height: 480 }}>
         <div className="card__header">
-          <div className="card__icon card__icon--blue">👁️</div>
+          <div className="card__icon card__icon--blue"><Eye size={20} /></div>
           <div>
             <div className="card__title">文件预览</div>
             <div className="card__subtitle">查看选中文件的内容</div>

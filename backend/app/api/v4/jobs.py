@@ -255,9 +255,16 @@ def abandon_v4_job(job_id: str):
 
     ``abandoned`` 是这套状态机里的**终态**：任务被中断/终止后，用户要么续跑，
     要么放弃。因此 ``canceled`` 同样可以放弃 —— 否则已终止的任务没有收尾方式。
+
+    另有一类 ``pending`` 也可放弃：**从未启动过**的任务（``job_dir is None``，
+    即管线线程还没跑过 ``set_dir``）。它没有线程，「终止」对它无效（只是置一个
+    没人检查的标志），若不在这里放行，这条记录会一直挂在任务列表里且没有任何
+    操作能去掉它。``job_dir`` 非空的 ``pending`` 仍在启动窗口内，那属于运行中
+    的任务，只能先终止（``cancel``）—— 于是这里的门槛实际是「没有任何线程在跑」。
     """
     job = _get_job(job_id)
-    if job.status not in (JobStatus.INTERRUPTED, JobStatus.CANCELED):
+    never_launched = job.status == JobStatus.PENDING and job.job_dir is None
+    if job.status not in (JobStatus.INTERRUPTED, JobStatus.CANCELED) and not never_launched:
         raise HTTPException(
             status_code=409,
             detail=f'job not abandonable: status={job.status.value}',

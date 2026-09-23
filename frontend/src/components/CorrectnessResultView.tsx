@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react'
-import { CircleCheck, CircleX, CircleHelp, CircleDashed, Table2, FileText, type LucideIcon } from 'lucide-react'
+import {
+  CircleCheck, CircleX, CircleHelp, CircleDashed, Table2, FileText, FileSpreadsheet,
+  ClipboardList, Hourglass, TriangleAlert, type LucideIcon,
+} from 'lucide-react'
 import { getDownloadUrlV4, getPreviewHtmlV4 } from '../api'
 import type { V4JobResultResponse, V4DownloadKind } from '../types'
 
@@ -9,17 +12,18 @@ interface Props {
   onNewTask: () => void
 }
 
-const DOWNLOADS: { kind: V4DownloadKind; label: string; desc: string; icon: string }[] = [
-  { kind: 'eoicd-xlsx', label: 'EoICD 条目化清单 (XLSX)', desc: '条目化需求清单', icon: '📊' },
-  { kind: 'consistency/deepseek', label: '差异对比报告(DeepSeek)', desc: 'DeepSeek 模型分析', icon: '📄' },
-  { kind: 'consistency/minimax', label: '差异对比报告(MiniMax)', desc: 'MiniMax 模型分析', icon: '📄' },
-  { kind: 'consistency/qwen', label: '差异对比报告(Qwen)', desc: 'Qwen 模型分析', icon: '📄' },
-  { kind: 'consensus-docx', label: '多模型差异分析报告', desc: '三模型分析', icon: '📋' },
+// 图标用 lucide-react 内联 SVG：服务器镜像里只有 9 种西文字体，emoji 会渲染成方框
+const DOWNLOADS: { kind: V4DownloadKind; label: string; desc: string; Icon: LucideIcon }[] = [
+  { kind: 'eoicd-xlsx', label: 'EoICD 条目化清单 (XLSX)', desc: '条目化需求清单', Icon: FileSpreadsheet },
+  { kind: 'consistency/deepseek', label: '差异对比报告(DeepSeek)', desc: 'DeepSeek 模型分析', Icon: FileText },
+  { kind: 'consistency/minimax', label: '差异对比报告(MiniMax)', desc: 'MiniMax 模型分析', Icon: FileText },
+  { kind: 'consistency/qwen', label: '差异对比报告(Qwen)', desc: 'Qwen 模型分析', Icon: FileText },
+  { kind: 'consensus-docx', label: '多模型差异分析报告', desc: '三模型分析', Icon: ClipboardList },
 ]
 
-const PREVIEWS: { kind: V4DownloadKind; title: string; desc: string; icon: string }[] = [
-  { kind: 'eoicd-xlsx', title: 'EoICD 条目化清单', desc: '条目化需求 Excel 清单', icon: '📊' },
-  { kind: 'consensus-docx', title: '多模型差异分析报告', desc: '三模型差异分析报告', icon: '📋' },
+const PREVIEWS: { kind: V4DownloadKind; title: string; desc: string; Icon: LucideIcon }[] = [
+  { kind: 'eoicd-xlsx', title: 'EoICD 条目化清单', desc: '条目化需求 Excel 清单', Icon: FileSpreadsheet },
+  { kind: 'consensus-docx', title: '多模型差异分析报告', desc: '三模型差异分析报告', Icon: ClipboardList },
 ]
 
 function outputAvailable(data: V4JobResultResponse, kind: V4DownloadKind): boolean {
@@ -36,12 +40,12 @@ function outputAvailable(data: V4JobResultResponse, kind: V4DownloadKind): boole
 function PreviewCard({
   title,
   desc,
-  icon,
+  Icon,
   jobId,
   kind,
   isAvailable,
 }: {
-  title: string; desc: string; icon: string; jobId: string; kind: V4DownloadKind; isAvailable: boolean
+  title: string; desc: string; Icon: LucideIcon; jobId: string; kind: V4DownloadKind; isAvailable: boolean
 }) {
   const [htmlContent, setHtmlContent] = useState('')
   const [loading, setLoading] = useState(false)
@@ -58,7 +62,7 @@ function PreviewCard({
   return (
     <div className="card" style={{ height: 480 }}>
       <div className="card__header">
-        <div className="card__icon card__icon--blue">{icon}</div>
+        <div className="card__icon card__icon--blue"><Icon size={20} /></div>
         <div>
           <div className="card__title">{title}</div>
           <div className="card__subtitle">{desc}</div>
@@ -68,21 +72,21 @@ function PreviewCard({
         {!isAvailable ? (
           <div className="preview-content">
             <div className="preview-empty">
-              <div className="preview-empty__icon">📄</div>
+              <div className="preview-empty__icon"><FileText size={48} /></div>
               <p>暂未生成</p>
             </div>
           </div>
         ) : loading ? (
           <div className="preview-content">
             <div className="preview-empty">
-              <div className="preview-empty__icon">⏳</div>
+              <div className="preview-empty__icon"><Hourglass size={48} /></div>
               <p>加载中...</p>
             </div>
           </div>
         ) : error ? (
           <div className="preview-content">
             <div className="preview-empty">
-              <div className="preview-empty__icon">⚠️</div>
+              <div className="preview-empty__icon"><TriangleAlert size={48} /></div>
               <p>{error}</p>
             </div>
           </div>
@@ -191,7 +195,7 @@ export default function CorrectnessResultView({ data, jobId, onNewTask }: Props)
             key={p.kind}
             title={p.title}
             desc={p.desc}
-            icon={p.icon}
+            Icon={p.Icon}
             jobId={jobId}
             kind={p.kind}
             isAvailable={outputAvailable(data, p.kind)}
@@ -207,7 +211,7 @@ export default function CorrectnessResultView({ data, jobId, onNewTask }: Props)
             const available = outputAvailable(data, d.kind)
             return available ? (
               <a key={d.kind} href={getDownloadUrlV4(jobId, d.kind)} download className="download-card">
-                <span className="download-card__icon">{d.icon}</span>
+                <span className="download-card__icon"><d.Icon size={24} /></span>
                 <div className="download-card__info">
                   <div className="download-card__name">{d.label}</div>
                   <div className="download-card__hint">{d.desc}</div>
@@ -215,7 +219,7 @@ export default function CorrectnessResultView({ data, jobId, onNewTask }: Props)
               </a>
             ) : (
               <div key={d.kind} className="download-card" style={{ opacity: 0.4 }}>
-                <span className="download-card__icon">{d.icon}</span>
+                <span className="download-card__icon"><d.Icon size={24} /></span>
                 <div className="download-card__info">
                   <div className="download-card__name">{d.label}</div>
                   <div className="download-card__hint">暂未生成</div>

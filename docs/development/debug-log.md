@@ -1533,3 +1533,140 @@ cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/ -q --continue-on-co
 1. 全量测试的 10 个 collection error 是历史问题（`tests/test_*_controller.py` 等仍 import 已不存在的 `app.v4.shared.parsing.hlr_parser_config`），不是本次改动引入，也不受本次影响；
 2. 追溯表侧 6 处同样只做了本机单元验证，没有真实的第三方重存追溯表样例；
 3. MOCK 中途报错、正向 Step 8 卡死两项尚未定位，与本问题无关。
+
+---
+
+### BUG-20260923-004：上传失败留下永远停在「等待开始」的幽灵任务，且无法丢弃
+
+#### 状态
+
+fixed
+
+#### 发现日期
+
+2026-09-23
+
+#### 关联 Issue / PR
+
+本次「Docker 服务器部署」反馈：任务列表里有两条「等待开始」的记录，没有任何办法去掉。用户要求「这个等待开始的任务也需要可以丢弃」。本条与 BUG-20260923-003 是同一批反馈的两面：003 修的是「点提交就 500」，本条修的是「那两次 500 留下的残骸」。
+
+#### 问题现象
+
+工具入口页「未完成的任务」列表里躺着两条「等待开始」：点进去没有进度、没有日志，也没有「继续」和「放弃」——**没有任何前端操作能把它从列表里去掉**。
+
+#### 复现方式
+
+两条记录的时间戳与 BUG-20260923-003 的两次 500 提交完全吻合，即它们正是那两次失败请求留下的。也可直接构造：调用上传接口时让「自动识别」抛错（或让 `_save_upload` 抛 413、追溯表校验抛 422），随后 `GET /api/v4/jobs` 就能看到多出来的这条记录。
+
+#### 影响范围
+
+一切「任务已创建、线程还没启动」的失败请求：文件过大 413、追溯表格式错 422、识别不出系统类型 500、保存上传失败。每失败一次就在列表里多一条无人认领、也无法处理的记录。
+
+#### 原因分析
+
+1. 上传接口先 `create_job` 把任务登记进任务表，**再**保存上传文件、自动识别系统类型；后两步任一抛错，请求就结束了，管线线程从未启动。
+2. 这条记录同时不满足两个出口：`cancel` 只置一个标志，需要有线程在检查点读取它——没有线程，终止无效；`abandon` 的门槛是 `interrupted` / `canceled`，`pending` 不在其中。
+3. 它也等不到重启清理：内存任务表随进程消失，而它没有 `job_dir`、没写过 `job.json`，启动扫描（只扫已落盘的 manifest）找不到它。于是用户看到的是一份「重启才会消失、重启前一直挂着」的记录。
+
+#### 修复方案
+
+把「登记」与「承诺运行」绑定：
+
+1. `JobManager.new_job()` 只构造、**不登记**；`launch_v4_pipeline` / `launch_forward_pipeline` 在 `set_dir()` 之后、`t.start()` 之前调用 `job_manager.register(job)`——登记点即「已承诺运行」点。
+2. `abandon` 的门槛从「状态是 interrupted/canceled」改为「**没有任何线程在跑**」：放行 `pending` 且 `job_dir is None`（从未启动）的记录；`job_dir` 非空的 `pending` 落在启动窗口内，仍属运行中的任务，只能先终止。
+3. 前端「未完成的任务」列表对 `pending` 也给出「放弃」按钮（`ABANDONABLE` 集合）；「继续」仍只对 `interrupted` / `canceled` 显示——`pending` 没有参数快照，也没有进度可续。
+
+#### 修改文件
+
+`backend/app/job_manager.py`（新增 `new_job` / `register`）、`backend/app/api/v4/runner.py`（两个 launch 函数各 1 行登记）、`backend/app/api/v4/coverage.py` 与 `backend/app/api/v4/completeness.py`（`create_job` → `new_job`）、`backend/app/api/v4/jobs.py`（abandon 门槛与说明）、`frontend/src/components/InterruptedTasks.tsx`（`ABANDONABLE`）
+
+#### 验证方式
+
+```bash
+cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/test_job_orphan.py -v
+cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/ -q --continue-on-collection-errors
+cd frontend && npx tsc --noEmit
+```
+
+#### 验证结果
+
+**已通过（本机）**：新增 5 个用例全通过——识别失败时任务表前后一致（修复前会多一条 pending）、成功路径照旧登记、`new_job` 构造的任务在 `launch` 之前查不到、未启动的 `pending` 可放弃成 `abandoned`、已 `set_dir` 的 `pending` 仍返回 409（守住「门槛是无线程、不是状态名」这条判据本身）。全量 112 passed / 10 errors（10 个 error 同 BUG-20260923-003 遗留问题第 1 条）。`tsc --noEmit` 退出码 0。**尚未验证**：容器内实际上传一个触发 413/422 的请求、确认列表不再新增记录（需重建镜像，本机未跑 Docker）。
+
+#### 遗留问题
+
+1. 服务器上那两条历史幽灵记录不在任何持久化文件里（无 `job.json`），重启容器即消失，无需手工清理；
+2. 顺带核实并**排除**了一个此前怀疑的隐患：`profiles/fsecu/` 存在但不在系统类型白名单内，曾担心「自动识别会选中它」。实测（`init_registry` + `list_ids()`）fsecu 虽在注册表里，但 `auto_detect=False`，而 `_detect_system_type` 对未配置 `auto_detect` 的 profile 直接 `continue`，因此不可能被自动识别选中——白名单只管手动选择，两套口径不冲突，无需改动。
+3. MOCK 中途报错、正向 Step 8 卡死两项尚未定位，与本问题无关。
+
+---
+
+### BUG-20260923-005：交付包部署脚本在部署成功之后仍以退出码 1 结束，且不打印结果汇总
+
+#### 状态
+
+fixed（交付前拦截，未随任何交付包发出）
+
+#### 发现日期
+
+2026-09-23
+
+#### 关联 Issue / PR
+
+本次「打包交付物」任务的实测环节：把构建出来的交付包整包拷到临时目录、按运维的方式执行 `bash deploy.sh`。
+
+#### 问题现象
+
+日志停在「前端首页：HTTP 200」，**没有打印「部署完成」汇总，脚本退出码 1**。而此前四步（sha256 校验、架构复核、镜像导入、容器启动与健康检查）全部正常——部署其实已经成功，运维看到的却是失败。
+
+#### 复现方式
+
+在 `hostname -I` 不可用的环境执行即可（BusyBox、Alpine 等精简发行版；本机 Git Bash 同样不支持该选项）：
+
+```bash
+cd <交付包目录> && bash deploy.sh; echo "exit=$?"
+```
+
+#### 影响范围
+
+仅汇总段：容器已正常起来、自检也已通过，但脚本报错退出，运维容易误判为部署失败而重复执行或回滚。`hostname -I` 是 iproute2 的扩展，并非 POSIX 或 BusyBox 的标准选项。
+
+#### 原因分析
+
+脚本开头是 `set -euo pipefail`，而汇总前取本机 IP 的写法是命令替换赋值：
+
+```bash
+IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+```
+
+`hostname` 报「无效选项」→ 管道退出码经 `pipefail` 变成非 0 → **赋值语句的退出码即命令替换的退出码** → `set -e` 立即终止脚本。注意判据的边界：命令替换失败本身不触发 `set -e`（如 `info "$(false)"` 不会中断），只有「赋值 = 命令替换」这种形状才会。按此判据逐行排查，同类隐患还有两处：openssl 分支的 `GET_SHA`、以及 wget-only 环境下返回 127 的 `CODE`。
+
+#### 修复方案
+
+1. `IP` 改三级回退：`hostname -I` → `hostname -f` → `hostname`，每级都带 `|| true`；全空则汇总里打印占位 `<服务器IP>`；
+2. `GET_SHA`（openssl 分支）加 `|| true`，并显式判空后 `die`，避免静默中止；
+3. `CODE`（首页状态码）加 `|| true`，改用 `case` 区分 200 / 127（本机无 curl）/ 其他，不再把「没有 curl」误报成「首页异常」；
+4. `docker load` 的 `gunzip` 兜底路径补 `die`，让失败有明确结论而不是静默退出。
+
+自此 `deploy.sh` 中每一处命令替换赋值都有兜底或明确判空。
+
+#### 修改文件
+
+`scripts/deploy.sh`
+
+#### 验证方式
+
+```bash
+bash -n scripts/deploy.sh
+# 再按交付方式整包实测（临时目录内改端口，避免与开发容器抢 8000）：
+#   sed -i "s/8000:8000/18000:8000/" docker-compose.server.yml
+#   bash deploy.sh; echo "exit=$?"
+```
+
+#### 验证结果
+
+**已通过（本机 Git Bash + Docker Desktop）**：`bash -n` 通过；用**重新构建出来的交付包**（`dist/icd-deploy-20260923/`，BUILD_INFO 中 sha256 = `864a6fc9…`）整包实测，退出码 **0**，四步全绿并打印「部署完成」汇总（IP 回退到 `hostname -f` 的结果）；返回的 `index-D3u_PtZc.js` / `index-DlK8Roxx.css` 与交付包内 `frontend/dist/assets/` 完全一致，且线上 JS 内含 27 处 lucide 图标特征，确认新图标已随包交付。测试容器、网络与临时目录均已清理。**尚未验证**：在真实 Linux 服务器上执行（本机只有 Git Bash + Docker Desktop）。
+
+#### 遗留问题
+
+1. 脚本要求 `bash`；纯 `sh`（dash）下 `BASH_SOURCE`、数组等不可用，属既定前提，已在「环境要求」表中说明。
+2. MOCK 中途报错、正向 Step 8 卡死两项尚未定位，与本问题无关。
