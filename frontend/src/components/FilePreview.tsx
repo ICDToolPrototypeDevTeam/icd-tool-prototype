@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import * as XLSX from 'xlsx'
 import mammoth from 'mammoth'
+import { normalizeZipEntryNames } from '../utils/zipEntryNames'
 
 interface Props {
   file: File | null
@@ -28,7 +29,9 @@ export default function FilePreview({ file }: Props) {
       const reader = new FileReader()
       reader.onload = (e) => {
         try {
-          const data = new Uint8Array(e.target?.result as ArrayBuffer)
+          const data = new Uint8Array(
+            normalizeZipEntryNames(e.target?.result as ArrayBuffer)
+          )
           const workbook = XLSX.read(data, { type: 'array' })
           const validNames = workbook.SheetNames.filter(
             (n) => !n.startsWith('WpsReserved_') && !n.startsWith('_') && !n.includes('CellImg')
@@ -59,7 +62,9 @@ export default function FilePreview({ file }: Props) {
       const reader = new FileReader()
       reader.onload = async (e) => {
         try {
-          const buf = e.target?.result as ArrayBuffer
+          // WPS 等第三方 Office 存出的包条目名可能用反斜杠，浏览器端解析器
+          // 同样按规范名查部件，这里先归一化（规范文件零开销直通）。
+          const buf = normalizeZipEntryNames(e.target?.result as ArrayBuffer)
           const result = await mammoth.convertToHtml({ arrayBuffer: buf })
           setHtmlContent(result.value)
           setLoading(false)

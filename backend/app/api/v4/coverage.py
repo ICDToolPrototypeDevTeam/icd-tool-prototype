@@ -21,6 +21,7 @@ from app.api.v4.schemas import V4AnalyzeResponse
 from app.job_manager import job_manager
 from app.v4.config import get_output_root
 from app.v4.parsers import registered_extensions
+from app.v4.parsers.zip_entry_normalize import ensure_standard_path
 from app.v4.profiles import get_registry, init_registry, _registry
 
 
@@ -78,6 +79,10 @@ def _load_hlr_tables(hlr_path: Path) -> list[list[list[str]]]:
     becomes a 2D array of stripped cell text strings. Lets the downstream
     ``_match_auto_detect`` operate on a format-agnostic structure.
     """
+    # 自动识别在请求内同步跑，一旦读不出来就是未捕获异常 → 裸 500（任务还没创建，
+    # 前端连日志都没有）。WPS 等第三方存盘的包条目名可能是反斜杠，先归一化再读。
+    hlr_path = ensure_standard_path(hlr_path)
+
     ext = hlr_path.suffix.lower()
     if ext == ".docx":
         doc = Document(str(hlr_path))

@@ -29,6 +29,7 @@ from app.v4.models import (
     ForwardScopeOutput,
     HLROutput,
 )
+from app.v4.parsers.zip_entry_normalize import ensure_standard_path
 from app.v4.traceability.trace_parser import (
     _read_table1_erd_to_icd,
     _read_table2_erd_to_hlr,
@@ -62,7 +63,7 @@ def _validate_trace_table(
     try:
         import openpyxl
 
-        wb = openpyxl.load_workbook(fpath, data_only=True)
+        wb = openpyxl.load_workbook(ensure_standard_path(fpath), data_only=True)
         sheets = wb.sheetnames
         if len(sheets) <= sheet_index:
             errors.append({

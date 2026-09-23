@@ -31,6 +31,7 @@ from app.v4.profiles.base import (
     TraceabilityConfig,
     TraceabilityTableConfig,
 )
+from app.v4.parsers.zip_entry_normalize import ensure_standard_path
 
 
 # AMS 默认 cfg：作为不传 cfg 时的兼容基线（与 profiles/ams/config.yaml 字节一致）。
@@ -147,7 +148,7 @@ def _read_table2_erd_to_hlr(
     if not fpath.exists():
         raise FileNotFoundError(f"Table 2 file not found: {fpath}")
 
-    wb = openpyxl.load_workbook(fpath, data_only=True)
+    wb = openpyxl.load_workbook(ensure_standard_path(fpath), data_only=True)
     ws = _select_sheet(wb, cfg)
 
     col_erd = cfg.columns["erd"]
@@ -205,7 +206,7 @@ def _read_table1_erd_to_icd(
     if not fpath.exists():
         raise FileNotFoundError(f"Table 1 file not found: {fpath}")
 
-    wb = openpyxl.load_workbook(fpath, data_only=True)
+    wb = openpyxl.load_workbook(ensure_standard_path(fpath), data_only=True)
     ws = _select_sheet(wb, cfg)
 
     col_erd = cfg.columns["erd"]
@@ -292,7 +293,7 @@ def _read_table1_header_adaptive(fpath: Path) -> dict[str, list[str]]:
     if not fpath.exists():
         raise FileNotFoundError(f"Table 1 file not found: {fpath}")
 
-    wb = openpyxl.load_workbook(fpath, data_only=True)
+    wb = openpyxl.load_workbook(ensure_standard_path(fpath), data_only=True)
     best_result: dict[str, list[str]] = {}
     best_sheet = ""
 
@@ -360,7 +361,7 @@ def _read_table2_header_adaptive(
         {m.upper() for m in cfg.skip_module} if cfg is not None else set()
     )
 
-    wb = openpyxl.load_workbook(fpath, data_only=True)
+    wb = openpyxl.load_workbook(ensure_standard_path(fpath), data_only=True)
     best_result: dict[str, list[str]] = {}
     best_sheet = ""
 
@@ -515,7 +516,7 @@ def _read_bridge_table(
     if not fpath.exists():
         return {}
 
-    wb = openpyxl.load_workbook(fpath, data_only=True)
+    wb = openpyxl.load_workbook(ensure_standard_path(fpath), data_only=True)
     ws = wb[wb.sheetnames[0]]
 
     def _get_prefixes(erd_set: set[str]) -> set[str]:

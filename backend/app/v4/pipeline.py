@@ -50,6 +50,7 @@ from app.v4.models import (
 )
 from app.v4.parsers.eoicd_excel_parser import EoICDExcelParser
 from app.v4.parsers import create_hlr_parser
+from app.v4.parsers.zip_entry_normalize import ensure_standard_zip
 from app.v4.profiles.base import ControllerProfile, TraceabilityConfig
 from app.v4.profiles import apply_hlr_preprocess_hook
 from app.v4.traceability import build_trace_index, name_to_block_key
@@ -121,6 +122,18 @@ def _parse_eoicd(
         paths_desc.append(f"Subscriber={subscriber_path.name}")
     print(f"Parsing EoICD ({', '.join(paths_desc)})")
 
+    # WPS 等第三方 Office 保存的包可能用反斜杠作条目名分隔符，Linux 上读不出部件
+    # （见 parsers/zip_entry_normalize）。
+    zip_fixed = False
+    if publisher_path:
+        publisher_path, fixed = ensure_standard_zip(publisher_path)
+        zip_fixed = zip_fixed or fixed
+    if subscriber_path:
+        subscriber_path, fixed = ensure_standard_zip(subscriber_path)
+        zip_fixed = zip_fixed or fixed
+    if zip_fixed:
+        print("  [fix] Non-standard package entry names normalized")
+
     parser = EoICDExcelParser(
         publisher_path=publisher_path,
         subscriber_path=subscriber_path,
@@ -157,6 +170,11 @@ def _parse_hlr(
     """
     print(f"Parsing HLR: {input_path}")
     resolved = _resolve_profile(profile)
+    # WPS 等第三方 Office 保存的包可能用反斜杠作条目名分隔符，Linux 上读不出部件
+    # （见 parsers/zip_entry_normalize）。非规范包改用规范化副本解析；hook 也用它。
+    input_path, zip_fixed = ensure_standard_zip(input_path)
+    if zip_fixed:
+        print(f"  [fix] Non-standard package entry names normalized: {input_path}")
     parser = create_hlr_parser(input_path, profile=resolved)
     result: HLROutput = parser.parse()
 

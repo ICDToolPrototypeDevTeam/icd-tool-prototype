@@ -1322,3 +1322,214 @@ Step 2（HLR AI 标注）点「终止」后不立刻生效：HLR 只有十几条
 #### 遗留问题
 
 同类「步长式检查点」若在别处出现（HLR 标注是唯一一处按索引取模的），需一并核对：`coverage_reviewer`（每个 block 边界）与 `pipeline.py` 各步边界已是较细粒度。
+
+### BUG-20260923-001：WPS 重存的 Word/Excel 在 Linux 上必然解析失败（zip 条目名用反斜杠）
+
+#### 状态
+
+fixed
+
+#### 发现日期
+
+2026-09-23
+
+#### 关联 Issue / PR
+
+本次「Docker 服务器部署」反馈问题的第 1 项：Word 无法解析。
+
+#### 问题现象
+
+同一份 .docx 在不同机器上表现不同：用户本机、本机 Docker、云服务器都能解析；另一台云服务器上**所有** Word 都报「文件无法解析」；内网服务器上只有 AMSC 那一份失败。失败机器上传回来的那份问题件（`空气管理系统控制器控制通道控制软件高层需求规范_故障注入.docx`，23,858 字节）在用户本机上同样解析失败。
+
+#### 复现方式
+
+```python
+import os
+os.sep = "/"                       # 模拟 Linux（容器/服务器）
+from app.v4.parsers.hlr_parser_factory import create_hlr_parser
+create_hlr_parser(path, profile=ams).parse()   # KeyError → 任务报「文件无法解析」
+```
+
+同一份文件保持 `os.sep = "\\"`（Windows 默认）则解析出 16 条需求。回归用例见 `backend/tests/test_zip_entry_normalize.py`。
+
+#### 影响范围
+
+所有走 OOXML 包（.docx / .xlsx）的解析入口：HLR Word 解析、EoICD Excel 解析。表现为任务在 Step 1 直接失败。**与服务器配置、镜像构建路径、机器资源均无关** —— 同一份文件在任何 Linux 环境（含用户自己的容器）都会失败。
+
+#### 原因分析
+
+.docx / .xlsx 本身就是 zip 包，内部部件名按 OOXML 规范必须用正斜杠（`word/document.xml`）。WPS 等第三方 Office 存盘时会把条目名写成反斜杠（`word\document.xml`），实测该问题件 15 个条目中 14 个是反斜杠。
+
+CPython 的 `zipfile` 对这类包有一个 Windows 专属兼容：`ZipInfo.__init__` 与 `_RealGetContents` 中都有 `if os.sep != "/" and os.sep in filename: filename = filename.replace(os.sep, "/")`。**只有 Windows 会替换**，Linux 原样保留 —— python-docx 按 `word/document.xml` 查关系部件时抛 `KeyError: no relationship of type '.../officeDocument'`，上层归类为「文件无法解析」。
+
+由此：同一份文件 Windows 上解析正常、任何 Linux 上必挂。三台机器的差异因此不在系统、不在镜像，而在**文件是否经 WPS 这类工具重存过**：说「所有 Word 都失败」的那台，文件都过了一遍 WPS；「只有 AMSC 失败」的那台，只有那一份过过。
+
+佐证：该问题件与用户原始的 Word 版本（27,235 字节）`word/document.xml` **逐字节相同**（解压后 166,329 字节、压缩后 9,275 字节），需求数同为 16、术语表同为 2 条；3,377 字节的体积差全部来自 zip 头与额外字段（WPS 不写 Word 的那些 extra field）。
+
+#### 修复方案
+
+新增 `backend/app/v4/parsers/zip_entry_normalize.py`：解析前按**中央目录的原始字节**检查条目名是否含反斜杠（不依赖 `os.sep` —— 依赖它会使检测本身随平台漂移，正是本 bug 的成因）；不规范就用标准库重写成一份规范包，落在 `<原目录>/_normalized/` 下并**保持同名**（解析结果里 `source_file` 用的是文件名，改名会让报告中的「来源文件」跟着变）。规范包原路径直通、零额外行为；读不出中央目录的（空文件、非 zip、截断）一律直通，把报错留给原本的解析路径。
+
+`pipeline._parse_hlr` 与 `_parse_eoicd` 在调用解析器前接入该归一化。`_parse_hlr` 中同一路径也交给 profile hook（HSCU 的 hook 会重开源 Word），两者用的是同一份文件。发生归一化时日志打一行 `[fix] Non-standard package entry names normalized: <路径>`，前端日志面板可见。
+
+未做：不把 `KeyError` 加入 `errors.py` 的格式异常集合（否则任意位置抛出的 `KeyError` 都会被误报成「文件无法解析」）；不改 `.doc`；不加依赖；不动判定逻辑。
+
+#### 修改文件
+
+`backend/app/v4/parsers/zip_entry_normalize.py`（新增）、`backend/app/v4/pipeline.py`、`backend/tests/test_zip_entry_normalize.py`（新增）
+
+#### 验证方式
+
+```bash
+cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/test_zip_entry_normalize.py -v
+```
+
+另有真实问题件回归：把它复制到临时目录，在 `os.sep="/"` 下走真实 `_parse_hlr` 入口解析，并与 Word 原件的结果对比需求数。
+
+#### 验证结果
+
+**已通过（本机）**：新增用例 10 passed，其中核心契约用例在 `os.sep="/"` 下断言「原件读 `word/document.xml` 抛 `KeyError`、归一化副本读得出且内容逐字节相同」；检测用例在 `os.sep` 取 `"/"` 与 `"\\"` 两种值时结论一致。真实问题件走 `_parse_hlr` 在 `os.sep="/"` 下解析出 **16 条需求 / 2 条术语**（与 Word 原件一致）、耗时 0.21s、`source_file` 仍为原始文件名；Word 原件走同一入口不生成 `_normalized/` 目录（直通路径，耗时 0.13s）。**尚未验证**：容器内实际解析（本机未执行 Docker 构建/运行）；`.xlsx` 侧只有单元层面覆盖，没有真实的第三方重存 Excel 样例。
+
+#### 遗留问题
+
+1. 本模块只处理条目名分隔符；若将来出现其他形态的非规范包（绝对路径、`..` 等）需另行处理；
+2. `.doc`（OLE 复合文档，不是 zip）仍不支持；按用户 2026-09-23 指示，`.doc` 适配不再做，本条不再是待办；
+3. MOCK 中途报错、正向 Step 8 卡死两项尚未定位，与本问题无关。
+
+### BUG-20260923-002：上传页「文件预览」对同一类包显示「无法解析 Word 文件」（浏览器端，与系统无关）
+
+#### 状态
+
+fixed
+
+#### 发现日期
+
+2026-09-23
+
+#### 关联 Issue / PR
+
+本次「Docker 服务器部署」反馈问题的第 1 项。与 BUG-20260923-001 **同根因、不同组件**：001 是后端管线在 Linux 上的失败，本条是纯浏览器端预览的失败。
+
+#### 问题现象
+
+上传 `空气管理系统控制器控制通道控制软件高层需求规范_故障注入.docx` 后，右侧「文件预览」面板显示「无法解析 Word 文件」。用户据此认为「重新构建镜像后这份文件还是无法解析」。
+
+#### 复现方式
+
+用前端预览所用的同一套库（mammoth 的 browser 构建 + JSZip）直接解析该文件：
+
+```js
+mammoth.convertToHtml({ arrayBuffer })   // FAIL: Could not find main document part. Are you sure this is a valid .docx file?
+```
+
+同一入口下 Word 原件正常（10034 字符 HTML）。
+
+#### 影响范围
+
+仅前端上传页的文件预览面板（Word 分支）。**不影响任务执行**，也不影响生成的需求文档。与 BUG-20260923-001 不同，本条**在任何平台的任何浏览器上都会复现**（包括 Windows）—— 浏览器的 zip 实现（JSZip）不做反斜杠归一化。
+
+#### 原因分析
+
+预览是纯浏览器端解析：`FilePreview.tsx` 用 `FileReader` 读本地 `File` 对象，交给 mammoth（内部用 JSZip）转 HTML，**全程不经过后端**。因此：
+
+1. 重建后端镜像对这条报错零影响；
+2. 后端也没有预览接口（`backend/app/api/` 下无 `preview`）。
+
+报错本身的原因与 BUG-20260923-001 相同：该文件 15 个 zip 条目名中 14 个用反斜杠（JSZip 原样看到、不做归一化），mammoth 按 `word/document.xml` 查不到主文档部件。
+
+补充一个容易误判的点：前端源码是**打进 frontend 镜像**的（`frontend/Dockerfile` 为 `COPY . .` + `npm run dev`，`docker-compose.yml` 的 frontend 服务没有源码卷），所以这条改动要生效必须**重建前端镜像**，与后端镜像无关。
+
+#### 修复方案
+
+新增 `frontend/src/utils/zipEntryNames.ts`，把后端那个做法搬到浏览器：只扫中央目录与局部头，把条目名里的反斜杠就地换成正斜杠。反斜杠与正斜杠都是单字节，等长替换后偏移、CRC、压缩数据全部原样保持 —— 不需要重新压缩，也不需要引入任何依赖。规范包返回同一个缓冲区（零开销直通）；读不出结构时原样返回，把报错留给原本的解析路径。
+
+`FilePreview.tsx` 的 Word 与 Excel 两个分支在交给 `mammoth` / `XLSX.read` 之前各调用一次。
+
+#### 修改文件
+
+`frontend/src/utils/zipEntryNames.ts`（新增）、`frontend/src/components/FilePreview.tsx`
+
+#### 验证方式
+
+```bash
+cd frontend && npx tsc --noEmit
+```
+
+外加临时 node 探针：以 `{ arrayBuffer }` 调用 mammoth 的 browser 构建（与 Vite 打包时的解析一致），对比归一化前后。
+
+#### 验证结果
+
+**已通过（本机）**：`tsc --noEmit` 退出码 0。探针结果 —— 问题件未归一化：FAIL `Could not find main document part...`；经 `normalizeZipEntryNames` 后：**OK，10034 字符**，与 Word 原件的预览内容**逐字符相同**；规范文件返回同一个缓冲区（`result === input`，确认零开销）；非 zip 缓冲区不抛异常。**尚未验证**：浏览器/容器内实际上传预览（需重建前端镜像后人工复测）。
+
+#### 遗留问题
+
+1. Excel 分支的归一化是**预防性**的：实测 SheetJS 对条目名反斜杠的包照读（人为造的 WPS 风格 xlsx，20/21 个条目名带反斜杠，`XLSX.read` 仍出 5 个 sheet），目前没有已知的 Excel 预览失败样例；
+2. 探针是临时文件，验证后已删除，未留在仓库。
+
+### BUG-20260923-003：提交后立即报 Internal Server Error，任务未创建（接口层自动识别）
+
+#### 状态
+
+fixed
+
+#### 发现日期
+
+2026-09-23
+
+#### 关联 Issue / PR
+
+本次「Docker 服务器部署」反馈问题第 1 项的**第三个表现**。与 BUG-20260923-001 同根因，是该问题的第三个调用点：001 修的是管线入口，002 修的是浏览器预览，本条在接口的处理请求阶段。
+
+#### 问题现象
+
+前端预览恢复正常后重新提交同一份文件，点提交立即得到「处理失败 / Internal Server Error / 任务未创建：提交失败，后端没有开始执行。」，且「执行日志」为空。
+
+#### 复现方式
+
+模拟容器（`os.sep="/"`）直接调用接口层的识别函数：
+
+```python
+from app.api.v4.coverage import _detect_system_type, _load_hlr_tables
+_load_hlr_tables(BAD_DOCX)      # Linux 下 KeyError
+_detect_system_type(BAD_DOCX)   # 同上；Windows 下返回 'ams'
+```
+
+#### 影响范围
+
+系统类型选择「自动识别」时**无法创建任务**——不是任务失败，而是任务从未创建，所以没有任务日志可看，前端只能显示一条「任务未创建」。手动指定系统类型可绕过（该分支不读文件）。
+
+#### 原因分析
+
+`POST /api/v4/coverage-analysis` 在 `controller_profile is None` 时**在请求内同步**调用 `_detect_system_type` → `_load_hlr_tables` → `python-docx` 打开上传文件，用来比对各 profile 的 `auto_detect` 规则。这条路径：
+
+1. 没有 `try/except` 兜底 —— `KeyError: no relationship of type '.../officeDocument...'`（反斜杠条目名的直接后果，同 001）冒泡成裸 HTTP 500；
+2. 也不在后台线程里 —— 因而没有任务日志，用户看到的只有一句「任务未创建」。
+
+BUG-20260923-001 的修复只包住了**管线解析入口**（`_parse_hlr` / `_parse_eoicd`），接口这条「为了自动识别而提前开一次文件」的路径当时没覆盖到。同类「直接开上传文件、读失败就是硬错误」的调用点还有追溯表侧：`traceability/trace_parser.py` 的 5 处 `openpyxl.load_workbook`、`traceability/forward_scope.py` 的表校验。
+
+#### 修复方案
+
+在 `zip_entry_normalize` 增加轻量包装 `ensure_standard_path(path) -> Path`（只要路径、不打 `[fix]` 日志；管线入口继续用 `ensure_standard_zip` 以保留日志），并在上述调用点各加一次归一化。接口侧 1 行、追溯表侧 6 处各 1 行，判定逻辑与解析结果格式均不变。
+
+#### 修改文件
+
+`backend/app/v4/parsers/zip_entry_normalize.py`（新增 `ensure_standard_path`）、`backend/app/api/v4/coverage.py`、`backend/app/v4/traceability/trace_parser.py`（5 处）、`backend/app/v4/traceability/forward_scope.py`
+
+#### 验证方式
+
+```bash
+cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/test_zip_entry_normalize.py -v
+cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/ -q --continue-on-collection-errors
+```
+
+外加识别探针（模拟 Linux 直接调用 `_detect_system_type`）。
+
+#### 验证结果
+
+**已通过（本机）**：识别探针在 `os.sep="/"` 下对问题件的 `_load_hlr_tables` 返回 17 张表、`_detect_system_type` 返回 `'ams'`（修复前同一调用抛 `KeyError`），与 Windows 行为一致；归一化副本识别结果同样为 `'ams'`。新增 3 个用例（`_load_hlr_tables` 读 .docx、`trace_parser._read_table2_erd_to_hlr` 读 .xlsx、`forward_scope._validate_trace_table` 读 .xlsx），xlsx 夹具是真的 openpyxl 工作簿再改条目名，其中校验用例含反证：把归一化换成直通后同一份文件只能落进 `trace_open_error` 分支。测试文件 13 passed；全量 107 passed / 10 errors（10 errors 与本问题无关，见遗留问题）。**尚未验证**：容器内用「自动识别」实际提交该文件（需重建**后端**镜像，本机未执行 Docker 构建/运行）。
+
+#### 遗留问题
+
+1. 全量测试的 10 个 collection error 是历史问题（`tests/test_*_controller.py` 等仍 import 已不存在的 `app.v4.shared.parsing.hlr_parser_config`），不是本次改动引入，也不受本次影响；
+2. 追溯表侧 6 处同样只做了本机单元验证，没有真实的第三方重存追溯表样例；
+3. MOCK 中途报错、正向 Step 8 卡死两项尚未定位，与本问题无关。
