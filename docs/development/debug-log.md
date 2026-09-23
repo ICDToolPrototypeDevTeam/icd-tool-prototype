@@ -1670,3 +1670,65 @@ bash -n scripts/deploy.sh
 
 1. 脚本要求 `bash`；纯 `sh`（dash）下 `BASH_SOURCE`、数组等不可用，属既定前提，已在「环境要求」表中说明。
 2. MOCK 中途报错、正向 Step 8 卡死两项尚未定位，与本问题无关。
+
+---
+
+### BUG-20260923-006：点「终止」要等第一步（解析）跑完才生效
+
+#### 状态
+
+fixed
+
+#### 发现日期
+
+2026-09-23
+
+#### 关联 Issue / PR
+
+本次「Docker 服务器部署」反馈：「容器中第一步执行也超级慢，但终止只能等第一步执行完」。用户确认修复范围为**只修终止响应**，不动解析性能。
+
+#### 问题现象
+
+容器里跑分析，在 `Step 1/8: Parsing input files`（正向）或 `Step 1/6: Parsing input files`（反向）横幅出现后点「终止」：任务状态不变、日志停住，直到 Step 1 把 `Parsing EoICD…` / `Parsing HLR…` / `Output: …` 全部打印完，才跳到已终止。
+
+#### 复现方式
+
+上传一份十万行级的 EoICD 表，Step 1 期间点终止；或在 `tests/test_pipeline_checkpoints.py` 看新增的两个用例 —— 未修时解析器根本不引用 `raise_if_cancelled`，用例直接失败。
+
+#### 影响范围
+
+两个管线的 Step 1：反向（正确性）Step 1/6、正向（完整性）Step 1/8。第一步是本工具最长的非模型阶段（本机实测 AMSC 14.5MB→21s / 122,674 条，RPDU 24.1MB→36s / 225,825 条；服务器 CPU 更弱则成倍放大），用户在此期间**没有任何办法停下**，只能等。
+
+#### 原因分析
+
+1. 取消是协作式的：`request_cancel()` 只置 `cancel_event`，必须由管线在检查点调用 `raise_if_cancelled()` 才真正抛 `JobCancelled`。
+2. 检查点策略（`pipeline.py` 顶部注释）原本只有「每个 Step 开头 + Step 4 / Step 5.5 的每个 case 边界」——**Step 1 内部零检查点**，其后的第一个检查点在 Step 1 结束处（反向约 987 行、正向约 1304 行）。于是 Step 1 期间置位的标志没人读。
+3. 同类问题其实已修过一次：Step 2 的 HLR 标注曾按「每 20 条」检查、后改成「每条」（见 2026-09-22 的 Fixed 记录）——「按批量边界埋点」在长批量上必然表现为「终止迟迟不生效」。
+
+#### 修复方案
+
+1. `eoicd_excel_parser` 引入模块级检查点（与 `coverage_reviewer`、`hlr_labeler` 同一套机制，未绑定任务时静默 no-op）：**整表物化**循环与**逐行解析**循环各按 `_CANCEL_CHECK_ROWS = 5000` 行检查一次，另在每张表开头补一次（多张小表的文件里行间隔永远数不到，靠它兜底）。
+2. 两个管线的 Step 1 子步骤边界各补检查点：解析发布方 → 解析订阅方 → 解析 HLR →（反向）生成条目化清单。
+3. 尾部三处 O(n) 合并 / 去重循环（纯内存、秒级）不加点，避免为可忽略的收益增加噪音。
+
+#### 修改文件
+
+`app/v4/parsers/eoicd_excel_parser.py`（+1 import、+1 常量、+3 处检查点）、`app/v4/pipeline.py`（两个 Step 1 共 +5 处检查点，顶部策略注释同步）、`tests/test_pipeline_checkpoints.py`（+2 用例）
+
+#### 验证方式
+
+```bash
+cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/test_pipeline_checkpoints.py -v
+cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/ -q --continue-on-collection-errors
+# 容器内实测：Step 1 横幅出现后点「终止」，期望数秒内变为已终止
+```
+
+#### 验证结果
+
+**已通过（本机）**：新增 2 个用例通过——一个证明取消在**整表物化**途中即抛出，一个证明在**逐行解析**循环内即抛出（断言中断落在第几次检查点，不依赖线程时序）。全量 114 passed / 10 errors（10 个 error 同 BUG-20260923-003 遗留问题第 1 条，非本次引入）。**尚未验证**：容器 / 服务器上点终止的实际响应时间，以及「第一步本身仍然慢」的现状（需重建镜像，本机未跑 Docker）。
+
+#### 遗留问题
+
+1. 「第一步慢」未处理（用户明确只修终止响应）：解析已是 `read_only + values_only` 快路径，不引入新依赖则无数量级优化空间；若后续仍要提速，方向是换更快的 xlsx 读取器（新依赖，需单独决策）或把第一步改为可续的分片。
+2. HLR（Word）解析内部未埋点，只靠其后的边界检查点兜底：本轮无证据表明 Word 解析是瓶颈；若服务器日志显示 Step 1 停在 `Parsing HLR…`，再按同一手法补点。
+3. MOCK 中途报错、正向 Step 8 卡死两项尚未定位，与本问题无关。

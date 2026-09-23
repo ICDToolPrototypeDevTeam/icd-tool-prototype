@@ -19,6 +19,7 @@ from typing import Any
 
 import openpyxl
 
+from app.job_manager import raise_if_cancelled
 from app.v4.config import (
     DP_ATTRIBUTES_FOR_RP,
     get_display_name,
@@ -27,6 +28,11 @@ from app.v4.config import (
     is_frame_signal,
 )
 from app.v4.models import EoICDOutput, EoICDRequirement
+
+# 取消检查点的行间隔。十万行级的表要解析几十秒，行间不设检查点就只能等整表跑完
+# 才响应终止（取消是协作式的，见 app/job_manager.raise_if_cancelled）；行级判断的
+# 开销相比每行的解析开销可忽略。未绑定任务（CLI / 单测）时该检查是静默 no-op。
+_CANCEL_CHECK_ROWS = 5000
 
 
 @dataclass
@@ -392,8 +398,14 @@ class EoICDExcelParser:
 
         for sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
+            # 每张表开头一个检查点：多张小表时，行间隔永远数不到，只能靠这里兜底
+            raise_if_cancelled()
             # Read all rows at once; read_only mode doesn't support max_row/max_column.
-            rows: list[list] = [list(row) for row in ws.iter_rows(values_only=True)]
+            rows: list[list] = []
+            for row in ws.iter_rows(values_only=True):
+                rows.append(list(row))
+                if len(rows) % _CANCEL_CHECK_ROWS == 0:
+                    raise_if_cancelled()
             if len(rows) < 4:
                 continue
 
@@ -424,6 +436,8 @@ class EoICDExcelParser:
             row_dedup: set[tuple] = set()
 
             for r in range(4, len(rows) + 1):
+                if r % _CANCEL_CHECK_ROWS == 0:
+                    raise_if_cancelled()
                 row_cells = rows[r - 1]
 
                 # --- Parse Publisher block ---

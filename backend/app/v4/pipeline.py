@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """Pipeline orchestration: reverse analysis workflow."""
 
-# 取消检查点策略：每个 Step 开头 + Step 4 / Step 5.5 的每个 case 边界。
+# 取消检查点策略：每个 Step 开头 + Step 4 / Step 5.5 的每个 case 边界
+# + Step 1 的子步骤边界（解析发布方 / 解析订阅方 / 解析 HLR / 生成条目化清单，
+#   其中 Excel 解析另在 parsers/eoicd_excel_parser 里按行间隔埋点）。
 # 取消是协作式的——已发出的 HTTP 请求无法中断，其结果会被丢弃。
 # 模块级 raise_if_cancelled / report_progress 在未绑定 job（CLI 路径）时静默 no-op。
 
@@ -958,6 +960,10 @@ def run_reverse_pipeline(
             output_dir / "eoicd_requirements.json",
         )
 
+    # Step 1 的子步骤边界检查点：解析十万行级的表要几十秒，而取消是协作式的，
+    # 没有检查点就只能等整步跑完（见 job_manager.raise_if_cancelled）
+    raise_if_cancelled()
+
     if hlr.suffix == ".json":
         print(f"  [skip] Using cached HLR JSON: {hlr}")
         hlr_data = json.loads(hlr.read_text(encoding="utf-8"))
@@ -968,6 +974,8 @@ def run_reverse_pipeline(
             output_dir / "hlr_requirements.json",
             profile=resolved_profile,
         )
+
+    raise_if_cancelled()
 
     # Step 1: EoICD itemization Excel
     eoicd_json_path = output_dir / "eoicd_requirements.json"
@@ -1289,11 +1297,17 @@ def run_forward_pipeline(
         print(f"  [skip] Using cached EoICD JSON: {eoicd_json}")
     else:
         eoicd_out = _parse_eoicd(publisher, subscriber, output_dir / "eoicd_requirements.json")
+
+    # Step 1 的子步骤边界检查点：解析十万行级的表要几十秒，而取消是协作式的，
+    # 没有检查点就只能等整步跑完（见 job_manager.raise_if_cancelled）
+    raise_if_cancelled()
     if hlr.suffix == ".json":
         hlr_out = HLROutput(**json.loads(hlr.read_text(encoding="utf-8")))
         print(f"  [skip] Using cached HLR JSON: {hlr}")
     else:
         hlr_out = _parse_hlr(hlr, output_dir / "hlr_requirements.json")
+
+    raise_if_cancelled()
 
     # C2: scope
     print()
