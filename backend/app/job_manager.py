@@ -97,6 +97,10 @@ class Job:
         # 取消：Event 供管线检查点轮询，cancel_requested 供前端展示「正在终止…」
         self.cancel_event = threading.Event()
         self.cancel_requested: bool = False
+        # 强制终止（不等待检查点）：hard_killed 后本任务的一切回写都被忽略；
+        # thread_ident 是本任务管线线程的 ident，供注入 JobCancelled
+        self.hard_killed: bool = False
+        self.thread_ident: Optional[int] = None
         # 节流窗口的起点取「构造时刻」：若取 0.0，首条进度必然满足
         # ``now - 0.0 >= 5.0``（time.monotonic 是系统运行时长），
         # 于是每个任务的第一次上报都会写盘，节流对首个 case 形同虚设。
@@ -149,6 +153,10 @@ class Job:
             pass
 
     def update(self, status: JobStatus, message: Optional[str] = None):
+        if self.hard_killed:
+            # 强制终止后：线程可能还卡在某个 C 调用里多跑一会儿，它的回写
+            # 一律忽略——否则状态会被改回 running/completed，半成品会被当成结果
+            return
         self.status = status
         if message is not None:
             self.message = message
@@ -179,6 +187,9 @@ class Job:
         ``message`` 与既有契约一致（``_parse_progress`` 仍在解析它），额外的
         stage_* / case_* 字段让前端不必再靠正则从 message 里猜。
         """
+        if self.hard_killed:
+            # 已强制终止：不让「正在生成报告」之类的进度文字盖在已终止的任务上
+            return
         if message is not None:
             self.message = message
         progress = dict(self.progress or {})
@@ -206,6 +217,9 @@ class Job:
         刻意**不**为不存在的 ``result`` 建字典：取消的任务不得留下任何
         ``job.result``，否则半成品有被当作结果展示的风险（spec §6.C）。
         """
+        if self.hard_killed:
+            # 强制终止后的异常来自我们自己的注入，不是真实失败信息，不覆盖终止说明
+            return
         self.error = dict(error)
         if self.result is not None:
             self.result['errors'] = [
@@ -229,6 +243,70 @@ class Job:
         if self.cancel_event.is_set():
             raise JobCancelled('任务已被用户终止')
 
+    def bind_thread(self) -> None:
+        """记录本任务管线线程的 ident（供强制终止注入异常）。"""
+        self.thread_ident = threading.get_ident()
+
+    def unbind_thread(self) -> None:
+        """线程退出前解除绑定。
+
+        ident 在**线程完全退出后**可能被后续线程复用，不摘掉的话，一次迟到的
+        强制终止会把异常打进另一个任务（很可能是另一次「重新执行」）的线程里。
+        线程的 ``finally`` 一定早于线程退出，因此这里摘掉后就不存在这个窗口。
+        """
+        self.thread_ident = None
+
+    def force_cancel(self) -> bool:
+        """强制终止：立即置终态，并尽力中断本任务的管线线程。
+
+        与 :meth:`request_cancel` 的区别是**不等检查点**：适用于管线卡在没有
+        检查点的地方（例如报告生成里的长循环）。完成后本任务的一切回写（状态、
+        进度、错误、结果）都被 ``hard_killed`` 挡掉，因此即使线程还在某个 C 调用
+        里多跑几十秒，也不会把状态改回去、更不会写出半成品结果。
+
+        只作用于**本任务自己的**线程（按 ident 注入），不重启进程、不改全局状态、
+        不影响其他任务。
+
+        返回是否真的注入成功（无绑定线程 / 线程已结束时为 ``False``，此时任务
+        仍然已经被标记为终止）。
+        """
+        # 先落终态再置 hard_killed：update() 自己也被 hard_killed 挡着
+        self.cancel_event.set()
+        self.cancel_requested = True
+        self.update(JobStatus.CANCELED, '已强制终止（不保留结果，不支持续跑）')
+        self.hard_killed = True
+        return self._inject_cancel()
+
+    def _inject_cancel(self) -> bool:
+        """向本任务线程注入 ``JobCancelled``（CPython 私有接口，尽力而为）。
+
+        线程正在执行的 Python 字节码边界上会立刻抛出该异常，因此纯 Python 循环
+        （解析逐行、报告逐行写入）是毫秒级退出；若线程正阻塞在 C 调用 / 网络
+        读取里，异常要等那次调用返回才送达——这也是本方法只承诺「尽力而为」的
+        原因，任务状态不依赖它（``force_cancel`` 已先落了终态）。
+        """
+        ident = self.thread_ident
+        if not ident:
+            return False
+        import ctypes
+
+        set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
+        set_async_exc.argtypes = [ctypes.c_ulong, ctypes.py_object]
+        set_async_exc.restype = ctypes.c_int
+        try:
+            # 传类而不是实例：CPython 会用无参构造，JobCancelled() 合法
+            count = set_async_exc(ctypes.c_ulong(ident), ctypes.py_object(JobCancelled))
+        except Exception:  # noqa: BLE001 — 注入失败不影响「已终止」这个事实
+            return False
+        if count > 1:
+            # 不该发生：一次只应命中一个线程。命中多个说明 ident 有歧义，立即撤销
+            try:
+                set_async_exc(ctypes.c_ulong(ident), None)
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+        return count == 1
+
     def clear_cancel(self) -> None:
         """复位取消标志，使任务可以再次运行（续跑已终止的任务前调用）。
 
@@ -239,6 +317,9 @@ class Job:
         """
         self.cancel_event.clear()
         self.cancel_requested = False
+        # 强制终止留下的 hard_killed 也必须复位：它挡着本任务的一切状态回写，
+        # 不复位的话，任务一旦被「继续」就会永远停在 canceled（用户点了继续却毫无反应）
+        self.hard_killed = False
         self._persist()
 
     @classmethod

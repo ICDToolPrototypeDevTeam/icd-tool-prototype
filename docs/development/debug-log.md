@@ -1071,7 +1071,7 @@ runner 里 `is not None` 判断原本就是为「未显式提供则不动 env」
 
 #### 遗留问题
 
-1. `backend/tests/` 中 9 个 `app.v4.reverse.*` 测试文件因反向架构重构源码未提交而收集失败（只余 `__pycache__`），为既有状态，与本次修复无关。
+1. `backend/tests/` 中 10 个测试文件收集失败（2026-09-24 复核；本条原记为 9 个，且未写明缺失模块）：它们导入的是 `app.v4.reverse.*`（`base` / `ctx` / `pipeline` / `judging.multi_judge` / `controllers.*`）与 `app.v4.shared.parsing.hlr_parser_config`，而这些模块在当前工作区已不存在——`app/v4/reverse/` 下 0 个 `.py`，目录里只剩 `__pycache__`（`controller.cpython-310.pyc` 的时间戳为 2026-09-16）；`git log --all -- app/v4/reverse` 与 `app/v4/shared` 均为 0 条，即从未进入版本库；`backend/tests/` 自身也在 `.gitignore:50`，24 个测试文件同样未纳管。为既有状态，与本次修复无关。
 2. `config.JUDGE_PROVIDERS` 为 import-time 常量，runner 线程内 `os.environ["JUDGE_PROVIDERS"]` 覆盖对 `pipeline.py` 引用的模块级常量不生效（provider 白名单实际由 `.env` 决定）；与 Mock 无关，本次不动。
 
 ---
@@ -1321,7 +1321,7 @@ Step 2（HLR AI 标注）点「终止」后不立刻生效：HLR 只有十几条
 
 #### 遗留问题
 
-同类「步长式检查点」若在别处出现（HLR 标注是唯一一处按索引取模的），需一并核对：`coverage_reviewer`（每个 block 边界）与 `pipeline.py` 各步边界已是较细粒度。
+同类「步长式检查点」若在别处出现，需一并核对：`coverage_reviewer`（每个 block 边界）与 `pipeline.py` 各步边界已是较细粒度。**2026-09-24 复核：本条原写「HLR 标注是唯一一处按索引取模的」，现已不成立**——此后按同一手法在多处补了点：EoICD Excel 解析器（`eoicd_excel_parser.py` 的物料化循环与解析循环，`_CANCEL_CHECK_ROWS = 5000`）与四个报告生成器（`word_generator.py:229`、`consensus_word_generator.py:457`、`forward_word_generator.py:145`、`excel_generator.py:67`）。
 
 ### BUG-20260923-001：WPS 重存的 Word/Excel 在 Linux 上必然解析失败（zip 条目名用反斜杠）
 
@@ -1394,7 +1394,7 @@ cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/test_zip_entry_norma
 
 1. 本模块只处理条目名分隔符；若将来出现其他形态的非规范包（绝对路径、`..` 等）需另行处理；
 2. `.doc`（OLE 复合文档，不是 zip）仍不支持；按用户 2026-09-23 指示，`.doc` 适配不再做，本条不再是待办；
-3. MOCK 中途报错、正向 Step 8 卡死两项尚未定位，与本问题无关。
+3. MOCK 中途报错尚未定位；正向 Step 8 卡死已定位并修复（见 BUG-20260923-009），与本问题无关。
 
 ### BUG-20260923-002：上传页「文件预览」对同一类包显示「无法解析 Word 文件」（浏览器端，与系统无关）
 
@@ -1532,7 +1532,7 @@ cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/ -q --continue-on-co
 
 1. 全量测试的 10 个 collection error 是历史问题（`tests/test_*_controller.py` 等仍 import 已不存在的 `app.v4.shared.parsing.hlr_parser_config`），不是本次改动引入，也不受本次影响；
 2. 追溯表侧 6 处同样只做了本机单元验证，没有真实的第三方重存追溯表样例；
-3. MOCK 中途报错、正向 Step 8 卡死两项尚未定位，与本问题无关。
+3. MOCK 中途报错尚未定位；正向 Step 8 卡死已定位并修复（见 BUG-20260923-009），与本问题无关。
 
 ---
 
@@ -1596,7 +1596,7 @@ cd frontend && npx tsc --noEmit
 
 1. 服务器上那两条历史幽灵记录不在任何持久化文件里（无 `job.json`），重启容器即消失，无需手工清理；
 2. 顺带核实并**排除**了一个此前怀疑的隐患：`profiles/fsecu/` 存在但不在系统类型白名单内，曾担心「自动识别会选中它」。实测（`init_registry` + `list_ids()`）fsecu 虽在注册表里，但 `auto_detect=False`，而 `_detect_system_type` 对未配置 `auto_detect` 的 profile 直接 `continue`，因此不可能被自动识别选中——白名单只管手动选择，两套口径不冲突，无需改动。
-3. MOCK 中途报错、正向 Step 8 卡死两项尚未定位，与本问题无关。
+3. MOCK 中途报错尚未定位；正向 Step 8 卡死已定位并修复（见 BUG-20260923-009），与本问题无关。
 
 ---
 
@@ -1669,7 +1669,7 @@ bash -n scripts/deploy.sh
 #### 遗留问题
 
 1. 脚本要求 `bash`；纯 `sh`（dash）下 `BASH_SOURCE`、数组等不可用，属既定前提，已在「环境要求」表中说明。
-2. MOCK 中途报错、正向 Step 8 卡死两项尚未定位，与本问题无关。
+2. MOCK 中途报错尚未定位；正向 Step 8 卡死已定位并修复（见 BUG-20260923-009），与本问题无关。
 
 ---
 
@@ -1729,6 +1729,177 @@ cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests/ -q --continue-on-co
 
 #### 遗留问题
 
-1. 「第一步慢」未处理（用户明确只修终止响应）：解析已是 `read_only + values_only` 快路径，不引入新依赖则无数量级优化空间；若后续仍要提速，方向是换更快的 xlsx 读取器（新依赖，需单独决策）或把第一步改为可续的分片。
-2. HLR（Word）解析内部未埋点，只靠其后的边界检查点兜底：本轮无证据表明 Word 解析是瓶颈；若服务器日志显示 Step 1 停在 `Parsing HLR…`，再按同一手法补点。
-3. MOCK 中途报错、正向 Step 8 卡死两项尚未定位，与本问题无关。
+1. 「第一步慢」未处理（用户明确只修终止响应）：解析已是 `read_only + values_only` 快路径，不引入新依赖则无数量级优化空间；若后续仍要提速，方向是换更快的 xlsx 读取器（新依赖，需单独决策）或把第一步改为可续的分片。**终止响应已解决**（本条检查点 + 未提交的 `/force-cancel`）。
+2. **第一步在低内存机器上会「卡死」——实为进程被杀 + 容器自动重启**（2026-09-24 补充）：交付用的 `docker-compose.server.yml` 是 `restart: unless-stopped` 且未设内存限制、无 healthcheck；容器一旦被宿主 OOM 杀掉就会自动起来，启动扫描随即把仍为 `running` 的任务标成 `interrupted`（`job_manager.load_interrupted`），前台表现为「未完成的任务」里一条「已中断」——用户读作「程序被重启过」。任务恰好停在第一步时，观感就是「第一步卡死」。成因与 BUG-20260923-008 同源（第一步峰值 621MB、其中落盘那一步独占 +252MB）：该条目的分块落盘已把第一步峰值降到 391MB、落盘增量降到 0，但**解析期 387MB 对象图是地板**，更大输入（RPDU 22.5 万条）仍可能被杀。
+   **现场确认手段（尚未在对方服务器执行）**：`dmesg -T | grep -iE "oom|killed process"`、`docker inspect -f '{{.RestartCount}} {{.State.OOMKilled}}' <容器>`，再比对 manifest 里 `updated_at`（中断前最后进度）与容器启动时刻。
+3. HLR（Word）解析内部未埋点，只靠其后的边界检查点兜底：本轮无证据表明 Word 解析是瓶颈；若服务器日志显示 Step 1 停在 `Parsing HLR…`，再按同一手法补点。
+4. MOCK 中途报错尚未定位；正向 Step 8 卡死已定位并修复（见 BUG-20260923-009），与本问题无关。若那条报错其实是任务变成了 `interrupted` / 提示「程序被重启过」，则属第 2 条（进程被杀），两者要分开看。
+
+### BUG-20260923-008：大输入序列化与收尾反读把峰值推到服务器可用内存之上（整机假死 / 被 OOM 击杀）
+
+#### 状态
+
+fixed
+
+#### 发现日期
+
+2026-09-23
+
+#### 关联 Issue / PR
+
+本次「Docker 服务器部署」反馈：反向任务跑完后服务器整机无响应，只能重启。与 BUG-20260923-006 同属这一批。代码注释里此前引用的 `BUG-20260923-007`（Excel 生成改为复用已解析对象、省掉一次 410MB 重读）属同一类问题的另一处修复，本文档未单列条目。
+
+#### 问题现象
+
+1. 2026-09-23 17:46 服务器：反向任务（AMSC，122,674 条 EoICD + 16 条 HLR，MOCK）在 `17:46:41.954` 流水线完成、四份报告落盘之后**整机失去响应**。最后一次被服务的请求是 `17:46:40.636`，此后约 7 分钟零请求、零日志、零写盘；用户点的「终止」「强制终止」从未被处理，8082 也访问不了，只能重启服务器。
+2. 2026-09-22 同一天：内核 OOM 击杀一次 —— `Out of memory: Killed process … (uvicorn) … anon-rss:732404kB`。
+3. 两次是同一根因的两种结局：内存压力先表现为 OOM 击杀，后表现为换页假死（本次无 OOM 记录、容器 `restarts=0`、全程仅两次 uvicorn 启动）。
+
+#### 复现方式
+
+本机 Docker，同镜像 `41d819deacc9`、同输入、同 MOCK 路径（脚本在 `build/measure-scratch/`，未进 git）：
+
+```bash
+# Step 1 两法对照（旧：整份序列化；新：分块流式），各跑一次独立进程
+docker run --rm --memory 3g --memory-swap 3g \
+  -v …/data:/data:ro -v …/measure-step1-both.py:/mnt/m.py:ro \
+  icd-tool-backend-v4.0:latest python -u /mnt/m.py old    # 再跑一次 new
+# 收尾与全局峰值
+docker run --rm --memory 3g --memory-swap 3g -e USE_MOCK_LLM=1 … python -u /mnt/measure-rev-tail-new.py
+```
+
+#### 影响范围
+
+反向（正确性）与正向（完整性）两个管线的 Step 1 与收尾阶段。**峰值与 EoICD 条数成正比**：AMSC 122,674 条时 Step 1 峰值 630MB；按 BUG-20260923-006 记录的 RPDU 225,825 条（1.8 倍）推算，同样任务在 896MB 机器上必死。服务器自报可用内存仅 476MB。
+
+#### 原因分析
+
+1. **Step 1 落盘**：`_parse_eoicd` 原走 `model_dump_json(indent=2)` → `Path.write_text`。12 万条时先在堆上造 171MB 的 str（含中文时 CPython 按 UCS-2 存，2 字节/字符），再编出 88MB 的 bytes。实测构成：解析 387MB → 序列化 +170MB → 写盘 +84MB = 621~630MB。
+2. **收尾反读**：`runner` 收尾调 `derive_eoicd_hlr_counts(output_dir)`，只为取 `total_after_dedup` 与 HLR 条数两个整数，把同一份 87.9MB JSON 整份 `read_text` + `json.loads`。实测该步 Δ +163/+247/+199MB（三次），峰值落到 421~498MB。这两个数在流水线里本来就在手上（`eoicd_out` / `hlr_out`），只是没往上传。
+3. **缺口**：服务器 `available` 476MB，对需求 630MB（Step 1）/ 421~498MB（收尾），缺口约 150MB —— 由慢速云盘 swap 抖动（假死）或全局 OOM（击杀）消化。本机在 646m（≈896MB 宿主减系统与页缓存占用）下跑同样的任务**零 swap 通过**，说明这是**全局宿主内存**现象，不是容器限额本身触发的。
+
+#### 修复方案
+
+1. 新增 `_write_json_streaming(path, model, big_field)`：标量头部照常 `json.dumps`，超大列表按 `_JSON_CHUNK_ROWS = 2000` 分块序列化写入 `TextIOWrapper`（增量编码，不再整份编 bytes），仍走「写 `.tmp` 再 `replace`」保证原子性。**输出与旧写法逐字节一致**，对下游 `json.loads` / `model_validate_json` 完全透明。
+2. `PipelineResult` 增 `eoicd_count` / `hlr_count`（均带默认值，向后兼容）；两个管线在 return 处用已在作用域的 `eoicd_out.total_after_dedup` / `len(hlr_out.requirements)` 填值。不复用现成的 `parsed_count`：反向管线里它是 HLR 条数、正向管线里是 `blocks.total_blocks`，含义不同。
+3. 两处 runner 收尾改用回传值；`derive_eoicd_hlr_counts` 保留给旧任务兜底，并把正向结果接口里对它的**无条件调用**改成惰性（原写法每打开一次正向结果页就整份读一遍 87.9MB）。
+4. `_parse_hlr` 保持原样（HLR JSON 只有 16 条，收益为零）；续跑分支（`pipeline.py` 中 `eoicd_data = json.loads(...)` 那处）的 410MB 峰值与新鲜解析同级，本次不动。
+
+#### 修改文件
+
+`app/v4/models.py`（`PipelineResult` +2 字段）、`app/v4/pipeline.py`（+`textwrap` import、+`_write_json_streaming`、`_parse_eoicd` 改用它、两处 `return PipelineResult(` 填值）、`app/api/v4/runner.py`（两处收尾改用回传值，`getattr` 容忍测试桩返回 `None`）、`app/api/v4/jobs.py`（正向结果接口兜底改惰性）
+
+#### 验证方式
+
+```bash
+cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests -q --continue-on-collection-errors
+python build/measure-scratch/check-streaming-write.py       # 新旧写法等价（含造的小样本七组用例）
+python build/measure-scratch/check-forward-result-lazy.py   # 结果接口兜底是否真的变惰性
+# 容器内：measure-step1-both.py（Step 1 两法对照）、verify-step1-bytes.py（87.9MB 全尺寸比对）、
+#         measure-rev-tail-new.py（收尾 + 全局峰值）、verify-pipelines-e2e.py（两条管线端到端）
+```
+
+#### 验证结果
+
+**已通过（本机，同镜像 `41d819deacc9`、同输入、同 MOCK）**：
+
+| 测点 | 改前 | 改后 |
+| --- | --- | --- |
+| Step 1 落盘那一步的 Δ | +252MB | **+0MB** |
+| Step 1 进程 VmHWM | 621MB | **391MB** |
+| 反向全局峰值 RSS | 630MB | **519MB** |
+| 收尾 `derive_eoicd_hlr_counts` Δ | +216MB | **+0MB**（runner 已不调用） |
+| 落盘 `eoicd_requirements.json` | 87,904,677B | 87,904,677B，**sha256 相同** |
+| 与事故现场那份产物比对 | — | 摘掉 `generated_at` 后**完全一致** |
+| 端到端（3g，两条管线） | — | 反向 5 类产物 + 正向 2 类产物齐全，`status=completed`，无 `.tmp` 残留 |
+| 646m 且**禁用 swap** | 通过 | 通过 |
+| 计数两条路径 | — | 回传 `(122674, 16)` == 反读落盘 `(122674, 16)` |
+| 全量测试 | 114 passed / 10 errors | 114 passed / 10 errors（10 个 error 同 BUG-20260923-003 遗留，非本次引入） |
+
+代价：Step 1 落盘墙钟 0.8s → 3.6s（+2.8s，约占 Step 1 总时长 6%）。
+
+**尚未验证**：服务器上反向任务完整跑完且全程服务可响应（需部署新包后实测）。
+
+#### 遗留问题
+
+1. **升内存仍是主解**：改后峰值 519MB 仍高于服务器可用 476MB。本机 646m/646m 下新旧代码**都能跑通**，说明本机无法复现服务器那种「宿主级」饥饿（服务器还有宿主系统占用、88MB 写盘的页缓存、慢速云盘 swap）。本改动是必要的风险削减，不替代扩容；且分块后峰值不再随文件大小放大。
+   **2026-09-24 补充（他人服务器的「第一步卡死」）**：对方服务器上 AMSC 任务在第一步「卡死」并提示程序被重启过，与本次内存尖峰同源 —— 交付 compose 是 `restart: unless-stopped`，容器被宿主 OOM 杀掉后自动重启，启动扫描把仍为 `running` 的任务标成 `interrupted`（详见 BUG-20260923-006 遗留问题第 2 条）。本条改动把第一步峰值从 621MB 降到 391MB（落盘那一步的增量由 +252MB 降到 0），**直接削弱**这一路径；但解析期 387MB 对象图未动，低内存机器与更大输入（RPDU 22.5 万条）仍可能被杀，仍需现场 `dmesg` / `OOMKilled` 证据与升内存。
+2. 结构性成本未动：解析期对象图 387MB、Excel 生成 +131MB。要再降需流式解析 / 流式 Excel，另开 Issue。
+3. 续跑分支（`pipeline.py` 中 `eoicd_data = json.loads(...)` 那处）读 87.9MB JSON 的 410MB 峰值与新鲜解析同级，本次未处理。
+4. 收尾的 `derive_eoicd_hlr_counts` 对**旧任务**仍会整份反读（结果接口惰性兜底），属可接受的兼容代价。
+5. 编号说明：`BUG-20260923-007`（Excel 生成改为复用已解析对象、省掉一次 410MB 重读）在代码里有两处引用（`excel_generator.py`、`pipeline.py`）但本日志**仍无对应条目**；`docx_cells.py` 原先误用 `008` 标注 docx 卡死，2026-09-24 已归位为 `BUG-20260923-009`。
+6. **同一批工作区改动尚未提交**：`/force-cancel`（`Job.bind_thread` / `hard_killed` / `_inject_cancel`）、前端「强制终止」按钮、`docx_cells.py` + 四个报告生成器。其中**强制终止那一层目前既无 debug-log 条目、也无 CHANGELOG 行**（本条与 009 的条目描述的只是其中的削峰与 docx 两部分）。
+
+### BUG-20260923-009：正向 Step 8 的 Word 报告生成为 O(行数²)，表现为「卡死」
+
+#### 状态
+
+fixed
+
+#### 发现日期
+
+2026-09-23（定位与修复当日完成）；2026-09-24 补做同 N 对照实测并补齐本条记录
+
+#### 关联 Issue / PR
+
+本次「Docker 服务器部署」反馈：正向（完整性）任务停在 Step 8/8 长时间不出结果。与 BUG-20260923-008 同批。
+编号说明：`docx_cells.py` 原先把这个缺陷标为 `BUG-20260923-008`，与内存峰值那条撞号，2026-09-24 归位为 009（代码注释已同步）。
+
+#### 问题现象
+
+1. 正向任务跑到 `Step 8/8: Consolidating coverage + generating reports` 后长时间无产出，CPU 单核跑满（服务器上观测「十余分钟仍在跑」）。
+2. 行数越多越慢，呈平方级：2026-09-23 观测到 1618 行的正向报告卡住 5.8 分钟仍不产出文件，遂中止，未跑完。
+3. 2026-09-24 在本机用同一份 1618 行数据复测：旧的取单元格方式 800 行 19.57s（按 O(n²) 外推 1618 行约 80s），新的方式 1618 行 2.73s。两者与第 2 条的差异属环境差异（当时在容器 / 服务器路径上，CPU 更慢），本条以 2026-09-24 可复现的数字为准。
+
+#### 复现方式
+
+```bash
+cd build/measure-scratch
+python -u verify-step8.py equiv        # 等价性：多规模 + 带横向合并的表
+python -u verify-step8.py old 800      # 旧路径（把生成器模块里的 row_cells 换回 row.cells）
+python -u verify-step8.py subset 800   # 新路径，同 N 对照
+python -u verify-step8.py new          # 全量 1618 行
+```
+
+**注意 `old` 模式的实现前提**：生成器用的是 `from ... import row_cells`（直接绑定），因此必须替换**生成器模块里**的那个名字 —— 2026-09-24 修正前该脚本只改 `docx_cells.row_cells`，两条分支实际跑的都是新路径，故早先那对 `fwd-old-sub.docx` / `fwd-new-sub.docx` **不构成对照证据**（本轮实测已推翻等价性结论所依赖的这一步，正确对照见下方数字）。
+
+#### 影响范围
+
+Word 报告生成的逐行填表：`word_generator`（反向一致性报告）、`forward_word_generator`（正向完整性报告）、`consensus_word_generator`（共识报告）。行数越多越严重；Excel 生成走 openpyxl，不受影响。反向报告行数少、症状不明显，正向 1618 行是本次暴露点。
+
+#### 原因分析
+
+python-docx 的 `_Row.cells` 并不是「取本行单元格」：它转到 `Table.row_cells(idx)` → `Table._cells`，**每次调用都用 `iter_tcs()` 把整张表的单元格网格重建一遍**（含 vMerge / gridSpan 回溯）。逐行填表时每行取 6 次单元格、共 1618 行 —— 约 9,708 次全表重建，整体退化为 O(行数²)。所以「卡死」的真身是平方级重算，不是死锁：进程一直在算，只是产出时间被平方项支配。
+
+#### 修复方案
+
+1. 新增 `docx_cells.row_cells(row)`：直接读本行 `tr.tc_lst`，逐行开销 O(列数)，整表回到 O(行数·列数)。前提不满足（`tc` 个数 ≠ 网格列数，或任一 `grid_span != 1`，即存在横向合并）就回落 `list(row.cells)`，保证结果不因快路径而不同。
+2. 三个 Word 生成器的逐行填表热循环改用它，共 11 处；表头行与小汇总表（状态 / 星级分布、汇总行）保持原样。
+3. 顺带：四个生成器（含 Excel）埋协作式取消检查点（Word 200 行、Excel 5000 行）并在开头打印行数 —— Step 8 由此既能秒级响应终止，也能从日志看出停在哪个报告、多少行。
+
+#### 修改文件
+
+`app/v4/doc_generators/docx_cells.py`（新增）、`word_generator.py`、`forward_word_generator.py`、`consensus_word_generator.py`（改用 row_cells + 检查点 + 行数打印）、`excel_generator.py`（检查点 + 行数打印；其对象复用见 BUG-20260923-007）
+
+#### 验证方式
+
+见上方「复现方式」四条命令；另加 `cd backend && PYTHONIOENCODING=utf-8 python -m pytest tests -q --continue-on-collection-errors`。
+
+#### 验证结果
+
+**已通过（本机，2026-09-24）**：
+
+| 测点 | 旧取单元格方式 | 新方式 |
+| --- | --- | --- |
+| 800 行同 N 对照（同进程、同数据） | 19.57s | **1.13s**（17.3×） |
+| 800 行 `word/document.xml` | sha1 `68086896…`，604,172B | **与旧方式逐字节相同**（同 sha1、同字节数） |
+| 1618 行全量（正向报告） | 本轮未跑完（见问题现象第 2 条） | **2.73s**，59,965B，sha1 `127ede6a…` |
+| 可复现性 | — | 与 4 小时前同脚本产出的 `fwd-new-full.docx` sha1 一致 |
+| 等价性 16 组（列 2/3/6/8 × 行 1/2/5/50，各含带横向合并的表） | — | 返回值与 `row.cells` 的 `tc` 身份序列完全一致；有合并时回落原路径且一致 |
+| 全量测试 | — | 114 passed / 10 errors（10 个 error 为既有遗留，非本次引入） |
+
+#### 遗留问题
+
+1. 仍有少量 `.cells` 用在小表上（状态 / 星级分布表、汇总行、表头行）——行数是个位数，不构成热点，本次不动。
+2. 「MOCK 中途报错」仍未定位（本批其它条目同样记为待定位），与本条无关。若那条报错其实是任务变成 `interrupted` / 提示「程序被重启过」，则属 BUG-20260923-008 的内存被杀路径（见其遗留问题第 1 条），两条要分开查。
+3. 本批改动（`docx_cells.py` + 四个生成器）**尚未提交**，与 `/force-cancel`、强制终止前端按钮等同在工作区；后者目前无 debug-log 条目、无 CHANGELOG 行（见 BUG-20260923-008 遗留问题第 6 条）。

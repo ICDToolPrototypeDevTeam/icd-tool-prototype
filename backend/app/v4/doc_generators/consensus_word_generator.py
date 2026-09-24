@@ -13,6 +13,13 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
+from app.job_manager import raise_if_cancelled
+from app.v4.doc_generators.docx_cells import row_cells
+
+# 取消检查点间隔：逐行填表是纯 Python 循环，行边界即可响应终止
+# （取消是协作式的，见 app.job_manager.raise_if_cancelled）
+_CANCEL_CHECK_ROWS = 200
+
 
 def _set_cell_font(cell, text: str, bold: bool = False, size: int = 9, color=None):
     """Set cell text with formatting."""
@@ -29,7 +36,7 @@ def _set_cell_font(cell, text: str, bold: bool = False, size: int = 9, color=Non
 
 def _style_header_row(table, headers: list[str]):
     """Style the header row of a table."""
-    header_cells = table.rows[0].cells
+    header_cells = row_cells(table.rows[0])
     for i, h in enumerate(headers):
         _set_cell_font(header_cells[i], h, bold=True, size=9)
         shading = header_cells[i]._element.get_or_add_tcPr()
@@ -431,6 +438,7 @@ def generate_consensus_report(
     ]
 
     seq = 0
+    print(f"  Generating consensus report ({len(merged_all)} rows)...")
     for _group_key, heading_title, pred in sections:
         group = [m for m in merged_all if pred(m)]
         if not group:
@@ -445,6 +453,9 @@ def generate_consensus_report(
 
         for m in group:
             seq += 1
+            # 取消检查点：本循环是纯 Python，行边界即可响应终止
+            if seq % _CANCEL_CHECK_ROWS == 0:
+                raise_if_cancelled()
             row = table.add_row()
             status = m["final_coverage_status"]
             agreement = m["agreement_level"]
@@ -467,25 +478,27 @@ def generate_consensus_report(
             else:
                 attr_str = "—"
 
-            _set_cell_font(row.cells[0], str(seq))
-            _set_cell_font(row.cells[1], m["hlr_id"])
-            _set_cell_font(row.cells[2], status_cn, bold=True, color=status_colors.get(status_cn))
-            _set_cell_font(row.cells[3], blocks_str, size=7)
-            _set_cell_font(row.cells[4], attr_str, size=7)
-            _set_cell_font(row.cells[5], m["final_analysis"], size=8)
+            cells = row_cells(row)
+            _set_cell_font(cells[0], str(seq))
+            _set_cell_font(cells[1], m["hlr_id"])
+            _set_cell_font(cells[2], status_cn, bold=True, color=status_colors.get(status_cn))
+            _set_cell_font(cells[3], blocks_str, size=7)
+            _set_cell_font(cells[4], attr_str, size=7)
+            _set_cell_font(cells[5], m["final_analysis"], size=8)
             if is_nm:
-                _set_cell_font(row.cells[6], "—")
-                _set_cell_font(row.cells[7], "—")
+                _set_cell_font(cells[6], "—")
+                _set_cell_font(cells[7], "—")
             else:
-                _set_cell_font(row.cells[6], consensus_label, color=consensus_color)
-                _set_cell_font(row.cells[7], _star_str(stars), bold=True, size=10,
+                _set_cell_font(cells[6], consensus_label, color=consensus_color)
+                _set_cell_font(cells[7], _star_str(stars), bold=True, size=10,
                                color=RGBColor(0xCC, 0x88, 0x00))
 
         # 设置明细表列宽
         detail_col_widths = [1.18, 4.61, 1.46, 5.1, 2.11, 9.93, 1.76, 1.93]
         for row_obj in table.rows:
+            cells = row_cells(row_obj)
             for i, w in enumerate(detail_col_widths):
-                row_obj.cells[i].width = Cm(w)
+                cells[i].width = Cm(w)
         _set_table_layout_fixed(table)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

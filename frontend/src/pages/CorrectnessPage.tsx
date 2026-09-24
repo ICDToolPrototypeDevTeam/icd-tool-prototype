@@ -190,6 +190,8 @@ export default function CorrectnessPage() {
           resumedHint="中断恢复执行 · 已完成的判定结果将直接复用，不重复调用模型"
           onCancel={job.jobId !== null ? job.cancel : undefined}
           cancelRequested={job.cancelRequested}
+          onForceCancel={job.jobId !== null ? job.forceCancel : undefined}
+          forceCancelAvailable={job.forceCancelAvailable}
         >
           <JobLogPanel lines={logLines} truncated={logTruncated} defaultOpen={false} />
         </ProcessingView>

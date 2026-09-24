@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import { ApiError, cancelJobV4, getJobStatusV4 } from '../api'
+import { ApiError, cancelJobV4, forceCancelJobV4, getJobStatusV4 } from '../api'
 import type { PageState, V4JobError, V4JobStatus } from '../types'
 
 const POLL_INTERVAL_MS = 10000
+
+/**
+ * 点了「终止」多久之后放出「强制终止」。
+ *
+ * 协作式终止要等管线跑到检查点；正常情况是秒级，超过这个时间说明管线卡在
+ * 没有检查点的地方（例如报告生成的长循环），此时才需要强制终止兜底。
+ * 立刻放出按钮会让用户习惯性点它，丢掉「协作式终止优先」这个前提。
+ */
+const FORCE_CANCEL_AFTER_MS = 15000
 /**
  * 前端等待上限。
  *
@@ -33,6 +42,8 @@ export interface AnalysisJobState<T> {
   jobStatus: V4JobStatus | null
   /** 已请求终止，等待管线在检查点停止 */
   cancelRequested: boolean
+  /** 已请求终止且迟迟没停住 —— 此时才允许「强制终止」 */
+  forceCancelAvailable: boolean
   start: (
     submit: () => Promise<{ job_id: string }>,
     fetchResult: (jobId: string) => Promise<T>,
@@ -41,6 +52,8 @@ export interface AnalysisJobState<T> {
   attach: (jobId: string, fetchResult: (jobId: string) => Promise<T>) => void
   /** 请求终止当前任务（后端在步骤/case 边界停止） */
   cancel: () => void
+  /** 强制终止：不等检查点，后端立即置终态并中断该任务的执行线程 */
+  forceCancel: () => void
   reset: () => void
 }
 
@@ -61,8 +74,13 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
   const [jobId, setJobId] = useState<string | null>(null)
   const [jobStatus, setJobStatus] = useState<V4JobStatus | null>(null)
   const [cancelRequested, setCancelRequested] = useState(false)
+  const [forceCancelAvailable, setForceCancelAvailable] = useState(false)
 
   const timerRef = useRef<number | null>(null)
+  const forceTimerRef = useRef<number | null>(null)
+  /** 本次运行是否已经发过强制终止。发过之后不再布防计时器，
+   *  否则轮询每隔一轮就把按钮重新放出来，用户再点只会拿到 409。 */
+  const forceSentRef = useRef(false)
   const mountedRef = useRef(true)
 
   useEffect(() => {
@@ -73,6 +91,10 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
         clearTimeout(timerRef.current)
         timerRef.current = null
       }
+      if (forceTimerRef.current !== null) {
+        clearTimeout(forceTimerRef.current)
+        forceTimerRef.current = null
+      }
     }
   }, [])
 
@@ -80,6 +102,10 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
     if (timerRef.current !== null) {
       clearTimeout(timerRef.current)
       timerRef.current = null
+    }
+    if (forceTimerRef.current !== null) {
+      clearTimeout(forceTimerRef.current)
+      forceTimerRef.current = null
     }
   }
 
@@ -99,6 +125,8 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
     setJobId(null)
     setJobStatus(null)
     setCancelRequested(false)
+    setForceCancelAvailable(false)
+    forceSentRef.current = false
   }
 
   function reset() {
@@ -150,13 +178,45 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
     poll(id, fetchResult)
   }
 
+  /** 布防「强制终止」计时器；已布防则不动（见 forceTimerRef 注释）。 */
+  function scheduleForceCancel() {
+    if (forceSentRef.current) return
+    if (forceTimerRef.current !== null) return
+    forceTimerRef.current = window.setTimeout(() => {
+      forceTimerRef.current = null
+      if (mountedRef.current) setForceCancelAvailable(true)
+    }, FORCE_CANCEL_AFTER_MS)
+  }
+
   function cancel() {
     const id = jobId
     if (!id) return
     setCancelRequested(true)          // 乐观置位：按钮立即变「正在终止…」
+    scheduleForceCancel()
     cancelJobV4(id).catch((e) => {
       console.error(e)
       if (mountedRef.current) setCancelRequested(false)
+    })
+  }
+
+  function forceCancel() {
+    const id = jobId
+    if (!id) return
+    // 只停「强制终止」自己的计时器，**不能**动轮询计时器：终止后的最终状态
+    // 由后端置位，前端要靠下一次轮询才会翻到「已终止」页
+    if (forceTimerRef.current !== null) {
+      clearTimeout(forceTimerRef.current)
+      forceTimerRef.current = null
+    }
+    forceSentRef.current = true
+    setForceCancelAvailable(false)
+    forceCancelJobV4(id).catch((e) => {
+      console.error(e)
+      if (mountedRef.current) {
+        // 请求没发出去（网络/409）：把按钮放回去让用户能重试
+        forceSentRef.current = false
+        setForceCancelAvailable(true)
+      }
     })
   }
 
@@ -179,7 +239,11 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
         if (status.resumed === true) setResumed(true)
         setMock(status.mock === true)
         setJobStatus(status.status)
-        setCancelRequested(status.cancel_requested === true)
+        const requested = status.cancel_requested === true
+        setCancelRequested(requested)
+        // 后端已经在终止中（例如刷新页面后挂到任务上）：同样要给出强制终止兜底，
+        // 否则「终止中但停不下来」的任务在前端没有任何出口
+        if (requested) scheduleForceCancel()
         setReuse(status.reuse ?? null)
 
         if (status.status === 'completed') {
@@ -263,9 +327,11 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
     jobId,
     jobStatus,
     cancelRequested,
+    forceCancelAvailable,
     start,
     attach,
     cancel,
+    forceCancel,
     reset,
   }
 }

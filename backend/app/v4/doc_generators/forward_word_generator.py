@@ -14,11 +14,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.job_manager import raise_if_cancelled
+from app.v4.doc_generators.docx_cells import row_cells
 from app.v4.doc_generators.forward_excel_generator import _coverage_detail_row
 from app.v4.models import ForwardBlocksOutput, ForwardCoverageOutput
 
 _HEADERS = ["EoICD ID", "协议", "信号族", "设备", "覆盖状态", "原因"]
 _COL_WIDTHS_CM = [5.0, 1.8, 5.0, 3.3, 3.5, 9.0]
+
+# 取消检查点间隔：逐行填表是纯 Python 循环，行边界即可响应终止
+# （取消是协作式的，见 app.job_manager.raise_if_cancelled）
+_CANCEL_CHECK_ROWS = 200
 
 
 def _section_of(row: dict) -> str:
@@ -60,6 +66,7 @@ def generate_forward_word(
         for r in coverage.results
         if r.business_object_id in block_map
     ]
+    print(f"  Generating forward Word report ({len(rows)} rows)...")
 
     covered = [r for r in rows if _section_of(r) == "covered"]
     uncovered = [r for r in rows if _section_of(r) == "uncovered"]
@@ -113,31 +120,38 @@ def generate_forward_word(
         apply_font(p.add_run(str(text)), size=size, bold=bold, color=color)
 
     def style_header(table, headers):
+        header_cells = row_cells(table.rows[0])
         for i, h in enumerate(headers):
-            set_font(table.rows[0].cells[i], h, bold=True, size=9)
-            tc = table.rows[0].cells[i]._element.get_or_add_tcPr()
+            set_font(header_cells[i], h, bold=True, size=9)
+            tc = header_cells[i]._element.get_or_add_tcPr()
             shd = tc.makeelement(qn("w:shd"), {qn("w:fill"): "D9E2F3", qn("w:val"): "clear"})
             tc.insert(0, shd)
 
     def set_col_widths(table, widths_cm):
         table.autofit = False
         for row in table.rows:
+            cells = row_cells(row)
             for i, w in enumerate(widths_cm):
-                if i < len(row.cells):
-                    row.cells[i].width = Cm(w)
+                if i < len(cells):
+                    cells[i].width = Cm(w)
 
     def fill_table(table, headers, data, color=None):
+        header_cells = row_cells(table.rows[0])
         for i, h in enumerate(headers):
-            table.rows[0].cells[i].text = h
+            header_cells[i].text = h
         style_header(table, headers)
-        for r in data:
+        for n, r in enumerate(data, 1):
+            # 取消检查点：本循环是纯 Python，行边界即可响应终止
+            if n % _CANCEL_CHECK_ROWS == 0:
+                raise_if_cancelled()
             row = table.add_row()
-            set_font(row.cells[0], r["business_object_id"])
-            set_font(row.cells[1], r["protocol"])
-            set_font(row.cells[2], r["signal_family"] or r["signal"])
-            set_font(row.cells[3], r["device"])
-            set_font(row.cells[4], r["coverage_label"], bold=True, color=color)
-            set_font(row.cells[5], r["reason"] or "—")
+            cells = row_cells(row)
+            set_font(cells[0], r["business_object_id"])
+            set_font(cells[1], r["protocol"])
+            set_font(cells[2], r["signal_family"] or r["signal"])
+            set_font(cells[3], r["device"])
+            set_font(cells[4], r["coverage_label"], bold=True, color=color)
+            set_font(cells[5], r["reason"] or "—")
         set_col_widths(table, _COL_WIDTHS_CM)
 
     def add_list_section(title, description, data, color=None, page_break=False):

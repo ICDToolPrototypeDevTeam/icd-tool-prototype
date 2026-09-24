@@ -12,6 +12,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import sys
+import textwrap
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -108,6 +109,49 @@ def _write_text_atomic(path: Path, text: str) -> None:
     tmp.replace(path)  # POSIX/Windows 均为原子替换
 
 
+_JSON_CHUNK_ROWS = 2000  # 每块约 1.4MB，12 万条 → 62 块
+
+
+def _write_json_streaming(path: Path, model, big_field: str = "requirements") -> None:
+    """分块写出「标量头部 + 一个超大列表」的模型，峰值内存与条目数无关。
+
+    ``_write_text_atomic(path, model.model_dump_json(indent=2, ensure_ascii=False))``
+    等价但更省内存：12 万条时 ``model_dump_json`` 先在堆上造 171MB 的 str
+    （含中文时 CPython 按 UCS-2 存，2 字节/字符），``write_text`` 再编出 88MB 的
+    bytes —— 实测 Step 1 的 630MB 峰值里有 ~254MB 来自这一步（BUG-20260923-008）。
+    分块后每块只驻留约 1.4MB，峰值不再随 EoICD 条数线性放大。
+
+    原子性同 ``_write_text_atomic``（先写 ``.tmp`` 再改名），续跑复用同样安全。
+    输出与 ``indent=2`` **逐字节一致**（已用 7 组用例验证：空列表 / 单条 / 整块边界 /
+    跨块余数 / 多块小尺寸 / 无其它字段 / 中文与嵌套结构），因此对下游
+    ``json.loads`` 与 ``model_validate_json`` 完全透明。``big_field`` 在文件中排在最后。
+    """
+    head = model.model_dump(mode="json", exclude={big_field})
+    items = getattr(model, big_field)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:  # TextIOWrapper 增量编码，不整份编 bytes
+        head_text = json.dumps(head, indent=2, ensure_ascii=False)
+        # {"a": 1\n} → 去掉尾部的 "\n}" 换成逗号，把大列表接在后面
+        fh.write("{" if head_text == "{}" else head_text[:-2] + ",")
+        if not items:
+            fh.write(f'\n  "{big_field}": []\n')
+            fh.write("}")
+        else:
+            fh.write(f'\n  "{big_field}": [\n')
+            for start in range(0, len(items), _JSON_CHUNK_ROWS):
+                chunk = [
+                    r.model_dump(mode="json")
+                    for r in items[start:start + _JSON_CHUNK_ROWS]
+                ]
+                # 缩进 +2：json.dumps 给整个列表加的 "[" / "]" 与首尾换行去掉后，
+                # 元素在块内是 2 空格，落到文件里应是 4 空格（与 indent=2 对齐）
+                body = json.dumps(chunk, indent=2, ensure_ascii=False)[1:-1].strip("\n")
+                fh.write(",\n" if start else "")
+                fh.write(textwrap.indent(body, "  "))
+            fh.write("\n  ]\n}")
+    tmp.replace(path)
+
+
 def _parse_eoicd(
     publisher_path: Path | None,
     subscriber_path: Path | None,
@@ -143,9 +187,8 @@ def _parse_eoicd(
     result: EoICDOutput = parser.parse()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_text_atomic(
-        output_path, result.model_dump_json(indent=2, ensure_ascii=False)
-    )
+    # 分块写：12 万条时整份序列化会额外占 ~254MB 堆（BUG-20260923-008）
+    _write_json_streaming(output_path, result)
 
     print(f"  Output: {output_path}")
     print(f"  Generated (before any dedup): {result.total_generated}")
@@ -978,8 +1021,13 @@ def run_reverse_pipeline(
     raise_if_cancelled()
 
     # Step 1: EoICD itemization Excel
+    # 传 eoicd_out 复用刚解析好的对象：12 万条时重读 JSON 峰值 +410MB（BUG-20260923-007）
     eoicd_json_path = output_dir / "eoicd_requirements.json"
-    generate_eoicd_excel(eoicd_json_path, output_dir / "EoICD条目化清单.xlsx")
+    generate_eoicd_excel(
+        eoicd_json_path,
+        output_dir / "EoICD条目化清单.xlsx",
+        eoicd_out=eoicd_out,
+    )
 
     # 同一 job 目录内的 LLM 判定缓存：内容寻址，命中即复用（见 app/v4/llm_cache.py）
     cache = open_llm_cache(output_dir)
@@ -1255,6 +1303,10 @@ def run_reverse_pipeline(
         match_count=len(match_result.results),
         judged_count=len(consensus_out.results),
         report_path=str(report_path),
+        # 计数在手上直接回传：runner 收尾反读同一份 JSON 只为取这两个整数，
+        # 12 万条时峰值 +163~247MB（BUG-20260923-008）
+        eoicd_count=eoicd_out.total_after_dedup,
+        hlr_count=len(hlr_out.requirements),
     )
 
 
@@ -1449,4 +1501,7 @@ def run_forward_pipeline(
         match_count=covered,
         judged_count=ai_review.total_reviewed,
         report_path=str(output_dir / "forward_coverage.json"),
+        # 同反向管线：避免 runner 收尾为两个整数反读整份大 JSON（BUG-20260923-008）
+        eoicd_count=eoicd_out.total_after_dedup,
+        hlr_count=len(hlr_out.requirements),
     )

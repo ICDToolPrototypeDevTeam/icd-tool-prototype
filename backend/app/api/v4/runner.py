@@ -107,6 +107,12 @@ def _begin_job_run(job: Job, job_dir: Path, requested_mock: Optional[bool]) -> O
     """
     prev: Optional[tuple] = None
     buf = None
+    # 记录本任务线程 ident，供强制终止按 ident 注入 JobCancelled。放在 try 之外：
+    # 这只是可观测/可控制性元数据，不得因它失败而丢掉日志绑定
+    try:
+        job.bind_thread()
+    except Exception:  # noqa: BLE001 — stub job（既有测试）没有该方法时忽略
+        pass
     try:
         buf = job_log_store.register(job.job_id, job_dir / LOG_FILE_NAME)
         prev = bind_job_log(job.job_id, job)
@@ -420,7 +426,14 @@ def run_v4_pipeline_thread(
         mock_models = derive_mock_models(output_dir)
         consensus = derive_consensus_summary(output_dir)
         match_stats = derive_match_summary(output_dir)
-        counts = derive_eoicd_hlr_counts(output_dir)
+        # 两个计数由管线随 PipelineResult 回传，不再反读 eoicd_requirements.json：
+        # 那份 JSON 有 87.9MB，反读一次峰值 +163~247MB（BUG-20260923-008）。
+        # getattr：测试桩的 run_reverse_pipeline 可能返回 None（既有契约），
+        # 真实管线正常返回时两个字段必有值。
+        counts = {
+            "eoicd_count": getattr(result, "eoicd_count", 0),
+            "hlr_count": getattr(result, "hlr_count", 0),
+        }
 
         # 拼装 job.result
         job.result = {
@@ -464,6 +477,11 @@ def run_v4_pipeline_thread(
         }
         _fail_job(job, e, "V4 pipeline")
     finally:
+        # 摘掉线程 ident（ident 会被后续线程复用，见 Job.unbind_thread）
+        try:
+            job.unbind_thread()
+        except Exception:  # noqa: BLE001 — stub job 没有该方法时忽略
+            pass
         # 恢复线程绑定，避免污染同线程的后续任务
         if prev_binding is not None:
             restore_job_log(prev_binding)
@@ -690,7 +708,12 @@ def run_forward_pipeline_thread(
 
         outputs = derive_forward_outputs(output_dir)
         summary = derive_forward_summary(output_dir)
-        counts = derive_eoicd_hlr_counts(output_dir)
+        # 同反向收尾：用管线回传的计数，不反读 87.9MB 的 eoicd_requirements.json。
+        # getattr 同上——测试桩可能返回 None。
+        counts = {
+            "eoicd_count": getattr(result, "eoicd_count", 0),
+            "hlr_count": getattr(result, "hlr_count", 0),
+        }
 
         job.result = {
             **outputs,
@@ -723,6 +746,11 @@ def run_forward_pipeline_thread(
         }
         _fail_job(job, e, "V4 forward pipeline")
     finally:
+        # 摘掉线程 ident（ident 会被后续线程复用，见 Job.unbind_thread）
+        try:
+            job.unbind_thread()
+        except Exception:  # noqa: BLE001 — stub job 没有该方法时忽略
+            pass
         if prev_binding is not None:
             restore_job_log(prev_binding)
         if saved_use_mock_llm is None:

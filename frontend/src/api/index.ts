@@ -88,6 +88,16 @@ export async function cancelJobV4(jobId: string): Promise<{ job_id: string; stat
   return res.json()
 }
 
+/**
+ * 强制终止：不等管线检查点，后端立即置终态并中断该任务的执行线程。
+ * 只影响这一个任务，不重启进程、不影响其他任务；不删文件、不支持续跑。
+ */
+export async function forceCancelJobV4(jobId: string): Promise<{ job_id: string; status: string; message: string }> {
+  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/force-cancel`, { method: 'POST' })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
 export async function getJobLogsV4(
   jobId: string,
   offset: number,

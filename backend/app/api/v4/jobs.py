@@ -170,8 +170,14 @@ def _forward_result(job, base_outputs_dir: Path) -> V4ForwardJobResultResponse:
     """组装完整性（正向）结果响应。"""
     outputs = derive_forward_outputs(base_outputs_dir)
     summary = derive_forward_summary(base_outputs_dir)
-    counts = derive_eoicd_hlr_counts(base_outputs_dir)
     res = job.result or {}
+    # 只有 job.result 缺计数（旧任务）才回退反读 JSON：那份文件 87.9MB，
+    # 原先是无条件读，等于每打开一次正向结果页就白占 ~200MB 峰值（BUG-20260923-008）
+    counts = (
+        derive_eoicd_hlr_counts(base_outputs_dir)
+        if 'eoicd_count' not in res or 'hlr_count' not in res
+        else {'eoicd_count': 0, 'hlr_count': 0}
+    )
 
     result_summary = V4ForwardJobResultSummary(
         analysis_mode=res.get('analysis_mode', summary['analysis_mode']) or '',
@@ -302,6 +308,37 @@ def cancel_v4_job(job_id: str):
         job_id=job.job_id,
         status=job.status.value,
         message='已请求终止，任务将在当前步骤/Case 边界停止（已产出文件保留）',
+    )
+
+
+@router.post('/jobs/{job_id}/force-cancel', response_model=V4AnalyzeResponse)
+def force_cancel_v4_job(job_id: str):
+    """强制终止一个运行中的任务（不等待检查点）。
+
+    与 ``/cancel`` 的区别：``/cancel`` 只置标志，管线要跑到检查点才停；本接口
+    **立即**把任务置为 ``canceled``，并向该任务自己的管线线程注入
+    ``JobCancelled``（见 :meth:`Job.force_cancel`）。用于「点了终止但管线卡在没有
+    检查点的地方」的场景。
+
+    作用范围严格限定在**这一个任务**：不重启进程、不改全局状态、不影响其他任务
+    与后续「重新执行」。**不删除**已产出的文件，也不写 ``job.result``。
+    """
+    job = _get_job(job_id)
+    if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
+        raise HTTPException(
+            status_code=409,
+            detail=f'job not force-cancelable: status={job.status.value}',
+        )
+
+    injected = job.force_cancel()
+    return V4AnalyzeResponse(
+        job_id=job.job_id,
+        status=job.status.value,
+        message=(
+            '已强制终止：任务线程已中断（已产出文件保留，不支持续跑）'
+            if injected
+            else '已强制终止：任务已标记终止（线程已结束，无可中断的执行）'
+        ),
     )
 
 

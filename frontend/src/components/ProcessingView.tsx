@@ -17,6 +17,10 @@ interface Props {
   onCancel?: () => void
   /** 已请求终止，等待管线在检查点停止 */
   cancelRequested?: boolean
+  /** 强制终止：不等检查点，后端立即置终态并中断该任务的执行线程 */
+  onForceCancel?: () => void
+  /** 已请求终止但迟迟没停住 —— 此时才允许「强制终止」 */
+  forceCancelAvailable?: boolean
   /** 日志面板等附加内容 */
   children?: ReactNode
 }
@@ -50,10 +54,25 @@ export default function ProcessingView({
   resumedHint,
   onCancel,
   cancelRequested,
+  onForceCancel,
+  forceCancelAvailable,
   children,
 }: Props) {
   const stageLabel = stage ? STAGE_LABELS[stage] || stage : null
   const hasV4Progress = stageLabel && stageTotal !== undefined && stageIndex !== undefined
+
+  /** 强制终止不可续跑，且已产出的文件不再通过结果页交付——按破坏性动作确认一次。 */
+  function handleForceCancel() {
+    if (
+      onForceCancel &&
+      window.confirm(
+        '强制终止会立即结束该任务，且不支持续跑。\n\n' +
+          '已产出的文件会保留在输出目录，但任务不会有结果页。\n\n确定要强制终止吗？',
+      )
+    ) {
+      onForceCancel()
+    }
+  }
 
   return (
     <div className="processing-state">
@@ -95,10 +114,17 @@ export default function ProcessingView({
           >
             {cancelRequested ? '正在终止…' : '终止任务'}
           </button>
+          {forceCancelAvailable && onForceCancel && (
+            <button className="btn btn--ghost" onClick={handleForceCancel}>
+              强制终止
+            </button>
+          )}
           <span className="processing-actions__hint">
-            {cancelRequested
-              ? '已请求终止，任务会在当前步骤/Case 结束时停止；已产出的文件会保留。'
-              : '终止后不删除已产出的文件，但任务不会有结果页。'}
+            {forceCancelAvailable && onForceCancel
+              ? '任务未在检查点停下（可能正卡在某一步里）。强制终止会立即结束该任务且不支持续跑，已产出的文件保留。'
+              : cancelRequested
+                ? '已请求终止，任务会在当前步骤/Case 结束时停止；已产出的文件会保留。'
+                : '终止后不删除已产出的文件，但任务不会有结果页。'}
           </span>
         </div>
       )}

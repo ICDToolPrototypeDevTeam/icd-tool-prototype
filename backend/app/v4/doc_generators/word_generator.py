@@ -12,6 +12,13 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 
+from app.job_manager import raise_if_cancelled
+from app.v4.doc_generators.docx_cells import row_cells
+
+# 取消检查点间隔：逐行填表是纯 Python 循环，行边界即可响应终止
+# （取消是协作式的，见 app.job_manager.raise_if_cancelled）
+_CANCEL_CHECK_ROWS = 200
+
 
 def _set_cell_font(cell, text: str, bold: bool = False, size: int = 9, color=None):
     """Set cell text with formatting."""
@@ -28,7 +35,7 @@ def _set_cell_font(cell, text: str, bold: bool = False, size: int = 9, color=Non
 
 def _style_header_row(table, headers: list[str]):
     """Style the header row of a table."""
-    header_cells = table.rows[0].cells
+    header_cells = row_cells(table.rows[0])
     for i, h in enumerate(headers):
         _set_cell_font(header_cells[i], h, bold=True, size=9)
         shading = header_cells[i]._element.get_or_add_tcPr()
@@ -148,6 +155,7 @@ def generate_consistency_report(
         status_counts[status] = status_counts.get(status, 0) + 1
 
     # ── Build Word document ──
+    print(f"  Generating consistency report ({len(detailed)} rows)...")
     doc = Document()
 
     section = doc.sections[0]
@@ -197,9 +205,10 @@ def generate_consistency_report(
     _set_cell_font(row.cells[2], "100%")
 
     for row_obj in ot.rows:
-        row_obj.cells[0].width = Cm(6.0)
-        row_obj.cells[1].width = Cm(2.0)
-        row_obj.cells[2].width = Cm(2.0)
+        cells = row_cells(row_obj)
+        cells[0].width = Cm(6.0)
+        cells[1].width = Cm(2.0)
+        cells[2].width = Cm(2.0)
 
     doc.add_page_break()
 
@@ -216,7 +225,11 @@ def generate_consistency_report(
     _style_header_row(dt, detail_headers)
 
     for i, entry in enumerate(detailed, 1):
+        # 取消检查点：本循环是纯 Python，行边界即可响应终止
+        if i % _CANCEL_CHECK_ROWS == 0:
+            raise_if_cancelled()
         row = dt.add_row()
+        cells = row_cells(row)
         status = entry["status"]
         color = _STATUS_COLORS.get(status)
 
@@ -225,18 +238,19 @@ def generate_consistency_report(
 
         conf_str = f"{entry['confidence']:.2f}" if entry["confidence"] > 0 else "—"
 
-        _set_cell_font(row.cells[0], str(i))
-        _set_cell_font(row.cells[1], entry["hlr_id"])
-        _set_cell_font(row.cells[2], _STATUS_LABELS.get(status, status),
+        _set_cell_font(cells[0], str(i))
+        _set_cell_font(cells[1], entry["hlr_id"])
+        _set_cell_font(cells[2], _STATUS_LABELS.get(status, status),
                        bold=True, color=color)
-        _set_cell_font(row.cells[3], block_str, size=7)
-        _set_cell_font(row.cells[4], entry["analysis"], size=8)
-        _set_cell_font(row.cells[5], conf_str)
+        _set_cell_font(cells[3], block_str, size=7)
+        _set_cell_font(cells[4], entry["analysis"], size=8)
+        _set_cell_font(cells[5], conf_str)
 
     col_widths = [0.8, 5.0, 1.9, 4.5, 12.0, 1.2]
     for row_obj in dt.rows:
+        cells = row_cells(row_obj)
         for i, w in enumerate(col_widths):
-            row_obj.cells[i].width = Cm(w)
+            cells[i].width = Cm(w)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))

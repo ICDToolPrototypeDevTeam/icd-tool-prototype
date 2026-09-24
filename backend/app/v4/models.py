@@ -311,6 +311,12 @@ class PipelineResult(BaseModel):
     judged_count: int = 0
     report_path: str = ""
     errors: list[str] = Field(default_factory=list)
+    # 解析产物的条目数，随结果回传给调用方（runner 收尾要用）。
+    # 单独两个字段而不是复用 parsed_count：反向管线里 parsed_count 是 HLR 条数、
+    # 正向管线里是 blocks.total_blocks，含义不同；调用方只想要「EoICD 条数 / HLR 条数」
+    # 这两个稳定语义。默认 0 保证旧调用点不受影响（BUG-20260923-008）。
+    eoicd_count: int = 0
+    hlr_count: int = 0
 
 
 # ============================================================
