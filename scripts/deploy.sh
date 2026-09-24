@@ -3,7 +3,8 @@
 # ICD 工具原型 · 服务器部署脚本
 #
 # 在**交付包目录内**执行：bash deploy.sh
-# 依次做四件事：校验归档 → 导入镜像 → 复核架构与目录 → 启动并健康自检。
+# 依次做五件事：校验归档 → 导入镜像 → 复核架构与目录 → 按宿主内存算出容器内存上限
+# → 启动并健康自检。
 #
 # 幂等：重复执行只会重新 load 镜像并按新镜像重建容器，
 #       **不会**动 backend/output/ 里的历史分析结果。
@@ -26,12 +27,20 @@ BUILD_INFO="BUILD_INFO"
 SKIP_VERIFY=0
 NO_START=0
 
+# 容器内存上限 = 宿主总内存 − 预留（内核 + docker 守护进程 + SSH 等），见第 4 步。
+# 预留取总内存的 10% 且不低于 300MB；上限本身不低于 512MB；读不到 /proc/meminfo 时
+# 退回保守兜底值（与 docker-compose.server.yml 里 ${ICD_MEM_LIMIT:-...} 的默认值一致）。
+MEM_RESERVE_MIN_MB=300
+MEM_LIMIT_FLOOR_MB=512
+MEM_LIMIT_FALLBACK_MB=640
+MEMINFO_FILE="${ICD_MEMINFO_FILE:-/proc/meminfo}"
+
 for arg in "$@"; do
   case "$arg" in
     --skip-verify) SKIP_VERIFY=1 ;;
     --no-start) NO_START=1 ;;
     -h | --help)
-      sed -n '2,20p' "${BASH_SOURCE[0]}"
+      sed -n '2,19p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *)
@@ -92,7 +101,7 @@ info "镜像标签：$IMAGE"
 info "归档文件：$ARCHIVE"
 
 # ------------------------------------------------------------------ 1. 校验
-say "[1/4] 校验归档完整性"
+say "[1/5] 校验归档完整性"
 if [ "$SKIP_VERIFY" = "1" ]; then
   warn "已按 --skip-verify 跳过 sha256 校验"
 else
@@ -112,7 +121,7 @@ else
 fi
 
 # ------------------------------------------------------------------ 2. 架构
-say "[2/4] 复核 CPU 架构"
+say "[2/5] 复核 CPU 架构"
 case "$(uname -m)" in
   x86_64 | amd64) HOST_ARCH="linux/amd64" ;;
   aarch64 | arm64) HOST_ARCH="linux/arm64" ;;
@@ -129,7 +138,7 @@ else
 fi
 
 # ------------------------------------------------------------------ 3. 导入
-say "[3/4] 导入镜像（大镜像需要一两分钟）"
+say "[3/5] 导入镜像（大镜像需要一两分钟）"
 docker load -i "$ARCHIVE" || {
   warn "docker load 直接读取失败，改用 gunzip 后重试"
   gunzip -c "$ARCHIVE" | docker load || die "镜像导入失败，请把上面的报错回传"
@@ -148,14 +157,60 @@ if [ ! -f backend/.env ]; then
   fi
 fi
 
+# ------------------------------------------------------------------ 4. 内存上限
+# 不设上限的后果：容器与宿主共享内存，十万条级 EoICD 输入会把整机拖进 swap 抖动，
+# SSH 与页面全部无响应——连「终止」都点不动，只能从容器外面杀进程（BUG-20260923-008
+# 记录的那两次）。有了上限，超限只杀容器内进程，宿主机始终可用。
+say "[4/5] 按宿主内存计算容器内存上限"
+MEM_TOTAL_MB=0
+MEM_RESERVE_MB=0
+if [ -r "$MEMINFO_FILE" ]; then
+  MEM_TOTAL_MB="$(awk '/^MemTotal:/ {printf "%d", $2/1024; exit}' "$MEMINFO_FILE" 2>/dev/null || true)"
+fi
+# 读不到或格式意外一律当 0 处理，走兜底值：算内存上限失败绝不能中断部署
+case "$MEM_TOTAL_MB" in '' | *[!0-9]*) MEM_TOTAL_MB=0 ;; esac
+
+if [ "$MEM_TOTAL_MB" -gt 0 ]; then
+  MEM_RESERVE_MB=$((MEM_TOTAL_MB / 10))
+  [ "$MEM_RESERVE_MB" -lt "$MEM_RESERVE_MIN_MB" ] && MEM_RESERVE_MB="$MEM_RESERVE_MIN_MB"
+  MEM_LIMIT_MB=$((MEM_TOTAL_MB - MEM_RESERVE_MB))
+  if [ "$MEM_LIMIT_MB" -lt "$MEM_LIMIT_FLOOR_MB" ]; then
+    MEM_LIMIT_MB="$MEM_LIMIT_FLOOR_MB"
+    warn "宿主内存只有 ${MEM_TOTAL_MB}MB，低于 ${MEM_LIMIT_FLOOR_MB}MB 的下限，上限已兜到 ${MEM_LIMIT_FLOOR_MB}m"
+  fi
+else
+  MEM_LIMIT_MB="$MEM_LIMIT_FALLBACK_MB"
+  warn "读不到 $MEMINFO_FILE，容器内存上限改用保守兜底值 ${MEM_LIMIT_MB}m"
+fi
+
+# .env 是给 docker compose 做变量替换用的（compose 会读项目目录下的 .env），
+# 与 backend/.env 里的模型配置无关。别人放的同名文件不覆盖，先备份再重建。
+if [ -f .env ] && ! grep -q '^ICD_MEM_LIMIT=' .env; then
+  cp .env .env.bak
+  warn "本目录已存在非本脚本生成的 .env，已备份为 .env.bak 后重建"
+fi
+{
+  printf '%s\n' '# 由 deploy.sh 生成，仅供 docker compose 做变量替换；模型地址与密钥在 backend/.env，与本文件无关。'
+  printf '%s\n' "# 容器内存上限 = 宿主总内存 ${MEM_TOTAL_MB}MB − 预留 ${MEM_RESERVE_MB}MB。"
+  printf 'ICD_MEM_LIMIT=%sm\n' "$MEM_LIMIT_MB"
+  printf 'ICD_MEMSWAP_LIMIT=%sm\n' "$MEM_LIMIT_MB"
+} >.env
+info "宿主内存 ${MEM_TOTAL_MB}MB → 容器上限 ${MEM_LIMIT_MB}m（swap 同值 = 该容器不许用 swap）"
+
+if [ "$MEM_TOTAL_MB" -gt 0 ] && [ "$MEM_TOTAL_MB" -lt 2048 ]; then
+  warn "宿主内存 ${MEM_TOTAL_MB}MB 低于建议的 8GB（见 部署说明.md §2）：
+      十万条级 EoICD 输入仍可能在容器内被 OOM 杀掉。这样只会让那个任务变成「已中断」
+      （整机不再假死、随时可「放弃」），任务本身跑不完——更大输入请先升内存或拆分输入。"
+fi
+
 if [ "$NO_START" = "1" ]; then
-  say "[4/4] 已按 --no-start 停在启动之前"
+  say "[5/5] 已按 --no-start 停在启动之前"
   info "启动命令：${COMPOSE[*]} -f $COMPOSE_FILE up -d"
   exit 0
 fi
 
-# ------------------------------------------------------------------ 4. 启动
-say "[4/4] 启动服务并自检"
+# ------------------------------------------------------------------ 5. 启动
+say "[5/5] 启动服务并自检"
 UP_LOG="$(mktemp)"
 trap 'rm -f "$UP_LOG"' EXIT
 
@@ -173,6 +228,23 @@ if ! "${COMPOSE[@]}" -f "$COMPOSE_FILE" up -d >"$UP_LOG" 2>&1; then
 else
   cat "$UP_LOG"
 fi
+
+# 上限没落到 cgroup 上，保护就等于零（例如 compose 版本不认 mem_limit）：
+# 所以看运行时的值，而不是编排文件里写了什么
+CID="$("${COMPOSE[@]}" -f "$COMPOSE_FILE" ps -q backend 2>/dev/null | head -1 || true)"
+MEM_APPLIED="$(docker inspect -f '{{.HostConfig.Memory}}' "$CID" 2>/dev/null || true)"
+case "$MEM_APPLIED" in
+  '' | *[!0-9]*)
+    warn "读不到容器的内存上限，请手动确认：docker inspect -f '{{.HostConfig.Memory}}' <容器>"
+    ;;
+  0)
+    warn "容器内存上限**没有生效**（HostConfig.Memory=0）：大输入仍可能把整机拖进假死。
+      请升级 docker compose 后重新部署，或在启动命令前后手动核对。"
+    ;;
+  *)
+    info "容器内存上限已生效：$((MEM_APPLIED / 1024 / 1024))MB"
+    ;;
+esac
 
 # 端口取编排文件里的映射（默认 8000），保持一致
 PORT="$(sed -n "s/^[[:space:]]*-[[:space:]]*'\{0,1\}\([0-9]\{1,5\}\):8000'\{0,1\}[[:space:]]*$/\1/p" "$COMPOSE_FILE" | head -1 || true)"
