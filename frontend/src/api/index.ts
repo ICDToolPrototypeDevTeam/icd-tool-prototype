@@ -8,6 +8,8 @@ import type {
   V4DownloadKind,
   V4ForwardJobResultResponse,
   V4ForwardDownloadKind,
+  V4HistoryItem,
+  V4HistoryDeleteResponse,
 } from '../types'
 
 // ========== V4 API ==========
@@ -127,6 +129,29 @@ export function getDownloadUrlV4(jobId: string, kind: V4DownloadKind): string {
 
 export function getForwardDownloadUrlV4(jobId: string, kind: V4ForwardDownloadKind): string {
   return `${API_V4_BASE}/jobs/${jobId}/outputs/${kind}`
+}
+
+// ========== 历史结果：列表 / 删除 ==========
+
+/** 服务器上保留的全部历史结果（磁盘口径，按创建时间倒序）。 */
+export async function listHistoryV4(): Promise<V4HistoryItem[]> {
+  const res = await fetch(`${API_V4_BASE}/history`)
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+/**
+ * 硬删除历史结果：整目录删除，**含该任务上传的输入文件**，不可恢复。
+ * 后端要求显式 confirm，因此这里固定带 `confirm: true`（前端已做过二次确认）。
+ */
+export async function deleteHistoryV4(jobIds: string[]): Promise<V4HistoryDeleteResponse> {
+  const res = await fetch(`${API_V4_BASE}/history/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_ids: jobIds, confirm: true }),
+  })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
 }
 
 export async function checkV4Health(): Promise<boolean> {

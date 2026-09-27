@@ -144,6 +144,15 @@ class JobLogStore:
             return {'lines': [], 'next_offset': offset, 'truncated': False}
         return buf.read(offset=offset, limit=limit)
 
+    def forget(self, job_id: str) -> None:
+        """丢弃某任务的 buffer（其输出目录被硬删除后调用）。
+
+        目录里的 ``job.log`` 已经一起被删，留着这份内存副本既不可能再被写、
+        也读不出新内容，只是白占内存。
+        """
+        with self._lock:
+            self._buffers.pop(job_id, None)
+
 
 job_log_store = JobLogStore()
 

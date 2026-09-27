@@ -170,14 +170,24 @@ def _fail_job(job: Job, exc: BaseException, label: str) -> None:
     traceback.print_exc()
 
 
-def job_input_filenames(job: Job) -> list[str]:
-    """任务列表展示用：从参数快照取出上传文件名（不含目录）。"""
+def input_filenames_from_params(params: Optional[dict]) -> list[str]:
+    """从参数快照取出上传文件名（不含目录）。
+
+    与 :func:`job_input_filenames` 同源，区别只在数据来源：历史结果列表读的是
+    磁盘 manifest 里的 ``params``，那时内存中并没有对应的 ``Job`` 对象（进程
+    重启后跑完的任务不会被启动扫描载入）。
+    """
     names = []
     for key in _INPUT_FILE_PARAM_KEYS:
-        value = (job.params or {}).get(key)
+        value = (params or {}).get(key)
         if value:
             names.append(Path(value).name)
     return names
+
+
+def job_input_filenames(job: Job) -> list[str]:
+    """任务列表展示用：从参数快照取出上传文件名（不含目录）。"""
+    return input_filenames_from_params(job.params)
 
 
 def _parse_progress(message: Optional[str]) -> dict:

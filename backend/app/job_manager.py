@@ -406,6 +406,16 @@ class JobManager:
     def list_jobs(self) -> list[Job]:
         return list(self._jobs.values())
 
+    def forget(self, job_id: str) -> bool:
+        """把任务从内存登记表摘掉（历史结果被硬删除后调用）。
+
+        目录已经连同 ``job.json`` 一起被删，内存里再留着这条记录，任务列表里
+        就会出现一条指向已删目录的幽灵任务：点「继续」报文件缺失、点日志报
+        目录不存在，且它既不会被启动扫描扫到，也不会再有任何产物。返回是否
+        确实摘掉了记录。
+        """
+        return self._jobs.pop(job_id, None) is not None
+
     def load_interrupted(self, v4_root: Path) -> int:
         """启动扫描：把磁盘上未跑完的任务标记为 interrupted 并载入内存。
 

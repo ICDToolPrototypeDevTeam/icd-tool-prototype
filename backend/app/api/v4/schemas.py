@@ -202,3 +202,75 @@ class V4ForwardJobResultResponse(BaseModel):
     summary: V4ForwardJobResultSummary
     outputs: V4ForwardJobOutputs
     errors: list[str]
+
+
+# ============================================================================
+# 历史结果：列表与删除
+# ============================================================================
+
+
+class V4HistoryOutputs(BaseModel):
+    """历史结果里各类产物的存在性（反向 5 类 + 正向 2 类，与下载接口一一对应）。"""
+
+    eoicd_xlsx: bool = False
+    consistency_deepseek_docx: bool = False
+    consistency_minimax_docx: bool = False
+    consistency_qwen_docx: bool = False
+    consensus_docx: bool = False
+    forward_xlsx: bool = False
+    forward_docx: bool = False
+
+
+class V4HistoryItem(BaseModel):
+    """GET /api/v4/history 列表项。
+
+    **磁盘口径**：列的是 ``output/v4/`` 下的任务目录，因此内存里没有的任务
+    （进程重启前就跑完的）同样会出现 —— 这正是历史结果页与 ``/jobs`` 的区别。
+    """
+
+    job_id: str
+    task_type: str = ""
+    # JobStatus 的取值；目录里没有可读 manifest（上传失败留下的残留目录）时为 "unknown"
+    status: str = "unknown"
+    message: Optional[str] = None
+    created_at: str
+    updated_at: str
+    finished_at: Optional[str] = None
+    input_files: list[str] = []
+    outputs: V4HistoryOutputs = V4HistoryOutputs()
+    # 该任务目录占用的字节数（含上传的输入文件与中间产物），删除前据此告知释放空间
+    size_bytes: int = 0
+    # 本次运行是否 MOCK（含义同状态接口：模拟数据不可用于验收）
+    mock: bool = False
+
+
+class V4HistoryDeleteRequest(BaseModel):
+    """POST /api/v4/history/delete 请求体。
+
+    ``confirm`` 必须显式为 ``true``：删除是整目录 ``rmtree``，不可恢复。
+    """
+
+    job_ids: list[str]
+    confirm: bool = False
+
+
+class V4HistoryDeleteResult(BaseModel):
+    """单个任务删除成功的结果。"""
+
+    job_id: str
+    freed_bytes: int = 0
+
+
+class V4HistoryDeleteFailure(BaseModel):
+    """单个任务删除失败的结果（不影响同批其它任务）。"""
+
+    job_id: str
+    error: str
+
+
+class V4HistoryDeleteResponse(BaseModel):
+    """POST /api/v4/history/delete 响应。"""
+
+    deleted: list[V4HistoryDeleteResult] = []
+    failed: list[V4HistoryDeleteFailure] = []
+    total_freed_bytes: int = 0

@@ -644,6 +644,16 @@ body {
   box-shadow: 0 4px 12px rgba(0, 102, 204, 0.15);
 }
 
+/* 危险动作（删除历史结果）：红底白字，与主/次按钮区分开 */
+.btn--danger {
+  background: var(--danger);
+  color: white;
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: #dc2626;
+}
+
 /* 弱化文字按钮：用于「复制诊断信息」这类工具型动作，不与主/次按钮抢视觉 */
 .btn--ghost {
   background: transparent;
@@ -1356,6 +1366,239 @@ body {
 
   .interrupted__actions {
     justify-content: flex-end;
+  }
+}
+
+/* ===== 历史结果（服务器上保留的结果：下载 / 删除）===== */
+.history {
+  margin-top: 32px;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 20px 24px;
+}
+
+.history__header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.history__title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.history__hint {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.history__header .btn--ghost {
+  padding: 6px 10px;
+}
+
+.history__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.history__check-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.history__confirm {
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.06);
+  border-radius: var(--radius-md);
+}
+
+.history__confirm-text {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+.history__confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.history__confirm-actions .btn {
+  padding: 8px 18px;
+  font-size: 13px;
+  border-radius: var(--radius-sm);
+}
+
+.history__list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.history__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--bg-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: border-color 0.2s ease;
+}
+
+.history__item:hover {
+  border-color: var(--primary);
+}
+
+.history__pick {
+  padding-top: 2px;
+  flex-shrink: 0;
+}
+
+.history__info {
+  flex: 1;
+  min-width: 0;
+}
+
+.history__files {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.history__tag {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(0, 102, 204, 0.1);
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.history__tag--mock {
+  background: rgba(245, 158, 11, 0.16);
+  color: #b45309;
+}
+
+.history__status {
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+  background: rgba(107, 114, 128, 0.12);
+  color: var(--text-secondary);
+}
+
+.history__status--completed {
+  background: rgba(16, 185, 129, 0.14);
+  color: #047857;
+}
+
+.history__status--running {
+  background: rgba(0, 102, 204, 0.1);
+  color: var(--primary);
+}
+
+.history__status--interrupted {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+}
+
+.history__status--failed {
+  background: rgba(239, 68, 68, 0.12);
+  color: #b91c1c;
+}
+
+.history__meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.history__downloads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.history__download {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: white;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.history__download:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.history__missing {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.history__placeholder {
+  padding: 24px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.history__error {
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.history__notice {
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: #047857;
+}
+
+@media (max-width: 768px) {
+  .history__item {
+    flex-direction: column;
+  }
+
+  .history__toolbar {
+    justify-content: flex-start;
   }
 }
 

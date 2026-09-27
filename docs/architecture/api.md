@@ -33,6 +33,8 @@ API 设计应遵守以下原则：
 | `/api/v4/jobs/{job_id}/outputs/consistency/{model}` | `GET`  | 下载单模型差异分析报告（docx）           |
 | `/api/v4/jobs/{job_id}/outputs/forward-xlsx`   | `GET`  | 下载正向完整性分析明细表（xlsx）            |
 | `/api/v4/jobs/{job_id}/outputs/forward-docx`   | `GET`  | 下载正向完整性分析报告（docx）            |
+| `/api/v4/history`                              | `GET`  | 查询服务器上保留的历史结果（磁盘口径，含内存中没有的已完成任务） |
+| `/api/v4/history/delete`                       | `POST` | 硬删除历史结果（整目录，含上传的输入文件；需 `confirm=true`） |
 
 `{model}` ∈ `{deepseek, minimax, qwen}`。
 
@@ -418,7 +420,7 @@ GET /api/v4/jobs?status=interrupted&task_type=correctness
 ```
 
 - 两个 query 参数均可选：`status` 按状态精确过滤，`task_type` 按任务类型过滤。
-- 内存中只保留本次进程创建的任务与启动时载入的 `interrupted` 任务，因此该接口不会返回历史 `completed` / `failed` 任务。`canceled` 同样**不在**启动载入范围内：被终止的任务只在**本次进程存活期间**可续跑 / 可放弃，容器重启后即从列表中消失（与 `completed` / `failed` 同待遇）。
+- 内存中只保留本次进程创建的任务与启动时载入的 `interrupted` 任务，因此该接口不会返回历史 `completed` / `failed` 任务。`canceled` 同样**不在**启动载入范围内：被终止的任务只在**本次进程存活期间**可续跑 / 可放弃，容器重启后即从列表中消失（与 `completed` / `failed` 同待遇）。**看历史任务请用 `GET /api/v4/history`（第 14 节），那是磁盘口径的接口。**
 - `input_files` 取自 manifest 参数快照中的输入文件（仅文件名，不含路径）；CLI 等无 manifest 的任务为空数组。
 
 ### 13.2 继续任务
@@ -505,3 +507,89 @@ POST /api/v4/jobs/{job_id}/abandon
 `params` 中的路径一律为相对 `job_dir` 的相对路径，保证输出目录整体搬迁后仍可恢复。不持久化任务结果（重跑时重新生成）。无 `job_dir` 的任务（如 CLI 直跑 `app/v4/cli.py`）不写 manifest，行为与本次改动前一致。
 
 **部署前提（Docker）**：本能力依赖 `output/` 跨进程存活。`docker-compose.yml` 已把 `./backend/output` 以 bind mount 挂到容器内 `/app/output`（且未设置 `OUTPUT_DIR`），因此 `docker compose restart` / `down` + `up` 后 manifest 仍在、中断任务不丢。若把该卷去掉、改为匿名 volume 或设置 `OUTPUT_DIR` 指向容器内非挂载路径，本能力会静默失效（重启后任务列表为空）。
+
+## 14. 历史结果接口（列表 / 删除）
+
+第 13 节的 `/jobs` 是**内存口径**（本进程新建 + 启动载入的中断任务），跑完的任务重启后即从内存消失；历史结果走**磁盘口径**：直接扫 `backend/output/v4/*/`，因此重启后仍能看到并下载以前的结果。前端入口是顶栏「历史结果」页。
+
+与之配套，下载接口（第 7 节）定位任务时按「**内存 → 磁盘 manifest**」取任务类型：内存里查不到时读该目录的 `job.json`；两者都取不到（上传失败留下的残留目录没有 manifest）就不再校验类型，交由「该产物文件是否存在」决定 404 与否。修复前只认内存，进程重启后已完成任务的下载一律 404。
+
+### 14.1 查询历史结果
+
+```text
+GET /api/v4/history
+```
+
+（V4HistoryItem，返回数组；按 `created_at` 倒序）
+
+```json
+[
+  {
+    "job_id": "<uuid>",
+    "task_type": "correctness | completeness | \"\"",
+    "status": "pending | running | completed | failed | interrupted | abandoned | canceled | unknown",
+    "message": "Step 6/6: Generating report",
+    "created_at": "ISO-8601",
+    "updated_at": "ISO-8601",
+    "finished_at": "ISO-8601 | null",
+    "input_files": ["HLR.docx", "Publisher.xlsx"],
+    "outputs": {
+      "eoicd_xlsx": true,
+      "consistency_deepseek_docx": false,
+      "consistency_minimax_docx": false,
+      "consistency_qwen_docx": false,
+      "consensus_docx": true,
+      "forward_xlsx": false,
+      "forward_docx": false
+    },
+    "size_bytes": 12345678,
+    "mock": false
+  }
+]
+```
+
+- **每个子目录都会列出**，不只有跑完的：`status` 取 manifest 原值；**没有可读 manifest** 的残留目录（上传失败留下、或 manifest 损坏）以 `status="unknown"`、`task_type=""`、时间取目录 mtime 出现 —— 这类目录不出现在任何其它列表里，却照样占磁盘，只能在这里看到并清理。
+- `outputs` 是七类对外产物的存在性布尔（反向 5 类 + 正向 2 类），与第 7 节的下载路径一一对应；全为 `false` 即「无可下载产物」（未跑完或生成失败）。
+- `size_bytes` 为该任务目录占用的字节数（**含 `input/` 里用户上传的原始文件**与全部中间产物），供删除前告知释放空间。
+- `mock` 含义同状态接口：模拟数据不可用于验收。
+- 该接口不做鉴权（与其它接口一致），只读磁盘，不改变任何状态。
+
+### 14.2 删除历史结果（硬删除）
+
+```text
+POST /api/v4/history/delete
+Content-Type: application/json
+
+{ "job_ids": ["<uuid>", "..."], "confirm": true }
+```
+
+删除粒度是**整个任务目录** `output/v4/{job_id}/`（`shutil.rmtree`），**包括 `input/` 里用户上传的原始文件**与全部中间产物。不进回收站、没有撤销，因此设了三道关卡：
+
+| 关卡 | 行为 |
+| --- | --- |
+| `confirm` 不是显式 `true` | 400，什么都不删 |
+| `job_ids` 为空 | 400 |
+| `job_id` 不是 uuid 形式，或解析后的路径不在 `output/v4/` 之下 | 400（防目录穿越 / 软链指向别处） |
+| 批次里任一任务还在跑（有线程在跑，或 `pending` 而已 `set_dir`） | **409，整批不删**（部分成功的批次会让人分不清哪些删掉了） |
+| 单个目录删除失败（权限、文件被占用） | 计入 `failed`，不影响同批其它任务 |
+| 目录已不存在（重复删除） | 计入 `failed`，`error` 为「目录不存在（可能已被删除）」 |
+
+返回：
+
+```json
+{
+  "deleted": [{ "job_id": "<uuid>", "freed_bytes": 12345678 }],
+  "failed": [{ "job_id": "<uuid>", "error": "目录不存在（可能已被删除）" }],
+  "total_freed_bytes": 12345678
+}
+```
+
+删除成功后同时从内存登记表与日志缓冲里摘掉该任务：否则任务列表里会留下一条指向已删目录的幽灵记录（点「继续」报文件缺失、点日志报目录不存在）。服务端另打一行 `[history] deleted job <id> dir=<path> freed=<N>B` 日志。
+
+### 14.3 历史结果错误响应
+
+| 场景 | HTTP |
+| --- | --- |
+| `job_ids` 为空，或缺 `confirm=true` | 400 |
+| `job_id` 非法（非 uuid / 越出 `output/v4/`） | 400 |
+| 批次内有任务正在运行 | 409 |

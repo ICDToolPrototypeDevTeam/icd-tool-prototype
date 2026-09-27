@@ -7,13 +7,15 @@ ADR-001 Issue A：
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 from app.api.v4.runner import FORWARD_OUTPUT_FILES, V4_OUTPUT_FILES
-from app.job_manager import job_manager
+from app.job_manager import MANIFEST_NAME, job_manager
 from app.v4.config import get_output_root
 
 
@@ -25,16 +27,34 @@ MEDIA_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.doc
 MEDIA_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
+def _manifest_task_type(job_dir: Path) -> Optional[str]:
+    """读磁盘 manifest 里的 task_type；文件缺失 / JSON 损坏时返回 None。"""
+    try:
+        data = json.loads((job_dir / MANIFEST_NAME).read_text(encoding='utf-8'))
+    except Exception:  # noqa: BLE001 — 目录被删、manifest 损坏一律按「不知道」处理
+        return None
+    task_type = data.get('task_type') if isinstance(data, dict) else None
+    return task_type if isinstance(task_type, str) and task_type else None
+
+
 def _output_root(job_id: str, expected_task_type: str) -> Path:
+    """定位任务的 output 目录；任务类型不符时 404。
+
+    任务类型的来源按优先级取：**内存**（本进程新建的任务）→ **磁盘 manifest**。
+    进程重启后跑完的任务不在内存里（启动扫描只载入未完成的任务），修复前这里
+    直接 404，于是「历史结果」点进去全是死链。两者都取不到（上传失败留下的残留
+    目录没有 manifest）就不再校验类型：五类产物的文件名互不重名，下面每个下载
+    接口按类型取的是各自的文件名，不存在把 A 类任务的产物当 B 类发出去的可能。
+    """
+    base = get_output_root() / 'v4' / job_id
     job = job_manager.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail='job not found')
-    if job.task_type != expected_task_type:
+    actual_task_type = job.task_type if job is not None else _manifest_task_type(base)
+    if actual_task_type is not None and actual_task_type != expected_task_type:
         raise HTTPException(
             status_code=404,
-            detail=f'job task_type is {job.task_type}, not {expected_task_type}; this output belongs to a different analysis',
+            detail=f'job task_type is {actual_task_type}, not {expected_task_type}; this output belongs to a different analysis',
         )
-    root = get_output_root() / 'v4' / job_id / 'output'
+    root = base / 'output'
     if not root.exists():
         raise HTTPException(status_code=404, detail='output dir does not exist (job likely failed before pipeline produced files)')
     return root

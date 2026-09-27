@@ -4,6 +4,7 @@ import { useMockMode } from './hooks/useMockMode'
 import LandingPage from './pages/LandingPage'
 import CorrectnessPage from './pages/CorrectnessPage'
 import CompletenessPage from './pages/CompletenessPage'
+import HistoryPage from './pages/HistoryPage'
 
 export default function App() {
   const { v4Online } = useV4Health()
@@ -47,6 +48,14 @@ export default function App() {
           >
             完整性分析
           </NavLink>
+          <NavLink
+            to="/history"
+            className={({ isActive }) =>
+              `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
+            }
+          >
+            历史结果
+          </NavLink>
         </nav>
 
         <div className="header__status">
@@ -78,6 +87,7 @@ export default function App() {
           <Route path="/" element={<LandingPage />} />
           <Route path="/correctness" element={<CorrectnessPage />} />
           <Route path="/completeness" element={<CompletenessPage />} />
+          <Route path="/history" element={<HistoryPage />} />
         </Routes>
       </main>
 

@@ -147,3 +147,43 @@ export interface V4ForwardJobResultResponse {
   }
   errors: string[]
 }
+
+// ========== V4 History（服务器上保留的历史结果）==========
+
+/** 历史结果里各类产物的存在性（后端 V4HistoryOutputs）。 */
+export interface V4HistoryOutputs {
+  eoicd_xlsx: boolean
+  consistency_deepseek_docx: boolean
+  consistency_minimax_docx: boolean
+  consistency_qwen_docx: boolean
+  consensus_docx: boolean
+  forward_xlsx: boolean
+  forward_docx: boolean
+}
+
+/**
+ * 历史结果条目。**磁盘口径**：后端扫的是 output/v4/ 下的任务目录，
+ * 因此进程重启前就跑完的任务（内存里已经没有了）同样会出现。
+ */
+export interface V4HistoryItem {
+  job_id: string
+  /** 'correctness' | 'completeness'；目录里没有可读 manifest 时为空串 */
+  task_type: string
+  /** V4JobStatus 取值；目录里没有可读 manifest 时为 'unknown' */
+  status: string
+  message: string | null
+  created_at: string
+  updated_at: string
+  finished_at: string | null
+  input_files: string[]
+  outputs: V4HistoryOutputs
+  /** 该任务目录占用的字节数（含上传的输入文件与中间产物） */
+  size_bytes: number
+  mock: boolean
+}
+
+export interface V4HistoryDeleteResponse {
+  deleted: { job_id: string; freed_bytes: number }[]
+  failed: { job_id: string; error: string }[]
+  total_freed_bytes: number
+}
