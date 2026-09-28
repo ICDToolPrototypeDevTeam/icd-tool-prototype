@@ -7,8 +7,9 @@
 任务隔离（app.runtime_context）解决「串台」，本模块解决「并发数不受控」。
 
 职责：
-- :func:`submit` 把已登记、已落盘参数快照的任务执行函数放进 FIFO 队列，由固定
-  ``MAX_CONCURRENT_JOBS``（默认 2）个常驻 daemon 工作线程顺序领取执行；
+- :func:`submit` 把已登记、已落盘参数快照的任务执行函数放进队列（续跑任务插到
+  队首，其余按入队先后 FIFO），由固定 ``MAX_CONCURRENT_JOBS``（默认 2）个常驻
+  daemon 工作线程顺序领取执行；
 - 出队时做两项裁决：
   1. **票据比对**——队列里可能留着同一任务的旧条目（排队期间被终止、之后又被
      「继续」）：只有 ``job.queue_token`` 与条目一致才执行，防止同一任务被两张
@@ -22,6 +23,7 @@
 """
 from __future__ import annotations
 
+import itertools
 import os
 import queue
 import threading
@@ -51,8 +53,15 @@ def _max_concurrent_jobs() -> int:
     return n if n >= 1 else DEFAULT_MAX_CONCURRENT_JOBS
 
 
-# (job, 票据, 执行函数)；票据是 submit 时生成的哨兵对象，见模块 docstring
-_queue: queue.Queue = queue.Queue()
+# PriorityQueue 数值越小越先出队
+_PRIORITY_RESUMED = 0
+_PRIORITY_NEW = 1
+
+# (优先级, 入队序号, job, 票据, 执行函数)；票据是 submit 时生成的哨兵对象，
+# 见模块 docstring。序号必须唯一且单调递增：PriorityQueue 在优先级相同时会继续
+# 比较元组的后续元素，若不垫序号就会去比较 Job 对象（不可排序 → TypeError）。
+_queue: queue.PriorityQueue = queue.PriorityQueue()
+_seq = itertools.count()
 _start_lock = threading.Lock()
 _workers_started = False
 _worker_count = 0
@@ -82,6 +91,11 @@ def submit(job: Job, fn: Callable[[], None]) -> None:
 
     每次 submit 生成新票据并写入 ``job.queue_token``：同一任务若因「排队期间被
     终止 → 又被继续」而二次入队，旧条目出队时会因票据不符被丢弃。
+
+    **续跑插队**：``job.resumed`` 的任务排到所有新提交任务之前 —— 它是用户
+    「已经在做、被打断」的工作，此前重新入队要从队尾等起。同优先级内仍按入队
+    先后 FIFO（``_seq`` 兜底，不比较 Job 对象）。插队只作用于等待队列，不是抢占：
+    执行槽位全忙时续跑同样要等某个任务结束。
     """
     _ensure_workers()
     token = object()
@@ -93,7 +107,8 @@ def submit(job: Job, fn: Callable[[], None]) -> None:
         JobStatus.PENDING,
         f'任务已排队，等待空闲执行槽位（并发上限 {_worker_count}）',
     )
-    _queue.put((job, token, fn))
+    priority = _PRIORITY_RESUMED if job.resumed else _PRIORITY_NEW
+    _queue.put((priority, next(_seq), job, token, fn))
 
 
 def _skip_reason(job: Job) -> Optional[str]:
@@ -126,7 +141,7 @@ def _mark_skipped(job: Job, reason: str) -> None:
 
 def _worker_loop() -> None:
     while True:
-        job, token, fn = _queue.get()
+        _priority, _seq_no, job, token, fn = _queue.get()
         try:
             if job.queue_token is not token:
                 # 旧票据：该任务排队期间被终止后又「继续」，本次重新入队已取代

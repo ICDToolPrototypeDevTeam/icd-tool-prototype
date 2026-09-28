@@ -3326,17 +3326,18 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
 
 ## 2026-09-28 多输入批量并行 · Step 2：进程内任务队列（`MAX_CONCURRENT_JOBS`）
 
-- **背景**：Step 1 已修掉跨任务运行参数串台（`app/runtime_context.py`），批量场景剩下的问题是「并发数不受控」—— 任务原先一登记就起自己的线程，提交 N 份输入即同时跑 N 份管线；单任务峰值内存数百 MB（RPDU 大输入反向管线实测约 519MB，见 09-23 条 BUG-20260923-008），2 核 2GB 目标机上多份叠加必然 swap 抖动 / 被 OOM 击杀。本步在**不引入外部依赖**（不引 Redis / MQ）的前提下，加一个进程内 FIFO 队列把并发上限定在 `MAX_CONCURRENT_JOBS`（默认 2）：批量提交按顺序逐个执行，不再一拥而上。Step 3（批量上传 + 前端）另行实施。
+- **背景**：Step 1 已修掉跨任务运行参数串台（`app/runtime_context.py`），批量场景剩下的问题是「并发数不受控」—— 任务原先一登记就起自己的线程，提交 N 份输入即同时跑 N 份管线；单任务峰值内存数百 MB（RPDU 大输入反向管线实测约 519MB，见 09-23 条 BUG-20260923-008），2 核 2GB 目标机上多份叠加必然 swap 抖动 / 被 OOM 击杀。本步在**不引入外部依赖**（不引 Redis / MQ）的前提下，加一个进程内队列把并发上限定在 `MAX_CONCURRENT_JOBS`（默认 2）：批量提交按顺序逐个执行，不再一拥而上。Step 3（批量上传 + 前端）另行实施。
 
 - **实现要点**：
-  1. **新增 `backend/app/job_scheduler.py`**：固定 N 个常驻 daemon 工作线程（`job-worker-N`）从 `queue.Queue` FIFO 领取执行函数；`MAX_CONCURRENT_JOBS` 未设置 / 非数字 / <1 一律回落默认 2（`_max_concurrent_jobs()`，与既有 env 解析约定一致）；线程在首次 `submit()` 时才启动（CLI 不触发），启动打一行 `[queue] 任务队列已启动：并发上限 N（MAX_CONCURRENT_JOBS）`。
+  1. **新增 `backend/app/job_scheduler.py`**：固定 N 个常驻 daemon 工作线程（`job-worker-N`）从 `queue.PriorityQueue` 领取执行函数（新任务按入队序号 FIFO，续跑插队，见要点 9）；`MAX_CONCURRENT_JOBS` 未设置 / 非数字 / <1 一律回落默认 2（`_max_concurrent_jobs()`，与既有 env 解析约定一致）；线程在首次 `submit()` 时才启动（CLI 不触发），启动打一行 `[queue] 任务队列已启动：并发上限 N（MAX_CONCURRENT_JOBS）`。
   2. **排队提示（入队即如实落 `pending`）**：`submit()` 无差别地把入队任务落为 `pending` 并把 `message` 写为「任务已排队，等待空闲执行槽位（并发上限 N）」—— 用户在前端/接口直接可辨「在排队而不是在跑」；`relaunch_from_manifest` **不再预置 `running`**。初版实现只对 fresh 的 `pending` 改 message，而续跑会先落 `running + 任务继续执行中`，于是续跑任务排队等待时在列表里显示成「正在分析」（用户实测指出）—— 复盘后改为入队统一落 pending，任务被工作线程真正领走时由管线线程入口落 `running + Step 1/N`。
   3. **票据防重复**：每次 `submit` 生成一个哨兵对象写入 `job.queue_token`（`job_manager` 新增字段，仅内存）；工作线程出队后先比对票据，不符即丢弃该条目 —— 「排队中被终止 → 继续」会先后入两张票，旧票必须作废，否则同一任务会被跑两遍（甚至被两个工作线程并发跑）。
   4. **出队跳过裁决**：出队时若任务已被终止（`canceled` / `cancel_event` 置位）、被放弃（`abandoned`）或被强杀（`hard_killed`），不执行，改为把原因写进该任务日志：`[queue] 任务在排队等待期间{已被终止|已被放弃|已被强制终止}，跳过执行（未开始任何步骤）`（经 `job_log_context` 归属本任务，日志面板与历史页可读）；若状态尚未落终态则补落 `canceled`，避免留下永远 `pending` 的幽灵任务。
   5. **排队中终止立即生效**：`jobs.cancel_v4_job` / `force_cancel_v4_job` 对 `thread_ident is None` 的排队任务（尚未绑定管线线程）直接落 `canceled`，报文为「任务已被用户终止（排队等待期间，未开始执行）」—— 不再等前面的任务跑完才生效。
   6. **排队中直接放弃**：`abandon_v4_job` 的门槛由「`pending` 且 `job_dir` 为空」改为「**没有任何线程在跑**」（`thread_ident is None`）。队列时代排队任务都已落盘 manifest，按旧门槛前端对 `pending` 显示的「放弃」按钮点了必 409（只能先终止再放弃两步走）；出队裁决已覆盖 `abandoned`，一步放弃因此安全（放弃与出队之间无锁，存在毫秒级竞态窗口：裁决刚通过即被放弃时任务会照常跑完并落 completed，无数据损坏，已在接口 docstring 注明）。
-  7. **两个启动入口接入**：`runner.launch_v4_pipeline`（反向）与 `launch_forward_pipeline`（正向）由「起线程」改为 `job_scheduler.submit(job, functools.partial(run_*_pipeline_thread, ...))`；`relaunch_from_manifest`（继续）先 `clear_cancel()`、重置 `resumed` / reuse 计数，再走同一入口重新入队（按重新入队时刻排到队尾；不再预置 RUNNING，见要点 2）。
+  7. **两个启动入口接入**：`runner.launch_v4_pipeline`（反向）与 `launch_forward_pipeline`（正向）由「起线程」改为 `job_scheduler.submit(job, functools.partial(run_*_pipeline_thread, ...))`；`relaunch_from_manifest`（继续）先 `clear_cancel()`、重置 `resumed` / reuse 计数，再走同一入口重新入队（续跑插队到队首，见要点 9；不再预置 RUNNING，见要点 2）。
   8. **单任务行为不变**：任务内部执行路径零改动；`MAX_CONCURRENT_JOBS=1` 即完全串行。CLI 直跑管线、不经过队列，行为与改动前逐字一致。工作线程常驻复用，要求执行函数返回前清干净自己的 thread-local —— `run_*_pipeline_thread` 的 finally 已做（job_log / runtime_context / thread ident 三处），本模块自身不绑定任何 thread-local。
+  9. **续跑插队（简单优先级）**：队列由 `queue.Queue` 改为 `queue.PriorityQueue`，键值 `(priority, seq, job, token, fn)`；`job.resumed` 的任务取 `_PRIORITY_RESUMED = 0`、新提交取 `_PRIORITY_NEW = 1` —— 续跑是用户「已经在做、被打断」的工作，此前重新入队要从队尾等起（用户指出）。同优先级内按唯一递增序号 `itertools.count()` 保持 FIFO（序号必须唯一：PriorityQueue 在优先级相同时会继续比较元组后续元素，不垫序号就会去比较不可排序的 `Job` 对象而 TypeError）。插队只作用于**等待队列**、不是抢占：执行槽位全忙时续跑同样要等某个任务结束（抢占意味着杀掉正在跑的管线、毁掉已完成的工作，不做）。
   - **边界说明**：串行化只限制「同时进行的任务数」，不改变单任务峰值内存 —— 2GB 机器上单份大输入能否跑完仍是内存问题（升内存仍是主解）；队列解决的是「多任务叠加把整机拖垮」。
 
 - **修改文件**：
@@ -3346,15 +3347,16 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   - 文档：`CHANGELOG.md`、`docs/architecture/api.md`、`docs/architecture/current-architecture.md`、`docs/development/development-log.md`（本条）。
 
 - **验证方式与结果**：
-  1. **调度器脚本** `cd backend && PYTHONIOENCODING=utf-8 python tests/verify_job_scheduler.py` → **ALL PASS（22 项）**（**已验证**）：并发上限 1 时任务严格串行（前一个不释放、后一个不执行）；排队 message 含「并发上限 1」；排队中 cancel 立即落 `canceled`、执行函数从未被调用、跳过原因写入该任务日志、随后可 abandon（用户流程闭环）；**排队中可直接 abandon**（不必先终止）且出队时跳过；续跑入队后落 `pending + 排队提示`；旧票据被丢弃且新票据恰好执行一次（留 0.3s 观察窗确认无重复）；抛异常的任务不杀死工作线程、后续任务照常执行；env 解析边界（未设置 / 非数字 / `0` / 负数 → 默认 2，显式值生效）。
-  2. **HTTP E2E** `cd backend && PYTHONIOENCODING=utf-8 python tests/verify_queue_e2e.py` → **ALL PASS（17 项）**（**已验证**）：本地 uvicorn 以 `MAX_CONCURRENT_JOBS=1` + `USE_MOCK_LLM=1` 启动，真实上传 FGMC-SDI-test 输入（`FGMC-SDI-test.docx` + `燃油EoICD_Publisher_Table-带标记.xlsx`）连提 3 个任务 —— B/C 入队后 message 为「任务已排队…（并发上限 1）」且 A 未结束时均 `pending`；A 运行中 B 走 `/cancel` 返回 200 且立即 `canceled`（不等 A 结束）、随后 `/abandon` 闭环；**C 排队中 `/cancel` → `/resume`：重新入队如实落 `pending + 排队提示`、`stage` 为空（不再显示为「正在分析」）**；A `completed` 后 C 自动开跑并 `completed`（旧队列条目被丢弃、跳过 B 不卡队列）；B 的 `/logs` 可读到「排队等待期间…跳过执行」；脚本收尾自动清理本次创建的 3 个任务目录。
-  3. **回归**：`python -m py_compile app/job_scheduler.py app/api/v4/runner.py app/api/v4/jobs.py app/job_manager.py` 通过（**已验证**）；CLI 路径不触发队列（`_ensure_workers` 仅在 `submit()` 内调用）；Compose 经 `env_file: ./backend/.env` 透传 `MAX_CONCURRENT_JOBS`，编排文件零改动（代码审查）。
-  4. 未覆盖：目标机（2C2G）上的真实批量实跑；真实 provider 下的批量提交（按项目约定由用户执行）。
+  1. **调度器脚本** `cd backend && PYTHONIOENCODING=utf-8 python tests/verify_job_scheduler.py` → **ALL PASS（25 项）**（**已验证**）：并发上限 1 时任务严格串行（前一个不释放、后一个不执行）；排队 message 含「并发上限 1」；排队中 cancel 立即落 `canceled`、执行函数从未被调用、跳过原因写入该任务日志、随后可 abandon（用户流程闭环）；**排队中可直接 abandon**（不必先终止）且出队时跳过；续跑入队后落 `pending + 排队提示`；旧票据被丢弃且新票据恰好执行一次（留 0.3s 观察窗确认无重复）；**续跑插队**（先入队的新任务仍在等待时，后入队的两个续跑任务先出队执行，顺序 = 续跑1 → 续跑2 → 更早入队的新任务，同优先级 FIFO 保持）；抛异常的任务不杀死工作线程、后续任务照常执行；env 解析边界（未设置 / 非数字 / `0` / 负数 → 默认 2，显式值生效）。
+  2. **HTTP E2E** `cd backend && PYTHONIOENCODING=utf-8 python tests/verify_queue_e2e.py` → **ALL PASS（24 项）**（**已验证**）：本地 uvicorn 以 `MAX_CONCURRENT_JOBS=1` + `USE_MOCK_LLM=1` 启动，真实上传 FGMC-SDI-test 输入（`FGMC-SDI-test.docx` + `燃油EoICD_Publisher_Table-带标记.xlsx`）连提 6 个任务 —— B/C 入队后 message 为「任务已排队…（并发上限 1）」且 A 未结束时均 `pending`；A 运行中 B 走 `/cancel` 返回 200 且立即 `canceled`（不等 A 结束）、随后 `/abandon` 闭环；**C 排队中 `/cancel` → `/resume`：重新入队如实落 `pending + 排队提示`、`stage` 为空（不再显示为「正在分析」）**；A `completed` 后 C 自动开跑并 `completed`（旧队列条目被丢弃、跳过 B 不卡队列）；**续跑插队**（D 占住唯一槽位；新任务 E 先入队、F 后「终止 → 继续」→ D 结束后 **F 先于 E 开跑**，F 运行期间 E 始终 `pending`，E 在 F 之后才执行并 `completed`）；B 的 `/logs` 可读到「排队等待期间…跳过执行」；脚本收尾自动清理本次创建的 6 个任务目录。
+  3. **现场复核（用户本地容器，并发上限 2、真实 provider）**（**已验证**）：用户反馈「前端看插队效果不明显」，经 `/api/v4/jobs` 与各任务日志（含 `ts`）还原时序 —— 4 个真实任务（`31e830d2` / `8748fe0a` / `f806b473` / `4ccec5c7`）；`31e830d2` 07:27:17 被终止后用户点「继续」，其重新入队条目在 07:28:41 一个槽位空出的瞬间**先于更早入队（07:27:05）的 `4ccec5c7` 开跑**（`resumed=True` 行 07:28:41.58，`4ccec5c7` 直到 07:29:43 才开跑）—— 插队在真实环境同样生效。直观感弱的两点原因：① 终止时释放的槽位在 90ms 内已被队列里先到的新任务 `f806b473` 领走（`/resume` 请求到达前），续跑只能等下一个空位；② 任务列表按 `created_at` 倒序，续跑任务停留在原（靠后）位置，开跑时徽章变化在下半屏不易察觉。
+  4. **回归**：`python -m py_compile app/job_scheduler.py app/api/v4/runner.py app/api/v4/jobs.py app/job_manager.py` 通过（**已验证**）；CLI 路径不触发队列（`_ensure_workers` 仅在 `submit()` 内调用）；Compose 经 `env_file: ./backend/.env` 透传 `MAX_CONCURRENT_JOBS`，编排文件零改动（代码审查）。
+  5. 未覆盖：目标机（2C2G）上的真实批量实跑；真实 provider 下的批量提交（按项目约定由用户执行）。
 
 - **遗留问题**：
   1. 队列只在**单进程内**有效：容器重启后排队任务与所有内存任务同待遇（`pending` 不在启动扫描范围，不载入）—— 与既有语义一致。
-  2. 队列为纯 FIFO，无优先级 / 无公平性保证；如批量使用中出现「大任务占满槽位、小任务久等」的反馈，再评估是否有必要引入优先级。
-  3. 「继续」重新入队排在**队尾**（不保留原排队位置）—— 符合「续跑是从头再排」的直觉，如需保位另议。
+  2. 仅有「续跑插队」这一条简单优先级规则；无多级优先级、无抢占、无公平性保证。如批量使用中出现「大任务占满槽位、小任务久等」的反馈，再评估是否扩展。
+  3. 插队只作用于等待队列：执行槽位全忙时续跑仍要等某个任务结束（抢占会毁掉正在跑的管线，不做）；同一任务多次续跑不保留原排队位置（每次都重新插队首）。
   4. `backend/tests/` 整体被 `.gitignore` 忽略：本轮新增的 `verify_queue_e2e.py` 与修正的 `verify_job_scheduler.py` 如需入库须 `git add -f`。
   5. Step 3（批量上传 + 前端 batch 展示）未开始；`I-2` 深修遗留的 R4（`JUDGE_PROVIDERS` 死写入）与 `M-5(c)` 死常量仍未清理。
 
