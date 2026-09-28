@@ -6,6 +6,8 @@ from __future__ import annotations
 import os
 from typing import Protocol, TypedDict
 
+from app.runtime_context import current_runtime
+
 
 # 截断自适应重试的 max_tokens 上限（各模型的 max output 防止无限倍增）
 MAX_TOKEN_CAP = 16384
@@ -25,7 +27,13 @@ class LLMClient(Protocol):
 
 
 def use_mock_llm() -> bool:
-    """USE_MOCK_LLM=1 -> True, default 0."""
+    """当前任务是否 mock：优先读线程内绑定的运行上下文，未绑定则回落 env。
+
+    回落分支即 CLI / 测试路径（不绑定上下文），行为与改动前完全一致。
+    """
+    ctx = current_runtime()
+    if ctx is not None and ctx.use_mock_llm is not None:
+        return ctx.use_mock_llm
     return os.getenv("USE_MOCK_LLM", "0") == "1"
 
 

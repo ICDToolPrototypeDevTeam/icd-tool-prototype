@@ -22,8 +22,8 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from app.job_log import bind_current_job
 from app.job_manager import raise_if_cancelled
+from app.runtime_context import bind_thread_context
 from app.v4.config import (
     FORWARD_AI_CANDIDATE_TOP_N,
     FORWARD_AI_MAX_INFLIGHT,
@@ -241,9 +241,9 @@ def review_blocks_with_ai(
         return result, False
 
     hits = 0
-    # 局部线程池同样不继承 thread-local：绑定后池内日志/进度才归属当前任务
+    # 局部线程池同样不继承 thread-local：绑定后池内日志/进度/运行上下文才归属当前任务
     with ThreadPoolExecutor(max_workers=FORWARD_AI_MAX_INFLIGHT) as pool:
-        futures = {pool.submit(bind_current_job(run), b): b for b in todo}
+        futures = {pool.submit(bind_thread_context(run), b): b for b in todo}
         for fut in as_completed(futures):
             raise_if_cancelled()      # 每个 block 边界一个取消检查点
             r, was_hit = fut.result()

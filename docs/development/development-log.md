@@ -3292,3 +3292,34 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   5. **本轮引入的、用户不可见的不一致**：`_fail_job` 先算 stage、再 `job.update(FAILED, …)` 覆盖 `job.message`，故失败后 `GET /jobs/{id}` 的顶层 `stage` 为空、而同响应 `error.stage` 有值。前端两个状态互斥渲染（`ProcessingView` 仅在 `pageState === 'processing'`），故**用户不可见**；列为跟进项（修法二选一：改 `_fail_job` 的 message 写法，或让查询侧读 `progress['message']`）。
 
 - **下一步建议**：1) 在服务器上按 `docs/testing/服务器部署验收清单.md` 手工验收并回填「实际」列；2) 前端行为一经浏览器实测，据实更新本纪要的「尚未验证」项；3) 如需继续压缩 MOCK 全流程耗时，另开 Issue 评估 EoICD 解析与 xlsx 生成；4) 按跟进 Issue 候选（`M-1` / `M-3` / `M-6` 代码半 / `I-2` 深修 优先）分单。
+
+## 2026-09-28 I-2 深修：运行时上下文隔离（线程局部 mock 绑定；多输入批量并行 · Step 1）
+
+- **背景**：09-22 轮把「MOCK 开关是进程级 `os.environ`、任务重叠会互相改写」判为已知限制（转跟进 Issue `I-2`），只在验收清单写明「两次提交不得重叠」。本轮启动「多输入批量并行」功能（队列调度 + 批量上传），`I-2` 是该功能的前置：批量场景下任务必然重叠，跨任务串台必须先修掉。本步（Step 1）只做上下文隔离，队列调度（Step 2）与批量上传 + 前端（Step 3）另行实施。
+
+- **实现要点**：
+  1. **新增 `backend/app/runtime_context.py`**：`RuntimeContext`（冻结 dataclass，字段 `use_mock_llm: Optional[bool]`，None = 回落 env）+ 线程内 `bind_runtime` / `restore_runtime` / `current_runtime`，以及 `bind_thread_context(fn)` —— 提交池任务前调用，把「当前 job 归属（复用 `app.job_log.bind_current_job`）+ 运行上下文」一起包进闭包；无任何绑定时原样返回 fn（CLI 零开销、行为不变）。
+  2. **模型工厂收敛**：`factory.use_mock_llm()` 改为「先读线程内上下文、未绑定回落 `os.environ`」。回落分支即 CLI / 测试路径，逐字不变。
+  3. **runner 两个线程函数**（反向 / 正向）不再写 `USE_MOCK_LLM` env，改为入口 `bind_runtime`、finally `restore_runtime`；`_begin_job_run` 必须在绑定之后调用（它读取生效后的 mock 模式，把「来源: 前端参数 / 继承容器配置」写进任务首行）。
+  4. **池提交点核查**：全库 7 处 `get_llm(` 中有 3 处执行在池内线程（`multi_judge._judge_with_provider_sync`、`re_review`、`coverage_reviewer`），而池提交点只有 2 处（`degradation/concurrency._submit_with_gate`、`coverage_reviewer` 的复核池）—— 两处换成 `bind_thread_context` 即封住全部池内线程，`get_llm` 调用点本身零改动。
+  5. **两层并发关系核实**（回答「与超时降级回补是否混淆」）：任务工作线程是父，进程级共享的 drain 池（6 worker）+ inflight 信号量是子，不存在「任务提交给任务池」的嵌套提交；共享的是**背压预算**（有意设计），不是数据；每任务的 `ctx.drain` 在管线内自建。队列化后并发任务共用 drain 池只意味着 LLM 调用总额受限，不会串台。
+
+- **修改文件**：
+  - 后端新增：`backend/app/runtime_context.py`；
+  - 后端修改：`backend/app/api/v4/runner.py`、`backend/app/api/v4/coverage.py`、`backend/app/api/v4/completeness.py`、`backend/app/v4/llm/factory.py`、`backend/app/v4/degradation/concurrency.py`、`backend/app/v4/comparison/coverage_reviewer.py`；
+  - 测试（gitignored，未纳入版本控制）：`backend/tests/verify_runtime_context.py`（新增）；
+  - 文档：`CHANGELOG.md`、`docs/development/development-log.md`（本条）。
+
+- **验证方式与结果**：
+  1. 单测 `cd backend && PYTHONIOENCODING=utf-8 python tests/verify_runtime_context.py` → **17/17 PASS**（**已验证**；覆盖未绑定回落 env 三种取值、绑定优先于 env、restore 后重新回落、两线程并发各读各值、嵌套绑定、池传播 + 池线程复用无残留 + 未包装反例回落 env、工厂 mock / 真实分支）。
+  2. API 路径 A（前端参数优先，**已验证**）：本地 uvicorn 以 `USE_MOCK_LLM=0` + 三个 Key 全空作护栏启动，提交任务时显式传 `use_mock_llm=true`（FGMC-SDI-test 输入）→ 任务 `completed`、首行 `mock=True (来源: 前端参数)`、`error=null`。该任务与下述任务 B 走同一处无 try 保护的 `get_llm` 构造点（`review_agent.py:53`）而未失败，证明绑定上下文确实压过 env；Key 全空使「真实调用假成功」不可能发生（走了真实分支必像任务 B 一样报 Key 缺失）。
+  3. API 路径 B（env 回落，**已验证**）：同护栏环境下提交任务且**不带** `use_mock_llm` 字段 → 快速 `failed`，错误 `DEEPSEEK_API_KEY not set`（stage=multi_judge）—— 回落分支未被破坏，且未显式 mock 时绝不静默走 mock。
+  4. CLI 等价（**已验证**）：`USE_MOCK_LLM=1` 直跑 CLI 反向管线（同一份 FGMC-SDI-test 输入）→ exit 0、全部产物落盘、`llm_cache.jsonl` 条目 `model=mock`（证明走 mock 分支、无真实调用）。CLI 不绑定上下文、回落 env，与改动前一致。
+  5. 未覆盖：真实 provider A/B **未跑**（按项目约定由用户执行）；批量并发下的实跑待 Step 2 调度器落地后验证。
+
+- **遗留问题**：
+  1. **R4（本轮审计发现，拟转单独 Issue）**：runner 对 `JUDGE_PROVIDERS` 的 `os.environ` 写入是**死代码** —— 该常量在 `config.py:162` 于导入时求值，导入链在进程启动即完成（`main` → `api.v4.router` → `coverage` → `runner` → `pipeline` → `config`），此后写入无人读取；即前端 `judge_providers` 字段从未生效（前端目前也不发该字段，恒为 Form 默认 `["deepseek"]`）。若将来要让该字段生效，必须同时改 `coverage.py` 的 Form 默认值（否则未显式传参的请求会把 .env 配置的多家静默缩成 1 家）。
+  2. 本步只做 Step 1；队列调度（Step 2）、批量上传 + 前端（Step 3）未开始。
+  3. `config.USE_MOCK_LLM` 死常量（09-22 轮 `M-5(c)`）仍在，本步未动。
+
+- **下一步建议**：1) 本步修复随镜像交付后，验收清单第 3 行的「两次提交不得重叠」前提可放开（交付前仍照旧执行）；2) 按计划继续 Step 2（进程内 job 队列，`MAX_CONCURRENT_JOBS=2`）与 Step 3（`batch_id` + 前端批量上传）；3) R4 与 `M-5(c)` 死常量可分一单清理。

@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-09-28
+
+### Fixed
+
+- 修复**并行任务之间运行参数互相串台**的问题（「MOCK 开关是进程级状态」这一已知限制的深修，也是「多输入批量并行」的前置修复）。任务启动时原先把 MOCK 模式直接写进**进程环境变量** `USE_MOCK_LLM`（`os.environ`），而这是进程级共享状态：两个任务重叠运行时会互相覆盖，把只打算开 MOCK 的任务切去发起真实调用、或反之——09-22 轮曾以「验收须等前一次任务结束」的约束规避。现在改为**线程内绑定的运行上下文**（新增 `app/runtime_context.py`：`bind_runtime` / `restore_runtime`，模型工厂 `use_mock_llm()` 优先读上下文、未绑定回落进程 env），任务线程在入口绑定自己的参数快照；线程池任务在提交时经 `bind_thread_context` 把提交方的快照一并带入（池内工作线程不继承 thread-local）。CLI 与单测路径不绑定上下文、行为与改动前逐字不变，单任务使用方式不受影响。该改动需**重建后端镜像**才生效。详见 `docs/development/development-log.md`。
+
 ## [Unreleased] - 2026-09-27
 
 ### Added
