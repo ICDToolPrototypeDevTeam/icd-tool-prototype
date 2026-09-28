@@ -16,7 +16,7 @@ from __future__ import annotations
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 
-from app.job_log import bind_current_job
+from app.runtime_context import bind_thread_context
 from app.v4.degradation.config import DegradationConfig
 
 
@@ -53,12 +53,13 @@ def _submit_with_gate(executor: ThreadPoolExecutor, fn, *args) -> Future:
     The semaphore is released when the future completes (success or failure).
     This prevents unbounded task accumulation when many cases are queued.
 
-    池内工作线程不继承 thread-local，因此提交前把 fn 包成「在提交方 job 上下文
-    内执行」，使 drain / re-review 的日志与进度归到同一个任务（无绑定 job 时
-    bind_current_job 原样返回 fn，CLI 路径行为不变）。
+    池内工作线程不继承 thread-local，因此提交前用 bind_thread_context 把 fn 包成
+    「在提交方的 job 归属 + 运行上下文内执行」：池内日志/进度归到同一个任务，
+    且池内构造的 LLM 客户端读到的仍是本任务的 mock 模式（不写进程 env）。
+    无任何绑定时原样返回 fn，CLI 路径行为不变。
     """
     sema = _get_inflight_sema()
     sema.acquire()
-    future = executor.submit(bind_current_job(fn), *args)
+    future = executor.submit(bind_thread_context(fn), *args)
     future.add_done_callback(lambda _: sema.release())
     return future

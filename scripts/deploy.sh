@@ -200,7 +200,8 @@ info "宿主内存 ${MEM_TOTAL_MB}MB → 容器上限 ${MEM_LIMIT_MB}m（swap �
 if [ "$MEM_TOTAL_MB" -gt 0 ] && [ "$MEM_TOTAL_MB" -lt 2048 ]; then
   warn "宿主内存 ${MEM_TOTAL_MB}MB 低于建议的 8GB（见 部署说明.md §2）：
       十万条级 EoICD 输入仍可能在容器内被 OOM 杀掉。这样只会让那个任务变成「已中断」
-      （整机不再假死、随时可「放弃」），任务本身跑不完——更大输入请先升内存或拆分输入。"
+      （整机不再假死、随时可「放弃」），任务本身跑不完——更大输入请先升内存或拆分输入。
+      批量提交时建议把 backend/.env 的 MAX_CONCURRENT_JOBS 设为 1（一次只跑一个任务，避免内存叠加）。"
 fi
 
 if [ "$NO_START" = "1" ]; then

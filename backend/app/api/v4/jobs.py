@@ -262,15 +262,20 @@ def abandon_v4_job(job_id: str):
     ``abandoned`` 是这套状态机里的**终态**：任务被中断/终止后，用户要么续跑，
     要么放弃。因此 ``canceled`` 同样可以放弃 —— 否则已终止的任务没有收尾方式。
 
-    另有一类 ``pending`` 也可放弃：**从未启动过**的任务（``job_dir is None``，
-    即管线线程还没跑过 ``set_dir``）。它没有线程，「终止」对它无效（只是置一个
-    没人检查的标志），若不在这里放行，这条记录会一直挂在任务列表里且没有任何
-    操作能去掉它。``job_dir`` 非空的 ``pending`` 仍在启动窗口内，那属于运行中
-    的任务，只能先终止（``cancel``）—— 于是这里的门槛实际是「没有任何线程在跑」。
+    排队中的 ``pending`` 任务（已入队、尚未绑定管线线程）同样可放弃 —— 工作线程
+    出队时会按状态跳过执行并往该任务日志写一行原因（见 :mod:`app.job_scheduler`），
+    不必先「终止」再「放弃」两步走。**从未启动过**的 ``pending``（``job_dir is
+    None``）也在此列：它没有线程，若不放行，这条记录会一直挂在任务列表里且没有
+    任何操作能去掉它。于是这里的门槛统一为「没有任何线程在跑」（``thread_ident
+    is None``）—— ``running`` 的任务总有线程；``pending`` 而无线程即排队中或
+    从未启动。放弃与工作线程出队之间没有锁，存在毫秒级竞态窗口（出队裁决刚通过
+    即被放弃），此时任务会照常跑完并落 completed，无数据损坏。
     """
     job = _get_job(job_id)
-    never_launched = job.status == JobStatus.PENDING and job.job_dir is None
-    if job.status not in (JobStatus.INTERRUPTED, JobStatus.CANCELED) and not never_launched:
+    queued_unstarted = (
+        job.status == JobStatus.PENDING and job.thread_ident is None
+    )
+    if job.status not in (JobStatus.INTERRUPTED, JobStatus.CANCELED) and not queued_unstarted:
         raise HTTPException(
             status_code=409,
             detail=f'job not abandonable: status={job.status.value}',
@@ -286,15 +291,21 @@ def abandon_v4_job(job_id: str):
 
 @router.post('/jobs/{job_id}/cancel', response_model=V4AnalyzeResponse)
 def cancel_v4_job(job_id: str):
-    """终止一个运行中的任务（协作式）。
+    """终止一个任务（协作式）。
 
-    只置取消标志，管线在下一个检查点（步骤开头 / 每个 case）抛出
+    运行中的任务：只置取消标志，管线在下一个检查点（步骤开头 / 每个 case）抛出
     ``JobCancelled`` 并以 ``canceled`` 结束。**不删除**已产出的文件，也不写
     ``job.result``（避免半成品被当成结果展示）。
 
-    返回体里的 ``status`` 是**当前真实状态**（``running`` / ``pending``），不是
-    虚构的 ``canceling``：前端靠 ``cancel_requested`` 展示「正在终止…」，
-    避免再出现「同一个词表示两件事」的歧义。
+    **排队等待中**的任务（已入队但尚未绑定管线线程，``thread_ident is None``）：
+    没有检查点会消费取消标志，直接落 ``canceled`` 终态，工作线程出队时按状态
+    跳过执行（见 ``app.job_scheduler``）——否则用户要在队列里干等到轮到自己，
+    期间既看不到进度也处理不了这条记录（「放弃」另有一步到位的入口，见
+    :func:`abandon_v4_job`）。
+
+    返回体里的 ``status`` 是**当前真实状态**（``running`` / ``pending`` /
+    排队任务立即终止后的 ``canceled``），不是虚构的 ``canceling``：前端靠
+    ``cancel_requested`` 展示「正在终止…」，避免再出现「同一个词表示两件事」的歧义。
     """
     job = _get_job(job_id)
     if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
@@ -304,6 +315,18 @@ def cancel_v4_job(job_id: str):
         )
 
     job.request_cancel()
+    if job.thread_ident is None:
+        # 还没绑定管线线程 = 还没真正开始执行（排队等待中）。竞态说明：若此刻
+        # 工作线程刚好在「出队→绑线程」的窗口里，它会先被状态覆盖回 running，
+        # 但取消标志已置位，管线第一个检查点立刻再落回 canceled —— 两种时序
+        # 都收敛到「未执行任何步骤即终止」。
+        job.update(JobStatus.CANCELED, '任务已被用户终止（排队等待期间，未开始执行）')
+        return V4AnalyzeResponse(
+            job_id=job.job_id,
+            status=job.status.value,
+            message='任务尚未开始执行，已直接终止（已产出文件保留）',
+        )
+
     return V4AnalyzeResponse(
         job_id=job.job_id,
         status=job.status.value,
@@ -322,6 +345,9 @@ def force_cancel_v4_job(job_id: str):
 
     作用范围严格限定在**这一个任务**：不重启进程、不改全局状态、不影响其他任务
     与后续「重新执行」。**不删除**已产出的文件，也不写 ``job.result``。
+
+    排队等待中的任务同样可强制终止：无绑定线程可注入，直接落 ``canceled`` 终态，
+    工作线程出队时跳过执行。
     """
     job = _get_job(job_id)
     if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
@@ -337,7 +363,7 @@ def force_cancel_v4_job(job_id: str):
         message=(
             '已强制终止：任务线程已中断（已产出文件保留，不支持续跑）'
             if injected
-            else '已强制终止：任务已标记终止（线程已结束，无可中断的执行）'
+            else '已强制终止：任务已标记终止（无正在执行的线程，已产出文件保留）'
         ),
     )
 

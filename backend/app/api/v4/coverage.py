@@ -3,7 +3,8 @@
 
 ADR-001 Issue A：
 - multipart 字段：hlr_word_file 必填；publisher/subscriber 二选一；traceability_files 可选；
-- judge_providers / use_mock_llm 由前端可选；线程内通过 runner 写入 env 并恢复；
+- judge_providers / use_mock_llm 由前端可选；use_mock_llm 由 runner 在本任务线程内
+  绑定运行上下文（见 app/runtime_context.py；不写进程 env，支持并发任务）；
 - 仅校验文件扩展名 / 白名单 provider；不做深度字段解析（V4 pipeline 内部自检）。
 """
 from __future__ import annotations
@@ -257,7 +258,7 @@ async def coverage_analysis(
                 ),
             )
 
-    # —— 后台线程跑 V4 管线（使用 runner 的 env 保存/恢复保护） ——
+    # —— 后台线程跑 V4 管线（use_mock_llm 由 runner 在线程内绑定运行上下文） ——
     launch_v4_pipeline(
         job=job,
         job_dir=job_dir,

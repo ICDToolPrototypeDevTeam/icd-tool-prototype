@@ -78,7 +78,8 @@ V4 反向管线 pipeline（6 步）
 | `main.py`      | FastAPI 应用入口，仅 CORS + `/api/v4` 路由装载 |
 | `job_manager.py` | 内存任务状态管理（`JobStatus` / `Job` / `JobManager`） |
 | `job_log.py`   | 进程级任务日志缓冲、stdout/stderr Tee、线程归属与 job.log 落盘；不依赖任何 `app.*` 模块 |
-| `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（后台线程 + 7 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` |
+| `job_scheduler.py` | 进程内任务队列：固定 `MAX_CONCURRENT_JOBS`（默认 2）个常驻工作线程领取任务（新任务 FIFO，续跑任务插队首，不抢占执行中任务）；出队时做票据比对（同一任务的旧条目丢弃）与跳过裁决（排队期间被终止 / 放弃的任务不执行，原因写入该任务日志） |
+| `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（经 `job_scheduler` 入队 + 7 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` |
 | `v4/pipeline.py` | V4 管线编排：反向 `run_reverse_pipeline`（6 步）+ 正向 `run_forward_pipeline`（8 步） |
 | `v4/config.py` | V4 env 加载（DEEPSEEK_* / USE_MOCK_LLM / JUDGE_PROVIDERS）+ 业务常量 |
 | `v4/errors.py` | 管线异常 → 面向用户的错误分类与建议；复用 `degradation.fallback.classify_exception` |
@@ -243,7 +244,7 @@ backend/output/v4/{job_id}/
 3. 暂不实现用户认证和权限管理；
 4. 暂不实现多用户并发任务管理；
 5. 暂不实现云端部署和生产环境运维能力；
-6. 暂不实现复杂任务队列。
+6. 暂不实现复杂任务队列 —— 当前仅有单进程内的队列 + 并发上限 + 一条简单的优先级规则「续跑任务插队首」（`job_scheduler.py`，见第 5 节），无通用多级优先级、无抢占、无持久化、无跨进程调度。
 
 如后续需要扩展上述能力，应通过新的 Issue 或 ADR 明确设计后再实施。
 
@@ -266,11 +267,12 @@ backend/app/
 ├── main.py                 # 顶层 FastAPI 入口（仅 CORS + V4 router 装载）
 ├── job_manager.py          # 共享 Job / JobManager（JobStatus 唯一来源）
 ├── job_log.py              # 进程级日志缓冲 / stdout-stderr Tee / job.log 落盘与恢复（不 import app.*）
+├── job_scheduler.py        # 进程内任务队列（常驻工作线程 + 票据 + 出队跳过裁决；并发上限 MAX_CONCURRENT_JOBS）
 ├── api/
 │   └── v4/
 │       ├── router.py       # V4 路由聚合（health + coverage + jobs + outputs）
 │       ├── schemas.py      # V4Job* Pydantic
-│       ├── runner.py       # V4 后台线程 + env 保存/恢复 + 7 个 derive_* 函数
+│       ├── runner.py       # V4 任务入队（job_scheduler）+ 线程函数（runtime 上下文绑定 + 7 个 derive_* 函数）
 │       ├── coverage.py     # POST /api/v4/coverage-analysis
 │       ├── jobs.py         # GET /api/v4/jobs/{id}[/result]
 │       └── outputs.py      # GET /api/v4/jobs/{id}/outputs/{kind}

@@ -1,22 +1,27 @@
 # -*- coding: utf-8 -*-
 """V4.0 后台线程 runner。
 
-ADR-001 Issue A 修正 #2：
-- 进入线程前先保存 JUDGE_PROVIDERS / USE_MOCK_LLM 等环境变量旧值；
-- try ... finally 中按"原值是否为 None"分别 pop 或赋值恢复；
-- 仅做最小保护；并发彻底隔离（thread-local env）由后续 Issue 处理。
+ADR-001 Issue A 修正 #2（多输入批量并行 Step 1 收口）：
+- ``USE_MOCK_LLM`` 不再写进程 env，改由 :mod:`app.runtime_context` 在本任务的
+  线程内绑定 —— 原先「同一时刻只能有一个分析任务在跑（单飞）」的限制随之解除；
+- ``JUDGE_PROVIDERS`` 的 env 保存/恢复保留原样：pipeline 读的是 import 期常量，
+  该写入对本次运行无影响（单开 Issue 处理）。
+
+多输入批量并行 Step 2：``launch_*_pipeline`` 不再直接起 daemon 线程，改为交给
+:mod:`app.job_scheduler` 的进程内队列（并发上限 ``MAX_CONCURRENT_JOBS``，默认 2）。
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import sys
-import threading
 import traceback
 from pathlib import Path
 from typing import Optional
 
+from app import job_scheduler
 from app.job_log import (
     LOG_FILE_NAME,
     bind_job_log,
@@ -25,6 +30,7 @@ from app.job_log import (
     restore_job_log,
 )
 from app.job_manager import Job, JobCancelled, JobStatus, job_manager
+from app.runtime_context import RuntimeContext, bind_runtime, restore_runtime
 from app.v4.errors import classify_pipeline_error
 from app.v4.llm.factory import use_mock_llm as mock_mode_enabled
 from app.v4.pipeline import run_forward_pipeline, run_reverse_pipeline
@@ -89,7 +95,8 @@ def _require_file(job_dir: Path, rel: Optional[str]) -> Optional[Path]:
 def _begin_job_run(job: Job, job_dir: Path, requested_mock: Optional[bool]) -> Optional[tuple]:
     """进入管线线程的统一开场：绑定日志上下文 + 写日志头 + 记录模式与来源。
 
-    必须在调用方设置 ``USE_MOCK_LLM`` **之后**调用，否则记录的模式不准。
+    必须在调用方 :func:`app.runtime_context.bind_runtime` **之后**调用，否则记录
+    的模式不准（``mock_mode_enabled()`` 读的是线程内绑定值）。
     ``requested_mock`` 是前端传来的参数（``None`` 表示未传、沿用容器配置）；
     记下来源是为了让「容器配置」与「前端开关」谁生效在日志面板里一眼可辨 ——
     本次实测中曾因本地容器未关闭而误判 mock 状态，正是缺少这条信息。
@@ -385,7 +392,7 @@ def run_v4_pipeline_thread(
     controller_profile: str = "ams",
     no_refine: bool = False,
 ) -> None:
-    """在后台线程内跑 V4 反向管线；带 env 保存/恢复；异常 → job.status=FAILED。"""
+    """在后台线程内跑 V4 反向管线；线程内绑定运行上下文；异常 → job.status=FAILED。"""
     output_dir = job_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -395,20 +402,16 @@ def run_v4_pipeline_thread(
     reg.load_all(Path(__file__).resolve().parents[2] / "v4" / "profiles")
     profile = reg.get_or_raise(controller_profile)
 
-    # —— ADR-001 Issue A 修正 #2：进入线程前保存旧 env；finally 中按 None/赋值恢复 ——
+    # 运行参数在本任务自己的线程内绑定（不再写进程 env，故任务可并发而不串台）；
+    # 绑定是单次赋值，放在 try 之前，finally 中无条件恢复。
+    prev_runtime = bind_runtime(RuntimeContext(use_mock_llm=use_mock_llm))
     saved_judge_providers = os.environ.get("JUDGE_PROVIDERS")
-    saved_use_mock_llm = os.environ.get("USE_MOCK_LLM")
     prev_binding = None
     try:
         if judge_providers:
             os.environ["JUDGE_PROVIDERS"] = ",".join(judge_providers)
-        # 注意：USE_MOCK_LLM 是进程级变量，本任务在 finally 之前一直「占有」它。
-        # 由此本工具假定同一时刻只有一个分析任务在跑（单飞）：两个任务重叠时，
-        # 后提交者会改写先提交者的 mock 模式，两边的日志与结果页警告都会失真（I-2）。
-        if use_mock_llm is not None:
-            os.environ["USE_MOCK_LLM"] = "1" if use_mock_llm else "0"
 
-        # 必须在设置 env 之后调用：_begin_job_run 会读取生效后的 USE_MOCK_LLM
+        # 必须在绑定运行上下文之后调用：_begin_job_run 读取生效后的 mock 模式
         prev_binding = _begin_job_run(job, job_dir, use_mock_llm)
 
         job.update(JobStatus.RUNNING, "Step 1/6: Parsing input files")
@@ -495,15 +498,12 @@ def run_v4_pipeline_thread(
         # 恢复线程绑定，避免污染同线程的后续任务
         if prev_binding is not None:
             restore_job_log(prev_binding)
-        # —— ADR-001 Issue A 修正 #2：env 恢复 ——
+        restore_runtime(prev_runtime)
+        # —— ADR-001 Issue A 修正 #2：JUDGE_PROVIDERS env 恢复 ——
         if saved_judge_providers is None:
             os.environ.pop("JUDGE_PROVIDERS", None)
         else:
             os.environ["JUDGE_PROVIDERS"] = saved_judge_providers
-        if saved_use_mock_llm is None:
-            os.environ.pop("USE_MOCK_LLM", None)
-        else:
-            os.environ["USE_MOCK_LLM"] = saved_use_mock_llm
 
 
 def launch_v4_pipeline(
@@ -517,9 +517,14 @@ def launch_v4_pipeline(
     use_mock_llm: Optional[bool],
     controller_profile: str = "ams",
     no_refine: bool = False,
-) -> threading.Thread:
-    """工厂：返回后台线程对象；前端已启动并发由 daemon 线程承载。"""
-    # 落盘参数快照（供进程重启后按原参数继续执行）；必须在 start 之前完成，
+) -> None:
+    """工厂：落盘参数快照 + 登记，然后把任务交给进程内队列（job_scheduler）。
+
+    并发上限由 ``MAX_CONCURRENT_JOBS`` 控制（默认 2）。此前是「登记后立即起
+    daemon 线程」——单个任务没问题，批量提交会把部署机（2C2G）同时压上多个
+    300~500MB 的管线。返回值恒为 None（三个调用方均不使用）。
+    """
+    # 落盘参数快照（供进程重启后按原参数继续执行）；必须在入队之前完成，
     # 保证 POST 返回时 manifest 已存在。
     job.set_dir(job_dir, {
         "hlr_path": _rel_path(job_dir, hlr_path),
@@ -534,21 +539,20 @@ def launch_v4_pipeline(
     # 登记即「已承诺运行」：在此之前失败的上传请求不会留下 pending 幽灵任务
     # （见 JobManager.new_job）。
     job_manager.register(job)
-    t = threading.Thread(
-        target=run_v4_pipeline_thread,
-        args=(job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir, judge_providers, use_mock_llm, controller_profile, no_refine),
-        daemon=True,
-    )
-    t.start()
-    return t
+    job_scheduler.submit(job, functools.partial(
+        run_v4_pipeline_thread,
+        job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir,
+        judge_providers, use_mock_llm, controller_profile, no_refine,
+    ))
 
 
-def relaunch_from_manifest(job: Job, job_dir: Path) -> threading.Thread:
+def relaunch_from_manifest(job: Job, job_dir: Path) -> None:
     """按参数快照重启一个被中断的任务。
 
     参数完全取自 ``job.params``（不接受调用方覆盖），保证恢复后的 label 缓存
     等语义与首次运行一致。先校验输入文件，缺失则抛 FileNotFoundError 且任务
-    状态保持不变；校验通过后才置 RUNNING 并启动线程。
+    状态保持不变；校验通过后才入队（不预置 running —— 入队即落 pending +
+    排队提示，任务真正开跑要等队列出空位，由管线线程入口落 running）。
     """
     params = job.params or {}
     hlr_path = _require_file(job_dir, params.get("hlr_path"))
@@ -568,7 +572,9 @@ def relaunch_from_manifest(job: Job, job_dir: Path) -> threading.Thread:
     # 恢复运行标记 + 计数重置（二次恢复不得累加上一轮的计数）
     job.resumed = True
     job.reuse = {"reused": 0, "rerun": 0}
-    job.update(JobStatus.RUNNING, "任务继续执行中")
+    # 不在此处预置 RUNNING：入队由 job_scheduler.submit 统一落 pending + 排队提示，
+    # 排队期间前端如实显示「等待开始 / 任务已排队…」；真正开跑由管线线程入口
+    # 落 running + Step 1/N（否则排队等待时会被显示成「正在分析」）。
 
     if job.task_type == "completeness":
         device_icd = _require_file(job_dir, params.get("device_icd_trace_file"))
@@ -684,20 +690,15 @@ def run_forward_pipeline_thread(
     system_device_trace_file: Optional[Path],
     use_mock_llm: Optional[bool],
 ) -> None:
-    """在后台线程内跑 V4 正向完整性管线；带 env 保存/恢复；异常 → FAILED。"""
+    """在后台线程内跑 V4 正向完整性管线；线程内绑定运行上下文；异常 → FAILED。"""
     output_dir = job_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    saved_use_mock_llm = os.environ.get("USE_MOCK_LLM")
+    # 同反向：运行参数绑定在本任务线程内，不写进程 env
+    prev_runtime = bind_runtime(RuntimeContext(use_mock_llm=use_mock_llm))
     prev_binding = None
     try:
-        # 注意：USE_MOCK_LLM 是进程级变量，本任务在 finally 之前一直「占有」它。
-        # 由此本工具假定同一时刻只有一个分析任务在跑（单飞）：两个任务重叠时，
-        # 后提交者会改写先提交者的 mock 模式，两边的日志与结果页警告都会失真（I-2）。
-        if use_mock_llm is not None:
-            os.environ["USE_MOCK_LLM"] = "1" if use_mock_llm else "0"
-
-        # 必须在设置 env 之后调用：_begin_job_run 会读取生效后的 USE_MOCK_LLM
+        # 必须在绑定运行上下文之后调用：_begin_job_run 读取生效后的 mock 模式
         prev_binding = _begin_job_run(job, job_dir, use_mock_llm)
 
         job.update(JobStatus.RUNNING, "Step 1/8: Parsing input files")
@@ -763,10 +764,7 @@ def run_forward_pipeline_thread(
             pass
         if prev_binding is not None:
             restore_job_log(prev_binding)
-        if saved_use_mock_llm is None:
-            os.environ.pop("USE_MOCK_LLM", None)
-        else:
-            os.environ["USE_MOCK_LLM"] = saved_use_mock_llm
+        restore_runtime(prev_runtime)
 
 
 def launch_forward_pipeline(
@@ -779,8 +777,8 @@ def launch_forward_pipeline(
     device_icd_trace_file: Optional[Path],
     system_device_trace_file: Optional[Path],
     use_mock_llm: Optional[bool],
-) -> threading.Thread:
-    """工厂：返回正向后台线程对象。"""
+) -> None:
+    """工厂：落盘参数快照 + 登记，然后交给进程内队列；语义同 launch_v4_pipeline。"""
     # 落盘参数快照，语义同反向管线（见 launch_v4_pipeline）。
     job.set_dir(job_dir, {
         "hlr_path": _rel_path(job_dir, hlr_path),
@@ -793,13 +791,8 @@ def launch_forward_pipeline(
     })
     # 登记即「已承诺运行」；语义同 launch_v4_pipeline
     job_manager.register(job)
-    t = threading.Thread(
-        target=run_forward_pipeline_thread,
-        args=(
-            job, job_dir, hlr_path, publisher_path, subscriber_path,
-            analysis_mode, device_icd_trace_file, system_device_trace_file, use_mock_llm,
-        ),
-        daemon=True,
-    )
-    t.start()
-    return t
+    job_scheduler.submit(job, functools.partial(
+        run_forward_pipeline_thread,
+        job, job_dir, hlr_path, publisher_path, subscriber_path,
+        analysis_mode, device_icd_trace_file, system_device_trace_file, use_mock_llm,
+    ))

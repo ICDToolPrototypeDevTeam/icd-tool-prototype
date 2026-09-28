@@ -101,6 +101,11 @@ class Job:
         # thread_ident 是本任务管线线程的 ident，供注入 JobCancelled
         self.hard_killed: bool = False
         self.thread_ident: Optional[int] = None
+        # 队列代次票据（仅内存，多输入批量并行 Step 2）：由
+        # :func:`app.job_scheduler.submit` 每次入队时写入；工作线程出队时比对，
+        # 不一致说明这张票已被「终止后又继续」的重新入队取代，跳过执行 ——
+        # 防止同一任务被两张票跑两遍（见 app/job_scheduler.py）
+        self.queue_token: Optional[object] = None
         # 节流窗口的起点取「构造时刻」：若取 0.0，首条进度必然满足
         # ``now - 0.0 >= 5.0``（time.monotonic 是系统运行时长），
         # 于是每个任务的第一次上报都会写盘，节流对首个 case 形同虚设。

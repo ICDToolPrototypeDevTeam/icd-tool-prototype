@@ -6,7 +6,8 @@
 
 - hlr_word_file 必填（.docx）；
 - eoicd_publisher_file / eoicd_subscriber_file 二选一（.xlsx）；
-- use_mock_llm 由前端可选，线程内通过 runner 写入 env 并恢复。
+- use_mock_llm 由前端可选，由 runner 在本任务线程内绑定运行上下文
+  （见 app/runtime_context.py；不写进程 env，支持并发任务）。
 
 正向缺陷修正 #5：analysis_mode 不再由前端指定（删除该字段，前端仍可透传但被忽略）。
 分析模式按上传的追溯表自动判定：
