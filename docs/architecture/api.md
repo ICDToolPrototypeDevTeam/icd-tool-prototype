@@ -25,8 +25,8 @@ API 设计应遵守以下原则：
 | `/api/v4/jobs/{job_id}`                        | `GET`  | 查询任务状态                          |
 | `/api/v4/jobs/{job_id}/logs`                   | `GET`  | 任务日志增量拉取（`offset` 取上次返回的 `next_offset`，首次 0；`limit` 默认 500、上限 2000；进程重启后可从 `job.log` 尾部恢复） |
 | `/api/v4/jobs/{job_id}/resume`                 | `POST` | 继续被中断 / 被终止的任务（按 manifest 参数快照重跑，已完成的 LLM 判定与已落盘的解析产物复用缓存） |
-| `/api/v4/jobs/{job_id}/abandon`                | `POST` | 放弃被中断 / 被终止 / 从未启动的任务（仅标记，不删除文件） |
-| `/api/v4/jobs/{job_id}/cancel`                 | `POST` | 终止运行中的任务（`running` / `pending` → 200，其余状态 → 409；不删除任何文件，任务最终以 `canceled` 结束） |
+| `/api/v4/jobs/{job_id}/abandon`                | `POST` | 放弃被中断 / 被终止 / 排队中的任务（门槛 = 没有任何线程在跑；仅标记，不删除文件） |
+| `/api/v4/jobs/{job_id}/cancel`                 | `POST` | 终止运行中 / 排队中的任务（`running` / `pending` → 200，其余状态 → 409；排队中（尚未绑定管线线程）的任务**立即**落 `canceled`、不等出队，运行中的任务在检查点停止；不删除任何文件，任务最终以 `canceled` 结束） |
 | `/api/v4/jobs/{job_id}/result`                 | `GET`  | 查询任务处理结果摘要（按 `task_type` 分发正确性/完整性两种 schema） |
 | `/api/v4/jobs/{job_id}/outputs/eoicd-xlsx`     | `GET`  | 下载 EoICD 条目化清单（xlsx）      |
 | `/api/v4/jobs/{job_id}/outputs/consensus-docx` | `GET`  | 下载多模型共识差异分析报告（docx）            |
@@ -127,6 +127,8 @@ GET /api/v4/jobs/{job_id}
 `mock` 表示本次运行是否按 MOCK 模式执行（结果页据此提示「模拟数据不可用于验收」）；`cancel_requested` 表示已请求终止、正等待管线在检查点停止，前端据此把终止按钮显示为「正在终止…」。
 
 `canceled` 表示运行中的任务被用户主动终止（`POST /api/v4/jobs/{job_id}/cancel`，见第 2 节）；它与 `abandoned` 语义不同：`abandoned` 指任务被中断 / 被终止后由用户放弃，是**终态**，`canceled` 指**仍在运行**的任务被终止，**不是终态** —— 被终止的任务可 `resume` 续跑（按参数快照重跑，续跑前复位取消标志）或 `abandon` 收尾。两者都不删除任何文件；终止是协作式的，`status` 会保持 `running` / `pending` 直至管线在检查点停止，接口不返回虚构的中间状态。
+
+**任务队列（多输入批量并行）**：任务不直接各起线程，而是统一进入**进程内 FIFO 队列**（`backend/app/job_scheduler.py`），由固定 `MAX_CONCURRENT_JOBS`（默认 2，见 `backend/.env.example`）个常驻工作线程领取执行；超出部分在队列中等待。排队中的任务 `status` 为 `pending`、`message` 为「任务已排队，等待空闲执行槽位（并发上限 N）」；排队期间被终止 / 放弃的任务**不会被执行**（出队时跳过，跳过原因写入该任务日志，可在 `/logs` 与日志面板读到「排队等待期间…跳过执行」）。对排队任务的 `cancel` 立即生效（直接落 `canceled`，不等前面的任务跑完），随后照常可 `abandon`（排队中也可**直接**放弃，不必先终止）或 `resume`（按重新入队时刻排到队尾，重新入队后与首次提交一样如实落 `pending` + 排队提示，被工作线程领走才翻为 `running`）。队列为纯 FIFO、只在单进程内有效：容器重启后排队任务不恢复（与其它内存任务同待遇）。
 
 `error` 为结构化失败信息，仅在任务 `failed` 或 `canceled` 时非空，运行中与成功时为 `null`：
 
@@ -436,8 +438,10 @@ POST /api/v4/jobs/{job_id}/resume
 返回：
 
 ```json
-{ "job_id": "<uuid>", "status": "running", "message": "任务已继续执行（将重新运行分析流程）" }
+{ "job_id": "<uuid>", "status": "pending", "message": "任务已继续执行（将重新运行分析流程）" }
 ```
+
+`:status` 是入队后的**真实状态**：`pending` = 已重新入队、等待空闲执行槽位（与首次提交一致，`GET /jobs/{id}` 的 `message` 为排队提示），任务被工作线程领走时才翻为 `running`，见第 5 节「任务队列」。队列为空时这一瞬间即完成。
 
 重跑成本说明（反向/正确性管线）：
 
@@ -464,9 +468,9 @@ POST /api/v4/jobs/{job_id}/resume
 POST /api/v4/jobs/{job_id}/abandon
 ```
 
-只把状态标记为 `abandoned`，**不删除任何输入或输出文件**（磁盘清理不在本期范围）。可放弃的任务为 `interrupted` 与 `canceled`（与 `resume` 同一门槛），**外加「从未启动过」的 `pending`**（`job_dir is None`，即管线线程没跑过 `set_dir`）：放弃是这套状态机里的终态，被终止的任务需要一个收尾方式，而这类 `pending` 没有线程、「终止」对它无效（`cancel` 只是置一个没人检查的标志），不放行就没有任何操作能把它从任务列表里去掉。门槛的实质是「**没有任何线程在跑**」——已进入启动窗口（`job_dir` 非空）的 `pending` 仍属运行中的任务，只能先 `cancel`。
+只把状态标记为 `abandoned`，**不删除任何输入或输出文件**（磁盘清理不在本期范围）。可放弃的任务为 `interrupted` 与 `canceled`（与 `resume` 同一门槛），**外加排队中 / 从未启动的 `pending`**（`thread_ident is None`，即没有任何线程在跑 —— 排队中的任务已入队但工作线程尚未领取；从未启动的幽灵任务连 `job_dir` 都没有）。放弃是这套状态机里的终态：被终止的任务需要一个收尾方式；排队中的任务出队时会被跳过执行（见第 5 节），一步放弃即可，不必先 `cancel` 再 `abandon` 两步走。门槛统一为「**没有任何线程在跑**」——`running` 的任务总有线程，只能先 `cancel`。放弃与工作线程出队之间没有锁，存在毫秒级竞态窗口（出队裁决刚通过即被放弃），此时任务会照常跑完并落 `completed`，无数据损坏。
 
-配套的不变量是「**登记即承诺运行**」：创建任务的接口用 `JobManager.new_job()` 只构造、不登记，由 `launch_*_pipeline` 在起线程前 `register()`。上传接口还有保存文件与识别系统类型两步，任一步失败请求就结束了、线程不会启动，若在创建时就登记，失败的上传会在列表里留下永远停在 `pending` 的空记录（既无进度也无日志，且当时无法放弃）。
+配套的不变量是「**登记即承诺运行**」：创建任务的接口用 `JobManager.new_job()` 只构造、不登记，由 `launch_*_pipeline` 在入队（起线程）前 `register()`。上传接口还有保存文件与识别系统类型两步，任一步失败请求就结束了、线程不会启动，若在创建时就登记，失败的上传会在列表里留下永远停在 `pending` 的空记录（既无进度也无日志，且当时无法放弃）。
 
 返回：
 
@@ -480,7 +484,7 @@ POST /api/v4/jobs/{job_id}/abandon
 | --- | --- |
 | `resume` / `abandon` 的任务不存在（如后端重启后该任务未留下可恢复记录） | 404 |
 | `resume` 的任务状态不是 `interrupted` / `canceled`（如 `completed` / `running` / `abandoned`） | 409 |
-| `abandon` 的任务状态既不是 `interrupted` / `canceled`，也不是「从未启动」的 `pending`（如 `running`、已 `set_dir` 的 `pending`、`completed`） | 409 |
+| `abandon` 的任务既不是 `interrupted` / `canceled`，也不是「没有任何线程在跑」的 `pending`（如 `running`、`completed`、`abandoned`） | 409 |
 | `resume` 时 manifest 记录的输入文件或追溯目录已不存在 | 409 |
 
 ### 13.5 manifest 字段说明
