@@ -59,6 +59,34 @@
 - 终止任务不再等整批标注跑完：HLR 标注（反向 Step 2 / 正向 Step 4）的取消检查点由「每 20 条」改为**每条**。此前十几条的批次在整批之内只有开头 1 次检查，点终止后要等剩余条目全部标完才生效；现在一条标完即停（正在飞的那次模型调用仍会跑完并写入缓存）。
 - 续跑不再重跑文件解析：反向与正向管线在**续跑**（`resumed=true`）且上轮解析产物仍在时，改把已落盘的 `eoicd_requirements.json` / `hlr_requirements.json` 交给管线（走管线已有的 `[skip] Using cached EoICD JSON / HLR JSON` 分支），Step 1 只剩《EoICD条目化清单.xlsx》的重新生成（交付物），预计由约 38s 降到约 11s 量级（按原日志拆分推算：EoICD 解析约 26s 被跳过，HLR 解析同被跳过）。首跑路径逐字不变——首跑时同名文件可能是上一轮残留，当成解析结果用会让新上传的输入文件完全不生效；两份产物缺一不可，避免把两次不同输入的产物拼在一起。该复用不计入 `reuse` 计数（那是文件解析、不是模型调用）。配套把 `_parse_eoicd` / `_parse_hlr` 的落盘改为「写 `.tmp` + 原子改名」：这两个文件一旦会被续跑直接当作解析结果加载，半截文件（容器在写盘窗口内被重启）的后果就从「白跑一次」升级为「该任务此后永远续跑失败、只能放弃重传」。
 
+## [Unreleased] - 2026-09-21
+
+### Fixed
+
+- **HLR 正文重复 label 提及导致反向候选重复入列并挤占 top-K 窗口**：`extract_labels` 原按文本逐次产出标签（`L(\d+)` 为子串匹配，"LABEL270" 亦命中），正文提及 N 次即产出 N 条；`_match_path1_label` 按标签条目逐次追加候选，同一候选块重复入列（实测基线 job `37fb82f0`：`FSF21000101_HLR_4928` 正文 24 次 "LABEL270" → 20 条 `matched_profile_keys` 中 18 条重复、`top_k=20` 窗口被 `L270/L_ENG_BLEED_AREA_OVHT_A/B` 各 10 条占满，排序靠后的 `L270/Fire_AREA_OVHT_A/B` 两块被挤出；`a508e191`：同 HLR 同现象，`HLR_4852` 14 条 keys 中 12 条重复）。修复为**保序去重**（首见顺序、大小写不敏感）。实测：受影响 HLR 候选 key 由重复清单变为 4 条 distinct（37fb82f0）/ 2 条（a508e191），裁判 prompt 行数 809→201、809→125、300→60，`match_evidence.hlr_labels` 去重为 `['L270']`/`['L52']`，`match_type` 不变；未受影响 HLR 的匹配结果与裁判 prompt 逐字节相等；正向 A/B 除 `hlr_identity_index.json` 的 `labels` 展示字段（7→1 / 24→1）外全部产物逐字段相等、确定性/覆盖 stats 零差异。LLM 判定缓存为内容寻址，仅触发 case 自动失效重判（`CACHE_VERSION` 不变）；已跑过的任务需重跑才生效。1 文件 / +11 / -1 行。
+
+## [Unreleased] - 2026-09-20
+
+### Changed
+
+- **反向判定输入下沉字段级 OneState/ZeroState（S2 挂载）**：裁判 user prompt 的「字内子信号明细」由 bit/位宽/类型三要素扩为内联字段状态定义（`- INSTANTANEOUS_TRIP: bit13, 1bit, BOOL（OneState=Trip / ZeroState=In）`），使「接通/断开状态」类断言可对「该 bit 的 1/0 各代表什么」做比对，不再依赖 LLM 从块级合并状态猜测归属。实现：`build_reverse_cases` 序列化块时，若块含子信号、至少一个字段有逐字段状态行、且所有有状态字段均存在于 sub_signals（无孤儿），则从块级 `merged_attributes` 剥离 OneState/ZeroState，并把逐字段状态以 `one_state`/`zero_state` 键挂载到子信号**副本**（不就地修改 `block.sub_signals`）；不满足触发条件时静默 no-op，与旧行为逐字节一致（实测基线 job 的 7 个 REV case：5 个裁判 prompt 逐字节相同；触发 case 行数变化恰等于被剥离的块级状态行数，REV-0005 87→83、REV-0006 849→809）。5.5 复查 prompt 只渲染固定键、不受影响；正向管线产物结构不变（前向 A/B：6 件产物结构一致，确定性/覆盖 stats 零差异）；LLM 判定缓存为内容寻址，仅触发 case 自动失效重判（`CACHE_VERSION` 不变）。3 文件 / +64 / -7 行。
+
+### Fixed
+
+- **EoICD 逐字段引用行被全局去重折叠，导致子信号位宽/类型串台**：`parse()` 末尾的全局去重键缺 `dp_ref_name`，使 P2.4 生成的逐字段引用行中同一 (属性, 值) 只保留行序第一个 DP 字段（如同一 RP 信号下 12 个 DP 字段均为 `DataFormatType=BOOL` / `ParameterSize=1` 时，仅 CB_CLOSED 存活，其余被折叠）。下游 `signal_profiler` 的 per_ref 表落空后回退借 `label_bit_dp` 同 label 槽位，产生错误证据（实测 AMS 任务：`SSPC_ON` 被判成 bit11、18bit、BNR，实际为 1bit、BOOL，直接污染相关 HLR 的 AI 裁判输入）。修复为**收窄补键**：仅当属性 ∈ {BitOffsetWithinDS, ParameterSize, DataFormatType} 时把 `dp_ref_name` 计入全局去重键，其余属性保持现状（避免条目化清单大量同描述重复行与 CodedSet 值拼接放大）。修复后全表 122674 → 134094 行（+11420，均为上述三类属性的引用行），183 个子信号的位宽/类型修正；`ird_id` 按位置顺延（既有机制，格式不变）。LLM 判定缓存为内容寻址，受影响 case 自动失效重判（`CACHE_VERSION` 不变）；已跑过的任务需重跑才生效。1 文件 / +7 / -0 行。
+
+- **逐字段 OneState/ZeroState 引用行被全局去重折叠（子信号无状态可引用）**：承接上一条 V2 收窄补键，`_DP_REF_DEDUP_ATTRS` 增补 `OneState`/`ZeroState` —— 同一 word 内多个布尔字段常共用同一状态值（如 'Trip'/'In'），全局去重会把后出现字段的状态行吞并到首个同值字段（实测 `INSTANTANEOUS_TRIP` 等子信号无状态）。修复后全表 134094 → 137758 行（+3664，均为 RP 侧 OneState/ZeroState 逐字段引用行且全部通过 should_keep，无行丢失），条目化清单 xlsx 数据行同步 +3664；块键集合、block 级 attributes / sub_signals 与旧版零差异；`ird_id` 按位置顺延（既有机制）。LLM 判定缓存为内容寻址，受影响 case 自动失效重判；已跑过的任务需重跑才生效。
+
+## [Unreleased] - 2026-09-18
+
+### Fixed
+
+- **反向判定 SDI 位序不稳定修复（位赋值推导确定性注入，Step 4 + Step 5.5）**：HLR「第9和10位分别设置为“1”和“0”」类断言此前依赖各家 LLM 自行完成「位号→权重→组装编码值→比对 ICD SDI CodedSet」算术链，同一输入复跑结论可翻转 —— 恢复运行实证（job `ab4691ce`，同输入 job `35f8fd93` 判对）：Step 4 两家按错误位序判 inconsistent、唯一正确的一家判对 → 2:1 触发复盘 → 复盘环节（`re_review.md` 系统提示词不含任何判定规则）把正确者翻转成 3:0 5★ 假阳性。修复为把该算术链在管线内**确定性算完并注入裁判 user prompt**（仿 `_append_bnr_sign_derivation` 先例），LLM 从「算」降级为「比」：新增 `hlr_classifier.extract_bit_value_assertions()` 提取位对+值对断言（按书写顺序配对、门控恰两位相邻且值∈{0,1}、带否定防护；`extract_bit_fields` 及其 4 个匹配关键调用方零改动），`semantic_judge._append_bit_assembly_derivation()` 按「ARINC 429 字内位号越大越高位」组装编码值、并按断言 span 引用 `word_protocol_fields` 的字段定义（`BitOffsetWithinDS`/`ParameterSize`/`CodedSet`，跨块去重；无 CodedSet 时只给数值推导），注入 `_build_reverse_user_prompt`（Step 4）与 `_build_re_review_user_prompt`（Step 5.5，经 `_make_re_review_prompt` 与缓存 key 预计算同源）。**未改任何 system prompt**（`reverse_judge.md`/`re_review.md` 均不动）：未触发 case 的裁判 prompt 逐字节不变、缓存 key 不变（已用 `git show HEAD:` 旧版模块经 importlib 对照断言），已有效果零扰动；触发 case 的 Step 4/5.5 缓存自然失效并重判。触发盲区（范围式「第N到M位」、英文 `bitN`、单 bit、非相邻位对）保守 no-op，行为与现状一致。修改文件：`backend/app/v4/matching/hlr_classifier.py`、`backend/app/v4/comparison/semantic_judge.py`、`backend/app/v4/comparison/re_review.py`。CLI 与 API 契约零变化。
+
+- **反向判定 SDI 稳定性补丁：英文位号逐位赋值式纳入推导覆盖（上一条盲区收窄）**：环控实证 job（`825c1e8b`）中 HLR 以英文写 SDI 逐位赋值（`bit8=0，bit9=0` 逐通道四行），属上一条声明的触发盲区 → 推导未注入，Step 4 中一方 LLM 复现了与 FGMC 同类的两个错误（把位号按 1 基物理位换算成偏移、按书写顺序误判位序），靠 2:1 多数 + 复盘翻转才得正确终局。本轮把英文 `bitN` 逐位赋值式纳入 `extract_bit_value_assertions`（新增 `_EN_BIT_VALUE_SINGLE_RE`，与中文共用同一套门控/否定防护/相邻同句成组，词内 `bit` 前缀由 `(?<![A-Za-z])` 排除，混合语言不成组），断言新增 `convention` 字段区分位号基准——中文「第N位」为 1 基物理位（offset=N-1，行为不变），英文 `bitN` 与 ICD `BitOffsetWithinDS` 同基准（offset=N，与 `825c1e8b` 各模型终局的一致解读相同），使推导行能正确定位 ICD SDI 字段。配套：同一 span 的去重 CodedSet 多于一种时**省略「其取值定义」清单**、仅保留「对应 ICD 字段 X（offset, size）」定位（本 job 60 块异构且拼接存在分隔歧义；FGMC 同构场景输出逐字节不变）。未触发 case 的裁判 prompt 仍逐字节不变（与扩展前快照经 importlib 对照断言），触发 case 的 Step 4/5.5 缓存自然失效并重判。范围式（`bit17至bit28`）与单 bit/符号式（`SDI=1`）仍不注入（无「位对→编码值」组装算术）。修改文件：`backend/app/v4/matching/hlr_classifier.py`、`backend/app/v4/comparison/semantic_judge.py`；`re_review.py` 零改动。CLI 与 API 契约零变化。
+
+- **反向判定位段基准不稳定修复：英文范围式（`bitN至bitM`）位段推导确定性注入（上一条声明的范围式盲区收窄）**：job `96da3513` 实证 —— HLR_478「bit17至bit28为有效数据位」与 ICD 字段逐位一致（`BitOffsetWithinDS=17 Bits`/`ParameterSize=12 Bits` ⇔ offset 17~28），三家却全票 inconsistent 5★ **假阳性**：现有全局提示句只教中文「第N位」的 -1 换算，各家把该规则过度泛化到英文 `bitN` 范围式上（同 job REV-0013 反向出错：有裁判把 ICD `offset=16` 强行 +1 成物理 17~29 虚构冲突），而提示内「HLR 位声明」块已给出正确折算 `bit17至bit28 → offset=17, size=12` 仍被三家无视。修复：新增 `hlr_classifier.extract_bit_range_assertions()` 提取英文范围式（`bitN至bitM`，分隔符兼容 至/到/~/～/-/—，大小写与空格不限，逆序归一 lo<hi，按 (lo,hi) 去重，退化同号 no-op；**不参与匹配**，`_BIT_RANGE_RE`/`extract_bit_fields` 及其 4 个匹配调用方零改动），`semantic_judge._append_bit_range_derivation()` 输出一行归一化推导（三连等式：英文 bitN 与 ICD `BitOffsetWithinDS` 同一基准 = 0 基 offset N = 物理第 N+1 位，并给出 offset lo~hi），注入 Step 4 与 Step 5.5（经 `_make_re_review_prompt` 与缓存 key 预计算同源）。**未改任何 system prompt**：非触发 case 的裁判 prompt 逐字节不变（`git show HEAD:` 旧版对照断言），本 job 14 例中 5 例命中（REV-0003/0004/0006/0007/0013）且差异集 == 提取器命中集、仅追加推导行；触发 case 的 Step 4/5.5 缓存自然失效并重判。中文范围式（「第N到M位」）与单 bit 仍保守 no-op。修改文件：`backend/app/v4/matching/hlr_classifier.py`、`backend/app/v4/comparison/semantic_judge.py`、`backend/app/v4/comparison/re_review.py`。CLI 与 API 契约零变化。
+
 ## [Unreleased] - 2026-09-16
 
 ### Added
