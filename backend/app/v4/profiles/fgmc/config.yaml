@@ -5,6 +5,7 @@ profile:
 
 hlr_parser:
   glossary_table_index: 1
+  glossary_header_keywords: ["缩略语", "缩写"]
   requirement_table_min_rows: 12
   filter_non_requirement: true
   non_requirement_value: "否"

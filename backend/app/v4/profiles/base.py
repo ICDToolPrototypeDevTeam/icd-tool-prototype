@@ -20,6 +20,14 @@ class HLRParserConfig:
     filter_non_requirement: bool = False
     non_requirement_value: str = "否"
     skip_requirement_when_empty: bool = True
+    # Header keywords that mark the table at ``glossary_table_index`` as an
+    # abbreviation glossary: it is parsed only when any first-row cell
+    # contains one of these keywords.  Guards against a non-glossary table
+    # (revision log, change record) sitting at that index and being read as
+    # garbage glossary entries.  Empty tuple = legacy behaviour (parse
+    # whenever the table has >=3 columns), so controllers that do not
+    # declare keywords are unaffected.
+    glossary_header_keywords: tuple[str, ...] = ()
     # std_field names whose value is the "is this a requirement?" indicator.
     # The parser picks the first alias that resolves to a std_field present
     # in the table headers.  Replaces the previous hardcoded Chinese-literal
@@ -200,6 +208,9 @@ def _parse_hlr_parser(data: dict[str, Any]) -> HLRParserConfig:
         filter_non_requirement=bool(data.get("filter_non_requirement", False)),
         non_requirement_value=str(data.get("non_requirement_value", "否")),
         skip_requirement_when_empty=bool(data.get("skip_requirement_when_empty", True)),
+        glossary_header_keywords=_to_tuple(
+            data.get("glossary_header_keywords", [])
+        ),
         non_requirement_field_aliases=_to_tuple(
             data.get("non_requirement_field_aliases", ["is_requirement"])
         ),

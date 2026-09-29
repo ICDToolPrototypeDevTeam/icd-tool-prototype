@@ -133,6 +133,7 @@ class HLRWordParser:
         if (
             len(tables) > glossary_idx
             and len(tables[glossary_idx].columns) >= 3
+            and self._looks_like_glossary(tables[glossary_idx])
         ):
             glossary = self._parse_glossary(tables[glossary_idx])
 
@@ -160,6 +161,25 @@ class HLRWordParser:
             requirements=requirements,
             glossary=glossary,
         )
+
+    def _looks_like_glossary(self, table) -> bool:
+        """Gate glossary parsing on a header keyword.
+
+        With ``glossary_header_keywords`` set (AMS/FGMC), the table at
+        ``glossary_table_index`` is parsed only when one of its first-row
+        cells contains a keyword; otherwise it is left unparsed and the
+        glossary stays empty instead of picking up garbage entries from a
+        non-glossary table (revision log, change record).  Empty keyword
+        tuple keeps the legacy behaviour.
+        """
+        keywords = self.cfg.glossary_header_keywords
+        if not keywords:
+            return True
+        for c in range(len(table.columns)):
+            cell = _cell_text(table, 0, c)
+            if any(kw in cell for kw in keywords):
+                return True
+        return False
 
     @staticmethod
     def _parse_glossary(table) -> list[HLRGlossaryEntry]:
