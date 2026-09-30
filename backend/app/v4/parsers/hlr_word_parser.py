@@ -11,17 +11,37 @@ from __future__ import annotations
 from pathlib import Path
 
 from docx import Document  # type: ignore
+from docx.text.paragraph import Paragraph  # type: ignore
 
 from app.v4.models import HLRGlossaryEntry, HLROutput, HLRRequirement
 from app.v4.profiles.base import ControllerProfile
 
 
 def _cell_text(table, row: int, col: int) -> str:
-    """Extract stripped text from a table cell."""
+    """Extract stripped text from a table cell.
+
+    ``cell.text`` only joins the cell's direct paragraphs, so content
+    described by a nested table (e.g. the signal/bit/value rows following
+    "按如下内容发送…") would be silently dropped.  When nested tables are
+    present they are flattened (cells joined with " | ", rows with newline)
+    in document order; cells without nested tables keep the previous
+    ``cell.text`` result exactly.
+    """
     try:
-        return table.cell(row, col).text.strip()
+        cell = table.cell(row, col)
     except (IndexError, AttributeError):
         return ""
+    if not cell.tables:
+        return cell.text.strip()
+    parts: list[str] = []
+    for item in cell.iter_inner_content():
+        if isinstance(item, Paragraph):
+            parts.append(item.text)
+        else:
+            for r in item.rows:
+                cells = (c.text.replace("\n", " ").strip() for c in r.cells)
+                parts.append(" | ".join(cells))
+    return "\n".join(parts).strip()
 
 
 def _build_field_map_index(

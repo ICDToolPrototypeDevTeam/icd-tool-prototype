@@ -3528,3 +3528,21 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   4. 模型仍可无视推导（RUN-B 先例）—— 推导行是「case 数据 + 基准声明」，强于规则行，不承诺 100% 收敛；以真实 A/B 观察。
   5. 触发 case（本 job 5 例）的 Step 4/5.5 旧缓存 key 自然失效并重判（期望行为）；非触发 case prompt 逐字节不变、缓存照常命中（由验证 1③④ 断言）。
 - **下一步建议**：1) 用户以真实 provider 复跑 `96da3513` 输入做 A/B；2) HLR_478 rationale 笔误拍板后如需修正，属输入数据侧改动、与本修复独立；3) 中文范围式盲区按真实语料评估；4) 汇总提交本分支三段修复（CN 位对 + EN 逐位 + EN 范围式）。
+
+## 2026-09-29 HLR 需求单元格内嵌表格扁平化提取（分支 feat/issue-xxx-table-within-table-parser）
+
+- **背景（用户发现新缺口）**：环控新输入 `AMSC安全通道测试.docx` 中部分需求的「需求中文」单元格用**嵌套表格**描述内容（正文为「软件应按照A429通信协议按如下内容向控制通道发送L372/L376数据：」，表即「如下内容」）：HLR_14464 内嵌 3x3 表（OFV_TRV手动驱动电路故障信号 bit10、本通道WAITS通道1温度测量值 bit16~bit28），HLR_14470 内嵌 14x3 表（13 条位定义：座舱高度限制标志 bit10 … 中电子设备舱过热检测 bit23）。python-docx 的 `_Cell.text` 只拼接单元格直接段落（1.1.2 源码实证），嵌套表内容被静默丢弃 → 需求正文只剩引导语；job 92ce5d88 产物实证：14464/14470 的 `hlr_labels.json` `signal_keywords`/`bit_fields` 全空，而同风格用内联文本写的 14466 能提取到「温度测量值/数据布局/位宽」。另注：该 job 中这三条判「无匹配」的主因是 L372/L373/L376 不在该 job 的 EoICD 数据里（出现 0 次，而 L234 出现 2228 次）—— 与本缺陷相互独立。
+- **方案（用户确认的方案 A）**：解析层「空守卫」扁平化并入单元格文本 —— `_cell_text` 中无嵌套表的单元格仍走 `cell.text.strip()` 原路径（逐字节不变）；有嵌套表时用 `cell.iter_inner_content()` 按文档内顺序拼接：段落原样、嵌套表每行单元格以 ` | ` 连接、行间换行。下游（AI 打标 → 匹配 → 裁判/复盘提示词 → 报告）全为文本消费，零管道改动自动生效。放弃项：结构化字段（收益低、schema 牵动下游）、profile 开关（无真实反例场景）、文档侧人工改文本（不解决系统能力）。
+- **实现要点**：requirements.txt / Docker 钉 python-docx 1.1.0 —— 经 1.1.0 wheel 源码核实其 `_Cell(BlockItemContainer)` 自带 `iter_inner_content`（本地 dev 1.1.2 行为一致），无需绕私有 XML；`hlr_word_parser.py` 新增 `Paragraph` 导入并改写 `_cell_text`。改动面收敛：`_cell_text` 仅在本文件 7 处使用（需求八字段 + 缩略语表）。
+- **修改文件**：`backend/app/v4/parsers/hlr_word_parser.py`；文档 `CHANGELOG.md`、`docs/development/development-log.md`（本条）。新增（gitignored）：`backend/tests/probe_ams_nested_tables.py`（嵌套表全库扫描）、`backend/tests/probe_nested_flatten_check.py`（改前/改后逐字段回归）。
+- **验证方式与结果**：
+  1. **全库扫描**：环控在库 15 份文档中仅 `AMSC安全通道测试.docx` 有嵌套表（2 处，均在需求中文单元格；拆分版与旧 job 输入版内容一致），其余 13 份 0 处（**已验证**）。
+  2. **逐字段回归**（`probe_nested_flatten_check.py`：改前快照经 importlib 加载，与新版本对照，零 LLM）：①合成样例 —— 含嵌表需求 content 变为「引导语 + `信号名称 | 数据位 | 值域` + 2 行」，无嵌表需求全字段一致；②真实 8 份文档 —— 仅两份 `AMSC安全通道测试.docx` 的 14464/14470 的 content 出现差异（新增扁平化表文本），其余 6 份（AMS 32/16/7 条、FGMC 7/2 条、HSCU 10 条，共 74 条需求）**逐字段完全一致**（**已验证**）。
+  3. **Mock E2E**：CLI（`USE_MOCK_LLM=1`）以拆分版文档 + 该 job 的 Publisher/Subscriber 跑反向全管线 → 5 条 HLR 全出、4 份报告 docx 与全部 json 产物齐全，产物内 14464/14470 content 已含扁平化表文本（**已验证**）。
+- **遗留问题**：
+  1. 嵌套表内的**图片/勾选图形符号**超 docx 文本能力，不提取（真实语料暂未出现）。
+  2. 嵌套表的**合并单元格**会按 grid 重复文本（样本 dup_rows=0 未触发）；出现再加去重。
+  3. 仅处理一层嵌套（样本无表套表）。
+  4. 触发条目（14464/14470）content 变化使其下游 LLM 缓存 key 自然失效并重判（期望行为）；无嵌表文档不受影响。
+  5. 需**重建后端镜像**才在服务器生效。
+- **下一步建议**：1) 重建镜像后以真实 provider 重跑该文档，观察 14464/14470 的打标/匹配/裁判是否用上位表信息；2) 如真实语料出现图片型位图或表套表再评估扩展。
