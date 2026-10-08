@@ -159,8 +159,9 @@ class HLRWordParser:
 
         # Requirement tables: everything after the glossary table
         for table in tables[glossary_idx + 1:]:
-            if len(table.rows) < self.cfg.requirement_table_min_rows:
-                continue
+            # No row-count gate: a requirement table may be missing field rows
+            # (e.g. no "实现方法" row).  _extract_requirement decides by the
+            # semantic criterion instead (field_map "id" row, value non-empty).
             if len(table.columns) < 2:
                 continue
             req = _extract_requirement(

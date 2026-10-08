@@ -3546,3 +3546,24 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   4. 触发条目（14464/14470）content 变化使其下游 LLM 缓存 key 自然失效并重判（期望行为）；无嵌表文档不受影响。
   5. 需**重建后端镜像**才在服务器生效。
 - **下一步建议**：1) 重建镜像后以真实 provider 重跑该文档，观察 14464/14470 的打标/匹配/裁判是否用上位表信息；2) 如真实语料出现图片型位图或表套表再评估扩展。
+
+## 2026-10-08 HLR 需求表行数门槛移除（分支 feat/issue-xxx-table-within-table-parser）
+
+- **背景（用户提问）**：用户问「HLR 解析识别是「需求ID + 行数≥8」吗？需求表少了实现方法一行能否识别？」合成探针实证：标准 8 行表缺「实现方法」→ 7 行 → 被 `requirement_table_min_rows` 门槛整表静默跳过、0 条需求；7 字段行 + 1 空行 = 8 行 → 识别（门槛判的是原始行数，空行也计入）；8 行但字段改名不在 field_map → 识别、该字段为空串。用户确认方案1（主判据 = 含需求ID且值非空），并要求先量化「是否要扫描所有表、有无内存风险」。
+- **量化（方案1 成本，零 LLM）**：
+  1. 成本探针（17 份真实文档，`probe_row_gate_cost.py` / `probe_row_gate_cost2.py`）：「门槛内」与「全扫」的表数**全部相等**——这些文档 glossary 之后不存在 <min_rows 的表，方案1 今天实际新增扫描 = 0 张；耗时差 ±15ms 内正负互见（噪声；探针模拟省略了 glossary 解析，负值属测量口径）；tracemalloc 峰值差 ±0.6KB（噪声）。
+  2. 表形状普查（21 份，`probe_row_gate_shapes.py`）：切片内表行数均 ≥8（AMS/HSCU）/≥12（FGMC）；仅有的小表是缩略语表本身（在扫描起点之前）与 HSCU 一张 1x1（被保留的列数门槛挡住）。
+  3. 内存结构论证：docx 的支配成本是 `Document()` 载入整份 XML（现状已支付）；增量只是小表逐单元格的临时字符串（KB 级、即弃），无累积结构。真实风险不在内存而在**误识面**——由语义判据兜底。
+  4. RPDU 澄清：RPDU 的 HLR 是 xlsx、按扩展名分发走 `HLRExcelParser`，不经 `HLRWordParser`，不在影响面内（其 config 中该键原为「legacy 保留」注释位）。
+- **方案（用户确认后实施）**：`parse()` 删除行数门槛（保留「列数 ≥ 2」），语义判据由既有 `_extract_requirement` 承担（field_map 命中「需求ID」且值非空；`skip_requirement_when_empty` 各 profile 默认 True 未关闭）；同步下线死配置 `requirement_table_min_rows`（base.py 字段与 yaml 读取 + 4 个 profile yaml 各删一行）。**不动**：`auto_detect`、glossary 逻辑、`_extract_requirement` 本体、Excel 解析路径。
+- **修改文件**：`backend/app/v4/parsers/hlr_word_parser.py`、`backend/app/v4/profiles/base.py`、`backend/app/v4/profiles/{ams,fgmc,hscu,rpdu}/config.yaml`；文档 `CHANGELOG.md`、`docs/development/development-log.md`（本条）。新增（gitignored）：`backend/tests/probe_row_gate_cost.py`、`probe_row_gate_cost2.py`、`probe_row_gate_shapes.py`、`probe_row_gate_verify.py`。
+- **验证方式与结果**：
+  1. **改前基线 → 改后逐字段全等**（`probe_row_gate_verify.py`：capture 先落盘 17 份真实文档 parse() 全量 `model_dump`，改后 check 对比，仅剔除 `generated_at` 时间戳）：**17/17 全等**、192 条需求（AMS 13 文档 / FGMC 3 / HSCU 1）（**已验证**）。
+  2. **合成用例**：7 行表（缺「实现方法」）改后识别 1 条 `FSF21000102_HLR_9003`（改前 0 条）；无「需求ID」行的 7 行表 0 条（语义判据兜底）（**已验证**）。
+  3. **回归**：`py_compile` 两个 py 文件通过；4 个 profile yaml 解析与 registry 全量加载冒烟通过（field_map 8/15/8/3 不变）；既有 mock 全管线脚本 `tests/verify_no_glossary_pipeline.py` **VERIFY_OK**（含 V1 完整 mock 反向管线：无 errors、产物齐全、断言全过）（**已验证**）。
+- **遗留问题**：
+  1. `auto_detect` 的 `required_rows` 为**精确匹配**（AMS=8 等）：7 行表文档在网页「自动识别」路径仍会识别失败（提示手动选择系统类型）——解析本身已修复、手动路径可用；是否放宽识别契约属独立决策，未顺手改。
+  2. 非需求小表若恰含「需求ID」行且值非空会被收录——这是方案1 判据语义本身（经用户确认），非缺陷。
+  3. 无「需求ID」行的表在 `skip_requirement_when_empty=False` 的 profile 下会以空 id 被收录——现无任何 profile 关闭该开关，与现状一致。
+  4. 需**重建后端镜像**才在服务器生效。
+- **下一步建议**：1) 重建镜像后以真实「缺行」文档验证识别与下游管线；2) 评估 `auto_detect` 是否放宽为语义 / ≥ 判定（独立 Issue，由用户决定）；3) 提交本改动（嵌套表扁平化已随 `e97904c` 提交）。
