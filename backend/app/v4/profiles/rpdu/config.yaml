@@ -32,7 +32,6 @@ hlr_parser_driver:
 # though xlsx driver bypasses HLRWordParser).
 hlr_parser:
   glossary_table_index: 0
-  requirement_table_min_rows: 3
   filter_non_requirement: false
   field_map:
     id: ["需求编号"]

@@ -15,7 +15,6 @@ class ProfileLoadError(Exception):
 @dataclass(frozen=True)
 class HLRParserConfig:
     glossary_table_index: int
-    requirement_table_min_rows: int
     field_map: dict[str, tuple[str, ...]]
     filter_non_requirement: bool = False
     non_requirement_value: str = "否"
@@ -203,7 +202,6 @@ def _parse_hlr_parser(data: dict[str, Any]) -> HLRParserConfig:
     field_map = {k: tuple(v) for k, v in field_map_raw.items()}
     return HLRParserConfig(
         glossary_table_index=int(data.get("glossary_table_index", 0)),
-        requirement_table_min_rows=int(data.get("requirement_table_min_rows", 8)),
         field_map=field_map,
         filter_non_requirement=bool(data.get("filter_non_requirement", False)),
         non_requirement_value=str(data.get("non_requirement_value", "否")),
