@@ -110,7 +110,8 @@ auto_detect:
 
 ### 兼容性
 
-- AMS / FGMC / HSCU / FSECU：未声明 `auto_detect` 或保持原 `required_rows` 精确语义，行为字节不变。
+- AMS / FGMC / HSCU：当时保持原 `required_rows` 精确语义、行为字节不变；已于 2026-10-08 改用 `min_rows`（AMS / HSCU = 5、FGMC = 10，标准行数 −3），详见 `CHANGELOG.md` `[Unreleased] - 2026-10-08`。
+- FSECU：未声明 `auto_detect`，行为字节不变。
 - RPDU Word 模板（暂未提供）：不会被本规则误匹配（Word 表与 Excel 加载层数据结构不同），按「无法识别 HLR 文件所属系统类型」错误处理，需手动指定 `controller_profile`。
 
 ### 验证
