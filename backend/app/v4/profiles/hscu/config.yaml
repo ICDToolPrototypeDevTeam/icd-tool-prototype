@@ -161,7 +161,7 @@ ai_labeling:
 # Auto-detection: used by coverage.py _detect_system_type to identify which
 # profile matches an uploaded HLR Word file.
 auto_detect:
-  required_rows: 8
+  min_rows: 5
   required_cols: 2
   cell_patterns:
     "0":

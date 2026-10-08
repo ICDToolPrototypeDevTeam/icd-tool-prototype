@@ -3576,8 +3576,24 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   2. **合成用例**：7 行表（缺「实现方法」）改后识别 1 条 `FSF21000102_HLR_9003`（改前 0 条）；无「需求ID」行的 7 行表 0 条（语义判据兜底）（**已验证**）。
   3. **回归**：`py_compile` 两个 py 文件通过；4 个 profile yaml 解析与 registry 全量加载冒烟通过（field_map 8/15/8/3 不变）；既有 mock 全管线脚本 `tests/verify_no_glossary_pipeline.py` **VERIFY_OK**（含 V1 完整 mock 反向管线：无 errors、产物齐全、断言全过）（**已验证**）。
 - **遗留问题**：
-  1. `auto_detect` 的 `required_rows` 为**精确匹配**（AMS=8 等）：7 行表文档在网页「自动识别」路径仍会识别失败（提示手动选择系统类型）——解析本身已修复、手动路径可用；是否放宽识别契约属独立决策，未顺手改。
+  1. `auto_detect` 的 `required_rows` 为**精确匹配**（AMS=8 等）：**全部需求表偏离标准行数**的文档在网页「自动识别」路径仍会识别失败（提示手动选择系统类型）——匹配为文档级「任意一表命中即通过」，混有标准行数表的文档不受影响；解析本身已修复、手动路径可用；是否放宽识别契约属独立决策，未顺手改。（**2026-10-08 当日已修复**：改为 `min_rows`（AMS/HSCU=5、FGMC=10），详见下方同日「自动识别行数判据放宽」条目。）
   2. 非需求小表若恰含「需求ID」行且值非空会被收录——这是方案1 判据语义本身（经用户确认），非缺陷。
   3. 无「需求ID」行的表在 `skip_requirement_when_empty=False` 的 profile 下会以空 id 被收录——现无任何 profile 关闭该开关，与现状一致。
   4. 需**重建后端镜像**才在服务器生效。
-- **下一步建议**：1) 重建镜像后以真实「缺行」文档验证识别与下游管线；2) 评估 `auto_detect` 是否放宽为语义 / ≥ 判定（独立 Issue，由用户决定）；3) 提交本改动（嵌套表扁平化已随 `e97904c` 提交）。
+- **下一步建议**：1) 重建镜像后以真实「缺行」文档验证识别与下游管线；2) 评估 `auto_detect` 是否放宽为语义 / ≥ 判定（独立 Issue，由用户决定）——**已于 2026-10-08 实施**（改为 `min_rows`，见下方同日条目）；3) 提交本改动（嵌套表扁平化已随 `e97904c` 提交）。
+
+## 2026-10-08 HLR 自动识别行数判据放宽：required_rows（==N）→ min_rows（≥N）（分支 feat/issue-xxx-table-within-table-parser）
+
+- **背景（用户提问）**：行数门槛移除（同日上条）后，用户追问自动识别残留问题。定位：AMS / HSCU / FGMC 的 `auto_detect.required_rows`（=8 / =8 / =13）为**精确匹配**，且 `_match_auto_detect` 是**文档级「任意一表命中即通过」**——文档中只要还有一张标准行数表就整体通过（用户实测其文档自动识别正常即属此类：13 张需求表中 2 张仍 8 行）；**全部需求表都偏离标准行数**的文档（如模板整体缺「实现方法」行）整体失败，上传报「无法识别 HLR 文件所属系统类型，请手动选择系统类型上传。」
+- **实证（零 LLM）**：合成单表文档（缩略语表 + 唯一一张 7 行需求表）→ `_detect_system_type` 抛 ValueError；用户文档（`AMSC安全通道测试.docx`）两版对照：2026-10-08 16:46 版（含 2 张 8 行表）→ ams，17:01 重存版（13 张需求表全 7 行）→ ValueError（解析侧仍出 13 条需求）——坐实文档级命中语义。
+- **方案（用户确认后实施，纯配置零代码）**：`min_rows`（≥N，2026-09-04 为 RPDU 引入、RPDU 在用）替换 `required_rows`——AMS 8→5、HSCU 8→5、FGMC 13→10（标准行数 −3，容纳缺 1~3 行字段）；`cell_patterns`（需求ID + FSF21/FSF29/FGMC 前缀）与 `required_cols` 不动；coverage.py / base.py 不动（`required_rows` 保留为 legacy 字段，两键并存）。
+- **修改文件**：`backend/app/v4/profiles/{ams,hscu,fgmc}/config.yaml`（各一行）；文档 `CHANGELOG.md`、`docs/development/development-log.md`（本条 + 上条遗留问题 1 的表述更正与状态更新）、`backend/app/v4/profiles/rpdu/README.md`（「兼容性」一节）。新增（gitignored）：`backend/tests/verify_autodetect_min_rows.py`（capture/check 基线比对）、`probe_autodetect_amsc_check.py`、`probe_autodetect_amsc_variant.py`（后二者本会话早前用于定位文档级命中语义）。
+- **验证方式与结果**：
+  1. 合成用例（`verify_autodetect_min_rows.py`：capture 改前基线 → check 改后比对）：7 行单表 / 9 行（多一行）/ 5 行（下限含边界）由无法识别 → ams；8 行「7 字段 + 1 空行」版与 8 行「实现方式」改名版 ams→ams 无回归；4 行小表、无「需求ID」的 7 行表仍无法识别（**已验证**）。
+  2. 真实变体 `c:/tmp/amsc_all7rows.docx`（13 张表全 7 行）：由无法识别 → ams（**已验证**）。
+  3. 17 份真实文档：16 份识别结果与改前逐一相同（ams 12 / fgmc 3 / hscu 1，无新增误识）；`input_doc_file/HLR故障注入版本/AMSC安全通道测试.docx`（17:01 重存全 7 行版）由无法识别 → ams——本修复的真实触发用例（**已验证**）。
+- **遗留问题**：
+  1. 恰含「需求ID」行 + `FSF2x` 值的小表（行数 ≥ 下限）会随下限纳入识别——与解析侧语义判据一致，属设计取舍。
+  2. 下限值（AMS/HSCU=5、FGMC=10）取「标准行数 −3」，如后续真实语料需要可在 config 调整。
+  3. 需**重建后端镜像**才在服务器生效。
+- **下一步建议**：1) 重建镜像后网页空选系统类型上传全 7 行版文档，确认自动识别走通全链路；2) 提交本改动；3) issue 草稿（`issues_file/issue-hlr-自动识别行数精确匹配导致缺行文档识别失败.md`）后续处理由用户决定。
