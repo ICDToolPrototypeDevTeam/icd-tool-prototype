@@ -3529,6 +3529,20 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   5. 触发 case（本 job 5 例）的 Step 4/5.5 旧缓存 key 自然失效并重判（期望行为）；非触发 case prompt 逐字节不变、缓存照常命中（由验证 1③④ 断言）。
 - **下一步建议**：1) 用户以真实 provider 复跑 `96da3513` 输入做 A/B；2) HLR_478 rationale 笔误拍板后如需修正，属输入数据侧改动、与本修复独立；3) 中文范围式盲区按真实语料评估；4) 汇总提交本分支三段修复（CN 位对 + EN 逐位 + EN 范围式）。
 
+## 2026-09-29 HLR 缩略语表串表门控修复（AMS/FGMC/HSCU 按表头关键字，提交 9dc07d0）
+
+- **背景**：缩略语解析此前只判「`glossary_table_index` 指向的表 ≥3 列」即按「缩写 / 英文全称 / 中文说明」三列读取其数据行。完整文档若在该位置放的是别的表（修订记录、变更表、LABEL 清单等），其数据行会被读成垃圾缩略语条目并随下游提示词流转。HSCU（液压）真实文档 `HSCU软件高层需求-裁剪.docx` 该位置即是一张 12×8「序号 / LABEL名称（LBL_XXX）/ LABEL号 / SDI号」表（全文档无「缩略语」字样）——仅因序号列**纵向合并**、数据行 col0 为空才侥幸解析出 0 条，属结构巧合而非有效保护；合成 3 列修订表实证旧行为产出 `[('1','2026-01-01'), ('2','2026-01-02'), ('3','2026-01-03')]` 三条垃圾条目。
+- **方案**：按**表头关键字**门控——仅当该表首行任一单元格含「缩略语」或「缩写」才按缩略语解析，否则缩略语为空列表；关键字由各 profile 声明（三家真实缩略语表头同为「缩略语 / 英文全称 / 中文全称」）。未声明关键字的控制器走原逻辑、行为逐字不变。
+- **实现要点**：`hlr_word_parser.py` 新增 `_looks_like_glossary()`（首行逐单元格 `_cell_text` 关键字判定）作为解析前置门控；`base.py` 新增 `glossary_header_keywords: tuple[str, ...] = ()` 字段与 yaml 读取（空元组 = 原行为）；AMS/FGMC/HSCU 三个 config.yaml 各声明 `["缩略语", "缩写"]`。
+- **修改文件**：`backend/app/v4/parsers/hlr_word_parser.py`（+20）、`backend/app/v4/profiles/base.py`（+11）、`backend/app/v4/profiles/{ams,fgmc,hscu}/config.yaml`（各 +1）；文档 `CHANGELOG.md`（+6，随提交 9dc07d0）。验证脚本（gitignored）：`backend/tests/probe_fgmc_glossary_check.py`、`probe_hscu_glossary_check.py`、`verify_no_glossary_pipeline.py`。
+- **验证方式与结果**：
+  1. FGMC 三份真实文档（含 SDI 两 case）：glossary_idx=1 表首行「缩略语 / 英文全称 / 中文全称」，门控放行，缩略语各 14 条、需求 7/2/2 条（`probe_fgmc_glossary_check.py`，**已验证**）。
+  2. HSCU：真实文档解析 glossary=0、需求 10 条；合成正例（首行=缩略语|英文全称|中文全称）解析 1 条；合成反例（3 列修订表）门控挡住（0 条），去门控对照旧行为产出上述垃圾条目（`probe_hscu_glossary_check.py`，**已验证**）。
+  3. 旧版对照仿真（本次补记时复核，`probe_glossary_gate_oldnew.py`：9dc07d0^ 解析器 exec 加载，门槛行替换为常量 8——行数门槛已另行移除、对需求集无影响）：七份文档新旧**逐条一致**——AMS 16/16/7 条需求、缩略语各 2 条；FGMC 7/2/2 条需求、缩略语各 14 条；HSCU 10 条需求、glossary 旧新均为 0（**已验证**）。
+  4. mock 全管线回归：`verify_no_glossary_pipeline.py`（删缩略语表 / 表头改名两场景）断言全过，完整 mock 反向管线无 errors、产物齐全（2026-10-08 回归复跑 VERIFY_OK）（**已验证**）。
+- **遗留问题**：缩略语表中的图片 / 富文本不入（既有能力边界）；未声明关键字的 profile 维持原逻辑；需**重建后端镜像**才在服务器生效。
+- **下一步建议**：新增控制器时按其缩略语表头在 profile 声明关键字；本条为 2026-10-08 补记（当时仅随提交更新了 CHANGELOG，dev-log 漏记，现按提交 9dc07d0 与验证脚本回补）。
+
 ## 2026-09-29 HLR 需求单元格内嵌表格扁平化提取（分支 feat/issue-xxx-table-within-table-parser）
 
 - **背景（用户发现新缺口）**：环控新输入 `AMSC安全通道测试.docx` 中部分需求的「需求中文」单元格用**嵌套表格**描述内容（正文为「软件应按照A429通信协议按如下内容向控制通道发送L372/L376数据：」，表即「如下内容」）：HLR_14464 内嵌 3x3 表（OFV_TRV手动驱动电路故障信号 bit10、本通道WAITS通道1温度测量值 bit16~bit28），HLR_14470 内嵌 14x3 表（13 条位定义：座舱高度限制标志 bit10 … 中电子设备舱过热检测 bit23）。python-docx 的 `_Cell.text` 只拼接单元格直接段落（1.1.2 源码实证），嵌套表内容被静默丢弃 → 需求正文只剩引导语；job 92ce5d88 产物实证：14464/14470 的 `hlr_labels.json` `signal_keywords`/`bit_fields` 全空，而同风格用内联文本写的 14466 能提取到「温度测量值/数据布局/位宽」。另注：该 job 中这三条判「无匹配」的主因是 L372/L373/L376 不在该 job 的 EoICD 数据里（出现 0 次，而 L234 出现 2228 次）—— 与本缺陷相互独立。
