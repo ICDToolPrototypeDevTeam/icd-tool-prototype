@@ -1,0 +1,49 @@
+# ===================== Python =====================
+__pycache__/
+*.py[cod]
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# ===================== 运行时产物 =====================
+# 集成脚本的最终交付物（顶层 output/，每次运行覆盖，不入库）
+output*/
+
+# 集成脚本的工作临时区（runs/，可重生，不入库）
+runs/
+integration_workspace*/
+
+# 结果汇总模块：input 由集成脚本复制到工作区；outputs 为旧版历史输出
+结果汇总/input/
+结果汇总/outputs/
+
+# EoICD 数据处理模块的输出目录（processed / processed_eps）为运行时生成，不入库
+# 注意：input/ams、input/eps 是输入样本数据，需要入库，不要忽略
+EoICD侧数据处理/data/processed/
+EoICD侧数据处理/data/processed_eps/
+
+# ===================== 密钥（本地，不入库） =====================
+# 真实 Key 放 .env（启动脚本 run_ai.bat / run_ai.sh 会读取）；.env.example 才是模板可入库
+.env
+# 多 judge 协同的专属密钥文件（run_multi_judge.bat / .sh 读取）；.env.multijudge.example 才是模板
+.env.multijudge
+
+# 运行日志
+*.log
+
+# ===================== 编辑器 / 系统 =====================
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Office 打开文件时产生的临时锁文件
+~$*.xlsx
+~$*.xlsm
+~$*.docx

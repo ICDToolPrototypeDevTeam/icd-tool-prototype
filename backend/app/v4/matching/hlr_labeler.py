@@ -218,9 +218,7 @@ def label_hlrs(
         cache: Optional 单条标注的内容寻址缓存（llm_cache.jsonl）。中断恢复时
             命中即复用该条标注、不再调用模型；None 时不读不写（CLI 等调用方行为不变）。
         tracker: Optional 复用计数回调，仅恢复运行传入。
-        cache_kind: 缓存 kind，编入 key。正向管线传 KIND_FORWARD_HLR_LABEL —— 正向与
-            反向的标注 prompt 在默认 profile 下逐字节相同（mock 靠 forward_label_context
-            区分），不带管线维度就可能把另一条管线的结果当成命中。
+        cache_kind: 缓存 kind，编入 key；调用方显式传入（缺省 KIND_HLR_LABEL）。
 
     Returns:
         dict mapping hlr_id → HLRLabel.

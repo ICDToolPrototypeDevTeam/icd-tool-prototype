@@ -1,0 +1,49 @@
+{
+  "_说明": "MOCK 运行配置：judges/arbitrator 的 base_url 全部指向本地 mock LLM server（http://127.0.0.1:8731/v1），不接真实 API。input 指向真实 hscu 数据以驱动阶段1/2 解析。本文件为新增，原 multi_judge_config.json 未改动。",
+  "project": "hscu",
+  "input": {
+    "eoicd_pub": "input/hscu/EoICD_Publisher_Table-标记.xlsx",
+    "eoicd_sub": "input/hscu/EoICD_Subscriber_Table-标记.xlsx",
+    "hlr": "input/hscu/HSCU软件高层需求-裁剪.docx",
+    "trace_dir": ""
+  },
+  "device": "",
+  "use_trace": false,
+  "aggregation": {
+    "need_review_on_split": true,
+    "need_review_rules": {}
+  },
+  "judges": [
+    {
+      "_说明": "异模型 judge（mock-ds）：与 judge_ds_stability 同 model 名，演示同模型重复在无温度抖动时结论一致。",
+      "name": "judge_ds",
+      "model": "mock-ds",
+      "base_url": "http://127.0.0.1:8731/v1",
+      "api_key_env": "MOCK_KEY"
+    },
+    {
+      "_说明": "异模型 judge（mock-qwen）：model 名不同 → mock server 产生不同判定，用于演示异模型分歧。",
+      "name": "judge_qwen",
+      "model": "mock-qwen",
+      "base_url": "http://127.0.0.1:8731/v1",
+      "api_key_env": "MOCK_KEY"
+    },
+    {
+      "_说明": "同模型稳定性重复（mock-ds）：与 judge_ds 同一 model 名，应得到完全相同的判定（模拟无温度抖动时重复空转）。",
+      "name": "judge_ds_stability",
+      "model": "mock-ds",
+      "base_url": "http://127.0.0.1:8731/v1",
+      "api_key_env": "MOCK_KEY"
+    }
+  ],
+  "arbitrator": {
+    "allow_same_as_judge": true,
+    "model": "mock-arb",
+    "base_url": "http://127.0.0.1:8731/v1",
+    "api_key_env": "MOCK_KEY"
+  },
+  "re_review": {
+    "enabled": true,
+    "max_rounds": 1
+  }
+}

@@ -111,7 +111,6 @@ _HINT_DETECT_KEYWORDS = FRAME_SIGNAL_KEYWORDS - {"sdi"}
 #
 # 这是显示层映射，刻意不改变 classify_hlr() 的返回值，也不改变
 # HLRCoverageResult.signal_category 字段：该字段是跨模块契约，被
-# forward_matcher._protocol_conflict()（正向协议冲突硬门）与
 # reverse_matcher L965/L972（label 过滤 / 总线过滤）消费。
 #
 # "A429隐式" 对应的桶实际覆盖 CAN/A825/A664/A429/AFDX/ARINC/总线

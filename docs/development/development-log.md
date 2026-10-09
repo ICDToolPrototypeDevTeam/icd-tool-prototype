@@ -3529,6 +3529,83 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   5. 触发 case（本 job 5 例）的 Step 4/5.5 旧缓存 key 自然失效并重判（期望行为）；非触发 case prompt 逐字节不变、缓存照常命中（由验证 1③④ 断言）。
 - **下一步建议**：1) 用户以真实 provider 复跑 `96da3513` 输入做 A/B；2) HLR_478 rationale 笔误拍板后如需修正，属输入数据侧改动、与本修复独立；3) 中文范围式盲区按真实语料评估；4) 汇总提交本分支三段修复（CN 位对 + EN 逐位 + EN 范围式）。
 
+## 2026-10-08 正向检查集成：「正向待集成」树原样接入、旧正向剔除（Issue #119）（分支 issue-x-forward-integration）
+
+- **背景（用户需求原文 5 条）**：将「正向待集成」文件夹下的正向检查集成进现有工程 —— ①不能影响反向任何功能；②仅做集成，即前端保持不变、正向实现保持与该文件夹一致；③正反向分离，除前端共用外不可有交叉共用部分，正向仅使用该路径下的方法与代码，保持原样集成（为了责任划分）；④之前的正向可以剔除，以目前「正向待集成」路径下的为准；⑤前端功能要正常接入，包括控制器选项等按钮。
+- **方案**：
+  1. **正向树原样落地**：`正向待集成/` 下整棵树（`EoICD侧数据处理/`、`multi_judge协同/`、`HLR需求聚类/`、`EoICD-HLR正向匹配与属性比对_支持追溯/`、`run_integration.py`、`multi_judge_runner.py`、`multi_judge_config.json`、`common/`）**逐字节复制**为 `backend/forward/`；一致性由 `backend/tests/test_forward_tree.py` 守卫（源树 vs 落地树逐文件比对），实现需求 ②③「原样集成」。
+  2. **适配层**：新增 `backend/app/forward/`（`root.py` 树根与交付名 / `execution.py` 子进程编排与进度映射 / `artifacts.py` 工作区复制与产物收集 / `config_builder.py` 配置与密钥注入 / `adapter.py` 任务入口 / `projects.py` 系统类型 / `mock_server.py` Mock LLM 服务）。正向编排全部在后端业务模块，`runner.py` 只做线程入口与参数装配（符合 CLAUDE.md §4/§6）。
+  3. **并发隔离**：每任务把正向树复制到 `<job_dir>/forward/`（≈2MB，排除 `input/`、`output/`、`runs/`、`EoICD侧数据处理/data/`、`__pycache__`、`*.log`），避免多任务共用 `runs/integration_workspace` 互相覆盖；续跑 `reuse=True` 复用副本以保住 judge 中间结果。
+  4. **旧正向剔除**：删除 `app/v4/` 下旧正向全部模块（见删除文件）；反向链路（`reverse_matcher`/`semantic_judge`/`re_review`/`consensus` 等）不受影响。
+  5. **密钥纪律**：`config_builder.py` 只写 env 变量**名**（如 `DEEPSEEK_API_KEY`），明文密钥仅作子进程 env 传入，不入代码/配置文件。
+  6. **前端接入**：`CompletenessPage.tsx` 新增「系统类型」下拉（空值 = 后端按上传文件名自动识别，见 `app/forward/projects.py`）、Mock 开关透传（`use_mock_llm` 显式传值，避免沿用容器配置）、控制器选项走既有 `controller_profile` 字段；仍走既有 `POST /api/v4/completeness-analysis` multipart 与下载/历史接口，**下载名不变**。
+- **修改文件**：`backend/app/api/v4/completeness.py`、`backend/app/api/v4/runner.py`（正向任务分支接 adapter、`FORWARD_OUTPUT_FILES`、进度与取消接线）、`backend/app/job_manager.py`（进度字段与终止支持）、`backend/app/v4/config.py`（正向配置项改为转发给正向树）、`backend/app/v4/pipeline.py`（剔除旧正向分支）、`backend/app/v4/llm/mock_llm.py`、`backend/app/v4/llm_cache.py`、`backend/app/v4/matching/hlr_labeler.py`、`backend/app/v4/matching/reverse_matcher.py`、`backend/app/v4/traceability/trace_parser.py`、`frontend/src/pages/CompletenessPage.tsx`、`backend/.env.example`、`CHANGELOG.md`、`README.md`、`docs/architecture/api.md`、`docs/architecture/current-architecture.md`、`docs/project/workflow.md`、`docs/development/development-log.md`（本条）。
+- **新增文件**：`backend/app/forward/{__init__,root,execution,artifacts,config_builder,adapter,projects,mock_server}.py`；`backend/forward/**`（原样正向树）；`backend/tests/test_forward_{adapter,artifacts,config_builder,execution,mock_server,projects,tree}.py`（**注**：`backend/tests/` 被 `.gitignore` 忽略，需与既有测试文件同样单独携带）。
+- **删除文件**：`backend/app/v4/comparison/coverage_reviewer.py`、`backend/app/v4/doc_generators/forward_excel_generator.py`、`backend/app/v4/doc_generators/forward_word_generator.py`、`backend/app/v4/matching/forward_block_builder.py`、`backend/app/v4/matching/forward_matcher.py`、`backend/app/v4/matching/hlr_identity_index.py`、`backend/app/v4/prompts/forward_review.md`、`backend/app/v4/traceability/forward_scope.py`。
+- **验证方式与结果**：
+  1. **单元/集成测试**：`cd backend && python -m pytest tests -q` → **157 passed**（含 7 个 `test_forward_*.py`：树逐字节一致性、子进程进度标记映射、取消杀树、工作区复用、产物收集与汇总映射、配置密钥只存变量名、Mock server 生命周期、系统类型解析）（**已验证**）。
+  2. **Mock E2E（trace 模式）**：`POST /api/v4/completeness-analysis`（HLR + Publisher + 设备追溯 + 系统追溯，`use_mock_llm=true`）→ 任务 `5ef2f16e` **completed**；`forward_summary.json`：`analysis_mode=trace`、`total 372`／已落实 15／部分落实 14／未落实 91／possible 252／`ai_reviewed` 15、`forward_docx/xlsx` 双 true；`output/` 下两交付名（`EoICD至HLR正向完整性分析报告.docx`、`EoICD至HLR正向完整性分析明细.xlsx`）齐全（**已验证**）。
+  3. **Mock E2E（全量模式）**：任务 `47d160d7` 四阶段进度契约实测 —— parse 1/4 → multi_judge 2/4（case 0/3 → 3/3）→ review 3/4 → report 4/4（API 内存口径，磁盘 `job.json` 仅在 flush 点落盘属设计如此）；聚合 `multi_judge_summary.json`：`total 4738`、已落实 76／部分落实 32／未落实 4377（未识别 4307 + 已识别未承接 70）／不一致 253、复核覆盖 `reviewed=76 / peer_reviewed=76 / arb_source=配置（arbitrator 层）`、星级 2★76 + 5★4662（均值 4.95），与 `docs/architecture/api.md` §12.2 示例口径逐项一致；任务最终 **completed**（`V4 forward pipeline complete`，finished_at 2026-10-08T17:47:55Z），`output/` 两固定交付名 + `forward_summary.json`、`forward/output/` `run_manifest_20261008_1652.json` + docx（148 KB）+ xlsx（574 KB）齐全。**报告阶段实测耗时 8 小时 49 分钟**（08:58:53Z 进入 → 17:47:49Z 写出 Word），见遗留 1（**已验证**）。
+  4. **失败路径**：任务 `b23220e2`（只传 Publisher、不传 Subscriber）→ 阶段 1 报「输入文件不存在 …`HSCU_EoICD_Subscriber_Table.xlsx`」→ failed，与预期一致（文案见遗留 2）（**已验证**）。
+  5. **取消路径**：任务 `9e47e158`（全量，正处 Word 生成中）请求取消 → `status=canceled`、消息「任务已被用户终止」，`tasklist` 核对无孤儿 python 子进程（**已验证**）。
+  6. **反向回归**：反向 correctness 任务 `75d8c900` **completed**（`V4 reverse pipeline complete`），反向链路未受影响（**已验证**）。
+  7. **Excel 子进程编码修复**：`app/forward/artifacts.py::run_excel_report` 补 `PYTHONIOENCODING=utf-8`（中文 Windows GBK 管道下 `gen_excel_report.py` 末行 `print("✅ …")` 触发 `UnicodeEncodeError` → exit=1，trace 任务实测踩中，Word 与其余产物当时均已产出）；TDD RED→GREEN 单测 + 全套 157 passed，round-2 trace/全量均恢复正常（**已验证**）。
+  8. **独立审查 agent（Opus）复审 + 修复**：审查以未提交工作区为口径独立实跑（31 passed / 全量 158 passed / 分离 grep / 密钥 grep）后给出报告，其中 2 条在本轮修复：①`config_builder._base_config` 原对 `eoicd_pub=None` 无条件落盘字面量 `"None"`，经 `runner.load_config` 真值判断被提升为 `<配置目录>/None` → 单侧上传时阶段1 以误导路径 FileNotFoundError 报错（与 `eoicd_sub` 的写法不对称）；改为「缺哪侧就不写哪个键」（同侧类型注解同步为 `Optional[Path]`），TDD 新增 `test_build_real_config_omits_publisher_key_when_absent`（RED：`{'eoicd_pub': 'None'}` → GREEN），全套 **158 passed**；E2E 复验（任务 `7e989cf8`，只上传 Subscriber）→ 阶段1 0.16s 以清晰文案 `❌ 输入文件不存在: …AMS_EoICD_Publisher_Table.xlsx` 失败（**已验证**）。②续跑口径文档订正（`api.md` §13.2 / `workflow.md` / `CHANGELOG.md`）：原表述「已完成的中间结果按工作区缓存命中，只有未完成部分真正调用模型」夸大——按源码事实，跨运行真正命中的只有 **HLR 聚类 AI 映射**（`ai_maps.py` 按 `covered_reqs` 元数据增量），阶段1 与各 judge 阶段2/3/4 仍按 `--step all` 重新执行，**身份/属性匹配的 AI 判定不复用**（`name_pair_deduper.py` 运行间独立、`ai_name_results_*.json` 只写不读），已改写为与源码一致的表述。
+  9. **成功收尾清理 runs 工作区（本轮增强）**：任务成功后 `adapter.run_forward_job` 调 `artifacts.cleanup_run_workspace` 删除 `<job_dir>/forward/runs/`（全量任务 `47d160d7` 实测 **574MB**；此时交付物已复制到 `<job>/output`、汇总已读，下载/历史接口只读 `<job>/output`）。失败/中断任务不清理（副本与中间产物保留，供续跑复用与排查）；清理为尽力而为（`ignore_errors`，失败不改变任务成功状态）。HLR 聚类 AI 映射文件在代码树内（`HLR需求聚类/hlr_cluster_tool/*_map.json`）不在 `runs/`，续跑的增量缓存不受影响。TDD 新增 2 个用例（RED：`AttributeError` → GREEN），forward 专项 **33 passed**、全量 **160 passed, 5 deselected**（**已验证**）。
+- **遗留问题**：
+  1. **全量模式 Word 报告生成极慢（已知限制，未修）**：round-2 全量任务 `47d160d7` 报告阶段实测 **8 小时 49 分钟**（08:58:53Z 进入 → 17:47:49Z 写出 Word；期间进程单线程 100% CPU，非卡死）。根因（已实证）：`backend/forward/multi_judge协同/multi_judge_report.py:272-290` 逐格 `set_cell(row.cells[i], …)` + 表尾宽度回填 `r.cells[i].width`，python-docx 1.1.0 每次 `row.cells` 访问重建整张表网格 → 总代价 ≈729n²（n 为该表行数）；全量「未落实」4377 行按子类拆两表（最大 4307 行）。trace 模式（未落实 91 行）≈158s，可用。**结论：全量模式当前只适合小批量/离线过夜运行**。属正向原样代码内部性能问题，按需求 ②「保持与文件夹一致」本 Issue 未改。
+  2. 单侧上传（只传 Publisher/Subscriber 之一）在阶段 1 以**明确文案**失败（`❌ 输入文件不存在: …_Publisher_Table.xlsx`，`7e989cf8` 实测 0.16s；修正前为 `.../None` 路径误导报错，见验证 8①）。文案仍是「文件不存在」而非「请补齐对侧文件」式指引——四个项目中无纯 Subscriber 侧项目，本 Issue 未加前置校验。
+  3. 正向新增可调项（`FORWARD_*` 超时/provider/并发等）散在 env，未在文档集中说明。
+  4. 旧管线历史正向任务在新代码下汇总为零值（无 `forward_summary.json` 快照，按设计兜底）。
+  5. 全量任务报告阶段只有一个粗粒度 4/4 阶段，长报告期内用户看不到细粒度进展。
+  6. **明文 API key 已清除（本轮修复）**：`正向待集成/EoICD-HLR正向匹配与属性比对_支持追溯/{test_full_identity.py, test_full_match.py, test_run.sh}` 与 `backend/forward/…` 同名副本中共 8 处明文 `sk-…`（3 个去重 key），经用户确认**均已作废、无需轮换**；`git log --all` 确认 3 个脚本**从未被提交**，明文未进 git 历史。修复（两侧同改，改后 `cmp` 仍逐字节一致）：`test_run.sh` 第 4 行 `export …="sk-…"` → `: "${DEEPSEEK_API_KEY:?请先导出环境变量 DEEPSEEK_API_KEY}"`；两个测试脚本的 3 项 `api_keys` 明文列表 → `os.environ` 读 `DEEPSEEK_API_KEY` 并复用 3 次（缺失时 `SystemExit` 明确报错），docstring/注释同步。验证：4 个 .py `ast.parse` 通过、`bash -n` 通过、全仓严格扫描（`sk-` 后 ≥20 密钥字符）现仅剩 `backend/.env`（`.gitignore:3` 已忽略；正向运行经 env 与反向共用同一批密钥）。其余 `sk-` 命中均为短占位符（`sk-xxx` 形态）或 `task-` 类误报，非真实密钥。备份在 `E:\tmp\keyfix_backup\`。**注意**：`正向待集成/` 三个文件在暂存区仍是含明文的旧版，需用户重新 `git add` 覆盖。
+- **下一步建议**：1) 若长期使用全量模式，单独评估 `multi_judge_report.py` 表格写入性能（一次性取 `row.cells` 列表、宽度只回填一次），本 Issue 因「原样集成」约束未动；2) 单侧上传在 API/adapter 层加前置中文校验；3) 用户提交前注意 `backend/app/forward/`、`backend/forward/`、`正向待集成/` 未跟踪需 `git add`，`backend/tests/` 被 `.gitignore` 忽略（与既有 35 个测试文件同现状）；4) 建议以真实 provider 跑一次小样本（trace）回归确认密钥注入与环境一致。
+
+## 2026-10-09 正向追溯表上传改单槽多文件（Issue #119 续）（分支 issue-x-forward-integration）
+
+- **背景（用户原文）**：`正向待集成/input/eps` 下有**三个追溯表**（`单模块需求矩阵分析(系统2设备).xlsx`、`单模块需求矩阵分析(设备2软件).xlsx`、`配电系统需求与EoICD追溯表_20260629_统计结果_RevB.xlsx`），「这种都没法上传啊」——前端只有两个固定追溯表槽且必须成对，而 EPS 4 层链路需要 3 张表。用户拍板方案：「和反向一样只留一个上传接口，然后三个表自己去解析识别」，并在「去掉 tab / 保留 tab」二选一中选定**保留 tab**（正向页保留「全量分析 / 追溯范围分析」切换，trace tab 下单槽多选）。
+- **方案**：
+  1. **API**：`POST /api/v4/completeness-analysis` 删除 `device_icd_trace_file` / `system_device_trace_file` 两个 `Optional[UploadFile]` 字段，新增 `trace_files: list[UploadFile] = File(default=[])`（同名字段重复提交，照反向 `coverage.py` 的 `traceability_files` 模式）；删除「必须成对」422 校验，改为 `analysis_mode = "trace" if trace_files else "full"`；逐文件 `.xlsx` 校验（非 .xlsx → 422）。张数与类型不做接口约束——识别交给正向树（`backend/forward/EoICD侧数据处理/config/traceability.yaml` 按表头关键字逐 sheet 判型，说明/修订 sheet 跳过）。
+  2. **runner 快照与续跑双形状兼容**：`runner.py` 新增 `_LEGACY_TRACE_PARAM_KEYS` 与 `_trace_paths_from_params`：快照键 `trace_files`（新，list）优先，缺省回落到旧两键（旧任务快照仍可续跑）；`launch_forward_pipeline` 签名改为 `trace_files: tuple[Path, ...]`，快照写 `"trace_files": [_rel_path(...)]`；`input_filenames_from_params` 同步兼容双形状（任务列表展示文件名）。
+  3. **前端**：`CompletenessFileUpload.tsx` 追溯表区改单区多选（`handleTraceFiles` append + 同一字段 `multiple` 上传；逐文件删除与预览切换；显示于 trace tab 内，切回 full 自动清空隐藏）；`CompletenessPage.tsx` 状态由两个单文件改 `traceFiles: FileItem[]`，提交时 `trace_files` 重复 append，前端校验改为「追溯模式 ≥1 张」。
+- **修改文件**：`backend/app/api/v4/completeness.py`、`backend/app/api/v4/runner.py`、`frontend/src/components/CompletenessFileUpload.tsx`、`frontend/src/pages/CompletenessPage.tsx`、`backend/tests/test_api_completeness_controller.py`（+4 用例）、`docs/architecture/api.md`（§12.1 字段表与模式判定、§12.2 口径、§12.5 错误表删「只传一张 422」行）、`docs/architecture/current-architecture.md`（§7.1 上传行）、`docs/project/workflow.md`（§1.2 上传行）、`CHANGELOG.md`、`docs/development/development-log.md`（本条）。
+- **新增文件**：`backend/tests/test_api_forward_trace_params.py`（5 用例：新键快照列举 / 旧两键回落 / 新键 roundtrip / 旧键 roundtrip / 快照记录但文件缺失 → FileNotFoundError）。
+- **删除文件**：无（旧字段仅从接口移除，未删任何文件）。
+- **验证方式与结果**：
+  1. **后端测试（TDD RED→GREEN）**：新用例先单独跑 RED（`KeyError: 'trace_files'`、200≠422 等预期失败）再实现；canonical 全量命令（10 ignore + 5 deselect，见上一轮）→ **169 passed, 5 deselected**（基线 160 + 新增 9）（**已验证**）。
+  2. **前端构建**：`cd frontend && npm run build`（tsc && vite build）通过（10.77s）（**已验证**）。
+  3. **Mock E2E（EPS 三张表，4 层链路）**：任务 `943045f7-8c88-40ce-a8dd-2d6c72e01dcf`（`use_mock_llm=true`，上传 HLR + Publisher + 上述三张追溯表，控制器留空自动识别）→ ~90s **completed**。`integration.log`：三张表分别识别为 `req_matrix`（系统2设备）/ `req_matrix`（设备2软件）/ `eoicd_erd`（配电系统需求与EoICD追溯表，sheet`[待填_需求接口追溯表]`），`链路判定: 4-layer（EoICD 追溯表 ID 列 = srd）`，`链路: 4-layer | HLR 11 → ERD 19 → SRD 15 → EoICD 84`；`forward_summary.json`：`analysis_mode=trace`、`total_blocks=44`、`covered_direct=6`、`covered_aggregate=12`、`uncovered=20`、`possible=6`、`ai_reviewed=15`；`forward-xlsx` / `forward-docx` 下载均 200（19,762 / 40,772 bytes）；任务成功收尾后 `<job>/forward/runs/` 已清理（`forward/` 剩 ≈1.5MB）；任务列表 `input_files` 正确列出全部 6 个文件（**已验证**）。
+- **遗留问题**：
+  1. 追溯表**实质识别失败**时（如误传无关 xlsx）的兜底：现由正向树按表头判型，判不出即该表不产生追溯关系（接口不报错）——行为与正向树的既有语义一致，未加接口层前置校验。
+  2. 前端追溯表区不校验扩展名以外的内容类型（与反向一致）；误传的后果由 E2E 报表体现。
+  3. 本轮 E2E 为 MOCK 模式（真实 provider 下链路识别与判定同路径，未差异验证）。
+- **下一步建议**：1) 真实环境用 EPS 三张表跑一次 trace 回归；2) 若后续出现第 5 个项目（其他链路层数），接口侧无需再改——识别逻辑集中在 `traceability.yaml`；3) 提交时本轮 4 个修改文件与 1 个新测试文件需用户自行 `git add`（`backend/tests/` 仍被 `.gitignore` 忽略，需单独携带）。
+
+## 2026-10-09 正向复核阶段（Step5 仲裁 + Step5.5 复查）进度输出（Issue #119 续）（分支 issue-x-forward-integration）
+
+- **背景**：用户真实任务 `20bb15b2`（AMS trace、`use_mock_llm=false`）于 10:05:41 进入 `[复核路由] Step5 仲裁 + Step5.5 peer-aware 复查（273 条需复核信号；串行执行，不占 judge 并发额度；预算=不限）` 后 **71 分钟零日志输出**，被误判为卡死并在界面终止（`cancelled by user at stage=review`，任务永远不会有 `output/` 最终产物）。用户问「复核这个是原正向就有的功能吗，如果是的话需要加输出进度」。
+- **复核结论（改动前先复核）**：Step5 仲裁 + Step5.5 复查为**原正向自带功能**（`正向待集成/multi_judge_runner.py::run_review_route` + `multi_judge协同/multi_judge_arbitrator.py`；源树与 `backend/forward/` 集成树逐字节一致、全树 diff 无内容差异）。该阶段设计上串行静默：单次 LLM 15~25s、约 4 次/分钟，273 条 ≈ 70 分钟量级——当时进度符合预期、并非卡死；零输出是唯一问题。**误导源**：日志横幅 `✅ 集成流程全部完成！总耗时: Xs` 是每个「集成」子流程各打一次（该日志 4 次），极易被读成整任务完成。用户随后拍板加进度输出。
+- **方案**：
+  1. `multi_judge_arbitrator.py` 新增 `PROGRESS_EVERY=20`、`_fmt_dur()`（`XmYYs` / `XhYYm`）与 `_review_progress(tag, total, executed_word)` → 返回 `(start, tick, finish)` 三个回调：`start` 打 `[<tag>进度] 0/N 开始（串行执行，每 20 条汇报一次）`；`tick(kind)` 计数并在每满 20 条（且未到总数，避免与收尾行重复）打一行；`finish` 打 `[<tag>进度] N/N 完成（…；总用时 X）`。
+  2. 进度行内容：`<裁决词> X / 跳过 Y / 失败 Z` 计数 + 已用时长 + 预计剩余（`elapsed/done*(total-done)` 线性外推）；`total==0` 零输出。
+  3. 接入点：`arbitrate()`（Step5 标签「仲裁」、Step5.6 重仲裁标签「重仲裁」）与 `peer_aware_review()`（标签「复查」）；各 4 个跳过路径计 skipped、LLM 失败路径计 failed、成功路径计 executed。
+  4. **原样集成纪律**：改动落在**源目录** `正向待集成/multi_judge协同/multi_judge_arbitrator.py`（14 处），完成后 `cp` 同步到 `backend/forward/multi_judge协同/`，`test_forward_tree.py` 逐字节守卫通过。
+  5. **进度契约不受影响**：新增 `[仲裁进度]` / `[复查进度]` / `[重仲裁进度]` 行不匹配 `app/forward/execution.py` 任何既有正则（`_RE_STAGE1` / `_RE_JUDGE_START` / `_RE_JUDGE_DONE` / `_RE_REVIEW` / `_RE_AGG_DONE` / `_RE_REPORT_START`）；子进程 `PYTHONUNBUFFERED=1` 已保证进度行实时经 `_pump` 进入任务日志面板。
+- **修改文件**：`正向待集成/multi_judge协同/multi_judge_arbitrator.py`（源，14 处）、`backend/forward/multi_judge协同/multi_judge_arbitrator.py`（逐字节副本）、`CHANGELOG.md`、`docs/development/development-log.md`（本条）。
+- **新增文件**：无（离线验证脚本 `.superpowers/sdd/2026-10-08-正向检查集成/verify_review_progress.py` 为过程记录，不提交）。
+- **删除文件**：无。
+- **验证方式与结果**：
+  1. **离线定点验证**（stub `call_llm`，不触网）：N=40（前 4 条走「后端完全共识跳过」）+ N=3 小样本，断言进度行数量 / 计数 / 文案 —— N=40：`[仲裁进度] 0/40 开始` → `20/40（裁决 13 / 跳过 4 / 失败 3；已用 …，约剩 …）` → `40/40 完成（裁决 29 / 跳过 4 / 失败 7）`，复查同构（`36/36 完成（复查 29 / 跳过 0 / 失败 7）`）；N=3 只打开始 + 收尾共 4 行；恰为 20 倍数时不重复打（**已验证**，脚本未提交）。
+  2. **守卫与执行层测试**：`cd backend && python -m pytest tests/test_forward_tree.py tests/test_forward_execution.py -q` → **7 passed**（两树逐字节一致）（**已验证**）。
+  3. **canonical 全量**（10 ignore + 5 deselect，见上一轮 Ruling）：**169 passed, 5 deselected**，与基线一致、零回归（**已验证**）。注：不带 ignore 直跑 `pytest tests/` 会报 10 个收集错误——为另一分支反向测试残留（存量，非本轮引入；详见 `.superpowers/sdd/…/progress.md` Task 8 Ruling）。
+  4. **正向自带自测**：`multi_judge_arbitrator._self_test()` 与 `multi_judge_runner._self_test()` 均通过，输出实证 `[仲裁进度]` / `[复查进度]` / `[重仲裁进度]` 三个标签（**已验证**）。
+- **遗留问题**：
+  1. 未重跑任务级 E2E（进度输出已在离线定点验证与自测中覆盖；如需可在 mock 模式快速复跑）。
+  2. 「预计剩余」为线性外推，LLM 用时波动时会有偏差（仅展示用，不影响逻辑）。
+  3. 部署包需**重建后端镜像**才带此改动（容器内代码为镜像内置，本地 host 开发立即生效）。
+  4. 阶段级横幅 `✅ 集成流程全部完成！总耗时: Xs` 每个「集成」子流程各打一次（误导源之一）本轮**未改**——属正向原样代码文案，未在用户要求范围内。
+- **下一步建议**：1) 用户重新提交真实任务时可直接从任务日志看到复核阶段每 20 条推进与 ETA；2) 提交时 `正向待集成/`、`backend/forward/` 及本轮文件由用户自行 `git add`（`backend/forward/` 与 `正向待集成/` 均未跟踪）。
+
 ## 2026-09-29 HLR 缩略语表串表门控修复（AMS/FGMC/HSCU 按表头关键字，提交 9dc07d0）
 
 - **背景**：缩略语解析此前只判「`glossary_table_index` 指向的表 ≥3 列」即按「缩写 / 英文全称 / 中文说明」三列读取其数据行。完整文档若在该位置放的是别的表（修订记录、变更表、LABEL 清单等），其数据行会被读成垃圾缩略语条目并随下游提示词流转。HSCU（液压）真实文档 `HSCU软件高层需求-裁剪.docx` 该位置即是一张 12×8「序号 / LABEL名称（LBL_XXX）/ LABEL号 / SDI号」表（全文档无「缩略语」字样）——仅因序号列**纵向合并**、数据行 col0 为空才侥幸解析出 0 条，属结构巧合而非有效保护；合成 3 列修订表实证旧行为产出 `[('1','2026-01-01'), ('2','2026-01-02'), ('3','2026-01-03')]` 三条垃圾条目。

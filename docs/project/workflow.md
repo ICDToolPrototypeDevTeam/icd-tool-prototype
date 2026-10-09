@@ -1,10 +1,12 @@
 # 业务流程说明
 
-本文档用于说明 **ICD工具原型** 的业务处理流程。当前版本仅保留 V4 反向管线流程；V3 旧流程已随 V3 代码移除（见 ADR-002）。
+本文档用于说明 **ICD工具原型** 的业务处理流程。当前版本包含两条相互独立的管线：反向管线（HLR → EoICD 正确性比对，§1.1）与正向完整性分析（EoICD → HLR 漏写检查，§1.2）；V3 旧流程已随 V3 代码移除（见 ADR-002）。
 
 ## 1. 总体流程
 
-ICD工具原型 的总体流程（6 步反向管线）如下：
+### 1.1 反向管线（HLR → EoICD，6 步）
+
+反向管线的总体流程（6 步）如下：
 
 ```text
 用户上传 HLR Word + EoICD PubSub Excel (Publisher 或 Subscriber 至少一个) + 可选追溯 Excel
@@ -82,6 +84,37 @@ Step 6: 报告生成
     模块: doc_generators/{excel_generator,word_generator,consensus_word_generator}.py
     + comparison/report_generator.py
 ```
+
+### 1.2 正向完整性分析（EoICD → HLR，多 judge 一致性管线）
+
+正向完整性分析回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析互补。管线为「正向待集成」工程的整体原样集成（唯一事实源：`backend/forward/` 代码树；每任务整体复制到 `<job_dir>/forward/` 运行），前端进度为 4 步：
+
+```text
+用户上传 HLR Word + EoICD PubSub Excel (Publisher 或 Subscriber 至少一个) + 可选追溯表（0-N 张，单槽多文件；
+    未上传 = 全量分析 `full`，上传任意张 = 追溯范围分析 `trace`；几张、各是什么表由正向树按表头自动识别，接口不做配对约束）
+    ↓
+Step 1/4: 解析输入文件（阶段1 共享）
+    系统类型（controller_profile：ams/eps/fgmc/hscu，空 = 按文件名自动识别）确定项目配置；
+    集成层将原始输入映射为正向代码树要求的配置与数据布局；
+    阶段1 的 EoICD 数据处理（确定性、无 AI）在全管线只执行一次，产物 copy 给各 judge 复用 ——
+    这就是「输入只解析一次」原则在正向管线中的落点
+    ↓
+Step 2/4: 多模型裁判判定（judge 数 = 配置的 judge 总数，MOCK 为 3）
+    每个 judge 一次完整正向检查运行（阶段2/3/4，均调 AI），在独立子进程 + 独立 env +
+    独立工作区 + 独立 map 缓存中并行执行，互不干扰；超时 judge 不 kill，由后台线程补收
+    ↓
+Step 3/4: 共识复核
+    各 judge 的阶段5 结果（report_{pub,sub}.json）按 signal_full_name 对齐聚合 →
+    Step5 仲裁（仲裁固定 DeepSeek）+ Step5.5 peer-aware 复查
+    ↓
+Step 4/4: 生成报告
+    Word 报告 + Excel 明细（明细表由集成层脚本生成），整理复制为两个固定交付名：
+    EoICD至HLR正向完整性分析报告.docx / EoICD至HLR正向完整性分析明细.xlsx
+```
+
+进度口径：`parse → multi_judge → review → report`，judge 完成数按 `case_index / case_total`（已完成 judge 数 / judge 总数）实时展示。终止任务会杀掉整个正向子进程树（不留孤儿）；恢复运行复用任务目录内的正向工作区（代码树副本与中间产物原样保留——失败/中断任务才需要恢复，成功任务收尾时 `runs/` 已清理；其中 HLR 聚类 AI 映射按 map 元数据增量命中；阶段1 与各 judge 判定步骤仍重新执行，身份/属性匹配 AI 判定不复用——口径见 `docs/architecture/api.md` 第 12.4 / 13.2 节）。
+
+两条管线完全独立：正向仅使用 `backend/forward/` 代码树及其适配层 `backend/app/forward/`，与反向模块（`backend/app/v4/`）不交叉共用业务代码；除前端页面外，正反向无共享实现（见 `docs/architecture/current-architecture.md` §7.1）。
 
 ## 2. 输入文件上传
 

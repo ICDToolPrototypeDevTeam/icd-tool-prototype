@@ -35,7 +35,6 @@ from app.v4.parsers.zip_entry_normalize import ensure_standard_path
 
 
 # AMS 默认 cfg：作为不传 cfg 时的兼容基线（与 profiles/ams/config.yaml 字节一致）。
-# 适用于 forward_scope.py 这类尚未迁移到 profile-driven 的旧调用方；
 # 反向管线 build_trace_index() 显式传 cfg.table1/table2，不走这里。
 _DEFAULT_TABLE1_CFG = TraceabilityTableConfig(
     filename_patterns=("设备需求与系统ICD追溯表.xlsx",),

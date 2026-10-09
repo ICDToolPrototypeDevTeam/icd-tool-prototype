@@ -1,0 +1,113 @@
+{
+  "FSF21000101_HLR_267": {
+    "value": [
+      {
+        "label": "30",
+        "name": "通风BBSOV1全关微动开关反馈",
+        "bit": "15",
+        "direction": "RX"
+      },
+      {
+        "label": "30",
+        "name": "通风BBSOV1全开微动开关反馈",
+        "bit": "16",
+        "direction": "RX"
+      }
+    ],
+    "text_hash": "74b21b00"
+  },
+  "FSF21000101_HLR_547": {
+    "value": [
+      {
+        "label": "11",
+        "name": "压调OFVTRV失效在关位故障有效标志",
+        "bit": "22",
+        "direction": "TX"
+      },
+      {
+        "label": "11",
+        "name": "压调OFVTRV失效在开位故障有效标志",
+        "bit": "23",
+        "direction": "TX"
+      },
+      {
+        "label": "11",
+        "name": "RFAN可用标志",
+        "bit": "24",
+        "direction": "TX"
+      },
+      {
+        "label": "11",
+        "name": "通风FWDEFAN可用标志",
+        "bit": "25",
+        "direction": "TX"
+      },
+      {
+        "label": "11",
+        "name": "通风FWDBFAN可用标志",
+        "bit": "26",
+        "direction": "TX"
+      },
+      {
+        "label": "11",
+        "name": "通风AFTEFAN可用标志",
+        "bit": "27",
+        "direction": "TX"
+      },
+      {
+        "label": "11",
+        "name": "通风AFTBFAN可用标志",
+        "bit": "28",
+        "direction": "TX"
+      }
+    ],
+    "text_hash": "0b6026b2"
+  },
+  "FSF21000101_HLR_4510": {
+    "value": [
+      {
+        "label": "126",
+        "name": "飞行架次数",
+        "bit": null,
+        "direction": "RX"
+      },
+      {
+        "label": "134",
+        "name": "飞机注册号",
+        "bit": null,
+        "direction": "RX"
+      },
+      {
+        "label": "135",
+        "name": "飞机注册号",
+        "bit": null,
+        "direction": "RX"
+      },
+      {
+        "label": "136",
+        "name": "飞机注册号",
+        "bit": null,
+        "direction": "RX"
+      },
+      {
+        "label": "137",
+        "name": "飞机阶段",
+        "bit": null,
+        "direction": "RX"
+      },
+      {
+        "label": "150",
+        "name": "UTC时间",
+        "bit": null,
+        "direction": "RX"
+      },
+      {
+        "label": "260",
+        "name": "UTC日期",
+        "bit": null,
+        "direction": "RX"
+      }
+    ],
+    "text_hash": "8e5fda1a"
+  }
+}

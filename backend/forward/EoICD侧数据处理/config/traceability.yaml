@@ -1,0 +1,130 @@
+# 追溯表配置（通用版，同时支持 3 层 / 4 层链路）
+# ============================================================
+# 用于「去重归簇」之后的追溯过滤：
+#   若输入目录中检测到追溯表，则按需求追溯链路逐级追溯，
+#   只保留与输入软件高层需求相关的 EoICD；未检测到则按原方案全量保留。
+#
+# 链路层级由「需求编号的命名规则」自动判定，不依赖文件名：
+#   软件高层需求(HLR) → 设备层级需求(ERD) → 系统层级需求(SRD) → EoICD
+#   - 3 层：HLR → ERD → EoICD（EoICD 追溯表左列是 ERD）
+#   - 4 层：HLR → ERD → SRD → EoICD（EoICD 追溯表左列是 SRD）
+
+# ---------------- 文件识别 ----------------
+# scan_dirs 仅作为「默认值」生效：当且仅当直接运行 trace_eoicd.py 且不带 -r 参数时
+# （例如 `python src/trace_eoicd.py -c config/traceability.yaml -o out.json`），
+# 才会按此列表扫描目录。
+# 注意：经编排脚本（run_data_processing.py）运行时始终会传入 -r 参数（取自
+# PROJECTS[proj]["raw_dir"]，如 ams=input/ams、eps=input/eps），
+# 此时 -r 优先、scan_dirs 被覆盖、永不生效。因此修改此处不会改变编排流程的扫描目录。
+scan_dirs:
+  - input/ams
+
+# .json 用于已结构化的 HLR 结果（如 hlr_clustered.json）
+scan_extensions:
+  - .xlsx
+  - .xlsm
+  - .docx
+  - .json
+
+skip_file_patterns:
+  - "~$"
+
+# 工作表名称含以下关键字时跳过（说明页/修订记录等叙述性 Sheet）
+# 这类 Sheet 的正文常出现 ERD编号 / ICD FullName 字样，极易被误判为追溯表
+skip_sheet_keywords:
+  - 说明
+  - 修订
+  - Readme
+  - README
+  - 备注
+
+# ---------------- 表类型识别 ----------------
+# 对每张工作表，只用「表头行」做关键字匹配（不用前几行拼接文本，
+# 否则追溯表的「说明」Sheet 会因正文提及 ERD编号/ICD FullName 而被误判）。
+
+table_types:
+  # EoICD ↔ 需求追溯表。左列是 ERD 还是 SRD 由 ID 内容自动判定
+  eoicd_erd:
+    required_header_keywords:
+      - ERD编号
+      - ICD FullName
+
+  # 需求矩阵表：左右两栏并排（左=上层需求，右=下层需求）
+  # 例：单模块需求矩阵分析(系统2设备) / (设备2软件)
+  # 必须出现 2 个「需求编号」列，用于排除「接口基线表」等单列表
+  req_matrix:
+    required_header_keywords:
+      - 需求编号
+    required_repeat:
+      需求编号: 2
+
+  # 独立的「系统需求 ↔ 设备需求」表（非矩阵格式，可选）
+  sys_erd:
+    required_header_keywords:
+      - 系统需求
+
+# ---------------- 列定位 ----------------
+# 列名按「包含」匹配；同名列按出现次序定位（occurrence 0/1）。
+
+columns:
+  eoicd_erd:
+    erd_id: ["ERD编号"]
+    sys_id: ["系统需求编号", "SRD编号"]
+    icd_fullname: ["ICD FullName"]
+    icd_category: ["ICD类别"]
+    icd_category_keep: ["EoICD"]
+
+  sys_erd:
+    sys_id: ["系统需求编号", "SRD编号", "系统层级需求编号"]
+    erd_id: ["设备需求编号", "ERD编号"]
+
+  req_matrix:
+    upper_id: ["需求编号"]     # 左栏第 1 个 = 上层需求
+    upper_doc: ["模块名称"]
+    lower_id: ["需求编号"]     # 右栏第 2 个 = 下层需求
+    lower_doc: ["模块名称"]
+    link_type: ["链接类型"]
+
+# ---------------- 需求编号识别 ----------------
+# 用于判定编号属于哪一层，也用于从文档中提取 HLR 编号。
+# 现已统一为「一套配置适配所有项目」，无需再为不同机型维护独立 traceability 文件：
+#   AMS / 配电 : HLR=FSF.._HLR_xxx   ERD=AMSC_ERD_5020 / RPDUDRD_003142   SRD=EPDSSRS_020942
+#   FGMC       : ERD 为纯数字（如 4036）
+#   HSCU       : ERD 为 HSCU- 前缀（如 HSCU-011037）
+# 因此 erd 正则同时覆盖三种写法：纯数字 / 含 ERD|DRD 字样 / 字母-数字（HSCU-）。
+# 注意：矩阵表左右两栏同名、只能靠「值格式」区分层级，故 hlr/srd 正则不可删，
+#       否则 4 层链路的 SRD→ERD 一跳会断（详见 trace_eoicd.py 的 classify_level）。
+# 前缀允许下划线：连写 RPDUDRD_003142 / 分隔 AMSC_ERD_5020。
+id_patterns:
+  hlr: '[A-Za-z0-9_]*_?HLR_[0-9]+'
+  erd: '[0-9]+|[A-Za-z0-9_]*(?:ERD|DRD)_[0-9]+|[A-Za-z]+-[0-9]+'
+  srd: '[A-Za-z0-9_]*(?:SRD|SRS)_[0-9]+'
+
+# ---------------- 软件高层需求输入 ----------------
+# 优先级：结构化 JSON > Word 文档 > Excel 清单
+hlr_source:
+  clustered_json:
+    filename_keywords:
+      - hlr_clustered
+      - hlr
+    array_field: requirements
+    id_field: req_id
+
+  filename_keywords:
+    - 软件高层需求
+    - HLR
+
+# ---------------- 过滤策略 ----------------
+filter:
+  # 矩阵表行过滤：只保留「左右栏编号都能归类到 hlr/erd/srd」的行。
+  # 靠编号规则过滤比靠文档名关键字更通用（配电的下层文档名不含「软件高层需求」）。
+  require_both_levels: true
+
+  # 可选：按文档名关键字过滤（留空 = 不过滤）
+  upper_doc_keywords: []
+  lower_doc_keywords: []
+
+  # 需要忽略的链接类型（如「参考」「测试」）
+  exclude_link_types: []
+
+  ignore_case: true

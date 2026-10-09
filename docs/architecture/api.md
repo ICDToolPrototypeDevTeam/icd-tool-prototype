@@ -120,7 +120,7 @@ GET /api/v4/jobs/{job_id}
 
 `mock_models` 按 ADR-001 D5 规则取值：`multi_judge_results.json.providers ∩ {"minimax", "qwen"}`；该交集**总是**执行，故该字段只会出现 `minimax` / `qwen`（`deepseek` 不会出现）。`USE_MOCK_LLM=1` 时三个模型的判定都由 Mock 产生，但该字段的取值规则不变。
 
-`resumed` 表示本次运行是否为中断后的恢复运行（`resume` 启动后置 `true`，首跑为 `false`）。`reuse` 仅在恢复运行时非空，以**模型调用次数**为单位反映本次运行的两个去向：`reused` = 直接复用中断前已完成结果、未发起请求的调用次数；`rerun` = 本次接续发起的调用次数（含中断前未执行到的步骤，以及中断时正在执行或已失败、缓存中没有可用结果的调用）。计数按**反向管线的 Step 2（HLR 标注）/4/5/5.5/5.6** 与**正向管线的 Step 4（HLR 标注）/7（AI 三态复核）**逐条模型调用累计、不去重（同一结果在后续步骤再次命中会再计一次），因此与 `llm_cache.jsonl` 的行数不是同一口径；也与需求条数不同 —— 每个需求对应「每个模型一次判定 + 一次共识」等多次调用。其中两侧的 HLR 标注整批完成、命中 `hlr_labels.json` 直接加载时，加载的 N 条按 `reused` 计入。正向管线同样接入内容寻址缓存（Step 4 `kind=forward_hlr_label`、Step 7 `kind=forward_review`），恢复运行与反向一样实时反映复用/接续调用次数。
+`resumed` 表示本次运行是否为中断后的恢复运行（`resume` 启动后置 `true`，首跑为 `false`）。`reuse` 仅在恢复运行时非空，以**模型调用次数**为单位反映本次运行的两个去向：`reused` = 直接复用中断前已完成结果、未发起请求的调用次数；`rerun` = 本次接续发起的调用次数（含中断前未执行到的步骤，以及中断时正在执行或已失败、缓存中没有可用结果的调用）。计数按**反向管线的 Step 2（HLR 标注）/4/5/5.5/5.6** 逐条模型调用累计、不去重（同一结果在后续步骤再次命中会再计一次），因此与 `llm_cache.jsonl` 的行数不是同一口径；也与需求条数不同 —— 每个需求对应「每个模型一次判定 + 一次共识」等多次调用。其中 HLR 标注整批完成、命中 `hlr_labels.json` 直接加载时，加载的 N 条按 `reused` 计入。**正向管线不产生 `reuse` 计数**（恒为 `{"reused": 0, "rerun": 0}`）：新正向多 judge 一致性管线的续跑复用发生在任务目录内的正向工作区（代码树副本与各 judge 工作区中间结果原样复用，见第 13.2 节），不逐条经过父进程记账。
 
 `interrupted` / `abandoned` 为任务中断恢复相关状态，见第 13 节。
 
@@ -305,12 +305,11 @@ Content-Type: multipart/form-data
 | `hlr_word_file` | UploadFile (.docx) | 是 | HLR Word 文档 |
 | `eoicd_publisher_file` | UploadFile (.xlsx) | 二选一 | EoICD Publisher PubSub Excel |
 | `eoicd_subscriber_file` | UploadFile (.xlsx) | 二选一 | EoICD Subscriber PubSub Excel |
-| `analysis_mode` | str (form) | 否（默认 `full`） | `full`（全量）或 `trace`（追溯范围） |
-| `device_icd_trace_file` | UploadFile (.xlsx) | trace 模式必填 | 表1：设备→ICD 追溯表 |
-| `system_device_trace_file` | UploadFile (.xlsx) | trace 模式必填 | 表2：设备→高层需求追溯表 |
+| `controller_profile` | str (form) | 否（空 = 自动识别） | 系统类型：`ams` / `eps` / `fgmc` / `hscu`；为空时按上传文件名自动识别；取值不在项目表 → 422 |
+| `trace_files` | UploadFile (.xlsx) × N | 追溯模式至少 1 张 | 追溯表多文件单字段（同名字段重复提交，照反向 `traceability_files` 模式）；几张、各是什么表由正向树按表头关键字自动识别（AMS 2 张 / EPS 4 层链 3 张），接口不做张数与配对约束 |
 | `use_mock_llm` | bool (form) | 否（默认不覆盖） | 显式覆盖 mock 开关；未提供时以 `.env` 的 `USE_MOCK_LLM` 为准（当前前端总是显式提交本字段） |
 
-`analysis_mode` 不在 `{full, trace}` → 422；trace 模式缺任意一张追溯表 → 422。
+`analysis_mode` 不是请求字段（历史字段被忽略）：追溯表不上传（0 张）→ `full`；上传任意张（≥1 张，含 1 张）→ `trace`。接口不做成对校验，张数与类型由正向树按表头自动识别（AMS 2 张 / EPS 4 层链 3 张）。
 
 预期返回（V4AnalyzeResponse，与反向共用）：
 
@@ -338,17 +337,17 @@ GET /api/v4/jobs/{job_id}/result
   "status": "completed",
   "summary": {
     "analysis_mode": "full",
-    "total_blocks": 1568,
-    "covered_direct": 450,
-    "covered_aggregate": 0,
-    "parent_referenced": 192,
-    "possible": 509,
-    "uncovered": 417,
+    "total_blocks": 4738,
+    "covered_direct": 76,
+    "covered_aggregate": 32,
+    "parent_referenced": 0,
+    "possible": 253,
+    "uncovered": 4377,
     "unsupported": 0,
     "input_error": 0,
-    "ai_reviewed": 701,
-    "eoicd_count": 122674,
-    "hlr_count": 32
+    "ai_reviewed": 76,
+    "eoicd_count": 4738,
+    "hlr_count": 0
   },
   "outputs": {
     "forward_xlsx": true,
@@ -357,6 +356,14 @@ GET /api/v4/jobs/{job_id}/result
   "errors": []
 }
 ```
+
+字段口径（Issue #119 新正向管线）：
+
+- `analysis_mode` 仅 `full` / `trace` 两值，由是否上传追溯表决定（未上传 → `full`；上传任意张 → `trace`，见 12.1），非请求字段；
+- 三态判定：`covered_direct` = 已落实、`covered_aggregate` = 部分落实、`uncovered` = 未落实（多 judge 一致性的判定分布）；
+- `possible` = 其余需人工判断项（`total_blocks − 三态之和`，含「不一致」桶），`total_blocks` / `eoicd_count` = 参与判定的 EoICD 业务对象总数；
+- `ai_reviewed` = 多 judge 复核覆盖条数（聚合产物 `review_coverage.reviewed`）；
+- `parent_referenced` / `unsupported` / `input_error` / `hlr_count` 保持字段兼容：新管线不产出对应语义，恒为 0。
 
 ### 12.3 下载正向输出
 
@@ -374,18 +381,13 @@ GET /api/v4/jobs/{job_id}/outputs/forward-docx
 
 正向下载接口校验 `task_type == "completeness"`；反向下载接口校验 `task_type == "correctness"`。用错任务下载 → 404。
 
-### 12.4 正向 JSON 中间产物（不暴露）
+### 12.4 正向中间产物（不暴露）
 
-正向管线分阶段落盘，以下 JSON 仅保留在 `backend/output/v4/{job_id}/output/` 内，不对外下载：
+正向管线分阶段落盘，以下产物不对外下载：
 
-- `forward_scope.json`（C2 追溯范围）
-- `forward_blocks.json`（C3 业务对象块）
-- `hlr_identity_index.json`（C4 HLR 身份索引：确定性 token + `label_hlrs()` 召回增强的 llm_label token）
-- `forward_candidates.json`（C5 候选召回）
-- `forward_deterministic.json`（C6 确定性判定）
-- `forward_ai_review.json`（C7 AI 三态复核）
-- `forward_coverage.json`（C8 最终覆盖结果）
-- `llm_cache.jsonl`（Step 4/7 的 LLM 调用内容寻址缓存，中断恢复时按条复用，见第 13.2 节）
+- `<job_dir>/output/forward_summary.json`：结果快照（结果摘要的落盘副本，供容器重启后反读；见第 13 节）；
+- `<job_dir>/forward/runs/integration_workspace/`：多 judge 一致性管线的中途产物（阶段1 共享产物、各 judge 工作区及其 AI map 缓存、聚合与复核 JSON）。任务**成功**收尾时该目录整体清理（全量任务实测约 574MB；失败/中断任务保留，供续跑与排查）；
+- `<job_dir>/forward/output/`：runner 落盘的 `run_manifest_*.json`、Word/Excel 报告原件（整理后复制为两个固定交付名，见 12.3）。
 
 ### 12.5 正向错误响应
 
@@ -394,8 +396,7 @@ GET /api/v4/jobs/{job_id}/outputs/forward-docx
 | `hlr_word_file` 缺失或非 .docx | 422 |
 | pub/sub Excel 都没传 | 422 |
 | 任意 Excel / 追溯表非 .xlsx | 422 |
-| `analysis_mode` 不在 `{full, trace}` | 422 |
-| trace 模式缺追溯表 | 422 |
+| `controller_profile` 非空且不在项目表 | 422 |
 | 任务 `running`/`failed` 时调 `/result` | 409 |
 | 正向 xlsx/docx 未生成时下载 | 404 |
 
@@ -457,14 +458,13 @@ POST /api/v4/jobs/{job_id}/resume
 
 重跑成本说明（正向/完整性管线）：
 
-- Step 4（HLR AI 标注）与反向 Step 2 同机制（`output/llm_cache.jsonl`，`kind=forward_hlr_label`）：每条标注按内容寻址复用，未完成的才真正调用模型；整批完成后 `output/hlr_labels.json` 落盘，此后直接整体加载跳过；
-- Step 7（AI 三态复核）的**已完成的单条复核结果**按内容寻址复用（`kind=forward_review`），只有未完成的才真正调用模型，随完成进度增量写入 `output/llm_cache.jsonl`。因此中断越晚、继续时省下的调用越多；
-- Step 1（文件解析）与反向同一机制，复用 `output/eoicd_requirements.json` 与 `output/hlr_requirements.json`；
-- Step 2/3/5/6/8 等确定性步骤（范围、块构建、召回、确定性判定、报告生成）仍全量重跑。
+- 续跑**不重新复制代码树**：每任务一份的正向代码副本 `<job_dir>/forward/` 原样复用（含上一轮的 `runs/integration_workspace/` 中间产物与各 judge 工作区的 AI map 缓存；可续跑的本就是失败/中断任务，成功任务收尾时 `runs/` 已清理，见 12.4）；**跨运行真正命中缓存的是 HLR 聚类 AI 映射**（`HLR需求聚类/hlr_cluster_tool/ai_maps.py` 按 map 文件的 `covered_reqs` 元数据增量，只对新增需求调用模型）。阶段1 与各 judge 的阶段2/3/4 仍按原样流程重新执行，**身份匹配 / 属性匹配的 AI 判定不复用**（其结果文件只写不读，`name_pair_deduper.py` 明确运行间独立），续跑不会省下这部分模型调用；
+- 新正向管线不使用反向的 `output/llm_cache.jsonl`（旧正向的 `kind=forward_hlr_label` / `kind=forward_review` 已随旧实现删除），也没有旧 Step 8 等步骤；
+- `reuse` 计数对正向任务不适用：恒为 `{"reused": 0, "rerun": 0}`（见第 5 节），续跑复用情况见任务日志中正向 runner 的工作区输出。
 
-复用只发生在**同一任务目录内**，不跨任务、也不跨管线（正/反向的缓存 `kind` 不同，即使两份 prompt 完全相同也不会互相命中）；换模型、改提示词、上游输入变化等会改变调用内容的情况都会自动失效并重新调用。
+复用只发生在**同一任务目录内**，不跨任务：反向管线的 `llm_cache.jsonl` 按 `kind` 区分步骤，正向管线整体复用任务目录内的正向工作区，两者即使 prompt 完全相同也互不命中；换模型、改提示词、上游输入变化等会改变调用内容的情况都会自动失效并重新调用。
 
-恢复启动后任务标记 `resumed=true`，并从 0 重新累计 `reuse` 计数（多次恢复不累加上一轮）；`GET /jobs/{id}` 可实时看到 `reuse.reused` / `reuse.rerun` 递增，用于前端展示「已复用中断前结果 N 次 · 接续调用模型 M 次」（次数即模型调用次数，口径见第 5 节）。
+恢复启动后任务标记 `resumed=true`，反向任务从 0 重新累计 `reuse` 计数（多次恢复不累加上一轮）；`GET /jobs/{id}` 可实时看到 `reuse.reused` / `reuse.rerun` 递增，用于前端展示「已复用中断前结果 N 次 · 接续调用模型 M 次」（次数即模型调用次数，口径见第 5 节）。
 
 ### 13.3 放弃任务
 
@@ -510,7 +510,7 @@ POST /api/v4/jobs/{job_id}/abandon
 }
 ```
 
-`resumed` / `reuse` 为中断恢复可视化字段（见第 5 节）：恢复运行开始与每完成一条判定（反向按 case、正向按标注条/复核块）时随 `_persist` 落盘，进程被杀后计数不丢；旧 manifest 无这两键时按默认值（`false` / `null`）加载，无需迁移。
+`resumed` / `reuse` 为中断恢复可视化字段（见第 5 节）：恢复运行开始与每完成一条判定（反向按 case）时随 `_persist` 落盘，进程被杀后计数不丢；正向任务的 `reuse` 恒为 `{"reused": 0, "rerun": 0}`（新正向管线不产生该计数，见第 13.2 节）。旧 manifest 无这两键时按默认值（`false` / `null`）加载，无需迁移。
 
 `params` 中的路径一律为相对 `job_dir` 的相对路径，保证输出目录整体搬迁后仍可恢复。不持久化任务结果（重跑时重新生成）。无 `job_dir` 的任务（如 CLI 直跑 `app/v4/cli.py`）不写 manifest，行为与本次改动前一致。
 
