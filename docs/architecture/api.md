@@ -224,6 +224,8 @@ GET /api/v4/jobs/{job_id}/outputs/consistency/{model}
 | `consistency/minimax` | `EoICD与SWHLR单模型差异分析报告_MiniMax.docx` |
 | `consistency/qwen` | `EoICD与SWHLR单模型差异分析报告_Qwen.docx` |
 
+下载保存名在上述物理文件名基础上追加产物生成时刻后缀 `_YYYYMMDD_HHMM`（东八区，取自产物文件落盘时刻，非下载时刻——重复下载文件名稳定不变）。例：`EoICD与SWHLR单模型差异分析报告_DeepSeek_20261009_1715.docx`。磁盘产物文件名不变。
+
 Content-Type：
 - `.xlsx` → `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
 - `.docx` → `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
@@ -374,6 +376,8 @@ GET /api/v4/jobs/{job_id}/outputs/forward-docx
 | --- | --- |
 | `forward-xlsx` | `EoICD至HLR正向完整性分析明细.xlsx` |
 | `forward-docx` | `EoICD至HLR正向完整性分析报告.docx` |
+
+下载保存名同样追加 `_YYYYMMDD_HHMM` 生成时刻后缀（规则同第 7 节）。
 
 正向下载接口校验 `task_type == "completeness"`；反向下载接口校验 `task_type == "correctness"`。用错任务下载 → 404。
 

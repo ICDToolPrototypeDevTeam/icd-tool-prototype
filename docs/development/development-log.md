@@ -3605,3 +3605,86 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   3. 部署包需**重建后端镜像**才带此改动（容器内代码为镜像内置，本地 host 开发立即生效）。
   4. 阶段级横幅 `✅ 集成流程全部完成！总耗时: Xs` 每个「集成」子流程各打一次（误导源之一）本轮**未改**——属正向原样代码文案，未在用户要求范围内。
 - **下一步建议**：1) 用户重新提交真实任务时可直接从任务日志看到复核阶段每 20 条推进与 ETA；2) 提交时 `正向待集成/`、`backend/forward/` 及本轮文件由用户自行 `git add`（`backend/forward/` 与 `正向待集成/` 均未跟踪）。
+
+## 2026-09-29 HLR 缩略语表串表门控修复（AMS/FGMC/HSCU 按表头关键字，提交 9dc07d0）
+
+- **背景**：缩略语解析此前只判「`glossary_table_index` 指向的表 ≥3 列」即按「缩写 / 英文全称 / 中文说明」三列读取其数据行。完整文档若在该位置放的是别的表（修订记录、变更表、LABEL 清单等），其数据行会被读成垃圾缩略语条目并随下游提示词流转。HSCU（液压）真实文档 `HSCU软件高层需求-裁剪.docx` 该位置即是一张 12×8「序号 / LABEL名称（LBL_XXX）/ LABEL号 / SDI号」表（全文档无「缩略语」字样）——仅因序号列**纵向合并**、数据行 col0 为空才侥幸解析出 0 条，属结构巧合而非有效保护；合成 3 列修订表实证旧行为产出 `[('1','2026-01-01'), ('2','2026-01-02'), ('3','2026-01-03')]` 三条垃圾条目。
+- **方案**：按**表头关键字**门控——仅当该表首行任一单元格含「缩略语」或「缩写」才按缩略语解析，否则缩略语为空列表；关键字由各 profile 声明（三家真实缩略语表头同为「缩略语 / 英文全称 / 中文全称」）。未声明关键字的控制器走原逻辑、行为逐字不变。
+- **实现要点**：`hlr_word_parser.py` 新增 `_looks_like_glossary()`（首行逐单元格 `_cell_text` 关键字判定）作为解析前置门控；`base.py` 新增 `glossary_header_keywords: tuple[str, ...] = ()` 字段与 yaml 读取（空元组 = 原行为）；AMS/FGMC/HSCU 三个 config.yaml 各声明 `["缩略语", "缩写"]`。
+- **修改文件**：`backend/app/v4/parsers/hlr_word_parser.py`（+20）、`backend/app/v4/profiles/base.py`（+11）、`backend/app/v4/profiles/{ams,fgmc,hscu}/config.yaml`（各 +1）；文档 `CHANGELOG.md`（+6，随提交 9dc07d0）。验证脚本（gitignored）：`backend/tests/probe_fgmc_glossary_check.py`、`probe_hscu_glossary_check.py`、`verify_no_glossary_pipeline.py`。
+- **验证方式与结果**：
+  1. FGMC 三份真实文档（含 SDI 两 case）：glossary_idx=1 表首行「缩略语 / 英文全称 / 中文全称」，门控放行，缩略语各 14 条、需求 7/2/2 条（`probe_fgmc_glossary_check.py`，**已验证**）。
+  2. HSCU：真实文档解析 glossary=0、需求 10 条；合成正例（首行=缩略语|英文全称|中文全称）解析 1 条；合成反例（3 列修订表）门控挡住（0 条），去门控对照旧行为产出上述垃圾条目（`probe_hscu_glossary_check.py`，**已验证**）。
+  3. 旧版对照仿真（本次补记时复核，`probe_glossary_gate_oldnew.py`：9dc07d0^ 解析器 exec 加载，门槛行替换为常量 8——行数门槛已另行移除、对需求集无影响）：七份文档新旧**逐条一致**——AMS 16/16/7 条需求、缩略语各 2 条；FGMC 7/2/2 条需求、缩略语各 14 条；HSCU 10 条需求、glossary 旧新均为 0（**已验证**）。
+  4. mock 全管线回归：`verify_no_glossary_pipeline.py`（删缩略语表 / 表头改名两场景）断言全过，完整 mock 反向管线无 errors、产物齐全（2026-10-08 回归复跑 VERIFY_OK）（**已验证**）。
+- **遗留问题**：缩略语表中的图片 / 富文本不入（既有能力边界）；未声明关键字的 profile 维持原逻辑；需**重建后端镜像**才在服务器生效。
+- **下一步建议**：新增控制器时按其缩略语表头在 profile 声明关键字；本条为 2026-10-08 补记（当时仅随提交更新了 CHANGELOG，dev-log 漏记，现按提交 9dc07d0 与验证脚本回补）。
+
+## 2026-09-29 HLR 需求单元格内嵌表格扁平化提取（分支 feat/issue-xxx-table-within-table-parser）
+
+- **背景（用户发现新缺口）**：环控新输入 `AMSC安全通道测试.docx` 中部分需求的「需求中文」单元格用**嵌套表格**描述内容（正文为「软件应按照A429通信协议按如下内容向控制通道发送L372/L376数据：」，表即「如下内容」）：HLR_14464 内嵌 3x3 表（OFV_TRV手动驱动电路故障信号 bit10、本通道WAITS通道1温度测量值 bit16~bit28），HLR_14470 内嵌 14x3 表（13 条位定义：座舱高度限制标志 bit10 … 中电子设备舱过热检测 bit23）。python-docx 的 `_Cell.text` 只拼接单元格直接段落（1.1.2 源码实证），嵌套表内容被静默丢弃 → 需求正文只剩引导语；job 92ce5d88 产物实证：14464/14470 的 `hlr_labels.json` `signal_keywords`/`bit_fields` 全空，而同风格用内联文本写的 14466 能提取到「温度测量值/数据布局/位宽」。另注：该 job 中这三条判「无匹配」的主因是 L372/L373/L376 不在该 job 的 EoICD 数据里（出现 0 次，而 L234 出现 2228 次）—— 与本缺陷相互独立。
+- **方案（用户确认的方案 A）**：解析层「空守卫」扁平化并入单元格文本 —— `_cell_text` 中无嵌套表的单元格仍走 `cell.text.strip()` 原路径（逐字节不变）；有嵌套表时用 `cell.iter_inner_content()` 按文档内顺序拼接：段落原样、嵌套表每行单元格以 ` | ` 连接、行间换行。下游（AI 打标 → 匹配 → 裁判/复盘提示词 → 报告）全为文本消费，零管道改动自动生效。放弃项：结构化字段（收益低、schema 牵动下游）、profile 开关（无真实反例场景）、文档侧人工改文本（不解决系统能力）。
+- **实现要点**：requirements.txt / Docker 钉 python-docx 1.1.0 —— 经 1.1.0 wheel 源码核实其 `_Cell(BlockItemContainer)` 自带 `iter_inner_content`（本地 dev 1.1.2 行为一致），无需绕私有 XML；`hlr_word_parser.py` 新增 `Paragraph` 导入并改写 `_cell_text`。改动面收敛：`_cell_text` 仅在本文件 7 处使用（需求八字段 + 缩略语表）。
+- **修改文件**：`backend/app/v4/parsers/hlr_word_parser.py`；文档 `CHANGELOG.md`、`docs/development/development-log.md`（本条）。新增（gitignored）：`backend/tests/probe_ams_nested_tables.py`（嵌套表全库扫描）、`backend/tests/probe_nested_flatten_check.py`（改前/改后逐字段回归）。
+- **验证方式与结果**：
+  1. **全库扫描**：环控在库 15 份文档中仅 `AMSC安全通道测试.docx` 有嵌套表（2 处，均在需求中文单元格；拆分版与旧 job 输入版内容一致），其余 13 份 0 处（**已验证**）。
+  2. **逐字段回归**（`probe_nested_flatten_check.py`：改前快照经 importlib 加载，与新版本对照，零 LLM）：①合成样例 —— 含嵌表需求 content 变为「引导语 + `信号名称 | 数据位 | 值域` + 2 行」，无嵌表需求全字段一致；②真实 8 份文档 —— 仅两份 `AMSC安全通道测试.docx` 的 14464/14470 的 content 出现差异（新增扁平化表文本），其余 6 份（AMS 32/16/7 条、FGMC 7/2 条、HSCU 10 条，共 74 条需求）**逐字段完全一致**（**已验证**）。
+  3. **Mock E2E**：CLI（`USE_MOCK_LLM=1`）以拆分版文档 + 该 job 的 Publisher/Subscriber 跑反向全管线 → 5 条 HLR 全出、4 份报告 docx 与全部 json 产物齐全，产物内 14464/14470 content 已含扁平化表文本（**已验证**）。
+- **遗留问题**：
+  1. 嵌套表内的**图片/勾选图形符号**超 docx 文本能力，不提取（真实语料暂未出现）。
+  2. 嵌套表的**合并单元格**会按 grid 重复文本（样本 dup_rows=0 未触发）；出现再加去重。
+  3. 仅处理一层嵌套（样本无表套表）。
+  4. 触发条目（14464/14470）content 变化使其下游 LLM 缓存 key 自然失效并重判（期望行为）；无嵌表文档不受影响。
+  5. 需**重建后端镜像**才在服务器生效。
+- **下一步建议**：1) 重建镜像后以真实 provider 重跑该文档，观察 14464/14470 的打标/匹配/裁判是否用上位表信息；2) 如真实语料出现图片型位图或表套表再评估扩展。
+
+## 2026-10-08 HLR 需求表行数门槛移除（分支 feat/issue-xxx-table-within-table-parser）
+
+- **背景（用户提问）**：用户问「HLR 解析识别是「需求ID + 行数≥8」吗？需求表少了实现方法一行能否识别？」合成探针实证：标准 8 行表缺「实现方法」→ 7 行 → 被 `requirement_table_min_rows` 门槛整表静默跳过、0 条需求；7 字段行 + 1 空行 = 8 行 → 识别（门槛判的是原始行数，空行也计入）；8 行但字段改名不在 field_map → 识别、该字段为空串。用户确认方案1（主判据 = 含需求ID且值非空），并要求先量化「是否要扫描所有表、有无内存风险」。
+- **量化（方案1 成本，零 LLM）**：
+  1. 成本探针（17 份真实文档，`probe_row_gate_cost.py` / `probe_row_gate_cost2.py`）：「门槛内」与「全扫」的表数**全部相等**——这些文档 glossary 之后不存在 <min_rows 的表，方案1 今天实际新增扫描 = 0 张；耗时差 ±15ms 内正负互见（噪声；探针模拟省略了 glossary 解析，负值属测量口径）；tracemalloc 峰值差 ±0.6KB（噪声）。
+  2. 表形状普查（21 份，`probe_row_gate_shapes.py`）：切片内表行数均 ≥8（AMS/HSCU）/≥12（FGMC）；仅有的小表是缩略语表本身（在扫描起点之前）与 HSCU 一张 1x1（被保留的列数门槛挡住）。
+  3. 内存结构论证：docx 的支配成本是 `Document()` 载入整份 XML（现状已支付）；增量只是小表逐单元格的临时字符串（KB 级、即弃），无累积结构。真实风险不在内存而在**误识面**——由语义判据兜底。
+  4. RPDU 澄清：RPDU 的 HLR 是 xlsx、按扩展名分发走 `HLRExcelParser`，不经 `HLRWordParser`，不在影响面内（其 config 中该键原为「legacy 保留」注释位）。
+- **方案（用户确认后实施）**：`parse()` 删除行数门槛（保留「列数 ≥ 2」），语义判据由既有 `_extract_requirement` 承担（field_map 命中「需求ID」且值非空；`skip_requirement_when_empty` 各 profile 默认 True 未关闭）；同步下线死配置 `requirement_table_min_rows`（base.py 字段与 yaml 读取 + 4 个 profile yaml 各删一行）。**不动**：`auto_detect`、glossary 逻辑、`_extract_requirement` 本体、Excel 解析路径。
+- **修改文件**：`backend/app/v4/parsers/hlr_word_parser.py`、`backend/app/v4/profiles/base.py`、`backend/app/v4/profiles/{ams,fgmc,hscu,rpdu}/config.yaml`；文档 `CHANGELOG.md`、`docs/development/development-log.md`（本条）。新增（gitignored）：`backend/tests/probe_row_gate_cost.py`、`probe_row_gate_cost2.py`、`probe_row_gate_shapes.py`、`probe_row_gate_verify.py`。
+- **验证方式与结果**：
+  1. **改前基线 → 改后逐字段全等**（`probe_row_gate_verify.py`：capture 先落盘 17 份真实文档 parse() 全量 `model_dump`，改后 check 对比，仅剔除 `generated_at` 时间戳）：**17/17 全等**、192 条需求（AMS 13 文档 / FGMC 3 / HSCU 1）（**已验证**）。
+  2. **合成用例**：7 行表（缺「实现方法」）改后识别 1 条 `FSF21000102_HLR_9003`（改前 0 条）；无「需求ID」行的 7 行表 0 条（语义判据兜底）（**已验证**）。
+  3. **回归**：`py_compile` 两个 py 文件通过；4 个 profile yaml 解析与 registry 全量加载冒烟通过（field_map 8/15/8/3 不变）；既有 mock 全管线脚本 `tests/verify_no_glossary_pipeline.py` **VERIFY_OK**（含 V1 完整 mock 反向管线：无 errors、产物齐全、断言全过）（**已验证**）。
+- **遗留问题**：
+  1. `auto_detect` 的 `required_rows` 为**精确匹配**（AMS=8 等）：**全部需求表偏离标准行数**的文档在网页「自动识别」路径仍会识别失败（提示手动选择系统类型）——匹配为文档级「任意一表命中即通过」，混有标准行数表的文档不受影响；解析本身已修复、手动路径可用；是否放宽识别契约属独立决策，未顺手改。（**2026-10-08 当日已修复**：改为 `min_rows`（AMS/HSCU=5、FGMC=10），详见下方同日「自动识别行数判据放宽」条目。）
+  2. 非需求小表若恰含「需求ID」行且值非空会被收录——这是方案1 判据语义本身（经用户确认），非缺陷。
+  3. 无「需求ID」行的表在 `skip_requirement_when_empty=False` 的 profile 下会以空 id 被收录——现无任何 profile 关闭该开关，与现状一致。
+  4. 需**重建后端镜像**才在服务器生效。
+- **下一步建议**：1) 重建镜像后以真实「缺行」文档验证识别与下游管线；2) 评估 `auto_detect` 是否放宽为语义 / ≥ 判定（独立 Issue，由用户决定）——**已于 2026-10-08 实施**（改为 `min_rows`，见下方同日条目）；3) 提交本改动（嵌套表扁平化已随 `e97904c` 提交）。
+
+## 2026-10-08 HLR 自动识别行数判据放宽：required_rows（==N）→ min_rows（≥N）（分支 feat/issue-xxx-table-within-table-parser）
+
+- **背景（用户提问）**：行数门槛移除（同日上条）后，用户追问自动识别残留问题。定位：AMS / HSCU / FGMC 的 `auto_detect.required_rows`（=8 / =8 / =13）为**精确匹配**，且 `_match_auto_detect` 是**文档级「任意一表命中即通过」**——文档中只要还有一张标准行数表就整体通过（用户实测其文档自动识别正常即属此类：13 张需求表中 2 张仍 8 行）；**全部需求表都偏离标准行数**的文档（如模板整体缺「实现方法」行）整体失败，上传报「无法识别 HLR 文件所属系统类型，请手动选择系统类型上传。」
+- **实证（零 LLM）**：合成单表文档（缩略语表 + 唯一一张 7 行需求表）→ `_detect_system_type` 抛 ValueError；用户文档（`AMSC安全通道测试.docx`）两版对照：2026-10-08 16:46 版（含 2 张 8 行表）→ ams，17:01 重存版（13 张需求表全 7 行）→ ValueError（解析侧仍出 13 条需求）——坐实文档级命中语义。
+- **方案（用户确认后实施，纯配置零代码）**：`min_rows`（≥N，2026-09-04 为 RPDU 引入、RPDU 在用）替换 `required_rows`——AMS 8→5、HSCU 8→5、FGMC 13→10（标准行数 −3，容纳缺 1~3 行字段）；`cell_patterns`（需求ID + FSF21/FSF29/FGMC 前缀）与 `required_cols` 不动；coverage.py / base.py 不动（`required_rows` 保留为 legacy 字段，两键并存）。
+- **修改文件**：`backend/app/v4/profiles/{ams,hscu,fgmc}/config.yaml`（各一行）；文档 `CHANGELOG.md`、`docs/development/development-log.md`（本条 + 上条遗留问题 1 的表述更正与状态更新）、`backend/app/v4/profiles/rpdu/README.md`（「兼容性」一节）。新增（gitignored）：`backend/tests/verify_autodetect_min_rows.py`（capture/check 基线比对）、`probe_autodetect_amsc_check.py`、`probe_autodetect_amsc_variant.py`（后二者本会话早前用于定位文档级命中语义）。
+- **验证方式与结果**：
+  1. 合成用例（`verify_autodetect_min_rows.py`：capture 改前基线 → check 改后比对）：7 行单表 / 9 行（多一行）/ 5 行（下限含边界）由无法识别 → ams；8 行「7 字段 + 1 空行」版与 8 行「实现方式」改名版 ams→ams 无回归；4 行小表、无「需求ID」的 7 行表仍无法识别（**已验证**）。
+  2. 真实变体 `c:/tmp/amsc_all7rows.docx`（13 张表全 7 行）：由无法识别 → ams（**已验证**）。
+  3. 17 份真实文档：16 份识别结果与改前逐一相同（ams 12 / fgmc 3 / hscu 1，无新增误识）；`input_doc_file/HLR故障注入版本/AMSC安全通道测试.docx`（17:01 重存全 7 行版）由无法识别 → ams——本修复的真实触发用例（**已验证**）。
+- **遗留问题**：
+  1. 恰含「需求ID」行 + `FSF2x` 值的小表（行数 ≥ 下限）会随下限纳入识别——与解析侧语义判据一致，属设计取舍。
+  2. 下限值（AMS/HSCU=5、FGMC=10）取「标准行数 −3」，如后续真实语料需要可在 config 调整。
+  3. 需**重建后端镜像**才在服务器生效。
+- **下一步建议**：1) 重建镜像后网页空选系统类型上传全 7 行版文档，确认自动识别走通全链路；2) 提交本改动；3) issue 草稿（`issues_file/issue-hlr-自动识别行数精确匹配导致缺行文档识别失败.md`）后续处理由用户决定。
+
+## 2026-10-09 报告下载文件名追加生成时刻后缀（分支 feat/issue-126-reportname-add-timestamp）
+
+- **背景（用户提出）**：所有任务下载的报告保存名固定同名（如 `EoICD与SWHLR多模型差异分析报告.docx`），多任务收集、归档与交付时浏览器自动追加 `(1)`/`(2)`，无法区分所属任务与生成时间。方案讨论确认：**只改下载层**（7 类产物全加，不区分轻重），不动磁盘产物名 / 存在性判定 / 前端 / 接口契约。
+- **方案**：`backend/app/api/v4/outputs.py` 新增 `_stamped_name(base_name, path)` 与固定东八区偏移 `_CN_TZ`——下载保存名 = 物理文件名 + `_YYYYMMDD_HHMM`；时间戳取产物文件 **mtime** 而非下载时刻（重复下载文件名稳定不变）；容器时区常为 UTC，固定 +8 保证与北京时间一致。5 个路由函数（覆盖 7 类产物：反向 5 + 正向 2）的 `filename=` 全部接入。
+- **修改文件**：`backend/app/api/v4/outputs.py`（+helper，5 处 `filename=`）；文档 `docs/architecture/api.md`（§7 与 §12.3 下载文件名表补注）、`CHANGELOG.md`（`[Unreleased] - 2026-10-09`）。新增（gitignored）：`backend/tests/verify_download_timestamp.py`。
+- **验证方式与结果**（`backend/tests/verify_download_timestamp.py`，零 LLM，**17/17 断言全过 ALL_OK=True**）：
+  1. helper 确定性：指定 mtime 2026-10-09 17:15（东八区）→ 精确文件名；东八区跨日用例（UTC 10-08 17:30 → 文件名 `_20261009_0130`）通过——不受宿主机时区影响（**已验证**）。
+  2. 7 类下载端点：临时 `OUTPUT_DIR` + 假任务（`job.json` manifest + `output/` 产物）逐端点调用，从 Content-Disposition 解析出的保存名与期望逐一相等（单模型为 `_DeepSeek` 等后缀**之后**再追加时间戳）；重复调用文件名稳定不变；磁盘物理文件名保持不变（**已验证**）。
+  3. `py_compile app/api/v4/outputs.py` 通过（**已验证**）。
+- **遗留问题**：
+  1. 需**重建后端镜像**才在服务器生效；网页端实际下载（反向 / 正向各一条链）待镜像重建后由用户在页面上复核。
+  2. 时间戳为文件 mtime（管线写盘完成时刻），与任务状态时间可差数分钟——属预期口径。
+- **下一步建议**：1) 重建镜像后在正确性 / 完整性结果页各下载一次，核对文件名带 `_YYYYMMDD_HHMM`；2) 提交本改动（分支 `feat/issue-126-reportname-add-timestamp`）。
