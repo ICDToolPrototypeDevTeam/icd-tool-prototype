@@ -7,15 +7,14 @@ interface Props {
   hlrWordFile: FileItem | null
   eoicdPublisherFile: FileItem | null
   eoicdSubscriberFile: FileItem | null
-  deviceIcdTraceFile: FileItem | null
-  systemDeviceTraceFile: FileItem | null
+  /** 追溯表：单槽多文件（0-N）。几张、各是什么表由正向树按表头自动识别。 */
+  traceFiles: FileItem[]
   analysisMode: ForwardAnalysisMode
   selectedPreviewFile: FileItem | null
   onHlrWordChange: (file: FileItem | null) => void
   onEoicdPublisherChange: (file: FileItem | null) => void
   onEoicdSubscriberChange: (file: FileItem | null) => void
-  onDeviceIcdTraceChange: (file: FileItem | null) => void
-  onSystemDeviceTraceChange: (file: FileItem | null) => void
+  onTraceFilesChange: (files: FileItem[]) => void
   onAnalysisModeChange: (mode: ForwardAnalysisMode) => void
   onPreviewSelect: (file: FileItem | null) => void
 }
@@ -41,23 +40,20 @@ export default function CompletenessFileUpload({
   hlrWordFile,
   eoicdPublisherFile,
   eoicdSubscriberFile,
-  deviceIcdTraceFile,
-  systemDeviceTraceFile,
+  traceFiles,
   analysisMode,
   selectedPreviewFile,
   onHlrWordChange,
   onEoicdPublisherChange,
   onEoicdSubscriberChange,
-  onDeviceIcdTraceChange,
-  onSystemDeviceTraceChange,
+  onTraceFilesChange,
   onAnalysisModeChange,
   onPreviewSelect,
 }: Props) {
   const hlrWordInputRef = useRef<HTMLInputElement>(null)
   const publisherInputRef = useRef<HTMLInputElement>(null)
   const subscriberInputRef = useRef<HTMLInputElement>(null)
-  const deviceIcdTraceInputRef = useRef<HTMLInputElement>(null)
-  const systemDeviceTraceInputRef = useRef<HTMLInputElement>(null)
+  const traceInputRef = useRef<HTMLInputElement>(null)
 
   function handleSingleFile(
     e: React.ChangeEvent<HTMLInputElement>,
@@ -69,6 +65,16 @@ export default function CompletenessFileUpload({
       onChange(item)
       onPreviewSelect(item)
     }
+  }
+
+  function handleTraceFiles(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+    const items = Array.from(files).map(makeFileItem)
+    onTraceFilesChange([...traceFiles, ...items])
+    onPreviewSelect(items[items.length - 1])
+    // 允许再次选择同一文件（否则 input 仍持有旧值，onChange 不触发）
+    e.target.value = ''
   }
 
   function renderFileItem(
@@ -190,31 +196,44 @@ export default function CompletenessFileUpload({
               )}
           </div>
 
-          {/* Trace files (trace mode only) */}
+          {/* Trace files (trace mode only, multi — 识别交给正向树，适配 AMS 2 张 / EPS 3 张) */}
           {analysisMode === 'trace' && (
-            <>
-              <div className="file-section">
-                <div className="file-section__title">
-                  <Paperclip size={16} /> 设备→ICD 追溯表 <span className="file-section__required">*追溯模式必填</span>
-                </div>
-                {renderFileItem(deviceIcdTraceFile, onDeviceIcdTraceChange, <Paperclip size={18} />)}
-                {!deviceIcdTraceFile &&
-                  renderUploadButton('上传 设备→ICD 追溯表', deviceIcdTraceInputRef, '.xlsx,.xls', (e) =>
-                    handleSingleFile(e, onDeviceIcdTraceChange)
-                  )}
+            <div className="file-section">
+              <div className="file-section__title">
+                <Paperclip size={16} /> 追溯表 <span className="file-section__required">*追溯模式必填（可多选）</span>
               </div>
-
-              <div className="file-section">
-                <div className="file-section__title">
-                  <Paperclip size={16} /> 设备→高层需求 追溯表 <span className="file-section__required">*追溯模式必填</span>
+              {traceFiles.length > 0 && (
+                <div className="file-list">
+                  {traceFiles.map((f) => (
+                    <div
+                      key={f.id}
+                      className={`file-item ${selectedPreviewFile?.id === f.id ? 'selected' : ''}`}
+                      onClick={() => onPreviewSelect(f)}
+                    >
+                      <div className="file-item__icon"><Paperclip size={18} /></div>
+                      <div className="file-item__info">
+                        <div className="file-item__name">{f.name}</div>
+                        <div className="file-item__meta">{formatSize(f.size)} · Excel</div>
+                      </div>
+                      <button
+                        className="file-item__remove"
+                        onClick={(ev) => {
+                          ev.stopPropagation()
+                          const next = traceFiles.filter((x) => x.id !== f.id)
+                          onTraceFilesChange(next)
+                          if (selectedPreviewFile?.id === f.id) {
+                            onPreviewSelect(next.length > 0 ? next[0] : null)
+                          }
+                        }}
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ))}
                 </div>
-                {renderFileItem(systemDeviceTraceFile, onSystemDeviceTraceChange, <Paperclip size={18} />)}
-                {!systemDeviceTraceFile &&
-                  renderUploadButton('上传 设备→高层需求 追溯表', systemDeviceTraceInputRef, '.xlsx,.xls', (e) =>
-                    handleSingleFile(e, onSystemDeviceTraceChange)
-                  )}
-              </div>
-            </>
+              )}
+              {renderUploadButton('添加追溯表', traceInputRef, '.xlsx,.xls', handleTraceFiles, true)}
+            </div>
           )}
         </div>
       </div>

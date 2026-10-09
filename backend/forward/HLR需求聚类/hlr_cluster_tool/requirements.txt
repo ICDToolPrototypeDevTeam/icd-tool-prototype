@@ -1,0 +1,3 @@
+# 本工具唯一的第三方依赖
+# （AI 接口层 ai_client.py / ai_maps.py 仅用标准库 urllib 实现，不需要额外依赖）
+PyYAML>=5.1

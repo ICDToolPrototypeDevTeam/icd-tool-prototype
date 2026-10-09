@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Optional
 
 from app import job_scheduler
+from app.forward import artifacts as forward_artifacts
+from app.forward.adapter import ForwardJobParams, run_forward_job
 from app.job_log import (
     LOG_FILE_NAME,
     bind_job_log,
@@ -33,7 +35,7 @@ from app.job_manager import Job, JobCancelled, JobStatus, job_manager
 from app.runtime_context import RuntimeContext, bind_runtime, restore_runtime
 from app.v4.errors import classify_pipeline_error
 from app.v4.llm.factory import use_mock_llm as mock_mode_enabled
-from app.v4.pipeline import run_forward_pipeline, run_reverse_pipeline
+from app.v4.pipeline import run_reverse_pipeline
 from app.v4.profiles import ProfileRegistry
 
 
@@ -62,8 +64,11 @@ MOCK_ONLY_PROVIDERS = {"minimax", "qwen"}
 # 参数快照中被视为「上传文件」的 key（用于任务列表展示 + 恢复前存在性校验）
 _INPUT_FILE_PARAM_KEYS = (
     "hlr_path", "publisher_path", "subscriber_path",
-    "device_icd_trace_file", "system_device_trace_file",
 )
+
+# 追溯表的旧快照键：Issue #119 早期为两个固定单文件字段，现为 trace_files 列表。
+# 兼容读取是为了历史任务列表展示与旧任务续跑（快照已落盘，改不掉）。
+_LEGACY_TRACE_PARAM_KEYS = ("device_icd_trace_file", "system_device_trace_file")
 
 
 def _rel_path(job_dir: Path, p: Optional[Path]) -> Optional[str]:
@@ -90,6 +95,18 @@ def _require_file(job_dir: Path, rel: Optional[str]) -> Optional[Path]:
     if p is not None and not p.exists():
         raise FileNotFoundError(str(p))
     return p
+
+
+def _trace_paths_from_params(job_dir: Path, params: dict) -> tuple[Path, ...]:
+    """还原快照中的追溯表路径：新式 ``trace_files`` 列表；旧式两个单文件键兼容。
+
+    与 :func:`input_filenames_from_params` 同一份兼容口径，仅多一层存在性校验
+    （续跑时记录在案但已删除的文件按 FileNotFoundError 处理）。
+    """
+    trace = params.get("trace_files")
+    rels = list(trace) if isinstance(trace, list) else [
+        params.get(k) for k in _LEGACY_TRACE_PARAM_KEYS]
+    return tuple(p for p in (_require_file(job_dir, r) for r in rels if r) if p is not None)
 
 
 def _begin_job_run(job: Job, job_dir: Path, requested_mock: Optional[bool]) -> Optional[tuple]:
@@ -183,12 +200,20 @@ def input_filenames_from_params(params: Optional[dict]) -> list[str]:
     与 :func:`job_input_filenames` 同源，区别只在数据来源：历史结果列表读的是
     磁盘 manifest 里的 ``params``，那时内存中并没有对应的 ``Job`` 对象（进程
     重启后跑完的任务不会被启动扫描载入）。
+
+    追溯表兼容两套快照形状：新式为 ``trace_files`` 列表，旧式（Issue #119 早期）
+    为 device_icd_trace_file / system_device_trace_file 两个单文件键。
     """
+    params = params or {}
     names = []
     for key in _INPUT_FILE_PARAM_KEYS:
-        value = (params or {}).get(key)
+        value = params.get(key)
         if value:
             names.append(Path(value).name)
+    trace = params.get("trace_files")
+    rels = list(trace) if isinstance(trace, list) else [
+        params.get(k) for k in _LEGACY_TRACE_PARAM_KEYS]
+    names.extend(Path(r).name for r in rels if r)
     return names
 
 
@@ -577,8 +602,6 @@ def relaunch_from_manifest(job: Job, job_dir: Path) -> None:
     # 落 running + Step 1/N（否则排队等待时会被显示成「正在分析」）。
 
     if job.task_type == "completeness":
-        device_icd = _require_file(job_dir, params.get("device_icd_trace_file"))
-        system_device = _require_file(job_dir, params.get("system_device_trace_file"))
         return launch_forward_pipeline(
             job=job,
             job_dir=job_dir,
@@ -586,9 +609,9 @@ def relaunch_from_manifest(job: Job, job_dir: Path) -> None:
             publisher_path=publisher_path,
             subscriber_path=subscriber_path,
             analysis_mode=params.get("analysis_mode", "full"),
-            device_icd_trace_file=device_icd,
-            system_device_trace_file=system_device,
+            trace_files=_trace_paths_from_params(job_dir, params),
             use_mock_llm=params.get("use_mock_llm"),
+            controller_profile=params.get("controller_profile"),
         )
 
     return launch_v4_pipeline(
@@ -615,143 +638,48 @@ FORWARD_OUTPUT_FILES = {
     "forward_docx": "EoICD至HLR正向完整性分析报告.docx",
 }
 
-# 正向分析内部 JSON 中间产物（分阶段落盘；仅供反读派生，不对外下载）
-FORWARD_INTERMEDIATE_JSON = {
-    "forward_coverage": "forward_coverage.json",
-    "forward_scope": "forward_scope.json",
-    "forward_blocks": "forward_blocks.json",
-    "hlr_identity_index": "hlr_identity_index.json",
-    "forward_candidates": "forward_candidates.json",
-    "forward_deterministic": "forward_deterministic.json",
-    "forward_ai_review": "forward_ai_review.json",
-}
-
-
 def derive_forward_outputs(output_dir: Path) -> dict:
     """检查正向完整性分析两个对外文件是否存在。"""
     return {k: (output_dir / filename).exists() for k, filename in FORWARD_OUTPUT_FILES.items()}
 
 
+# 正向汇总零值基线：新任务由 forward_summary.json 提供；Issue #119 之前的历史任务
+# 只有旧口径的中间 JSON，数字无法映射到新口径，故不再反读（显示零值而非错误数字）。
+_FORWARD_SUMMARY_ZERO = {
+    "analysis_mode": "", "total_blocks": 0, "covered_direct": 0, "covered_aggregate": 0,
+    "parent_referenced": 0, "possible": 0, "uncovered": 0, "unsupported": 0,
+    "input_error": 0, "ai_reviewed": 0, "eoicd_count": 0, "hlr_count": 0,
+}
+
+
 def derive_forward_summary(output_dir: Path) -> dict:
-    """反读 forward_coverage.json 提取覆盖分布 + AI 复核计数。"""
-    out = {
-        "analysis_mode": "",
-        "total_blocks": 0,
-        "covered_direct": 0,
-        "covered_aggregate": 0,
-        "parent_referenced": 0,
-        "possible": 0,
-        "uncovered": 0,
-        "unsupported": 0,
-        "input_error": 0,
-        "ai_reviewed": 0,
-    }
-    coverage_p = output_dir / FORWARD_INTERMEDIATE_JSON["forward_coverage"]
-    if coverage_p.exists():
-        try:
-            data = json.loads(coverage_p.read_text(encoding="utf-8"))
-            out["analysis_mode"] = data.get("analysis_mode", "") or ""
-            stats = data.get("stats", {}) or {}
-            for key in (
-                "covered_direct", "covered_aggregate", "parent_referenced",
-                "possible", "uncovered", "unsupported", "input_error",
-            ):
-                try:
-                    out[key] = int(stats.get(key, 0))
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    blocks_p = output_dir / FORWARD_INTERMEDIATE_JSON["forward_blocks"]
-    if blocks_p.exists():
-        try:
-            data = json.loads(blocks_p.read_text(encoding="utf-8"))
-            out["total_blocks"] = int(data.get("total_blocks", 0))
-        except Exception:
-            pass
-    ai_p = output_dir / FORWARD_INTERMEDIATE_JSON["forward_ai_review"]
-    if ai_p.exists():
-        try:
-            data = json.loads(ai_p.read_text(encoding="utf-8"))
-            out["ai_reviewed"] = int(data.get("total_reviewed", 0))
-        except Exception:
-            pass
+    """读新正向管线落盘的 forward_summary.json（快照）；缺失 → 零值。"""
+    out = dict(_FORWARD_SUMMARY_ZERO)
+    data = forward_artifacts.read_summary(output_dir)
+    if isinstance(data, dict):
+        for key in out:
+            if key in data and data[key] is not None:
+                out[key] = data[key]
     return out
 
 
-def run_forward_pipeline_thread(
-    job: Job,
-    job_dir: Path,
-    hlr_path: Path,
-    publisher_path: Optional[Path],
-    subscriber_path: Optional[Path],
-    analysis_mode: str,
-    device_icd_trace_file: Optional[Path],
-    system_device_trace_file: Optional[Path],
-    use_mock_llm: Optional[bool],
-) -> None:
-    """在后台线程内跑 V4 正向完整性管线；线程内绑定运行上下文；异常 → FAILED。"""
-    output_dir = job_dir / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # 同反向：运行参数绑定在本任务线程内，不写进程 env
-    prev_runtime = bind_runtime(RuntimeContext(use_mock_llm=use_mock_llm))
+def run_forward_pipeline_thread(job: Job, job_dir: Path, params: ForwardJobParams) -> None:
+    """在后台线程内跑正向多 judge 一致性分析；线程内绑定运行上下文；异常 → FAILED。"""
+    prev_runtime = bind_runtime(RuntimeContext(use_mock_llm=params.use_mock_llm))
     prev_binding = None
     try:
         # 必须在绑定运行上下文之后调用：_begin_job_run 读取生效后的 mock 模式
-        prev_binding = _begin_job_run(job, job_dir, use_mock_llm)
-
-        job.update(JobStatus.RUNNING, "Step 1/8: Parsing input files")
-
-        # 续跑时改传已落盘的解析产物（首跑仍传原始输入，eoicd_json=None）
-        hlr_arg, eoicd_json_arg = _reuse_parse_inputs(job, output_dir, hlr_path)
-        result = run_forward_pipeline(
-            hlr=hlr_arg,
-            eoicd_json=eoicd_json_arg,
-            publisher=publisher_path,
-            subscriber=subscriber_path,
-            output_dir=output_dir,
-            job=job,
-            analysis_mode=analysis_mode,
-            device_icd_trace_file=device_icd_trace_file,
-            system_device_trace_file=system_device_trace_file,
-        )
-
-        outputs = derive_forward_outputs(output_dir)
-        summary = derive_forward_summary(output_dir)
-        # 同反向收尾：用管线回传的计数，不反读 87.9MB 的 eoicd_requirements.json。
-        # getattr 同上——测试桩可能返回 None。
-        counts = {
-            "eoicd_count": getattr(result, "eoicd_count", 0),
-            "hlr_count": getattr(result, "hlr_count", 0),
-        }
-
-        job.result = {
-            **outputs,
-            "analysis_mode": summary["analysis_mode"],
-            "total_blocks": summary["total_blocks"],
-            "covered_direct": summary["covered_direct"],
-            "covered_aggregate": summary["covered_aggregate"],
-            "parent_referenced": summary["parent_referenced"],
-            "possible": summary["possible"],
-            "uncovered": summary["uncovered"],
-            "unsupported": summary["unsupported"],
-            "input_error": summary["input_error"],
-            "ai_reviewed": summary["ai_reviewed"],
-            "eoicd_count": counts.get("eoicd_count", 0),
-            "hlr_count": counts.get("hlr_count", 0),
-            "errors": [],
-        }
-        job.update(JobStatus.COMPLETED, "V4 forward pipeline complete")
+        prev_binding = _begin_job_run(job, job_dir, params.use_mock_llm)
+        run_forward_job(job, job_dir, params)
     except JobCancelled as e:
-        # 必须先于 Exception：JobCancelled 继承 BaseException，本不会被下面的
-        # except Exception 捕获；显式列出是为了让取消走 canceled 而非 failed 分支。
+        # 必须先于 Exception：JobCancelled 继承 BaseException（同反向管线）
         _fail_job(job, e, "V4 forward pipeline")
     except Exception as e:
+        output_dir = job_dir / "output"
         job.result = {
             "forward_xlsx": (output_dir / FORWARD_OUTPUT_FILES["forward_xlsx"]).exists(),
             "forward_docx": (output_dir / FORWARD_OUTPUT_FILES["forward_docx"]).exists(),
-            "analysis_mode": analysis_mode,
+            "analysis_mode": params.analysis_mode,
             "total_blocks": 0,
             "errors": [f"{type(e).__name__}: {e}"],
         }
@@ -774,25 +702,36 @@ def launch_forward_pipeline(
     publisher_path: Optional[Path],
     subscriber_path: Optional[Path],
     analysis_mode: str,
-    device_icd_trace_file: Optional[Path],
-    system_device_trace_file: Optional[Path],
+    trace_files: tuple[Path, ...],
     use_mock_llm: Optional[bool],
+    controller_profile: Optional[str] = None,
 ) -> None:
-    """工厂：落盘参数快照 + 登记，然后交给进程内队列；语义同 launch_v4_pipeline。"""
-    # 落盘参数快照，语义同反向管线（见 launch_v4_pipeline）。
+    """工厂：落盘参数快照 + 登记，然后交给进程内队列；语义同 launch_v4_pipeline。
+
+    参数与落盘字段保持与旧正向一致（续跑/completeness 端点兼容），仅新增
+    controller_profile（Issue #119 系统类型下拉）；追溯表为单字段多文件
+    ``trace_files`` 列表（EPS 4 层链需 3 张表），旧快照双键由
+    :func:`_trace_paths_from_params` 兼容读取。
+    """
+    params = ForwardJobParams(
+        hlr_path=hlr_path,
+        publisher_path=publisher_path,
+        subscriber_path=subscriber_path,
+        analysis_mode=analysis_mode,
+        use_mock_llm=use_mock_llm,
+        trace_files=tuple(trace_files),
+        controller_profile=controller_profile,
+    )
     job.set_dir(job_dir, {
         "hlr_path": _rel_path(job_dir, hlr_path),
         "publisher_path": _rel_path(job_dir, publisher_path),
         "subscriber_path": _rel_path(job_dir, subscriber_path),
         "analysis_mode": analysis_mode,
-        "device_icd_trace_file": _rel_path(job_dir, device_icd_trace_file),
-        "system_device_trace_file": _rel_path(job_dir, system_device_trace_file),
+        "trace_files": [_rel_path(job_dir, p) for p in trace_files],
         "use_mock_llm": use_mock_llm,
+        "controller_profile": controller_profile,
     })
-    # 登记即「已承诺运行」；语义同 launch_v4_pipeline
     job_manager.register(job)
     job_scheduler.submit(job, functools.partial(
-        run_forward_pipeline_thread,
-        job, job_dir, hlr_path, publisher_path, subscriber_path,
-        analysis_mode, device_icd_trace_file, system_device_trace_file, use_mock_llm,
+        run_forward_pipeline_thread, job, job_dir, params,
     ))

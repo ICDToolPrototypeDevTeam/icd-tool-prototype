@@ -1,0 +1,2434 @@
+{
+  "meta": {
+    "source_doc": "HLR_完整未故障注入.docx",
+    "req_count": 16,
+    "item_count": 29,
+    "dedup_count": 16,
+    "detection_fields": [
+      "需求中文",
+      "基本原理",
+      "验证方法",
+      "实现方法"
+    ],
+    "attribute_count": 23,
+    "attribute_class_count": 13,
+    "name_map_used": true,
+    "name_map_status": {
+      "mapped": 16,
+      "missing": [],
+      "stale": [],
+      "text_changed": []
+    },
+    "state_map_used": true,
+    "state_map_status": {
+      "mapped": 5,
+      "missing": [
+        "FSF21000101_HLR_1237",
+        "FSF21000101_HLR_199",
+        "FSF21000101_HLR_280",
+        "FSF21000101_HLR_3569",
+        "FSF21000101_HLR_3573",
+        "FSF21000101_HLR_378",
+        "FSF21000101_HLR_4210",
+        "FSF21000101_HLR_4373",
+        "FSF21000101_HLR_4510",
+        "FSF21000101_HLR_473",
+        "FSF21000101_HLR_478"
+      ],
+      "stale": [],
+      "text_changed": []
+    },
+    "signal_map_used": true,
+    "signal_map_status": {
+      "mapped": 3,
+      "missing": [
+        "FSF21000101_HLR_1237",
+        "FSF21000101_HLR_199",
+        "FSF21000101_HLR_278",
+        "FSF21000101_HLR_280",
+        "FSF21000101_HLR_3569",
+        "FSF21000101_HLR_3573",
+        "FSF21000101_HLR_378",
+        "FSF21000101_HLR_4210",
+        "FSF21000101_HLR_4276",
+        "FSF21000101_HLR_4373",
+        "FSF21000101_HLR_473",
+        "FSF21000101_HLR_478",
+        "FSF21000101_HLR_544"
+      ],
+      "stale": [],
+      "text_changed": []
+    },
+    "dedup_out": "example/HLR需求去重结果.json",
+    "cluster_by": "依据需求表格全部相关字段（需求中文/基本原理等）检测属性：明确提及某属性才归入该类，不从 ICD/EoICD 填充；一条需求可出现在多个类；涉及 0/1 编码定义归 OneState/ZeroState/CodedSet；多信号需求按信号 Name 拆分接口项"
+  },
+  "attribute_classes": [
+    {
+      "attribute": "ActivityTimeout",
+      "sources": [
+        "publisher.A664-RP.LogicalPort",
+        "publisher.A825-RP.LogicalPort",
+        "publisher.A429-RP.LogicalPort",
+        "subscriber.A664-RP.LogicalPort",
+        "subscriber.A825-RP.LogicalPort",
+        "subscriber.A429-RP.LogicalPort",
+        "subscriber.Analog-RP.LogicalPort",
+        "subscriber.Discrete-RP.LogicalPort"
+      ],
+      "item_count": 0,
+      "req_ids": [],
+      "requirements": []
+    },
+    {
+      "attribute": "RefreshPeriod",
+      "sources": [
+        "publisher.A664-RP.LogicalPort",
+        "publisher.A825-RP.LogicalPort",
+        "publisher.A429-RP.LogicalPort",
+        "publisher.Analog-RP.LogicalPort",
+        "publisher.Discrete-RP.LogicalPort"
+      ],
+      "item_count": 8,
+      "req_ids": [
+        "FSF21000101_HLR_4210",
+        "FSF21000101_HLR_4510"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_4210",
+          "bus": "A429",
+          "label": "L11",
+          "name": null,
+          "bit": null,
+          "direction": "TX",
+          "attr_value": "1000ms",
+          "evidence": [
+            "[需求中文]以1000ms为周期"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L126",
+          "name": "飞行架次数",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "1秒",
+          "evidence": [
+            "[需求中文]每1秒解析"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L134",
+          "name": "飞机注册号",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "1秒",
+          "evidence": [
+            "[需求中文]每1秒解析"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L135",
+          "name": "飞机注册号",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "1秒",
+          "evidence": [
+            "[需求中文]每1秒解析"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L136",
+          "name": "飞机注册号",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "1秒",
+          "evidence": [
+            "[需求中文]每1秒解析"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L137",
+          "name": "飞机阶段",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "1秒",
+          "evidence": [
+            "[需求中文]每1秒解析"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L150",
+          "name": "UTC时间",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "1秒",
+          "evidence": [
+            "[需求中文]每1秒解析"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L260",
+          "name": "UTC日期",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "1秒",
+          "evidence": [
+            "[需求中文]每1秒解析"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "MessageSize",
+      "sources": [
+        "publisher.A664-RP.A664Message",
+        "publisher.A825-RP.CANMessage",
+        "subscriber.A664-RP.LogicalPort",
+        "subscriber.A825-RP.LogicalPort",
+        "subscriber.A429-RP.LogicalPort",
+        "subscriber.Analog-RP.LogicalPort",
+        "subscriber.Discrete-RP.LogicalPort"
+      ],
+      "item_count": 0,
+      "req_ids": [],
+      "requirements": []
+    },
+    {
+      "attribute": "TransmissionIntervalMinimum",
+      "sources": [
+        "publisher.A664-RP.A664Message",
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.CANMessage",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.A429Channel",
+        "publisher.A429-RP.DP",
+        "publisher.Analog-RP.DP",
+        "publisher.Discrete-RP.DP"
+      ],
+      "item_count": 1,
+      "req_ids": [
+        "FSF21000101_HLR_4210"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_4210",
+          "bus": "A429",
+          "label": "L11",
+          "name": null,
+          "bit": null,
+          "direction": "TX",
+          "attr_value": "1000ms",
+          "evidence": [
+            "[需求中文]以1000ms为周期发送"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "ByteOffsetWithinMsg",
+      "sources": [
+        "publisher.A664-RP.DS"
+      ],
+      "item_count": 0,
+      "req_ids": [],
+      "requirements": []
+    },
+    {
+      "attribute": "DataSetSize",
+      "sources": [
+        "publisher.A664-RP.DS"
+      ],
+      "item_count": 0,
+      "req_ids": [],
+      "requirements": []
+    },
+    {
+      "attribute": "Name",
+      "sources": [
+        "publisher.A664-RP.A429Word",
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.A429Word",
+        "publisher.A429-RP.DP",
+        "publisher.Analog-RP.DP",
+        "subscriber.A664-RP.RP",
+        "subscriber.A825-RP.RP",
+        "subscriber.A429-RP.RP",
+        "subscriber.Analog-RP.RP",
+        "subscriber.Discrete-RP.RP"
+      ],
+      "item_count": 28,
+      "req_ids": [
+        "FSF21000101_HLR_199",
+        "FSF21000101_HLR_267",
+        "FSF21000101_HLR_278",
+        "FSF21000101_HLR_280",
+        "FSF21000101_HLR_378",
+        "FSF21000101_HLR_4276",
+        "FSF21000101_HLR_473",
+        "FSF21000101_HLR_478",
+        "FSF21000101_HLR_544",
+        "FSF21000101_HLR_547",
+        "FSF21000101_HLR_4373",
+        "FSF21000101_HLR_1237",
+        "FSF21000101_HLR_4510",
+        "FSF21000101_HLR_3569",
+        "FSF21000101_HLR_3573"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_199",
+          "bus": "Analog",
+          "label": null,
+          "name": "光耦传感器供电电压回采值",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "光耦传感器供电电压回采值",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全关微动开关反馈",
+          "bit": "15",
+          "direction": "RX",
+          "attr_value": "通风BBSOV1全关微动开关反馈",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全开微动开关反馈",
+          "bit": "16",
+          "direction": "RX",
+          "attr_value": "通风BBSOV1全开微动开关反馈",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_278",
+          "bus": "A429",
+          "label": "L35",
+          "name": "AFTEFAN1不可运行/过流/过热/低转速反馈",
+          "bit": "15-18",
+          "direction": "RX",
+          "attr_value": "AFTEFAN1不可运行/过流/过热/低转速反馈",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_280",
+          "bus": "A429",
+          "label": "L36",
+          "name": "AFTEFAN1速度信号",
+          "bit": "13-28",
+          "direction": "RX",
+          "attr_value": "AFTEFAN1速度信号",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_378",
+          "bus": "A429",
+          "label": "L203",
+          "name": "气压高度",
+          "bit": "10-28",
+          "direction": "RX",
+          "attr_value": "气压高度",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4276",
+          "bus": "A429",
+          "label": "L126",
+          "name": "OHMS全局终止标志",
+          "bit": "10",
+          "direction": "RX",
+          "attr_value": "OHMS全局终止标志",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_473",
+          "bus": "A429",
+          "label": "L126",
+          "name": "飞机架次数",
+          "bit": "21-28",
+          "direction": "RX",
+          "attr_value": "飞机架次数",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_478",
+          "bus": "A429",
+          "label": "L121",
+          "name": "气源APU引起温度",
+          "bit": "17-28",
+          "direction": "RX",
+          "attr_value": "气源APU引起温度",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_544",
+          "bus": null,
+          "label": null,
+          "name": "SDI",
+          "bit": "8-9",
+          "direction": "TX",
+          "attr_value": "SDI",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "压调OFVTRV失效在关位故障有效标志",
+          "bit": "22",
+          "direction": "TX",
+          "attr_value": "压调OFVTRV失效在关位故障有效标志",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "压调OFVTRV失效在开位故障有效标志",
+          "bit": "23",
+          "direction": "TX",
+          "attr_value": "压调OFVTRV失效在开位故障有效标志",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "RFAN可用标志",
+          "bit": "24",
+          "direction": "TX",
+          "attr_value": "RFAN可用标志",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风FWDEFAN可用标志",
+          "bit": "25",
+          "direction": "TX",
+          "attr_value": "通风FWDEFAN可用标志",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风FWDBFAN可用标志",
+          "bit": "26",
+          "direction": "TX",
+          "attr_value": "通风FWDBFAN可用标志",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风AFTEFAN可用标志",
+          "bit": "27",
+          "direction": "TX",
+          "attr_value": "通风AFTEFAN可用标志",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风AFTBFAN可用标志",
+          "bit": "28",
+          "direction": "TX",
+          "attr_value": "通风AFTBFAN可用标志",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4373",
+          "bus": "A429",
+          "label": "L214",
+          "name": "驾驶舱温度COCKPIT_TEMP_SELECTION信号",
+          "bit": "16-28",
+          "direction": "TX",
+          "attr_value": "驾驶舱温度COCKPIT_TEMP_SELECTION信号",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_1237",
+          "bus": "A825",
+          "label": null,
+          "name": "RFAN工作模式",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "RFAN工作模式",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L126",
+          "name": "飞行架次数",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "飞行架次数",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L134",
+          "name": "飞机注册号",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "飞机注册号",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L135",
+          "name": "飞机注册号",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "飞机注册号",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L136",
+          "name": "飞机注册号",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "飞机注册号",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L137",
+          "name": "飞机阶段",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "飞机阶段",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L150",
+          "name": "UTC时间",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "UTC时间",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L260",
+          "name": "UTC日期",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "UTC日期",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_3569",
+          "bus": "A429",
+          "label": "L50",
+          "name": "A429通信测试信息L50",
+          "bit": null,
+          "direction": "TX",
+          "attr_value": "A429通信测试信息L50",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_3573",
+          "bus": "A825",
+          "label": null,
+          "name": "通风RFAN速度指令",
+          "bit": null,
+          "direction": "TX",
+          "attr_value": "通风RFAN速度指令",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "BitOffsetWithinDS",
+      "sources": [
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.DP",
+        "publisher.Analog-RP.DP",
+        "publisher.Discrete-RP.DP"
+      ],
+      "item_count": 9,
+      "req_ids": [
+        "FSF21000101_HLR_544",
+        "FSF21000101_HLR_547",
+        "FSF21000101_HLR_4373"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_544",
+          "bus": null,
+          "label": null,
+          "name": "SDI",
+          "bit": "8-9",
+          "direction": "TX",
+          "attr_value": "8-9",
+          "evidence": [
+            "[需求中文]bit8"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "压调OFVTRV失效在关位故障有效标志",
+          "bit": "22",
+          "direction": "TX",
+          "attr_value": "22",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "压调OFVTRV失效在开位故障有效标志",
+          "bit": "23",
+          "direction": "TX",
+          "attr_value": "23",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "RFAN可用标志",
+          "bit": "24",
+          "direction": "TX",
+          "attr_value": "24",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风FWDEFAN可用标志",
+          "bit": "25",
+          "direction": "TX",
+          "attr_value": "25",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风FWDBFAN可用标志",
+          "bit": "26",
+          "direction": "TX",
+          "attr_value": "26",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风AFTEFAN可用标志",
+          "bit": "27",
+          "direction": "TX",
+          "attr_value": "27",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风AFTBFAN可用标志",
+          "bit": "28",
+          "direction": "TX",
+          "attr_value": "28",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4373",
+          "bus": "A429",
+          "label": "L214",
+          "name": "驾驶舱温度COCKPIT_TEMP_SELECTION信号",
+          "bit": "16-28",
+          "direction": "TX",
+          "attr_value": "16-28",
+          "evidence": [
+            "[需求中文]bit16"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "CodedSet",
+      "sources": [
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.DP"
+      ],
+      "item_count": 12,
+      "req_ids": [
+        "FSF21000101_HLR_267",
+        "FSF21000101_HLR_278",
+        "FSF21000101_HLR_4276",
+        "FSF21000101_HLR_544",
+        "FSF21000101_HLR_547"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全关微动开关反馈",
+          "bit": "15",
+          "direction": "RX",
+          "attr_value": "bit15=1→True；bit15=0→False",
+          "evidence": [
+            "[需求中文]bit15=1"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全开微动开关反馈",
+          "bit": "16",
+          "direction": "RX",
+          "attr_value": "bit16=1→True；bit16=0→False",
+          "evidence": [
+            "[需求中文]bit15=1"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_278",
+          "bus": "A429",
+          "label": "L35",
+          "name": "AFTEFAN1不可运行/过流/过热/低转速反馈",
+          "bit": "15-18",
+          "direction": "RX",
+          "attr_value": "bit15=1→有效；bit15=0→无效；bit16=1→有效；bit16=0→无效；bit17=1→有效；bit17=0→无效；bit18=1→有效；bit18=0→无效",
+          "evidence": [
+            "[需求中文]bit15=1"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4276",
+          "bus": "A429",
+          "label": "L126",
+          "name": "OHMS全局终止标志",
+          "bit": "10",
+          "direction": "RX",
+          "attr_value": "bit10=1→有效；bit10=0→无效",
+          "evidence": [
+            "[需求中文]bit10=1"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_544",
+          "bus": null,
+          "label": null,
+          "name": "SDI",
+          "bit": "8-9",
+          "direction": "TX",
+          "attr_value": "bit8=0，bit9=0，通道位置为1A；bit8=1，bit9=0，通道位置为1B；bit8=0，bit9=1，通道位置为2A；bit8=1，bit9=1，通道位置为2B",
+          "evidence": [
+            "[需求中文]bit8=1"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "压调OFVTRV失效在关位故障有效标志",
+          "bit": "22",
+          "direction": "TX",
+          "attr_value": "压调OFVTRV失效在关位故障有效标志为有效→bit22=1；压调OFVTRV失效在关位故障有效标志为无效→bit22=0",
+          "evidence": [
+            "[需求中文]bit22=1"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "压调OFVTRV失效在开位故障有效标志",
+          "bit": "23",
+          "direction": "TX",
+          "attr_value": "压调OFVTRV失效在开位故障有效标志为有效→bit23=1；压调OFVTRV失效在开位故障有效标志为无效→bit23=0",
+          "evidence": [
+            "[需求中文]bit22=1"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "RFAN可用标志",
+          "bit": "24",
+          "direction": "TX",
+          "attr_value": "RFAN可用标志为有效→bit24=0；RFAN可用标志为无效→bit24=1",
+          "evidence": [
+            "[需求中文]bit22=1"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风FWDEFAN可用标志",
+          "bit": "25",
+          "direction": "TX",
+          "attr_value": "通风FWDEFAN可用标志为有效→bit25=0；通风FWDEFAN可用标志为无效→bit25=1",
+          "evidence": [
+            "[需求中文]bit22=1"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风FWDBFAN可用标志",
+          "bit": "26",
+          "direction": "TX",
+          "attr_value": "通风FWDBFAN可用标志为有效→bit26=0；通风FWDBFAN可用标志为无效→bit26=1",
+          "evidence": [
+            "[需求中文]bit22=1"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风AFTEFAN可用标志",
+          "bit": "27",
+          "direction": "TX",
+          "attr_value": "通风AFTEFAN可用标志为有效→bit27=0；通风AFTEFAN可用标志为无效→bit27=1",
+          "evidence": [
+            "[需求中文]bit22=1"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风AFTBFAN可用标志",
+          "bit": "28",
+          "direction": "TX",
+          "attr_value": "通风AFTBFAN可用标志为有效→bit28=0；通风AFTBFAN可用标志为无效→bit28=1",
+          "evidence": [
+            "[需求中文]bit22=1"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "DataFormatType",
+      "sources": [
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.DP",
+        "publisher.Analog-RP.DP",
+        "publisher.Discrete-RP.DP",
+        "subscriber.A664-RP.RP",
+        "subscriber.A825-RP.RP",
+        "subscriber.A429-RP.RP",
+        "subscriber.Analog-RP.RP",
+        "subscriber.Discrete-RP.RP"
+      ],
+      "item_count": 0,
+      "req_ids": [],
+      "requirements": []
+    },
+    {
+      "attribute": "FuncRngMax",
+      "sources": [
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.DP",
+        "publisher.Analog-RP.DP"
+      ],
+      "item_count": 2,
+      "req_ids": [
+        "FSF21000101_HLR_473",
+        "FSF21000101_HLR_478"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_473",
+          "bus": "A429",
+          "label": "L126",
+          "name": "飞机架次数",
+          "bit": "21-28",
+          "direction": "RX",
+          "attr_value": "127",
+          "evidence": [
+            "[基本原理]满量程范围：-128至127"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_478",
+          "bus": "A429",
+          "label": "L121",
+          "name": "气源APU引起温度",
+          "bit": "17-28",
+          "direction": "RX",
+          "attr_value": "1100",
+          "evidence": [
+            "[基本原理]功能范围-70~1100"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "FuncRngMin",
+      "sources": [
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.DP",
+        "publisher.Analog-RP.DP"
+      ],
+      "item_count": 2,
+      "req_ids": [
+        "FSF21000101_HLR_473",
+        "FSF21000101_HLR_478"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_473",
+          "bus": "A429",
+          "label": "L126",
+          "name": "飞机架次数",
+          "bit": "21-28",
+          "direction": "RX",
+          "attr_value": "-128",
+          "evidence": [
+            "[基本原理]满量程范围：-128至127"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_478",
+          "bus": "A429",
+          "label": "L121",
+          "name": "气源APU引起温度",
+          "bit": "17-28",
+          "direction": "RX",
+          "attr_value": "-70",
+          "evidence": [
+            "[基本原理]功能范围-70~1100"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "Label",
+      "sources": [
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.DP",
+        "subscriber.A664-RP.RP",
+        "subscriber.A825-RP.RP",
+        "subscriber.A429-RP.RP",
+        "subscriber.Analog-RP.RP",
+        "subscriber.Discrete-RP.RP"
+      ],
+      "item_count": 25,
+      "req_ids": [
+        "FSF21000101_HLR_267",
+        "FSF21000101_HLR_278",
+        "FSF21000101_HLR_280",
+        "FSF21000101_HLR_378",
+        "FSF21000101_HLR_4276",
+        "FSF21000101_HLR_473",
+        "FSF21000101_HLR_478",
+        "FSF21000101_HLR_4210",
+        "FSF21000101_HLR_547",
+        "FSF21000101_HLR_4373",
+        "FSF21000101_HLR_4510",
+        "FSF21000101_HLR_3569"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全关微动开关反馈",
+          "bit": "15",
+          "direction": "RX",
+          "attr_value": "30",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全开微动开关反馈",
+          "bit": "16",
+          "direction": "RX",
+          "attr_value": "30",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_278",
+          "bus": "A429",
+          "label": "L35",
+          "name": "AFTEFAN1不可运行/过流/过热/低转速反馈",
+          "bit": "15-18",
+          "direction": "RX",
+          "attr_value": "35",
+          "evidence": [
+            "[需求中文]L35"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_280",
+          "bus": "A429",
+          "label": "L36",
+          "name": "AFTEFAN1速度信号",
+          "bit": "13-28",
+          "direction": "RX",
+          "attr_value": "36",
+          "evidence": [
+            "[需求中文]L36"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_378",
+          "bus": "A429",
+          "label": "L203",
+          "name": "气压高度",
+          "bit": "10-28",
+          "direction": "RX",
+          "attr_value": "203",
+          "evidence": [
+            "[需求中文]L203"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4276",
+          "bus": "A429",
+          "label": "L126",
+          "name": "OHMS全局终止标志",
+          "bit": "10",
+          "direction": "RX",
+          "attr_value": "126",
+          "evidence": [
+            "[需求中文]L126"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_473",
+          "bus": "A429",
+          "label": "L126",
+          "name": "飞机架次数",
+          "bit": "21-28",
+          "direction": "RX",
+          "attr_value": "126",
+          "evidence": [
+            "[需求中文]L126"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_478",
+          "bus": "A429",
+          "label": "L121",
+          "name": "气源APU引起温度",
+          "bit": "17-28",
+          "direction": "RX",
+          "attr_value": "121",
+          "evidence": [
+            "[需求中文]L121"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4210",
+          "bus": "A429",
+          "label": "L11",
+          "name": null,
+          "bit": null,
+          "direction": "TX",
+          "attr_value": "11",
+          "evidence": [
+            "[需求中文]L11"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "压调OFVTRV失效在关位故障有效标志",
+          "bit": "22",
+          "direction": "TX",
+          "attr_value": "11",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "压调OFVTRV失效在开位故障有效标志",
+          "bit": "23",
+          "direction": "TX",
+          "attr_value": "11",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "RFAN可用标志",
+          "bit": "24",
+          "direction": "TX",
+          "attr_value": "11",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风FWDEFAN可用标志",
+          "bit": "25",
+          "direction": "TX",
+          "attr_value": "11",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风FWDBFAN可用标志",
+          "bit": "26",
+          "direction": "TX",
+          "attr_value": "11",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风AFTEFAN可用标志",
+          "bit": "27",
+          "direction": "TX",
+          "attr_value": "11",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风AFTBFAN可用标志",
+          "bit": "28",
+          "direction": "TX",
+          "attr_value": "11",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4373",
+          "bus": "A429",
+          "label": "L214",
+          "name": "驾驶舱温度COCKPIT_TEMP_SELECTION信号",
+          "bit": "16-28",
+          "direction": "TX",
+          "attr_value": "214",
+          "evidence": [
+            "[需求中文]L214"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L126",
+          "name": "飞行架次数",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "126",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L134",
+          "name": "飞机注册号",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "134",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L135",
+          "name": "飞机注册号",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "135",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L136",
+          "name": "飞机注册号",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "136",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L137",
+          "name": "飞机阶段",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "137",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L150",
+          "name": "UTC时间",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "150",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4510",
+          "bus": null,
+          "label": "L260",
+          "name": "UTC日期",
+          "bit": null,
+          "direction": "RX",
+          "attr_value": "260",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_3569",
+          "bus": "A429",
+          "label": "L50",
+          "name": "A429通信测试信息L50",
+          "bit": null,
+          "direction": "TX",
+          "attr_value": "50",
+          "evidence": [
+            "[需求中文]L50"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "LsbRes",
+      "sources": [
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.DP",
+        "subscriber.A664-RP.RP",
+        "subscriber.A825-RP.RP",
+        "subscriber.A429-RP.RP",
+        "subscriber.Analog-RP.RP",
+        "subscriber.Discrete-RP.RP"
+      ],
+      "item_count": 0,
+      "req_ids": [],
+      "requirements": []
+    },
+    {
+      "attribute": "OneState",
+      "sources": [
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.DP",
+        "publisher.Discrete-RP.DP"
+      ],
+      "item_count": 12,
+      "req_ids": [
+        "FSF21000101_HLR_267",
+        "FSF21000101_HLR_278",
+        "FSF21000101_HLR_4276",
+        "FSF21000101_HLR_544",
+        "FSF21000101_HLR_547"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全关微动开关反馈",
+          "bit": "15",
+          "direction": "RX",
+          "attr_value": "bit15=1→BBSOV1全关反馈True；bit16=1→BBSOV1全开反馈True",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全开微动开关反馈",
+          "bit": "16",
+          "direction": "RX",
+          "attr_value": "bit15=1→BBSOV1全关反馈True；bit16=1→BBSOV1全开反馈True",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_278",
+          "bus": "A429",
+          "label": "L35",
+          "name": "AFTEFAN1不可运行/过流/过热/低转速反馈",
+          "bit": "15-18",
+          "direction": "RX",
+          "attr_value": "bit15=1→AFTEFAN1不可运行反馈有效；bit16=1→AFTEFAN1过流反馈有效；bit17=1→AFTEFAN1过热反馈有效；bit18=1→AFTEFAN1低转速反馈有效",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4276",
+          "bus": "A429",
+          "label": "L126",
+          "name": "OHMS全局终止标志",
+          "bit": "10",
+          "direction": "RX",
+          "attr_value": "有效",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_544",
+          "bus": null,
+          "label": null,
+          "name": "SDI",
+          "bit": "8-9",
+          "direction": "TX",
+          "attr_value": "bit8=1→通道位置1B/2B；bit9=1→通道位置2A/2B",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "压调OFVTRV失效在关位故障有效标志",
+          "bit": "22",
+          "direction": "TX",
+          "attr_value": "bit22=1→OFVTRV关位失效有效；bit23=1→开位失效有效；bit24~28=1→对应风扇不可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "压调OFVTRV失效在开位故障有效标志",
+          "bit": "23",
+          "direction": "TX",
+          "attr_value": "bit22=1→OFVTRV关位失效有效；bit23=1→开位失效有效；bit24~28=1→对应风扇不可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "RFAN可用标志",
+          "bit": "24",
+          "direction": "TX",
+          "attr_value": "bit22=1→OFVTRV关位失效有效；bit23=1→开位失效有效；bit24~28=1→对应风扇不可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风FWDEFAN可用标志",
+          "bit": "25",
+          "direction": "TX",
+          "attr_value": "bit22=1→OFVTRV关位失效有效；bit23=1→开位失效有效；bit24~28=1→对应风扇不可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风FWDBFAN可用标志",
+          "bit": "26",
+          "direction": "TX",
+          "attr_value": "bit22=1→OFVTRV关位失效有效；bit23=1→开位失效有效；bit24~28=1→对应风扇不可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风AFTEFAN可用标志",
+          "bit": "27",
+          "direction": "TX",
+          "attr_value": "bit22=1→OFVTRV关位失效有效；bit23=1→开位失效有效；bit24~28=1→对应风扇不可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风AFTBFAN可用标志",
+          "bit": "28",
+          "direction": "TX",
+          "attr_value": "bit22=1→OFVTRV关位失效有效；bit23=1→开位失效有效；bit24~28=1→对应风扇不可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "ZeroState",
+      "sources": [
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.DP",
+        "publisher.Discrete-RP.DP"
+      ],
+      "item_count": 12,
+      "req_ids": [
+        "FSF21000101_HLR_267",
+        "FSF21000101_HLR_278",
+        "FSF21000101_HLR_4276",
+        "FSF21000101_HLR_544",
+        "FSF21000101_HLR_547"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全关微动开关反馈",
+          "bit": "15",
+          "direction": "RX",
+          "attr_value": "bit15=0→BBSOV1全关反馈False；bit16=0→BBSOV1全开反馈False",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全开微动开关反馈",
+          "bit": "16",
+          "direction": "RX",
+          "attr_value": "bit15=0→BBSOV1全关反馈False；bit16=0→BBSOV1全开反馈False",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_278",
+          "bus": "A429",
+          "label": "L35",
+          "name": "AFTEFAN1不可运行/过流/过热/低转速反馈",
+          "bit": "15-18",
+          "direction": "RX",
+          "attr_value": "bit15=0→AFTEFAN1不可运行反馈无效；bit16=0→AFTEFAN1过流反馈无效；bit17=0→AFTEFAN1过热反馈无效；bit18=0→AFTEFAN1低转速反馈无效",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4276",
+          "bus": "A429",
+          "label": "L126",
+          "name": "OHMS全局终止标志",
+          "bit": "10",
+          "direction": "RX",
+          "attr_value": "无效",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_544",
+          "bus": null,
+          "label": null,
+          "name": "SDI",
+          "bit": "8-9",
+          "direction": "TX",
+          "attr_value": "bit8=0→通道位置1A/2A；bit9=0→通道位置1A/1B",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "压调OFVTRV失效在关位故障有效标志",
+          "bit": "22",
+          "direction": "TX",
+          "attr_value": "bit22=0→OFVTRV关位失效无效；bit23=0→开位失效无效；bit24~28=0→对应风扇可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "压调OFVTRV失效在开位故障有效标志",
+          "bit": "23",
+          "direction": "TX",
+          "attr_value": "bit22=0→OFVTRV关位失效无效；bit23=0→开位失效无效；bit24~28=0→对应风扇可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "RFAN可用标志",
+          "bit": "24",
+          "direction": "TX",
+          "attr_value": "bit22=0→OFVTRV关位失效无效；bit23=0→开位失效无效；bit24~28=0→对应风扇可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风FWDEFAN可用标志",
+          "bit": "25",
+          "direction": "TX",
+          "attr_value": "bit22=0→OFVTRV关位失效无效；bit23=0→开位失效无效；bit24~28=0→对应风扇可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风FWDBFAN可用标志",
+          "bit": "26",
+          "direction": "TX",
+          "attr_value": "bit22=0→OFVTRV关位失效无效；bit23=0→开位失效无效；bit24~28=0→对应风扇可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风AFTEFAN可用标志",
+          "bit": "27",
+          "direction": "TX",
+          "attr_value": "bit22=0→OFVTRV关位失效无效；bit23=0→开位失效无效；bit24~28=0→对应风扇可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_547",
+          "bus": "A429",
+          "label": "L11",
+          "name": "通风AFTBFAN可用标志",
+          "bit": "28",
+          "direction": "TX",
+          "attr_value": "bit22=0→OFVTRV关位失效无效；bit23=0→开位失效无效；bit24~28=0→对应风扇可用",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "ParameterSize",
+      "sources": [
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.DP",
+        "publisher.Analog-RP.DP",
+        "publisher.Discrete-RP.DP",
+        "subscriber.A664-RP.RP",
+        "subscriber.A825-RP.RP",
+        "subscriber.A429-RP.RP",
+        "subscriber.Analog-RP.RP",
+        "subscriber.Discrete-RP.RP"
+      ],
+      "item_count": 0,
+      "req_ids": [],
+      "requirements": []
+    },
+    {
+      "attribute": "PublishedLatency",
+      "sources": [
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.DP",
+        "publisher.Analog-RP.DP",
+        "publisher.Discrete-RP.AnalogDiscreteParameter"
+      ],
+      "item_count": 0,
+      "req_ids": [],
+      "requirements": []
+    },
+    {
+      "attribute": "Units",
+      "sources": [
+        "publisher.A664-RP.DP",
+        "publisher.A825-RP.DP",
+        "publisher.A429-RP.DP",
+        "publisher.Analog-RP.DP"
+      ],
+      "item_count": 2,
+      "req_ids": [
+        "FSF21000101_HLR_478",
+        "FSF21000101_HLR_3573"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_478",
+          "bus": "A429",
+          "label": "L121",
+          "name": "气源APU引起温度",
+          "bit": "17-28",
+          "direction": "RX",
+          "attr_value": "degrees C",
+          "evidence": [
+            "[基本原理]单位：degrees C"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_3573",
+          "bus": "A825",
+          "label": null,
+          "name": "通风RFAN速度指令",
+          "bit": null,
+          "direction": "TX",
+          "attr_value": "RPM",
+          "evidence": [
+            "[需求中文]RPM"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "SamplePeriod",
+      "sources": [
+        "publisher.A825-RP.LogicalPort",
+        "subscriber.A664-RP.LogicalPort",
+        "subscriber.A825-RP.LogicalPort",
+        "subscriber.A429-RP.LogicalPort",
+        "subscriber.Analog-RP.LogicalPort",
+        "subscriber.Discrete-RP.LogicalPort"
+      ],
+      "item_count": 0,
+      "req_ids": [],
+      "requirements": []
+    },
+    {
+      "attribute": "BitOffsetWithinMsg",
+      "sources": [
+        "subscriber.A664-RP.RP",
+        "subscriber.A825-RP.RP",
+        "subscriber.A429-RP.RP",
+        "subscriber.Analog-RP.RP",
+        "subscriber.Discrete-RP.RP"
+      ],
+      "item_count": 8,
+      "req_ids": [
+        "FSF21000101_HLR_267",
+        "FSF21000101_HLR_278",
+        "FSF21000101_HLR_280",
+        "FSF21000101_HLR_378",
+        "FSF21000101_HLR_4276",
+        "FSF21000101_HLR_473",
+        "FSF21000101_HLR_478"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全关微动开关反馈",
+          "bit": "15",
+          "direction": "RX",
+          "attr_value": "15",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全开微动开关反馈",
+          "bit": "16",
+          "direction": "RX",
+          "attr_value": "16",
+          "evidence": [
+            "[AI辅助识别]"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_278",
+          "bus": "A429",
+          "label": "L35",
+          "name": "AFTEFAN1不可运行/过流/过热/低转速反馈",
+          "bit": "15-18",
+          "direction": "RX",
+          "attr_value": "15-18",
+          "evidence": [
+            "[需求中文]bit15"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_280",
+          "bus": "A429",
+          "label": "L36",
+          "name": "AFTEFAN1速度信号",
+          "bit": "13-28",
+          "direction": "RX",
+          "attr_value": "13-28",
+          "evidence": [
+            "[需求中文]bit13"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_378",
+          "bus": "A429",
+          "label": "L203",
+          "name": "气压高度",
+          "bit": "10-28",
+          "direction": "RX",
+          "attr_value": "10-28",
+          "evidence": [
+            "[需求中文]bit10"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_4276",
+          "bus": "A429",
+          "label": "L126",
+          "name": "OHMS全局终止标志",
+          "bit": "10",
+          "direction": "RX",
+          "attr_value": "10",
+          "evidence": [
+            "[需求中文]bit10"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_473",
+          "bus": "A429",
+          "label": "L126",
+          "name": "飞机架次数",
+          "bit": "21-28",
+          "direction": "RX",
+          "attr_value": "21-28",
+          "evidence": [
+            "[需求中文]bit21",
+            "[基本原理]bit21"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_478",
+          "bus": "A429",
+          "label": "L121",
+          "name": "气源APU引起温度",
+          "bit": "17-28",
+          "direction": "RX",
+          "attr_value": "17-28",
+          "evidence": [
+            "[需求中文]bit17",
+            "[基本原理]bit17"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "SDIExpected",
+      "sources": [
+        "subscriber.A664-RP.RP",
+        "subscriber.A825-RP.RP",
+        "subscriber.A429-RP.RP",
+        "subscriber.Analog-RP.RP",
+        "subscriber.Discrete-RP.RP"
+      ],
+      "item_count": 5,
+      "req_ids": [
+        "FSF21000101_HLR_267",
+        "FSF21000101_HLR_278",
+        "FSF21000101_HLR_280",
+        "FSF21000101_HLR_544"
+      ],
+      "requirements": [
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全关微动开关反馈",
+          "bit": "15",
+          "direction": "RX",
+          "attr_value": "1",
+          "evidence": [
+            "[需求中文]SDI"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_267",
+          "bus": "A429",
+          "label": "L30",
+          "name": "通风BBSOV1全开微动开关反馈",
+          "bit": "16",
+          "direction": "RX",
+          "attr_value": "1",
+          "evidence": [
+            "[需求中文]SDI"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_278",
+          "bus": "A429",
+          "label": "L35",
+          "name": "AFTEFAN1不可运行/过流/过热/低转速反馈",
+          "bit": "15-18",
+          "direction": "RX",
+          "attr_value": "1",
+          "evidence": [
+            "[需求中文]SDI"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_280",
+          "bus": "A429",
+          "label": "L36",
+          "name": "AFTEFAN1速度信号",
+          "bit": "13-28",
+          "direction": "RX",
+          "attr_value": "1",
+          "evidence": [
+            "[需求中文]SDI"
+          ]
+        },
+        {
+          "req_id": "FSF21000101_HLR_544",
+          "bus": null,
+          "label": null,
+          "name": "SDI",
+          "bit": "8-9",
+          "direction": "TX",
+          "attr_value": "SDI",
+          "evidence": [
+            "[需求中文]SDI"
+          ]
+        }
+      ]
+    },
+    {
+      "attribute": "SSM",
+      "sources": [
+        "subscriber.A664-RP.RP",
+        "subscriber.A825-RP.RP",
+        "subscriber.A429-RP.RP",
+        "subscriber.Analog-RP.RP",
+        "subscriber.Discrete-RP.RP"
+      ],
+      "item_count": 0,
+      "req_ids": [],
+      "requirements": []
+    }
+  ],
+  "requirements": [
+    {
+      "req_id": "FSF21000101_HLR_199",
+      "bus": "Analog",
+      "label": null,
+      "name": "光耦传感器供电电压回采值",
+      "bit": null,
+      "direction": "RX",
+      "attribute_classes": [
+        "Name"
+      ],
+      "req_text": "软件应从ADCINA3接收并解析光耦传感器供电电压回采值。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_267",
+      "bus": "A429",
+      "label": "30",
+      "name": "通风BBSOV1全关微动开关反馈",
+      "bit": "15",
+      "direction": "RX",
+      "attribute_classes": [
+        "Name",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState",
+        "BitOffsetWithinMsg",
+        "SDIExpected"
+      ],
+      "req_text": "当通道位置在“1A”或者“1B”时，软件应按照A429通信协议从A429接收数据中解析L30，逻辑如下： 当SDI=1且bit15=1时，通风BBSOV1全关微动开关反馈设为“True” 当SDI=1且bit15=0时，通风BBSOV1全关微动开关反馈设为“False” 当SDI=1且bit16=1时，通风BBSOV1全开微动开关反馈设为“True” 当SDI=1且bit16=0时，通风BBSOV1全开微动开关反馈设为“False”"
+    },
+    {
+      "req_id": "FSF21000101_HLR_267",
+      "bus": "A429",
+      "label": "30",
+      "name": "通风BBSOV1全开微动开关反馈",
+      "bit": "16",
+      "direction": "RX",
+      "attribute_classes": [
+        "Name",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState",
+        "BitOffsetWithinMsg",
+        "SDIExpected"
+      ],
+      "req_text": "当通道位置在“1A”或者“1B”时，软件应按照A429通信协议从A429接收数据中解析L30，逻辑如下： 当SDI=1且bit15=1时，通风BBSOV1全关微动开关反馈设为“True” 当SDI=1且bit15=0时，通风BBSOV1全关微动开关反馈设为“False” 当SDI=1且bit16=1时，通风BBSOV1全开微动开关反馈设为“True” 当SDI=1且bit16=0时，通风BBSOV1全开微动开关反馈设为“False”"
+    },
+    {
+      "req_id": "FSF21000101_HLR_278",
+      "bus": "A429",
+      "label": "35",
+      "name": "AFTEFAN1不可运行/过流/过热/低转速反馈",
+      "bit": "15-18",
+      "direction": "RX",
+      "attribute_classes": [
+        "Name",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState",
+        "BitOffsetWithinMsg",
+        "SDIExpected"
+      ],
+      "req_text": "当通道位置在“1A”或者“1B”时，软件应按照A429通信协议从A429接收数据中解析L35，逻辑如下： 当SDI=1且bit15=1时，通风AFTEFAN1不可运行反馈设为“有效” 当SDI=1且bit15=0时，通风AFTEFAN1不可运行反馈设为“无效” 当SDI=1且bit16=1时，通风AFTEFAN1过流反馈设为“有效” 当SDI=1且bit16=0时，通风AFTEFAN1过流反馈设为“无效” 当SDI=1且bit17=1时，通风AFTEFAN1过热反馈设为“有效” 当SDI=1且bit17=0时，通风AFTEFAN1过热反馈设为“无效” 当SDI=1且bit18=1时，通风AFTEFAN1低转速反馈设为“有效” 当SDI=1且bit18=0时，通风AFTEFAN1低转速反馈设为“无效”"
+    },
+    {
+      "req_id": "FSF21000101_HLR_280",
+      "bus": "A429",
+      "label": "36",
+      "name": "AFTEFAN1速度信号",
+      "bit": "13-28",
+      "direction": "RX",
+      "attribute_classes": [
+        "Name",
+        "Label",
+        "BitOffsetWithinMsg",
+        "SDIExpected"
+      ],
+      "req_text": "软件应按照A429通信协议从A429接收数据中解析L36，当SDI=1时，bit13至bit28为AFTEFAN1速度信号。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_378",
+      "bus": "A429",
+      "label": "203",
+      "name": "气压高度",
+      "bit": "10-28",
+      "direction": "RX",
+      "attribute_classes": [
+        "Name",
+        "Label",
+        "BitOffsetWithinMsg"
+      ],
+      "req_text": "软件应按照A429通信协议从A429接收数据中解析L203，其中bit10至bit28为气压高度。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4276",
+      "bus": "A429",
+      "label": "126",
+      "name": "OHMS全局终止标志",
+      "bit": "10",
+      "direction": "RX",
+      "attribute_classes": [
+        "Name",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState",
+        "BitOffsetWithinMsg"
+      ],
+      "req_text": "软件应按照A429通信协议从A429接收数据中解析L126的bit10，设置OHMS全局终止标志，逻辑如下： 当bit10=1时，OHMS全局终止标志设为“有效”； 当bit10=0时，OHMS全局终止标志设为“无效”。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_473",
+      "bus": "A429",
+      "label": "126",
+      "name": "飞机架次数",
+      "bit": "21-28",
+      "direction": "RX",
+      "attribute_classes": [
+        "Name",
+        "FuncRngMax",
+        "FuncRngMin",
+        "Label",
+        "BitOffsetWithinMsg"
+      ],
+      "req_text": "软件应按照A429通信协议从A429接收数据中解析L126，将bit21至bit28设为飞机架次数。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_478",
+      "bus": "A429",
+      "label": "121",
+      "name": "气源APU引起温度",
+      "bit": "17-28",
+      "direction": "RX",
+      "attribute_classes": [
+        "Name",
+        "FuncRngMax",
+        "FuncRngMin",
+        "Label",
+        "Units",
+        "BitOffsetWithinMsg"
+      ],
+      "req_text": "软件应按照A429通信协议从A429接收数据中解析L121，并设置气源APU引起温度，bit17至bit28为有效数据位。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_544",
+      "bus": null,
+      "label": null,
+      "name": "SDI",
+      "bit": "8-9",
+      "direction": "TX",
+      "attribute_classes": [
+        "Name",
+        "BitOffsetWithinDS",
+        "CodedSet",
+        "OneState",
+        "ZeroState",
+        "SDIExpected"
+      ],
+      "req_text": "软件应根据通道位置在LABEL的SDI位写入固定数据，逻辑如下： 通道位置为“1A”时，bit8=0，bit9=0； 通道位置为“1B”时，bit8=1，bit9=0； 通道位置为“2A”时，bit8=0，bit9=1； 通道位置为“2B”时，bit8=1，bit9=1；"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4210",
+      "bus": "A429",
+      "label": "11",
+      "name": null,
+      "bit": null,
+      "direction": "TX",
+      "attribute_classes": [
+        "RefreshPeriod",
+        "TransmissionIntervalMinimum",
+        "Label"
+      ],
+      "req_text": "软件应按照A429通信协议以1000ms为周期发送A429发送数据中的L11。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_547",
+      "bus": "A429",
+      "label": "11",
+      "name": "压调OFVTRV失效在关位故障有效标志",
+      "bit": "22",
+      "direction": "TX",
+      "attribute_classes": [
+        "Name",
+        "BitOffsetWithinDS",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState"
+      ],
+      "req_text": "软件应按照A429通信协议向429发送数据中L11写入压调OFVTRV失效在关位故障有效标志、压调OFVTRV失效在开位故障有效标志通风FWDBFAN可用标志、通风FWDEFAN可用标志，具体逻辑如下： 当压调OFVTRV失效在关位故障有效标志为“有效”时，bit22=1； 当压调OFVTRV失效在关位故障有效标志为“无效”时，bit22=0； 当压调OFVTRV失效在开位故障有效标志为“有效”时，bit23=1； 当压调OFVTRV失效在开位故障有效标志为“无效”时，bit23=0； 当RFAN可用标志为“有效”时，bit24=0； 当RFAN可用标志为“无效”时，bit24=1； 当通风FWDEFAN可用标志为“有效”时，bit25=0； 当通风FWDEFAN可用标志为“无效”时，bit25=1； 当通风FWDBFAN可用标志为“有效”时，bit26=0； 当通风FWDBFAN可用标志为“无效”时，bit26=1； 当通风AFTEFAN可用标志为“有效”时，bit27=0； 当通风AFTEFAN可用标志为“无效”时，bit27=1； 当通风AFTBFAN可用标志为“有效”时，bit28=0； 当通风AFTBFAN可用标志为“无效”时，bit28=1。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_547",
+      "bus": "A429",
+      "label": "11",
+      "name": "压调OFVTRV失效在开位故障有效标志",
+      "bit": "23",
+      "direction": "TX",
+      "attribute_classes": [
+        "Name",
+        "BitOffsetWithinDS",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState"
+      ],
+      "req_text": "软件应按照A429通信协议向429发送数据中L11写入压调OFVTRV失效在关位故障有效标志、压调OFVTRV失效在开位故障有效标志通风FWDBFAN可用标志、通风FWDEFAN可用标志，具体逻辑如下： 当压调OFVTRV失效在关位故障有效标志为“有效”时，bit22=1； 当压调OFVTRV失效在关位故障有效标志为“无效”时，bit22=0； 当压调OFVTRV失效在开位故障有效标志为“有效”时，bit23=1； 当压调OFVTRV失效在开位故障有效标志为“无效”时，bit23=0； 当RFAN可用标志为“有效”时，bit24=0； 当RFAN可用标志为“无效”时，bit24=1； 当通风FWDEFAN可用标志为“有效”时，bit25=0； 当通风FWDEFAN可用标志为“无效”时，bit25=1； 当通风FWDBFAN可用标志为“有效”时，bit26=0； 当通风FWDBFAN可用标志为“无效”时，bit26=1； 当通风AFTEFAN可用标志为“有效”时，bit27=0； 当通风AFTEFAN可用标志为“无效”时，bit27=1； 当通风AFTBFAN可用标志为“有效”时，bit28=0； 当通风AFTBFAN可用标志为“无效”时，bit28=1。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_547",
+      "bus": "A429",
+      "label": "11",
+      "name": "RFAN可用标志",
+      "bit": "24",
+      "direction": "TX",
+      "attribute_classes": [
+        "Name",
+        "BitOffsetWithinDS",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState"
+      ],
+      "req_text": "软件应按照A429通信协议向429发送数据中L11写入压调OFVTRV失效在关位故障有效标志、压调OFVTRV失效在开位故障有效标志通风FWDBFAN可用标志、通风FWDEFAN可用标志，具体逻辑如下： 当压调OFVTRV失效在关位故障有效标志为“有效”时，bit22=1； 当压调OFVTRV失效在关位故障有效标志为“无效”时，bit22=0； 当压调OFVTRV失效在开位故障有效标志为“有效”时，bit23=1； 当压调OFVTRV失效在开位故障有效标志为“无效”时，bit23=0； 当RFAN可用标志为“有效”时，bit24=0； 当RFAN可用标志为“无效”时，bit24=1； 当通风FWDEFAN可用标志为“有效”时，bit25=0； 当通风FWDEFAN可用标志为“无效”时，bit25=1； 当通风FWDBFAN可用标志为“有效”时，bit26=0； 当通风FWDBFAN可用标志为“无效”时，bit26=1； 当通风AFTEFAN可用标志为“有效”时，bit27=0； 当通风AFTEFAN可用标志为“无效”时，bit27=1； 当通风AFTBFAN可用标志为“有效”时，bit28=0； 当通风AFTBFAN可用标志为“无效”时，bit28=1。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_547",
+      "bus": "A429",
+      "label": "11",
+      "name": "通风FWDEFAN可用标志",
+      "bit": "25",
+      "direction": "TX",
+      "attribute_classes": [
+        "Name",
+        "BitOffsetWithinDS",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState"
+      ],
+      "req_text": "软件应按照A429通信协议向429发送数据中L11写入压调OFVTRV失效在关位故障有效标志、压调OFVTRV失效在开位故障有效标志通风FWDBFAN可用标志、通风FWDEFAN可用标志，具体逻辑如下： 当压调OFVTRV失效在关位故障有效标志为“有效”时，bit22=1； 当压调OFVTRV失效在关位故障有效标志为“无效”时，bit22=0； 当压调OFVTRV失效在开位故障有效标志为“有效”时，bit23=1； 当压调OFVTRV失效在开位故障有效标志为“无效”时，bit23=0； 当RFAN可用标志为“有效”时，bit24=0； 当RFAN可用标志为“无效”时，bit24=1； 当通风FWDEFAN可用标志为“有效”时，bit25=0； 当通风FWDEFAN可用标志为“无效”时，bit25=1； 当通风FWDBFAN可用标志为“有效”时，bit26=0； 当通风FWDBFAN可用标志为“无效”时，bit26=1； 当通风AFTEFAN可用标志为“有效”时，bit27=0； 当通风AFTEFAN可用标志为“无效”时，bit27=1； 当通风AFTBFAN可用标志为“有效”时，bit28=0； 当通风AFTBFAN可用标志为“无效”时，bit28=1。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_547",
+      "bus": "A429",
+      "label": "11",
+      "name": "通风FWDBFAN可用标志",
+      "bit": "26",
+      "direction": "TX",
+      "attribute_classes": [
+        "Name",
+        "BitOffsetWithinDS",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState"
+      ],
+      "req_text": "软件应按照A429通信协议向429发送数据中L11写入压调OFVTRV失效在关位故障有效标志、压调OFVTRV失效在开位故障有效标志通风FWDBFAN可用标志、通风FWDEFAN可用标志，具体逻辑如下： 当压调OFVTRV失效在关位故障有效标志为“有效”时，bit22=1； 当压调OFVTRV失效在关位故障有效标志为“无效”时，bit22=0； 当压调OFVTRV失效在开位故障有效标志为“有效”时，bit23=1； 当压调OFVTRV失效在开位故障有效标志为“无效”时，bit23=0； 当RFAN可用标志为“有效”时，bit24=0； 当RFAN可用标志为“无效”时，bit24=1； 当通风FWDEFAN可用标志为“有效”时，bit25=0； 当通风FWDEFAN可用标志为“无效”时，bit25=1； 当通风FWDBFAN可用标志为“有效”时，bit26=0； 当通风FWDBFAN可用标志为“无效”时，bit26=1； 当通风AFTEFAN可用标志为“有效”时，bit27=0； 当通风AFTEFAN可用标志为“无效”时，bit27=1； 当通风AFTBFAN可用标志为“有效”时，bit28=0； 当通风AFTBFAN可用标志为“无效”时，bit28=1。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_547",
+      "bus": "A429",
+      "label": "11",
+      "name": "通风AFTEFAN可用标志",
+      "bit": "27",
+      "direction": "TX",
+      "attribute_classes": [
+        "Name",
+        "BitOffsetWithinDS",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState"
+      ],
+      "req_text": "软件应按照A429通信协议向429发送数据中L11写入压调OFVTRV失效在关位故障有效标志、压调OFVTRV失效在开位故障有效标志通风FWDBFAN可用标志、通风FWDEFAN可用标志，具体逻辑如下： 当压调OFVTRV失效在关位故障有效标志为“有效”时，bit22=1； 当压调OFVTRV失效在关位故障有效标志为“无效”时，bit22=0； 当压调OFVTRV失效在开位故障有效标志为“有效”时，bit23=1； 当压调OFVTRV失效在开位故障有效标志为“无效”时，bit23=0； 当RFAN可用标志为“有效”时，bit24=0； 当RFAN可用标志为“无效”时，bit24=1； 当通风FWDEFAN可用标志为“有效”时，bit25=0； 当通风FWDEFAN可用标志为“无效”时，bit25=1； 当通风FWDBFAN可用标志为“有效”时，bit26=0； 当通风FWDBFAN可用标志为“无效”时，bit26=1； 当通风AFTEFAN可用标志为“有效”时，bit27=0； 当通风AFTEFAN可用标志为“无效”时，bit27=1； 当通风AFTBFAN可用标志为“有效”时，bit28=0； 当通风AFTBFAN可用标志为“无效”时，bit28=1。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_547",
+      "bus": "A429",
+      "label": "11",
+      "name": "通风AFTBFAN可用标志",
+      "bit": "28",
+      "direction": "TX",
+      "attribute_classes": [
+        "Name",
+        "BitOffsetWithinDS",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState"
+      ],
+      "req_text": "软件应按照A429通信协议向429发送数据中L11写入压调OFVTRV失效在关位故障有效标志、压调OFVTRV失效在开位故障有效标志通风FWDBFAN可用标志、通风FWDEFAN可用标志，具体逻辑如下： 当压调OFVTRV失效在关位故障有效标志为“有效”时，bit22=1； 当压调OFVTRV失效在关位故障有效标志为“无效”时，bit22=0； 当压调OFVTRV失效在开位故障有效标志为“有效”时，bit23=1； 当压调OFVTRV失效在开位故障有效标志为“无效”时，bit23=0； 当RFAN可用标志为“有效”时，bit24=0； 当RFAN可用标志为“无效”时，bit24=1； 当通风FWDEFAN可用标志为“有效”时，bit25=0； 当通风FWDEFAN可用标志为“无效”时，bit25=1； 当通风FWDBFAN可用标志为“有效”时，bit26=0； 当通风FWDBFAN可用标志为“无效”时，bit26=1； 当通风AFTEFAN可用标志为“有效”时，bit27=0； 当通风AFTEFAN可用标志为“无效”时，bit27=1； 当通风AFTBFAN可用标志为“有效”时，bit28=0； 当通风AFTBFAN可用标志为“无效”时，bit28=1。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4373",
+      "bus": "A429",
+      "label": "214",
+      "name": "驾驶舱温度COCKPIT_TEMP_SELECTION信号",
+      "bit": "16-28",
+      "direction": "TX",
+      "attribute_classes": [
+        "Name",
+        "BitOffsetWithinDS",
+        "Label"
+      ],
+      "req_text": "当通道位置为“1B”时，软件应按照A429通信协议向429发送数据中的L214的bit16至bit28写入驾驶舱温度COCKPIT_TEMP_SELECTION信号。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_1237",
+      "bus": "A825",
+      "label": null,
+      "name": "RFAN工作模式",
+      "bit": null,
+      "direction": "RX",
+      "attribute_classes": [
+        "Name"
+      ],
+      "req_text": "软件应按照协议，从风扇CAN接口的接口数据中解析得到RFAN的工作模式。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4510",
+      "bus": null,
+      "label": "126",
+      "name": "飞行架次数",
+      "bit": null,
+      "direction": "RX",
+      "attribute_classes": [
+        "RefreshPeriod",
+        "Name",
+        "Label"
+      ],
+      "req_text": "软件应每1秒解析一次飞机状态消息，包括： LABEL126（飞行架次数）； LABEL134（飞机注册号）； LABEL135（飞机注册号）； LABEL136（飞机注册号）； LABEL137（飞机阶段）； LABEL150（UTC时间）； LABEL260（UTC日期）；"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4510",
+      "bus": null,
+      "label": "134",
+      "name": "飞机注册号",
+      "bit": null,
+      "direction": "RX",
+      "attribute_classes": [
+        "RefreshPeriod",
+        "Name",
+        "Label"
+      ],
+      "req_text": "软件应每1秒解析一次飞机状态消息，包括： LABEL126（飞行架次数）； LABEL134（飞机注册号）； LABEL135（飞机注册号）； LABEL136（飞机注册号）； LABEL137（飞机阶段）； LABEL150（UTC时间）； LABEL260（UTC日期）；"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4510",
+      "bus": null,
+      "label": "135",
+      "name": "飞机注册号",
+      "bit": null,
+      "direction": "RX",
+      "attribute_classes": [
+        "RefreshPeriod",
+        "Name",
+        "Label"
+      ],
+      "req_text": "软件应每1秒解析一次飞机状态消息，包括： LABEL126（飞行架次数）； LABEL134（飞机注册号）； LABEL135（飞机注册号）； LABEL136（飞机注册号）； LABEL137（飞机阶段）； LABEL150（UTC时间）； LABEL260（UTC日期）；"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4510",
+      "bus": null,
+      "label": "136",
+      "name": "飞机注册号",
+      "bit": null,
+      "direction": "RX",
+      "attribute_classes": [
+        "RefreshPeriod",
+        "Name",
+        "Label"
+      ],
+      "req_text": "软件应每1秒解析一次飞机状态消息，包括： LABEL126（飞行架次数）； LABEL134（飞机注册号）； LABEL135（飞机注册号）； LABEL136（飞机注册号）； LABEL137（飞机阶段）； LABEL150（UTC时间）； LABEL260（UTC日期）；"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4510",
+      "bus": null,
+      "label": "137",
+      "name": "飞机阶段",
+      "bit": null,
+      "direction": "RX",
+      "attribute_classes": [
+        "RefreshPeriod",
+        "Name",
+        "Label"
+      ],
+      "req_text": "软件应每1秒解析一次飞机状态消息，包括： LABEL126（飞行架次数）； LABEL134（飞机注册号）； LABEL135（飞机注册号）； LABEL136（飞机注册号）； LABEL137（飞机阶段）； LABEL150（UTC时间）； LABEL260（UTC日期）；"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4510",
+      "bus": null,
+      "label": "150",
+      "name": "UTC时间",
+      "bit": null,
+      "direction": "RX",
+      "attribute_classes": [
+        "RefreshPeriod",
+        "Name",
+        "Label"
+      ],
+      "req_text": "软件应每1秒解析一次飞机状态消息，包括： LABEL126（飞行架次数）； LABEL134（飞机注册号）； LABEL135（飞机注册号）； LABEL136（飞机注册号）； LABEL137（飞机阶段）； LABEL150（UTC时间）； LABEL260（UTC日期）；"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4510",
+      "bus": null,
+      "label": "260",
+      "name": "UTC日期",
+      "bit": null,
+      "direction": "RX",
+      "attribute_classes": [
+        "RefreshPeriod",
+        "Name",
+        "Label"
+      ],
+      "req_text": "软件应每1秒解析一次飞机状态消息，包括： LABEL126（飞行架次数）； LABEL134（飞机注册号）； LABEL135（飞机注册号）； LABEL136（飞机注册号）； LABEL137（飞机阶段）； LABEL150（UTC时间）； LABEL260（UTC日期）；"
+    },
+    {
+      "req_id": "FSF21000101_HLR_3569",
+      "bus": "A429",
+      "label": "50",
+      "name": "A429通信测试信息L50",
+      "bit": null,
+      "direction": "TX",
+      "attribute_classes": [
+        "Name",
+        "Label"
+      ],
+      "req_text": "当接收到ATP测试指令为AB_A429ARX7_RECEIVE时，软件应按照A429通信协议通过ARINC429发送通道TX2将A429通信测试信息L50写入A429发送数据中。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_3573",
+      "bus": "A825",
+      "label": null,
+      "name": "通风RFAN速度指令",
+      "bit": null,
+      "direction": "TX",
+      "attribute_classes": [
+        "Name",
+        "Units"
+      ],
+      "req_text": "当接收到ATP测试指令为AB_A825_TRANSMIT时，软件应将通风RFAN速度指令设置为12700（RPM）并按照A825通信协议写入A825发送数据中。"
+    }
+  ]
+}

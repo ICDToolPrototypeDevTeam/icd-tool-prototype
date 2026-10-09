@@ -1,0 +1,189 @@
+publisher:
+  A664-RP:
+    layers:
+      LogicalPort:
+        - ActivityTimeout
+        - RefreshPeriod
+      A664Message:
+        - MessageSize
+        - TransmissionIntervalMinimum
+      DS:
+        - ByteOffsetWithinMsg
+        - DataSetSize
+      A429Word:
+        - Name
+      DP:
+        - Name
+        - BitOffsetWithinDS
+        - CodedSet
+        - DataFormatType
+        - FuncRngMax
+        - FuncRngMin
+        - Label
+        - LsbRes
+        - OneState
+        - ZeroState
+        - ParameterSize
+        - PublishedLatency
+        - TransmissionIntervalMinimum
+        - Units
+
+  A825-RP:
+    layers:
+      LogicalPort:
+        - ActivityTimeout
+        - RefreshPeriod
+        - SamplePeriod
+      CANMessage:
+        - MessageSize
+        - TransmissionIntervalMinimum
+      DP:
+        - Name
+        - BitOffsetWithinDS
+        - CodedSet
+        - DataFormatType
+        - FuncRngMax
+        - FuncRngMin
+        - Label
+        - LsbRes
+        - OneState
+        - ZeroState
+        - ParameterSize
+        - PublishedLatency
+        - TransmissionIntervalMinimum
+        - Units
+
+  A429-RP:
+    layers:
+      LogicalPort:
+        - ActivityTimeout
+        - RefreshPeriod
+      A429Channel:
+        - TransmissionIntervalMinimum
+      A429Word:
+        - Name
+      DP:
+        - Name
+        - BitOffsetWithinDS
+        - CodedSet
+        - DataFormatType
+        - FuncRngMax
+        - FuncRngMin
+        - Label
+        - LsbRes
+        - OneState
+        - ZeroState
+        - ParameterSize
+        - PublishedLatency
+        - TransmissionIntervalMinimum
+        - Units
+
+  Analog-RP:
+    layers:
+      LogicalPort:
+        - RefreshPeriod
+      DP:
+        - Name
+        - BitOffsetWithinDS
+        - DataFormatType
+        - FuncRngMax
+        - FuncRngMin
+        - ParameterSize
+        - PublishedLatency
+        - TransmissionIntervalMinimum
+        - Units
+
+  Discrete-RP:
+    layers:
+      LogicalPort:
+        - RefreshPeriod
+      AnalogDiscreteParameter:
+        - PublishedLatency
+      DP:
+        - BitOffsetWithinDS
+        - DataFormatType
+        - OneState
+        - ZeroState
+        - ParameterSize
+        - TransmissionIntervalMinimum
+
+subscriber:
+  A664-RP:
+    layers:
+      LogicalPort:
+        - ActivityTimeout
+        - MessageSize
+        - SamplePeriod
+      RP:
+        - Name
+        - BitOffsetWithinMsg
+        - DataFormatType
+        - Label
+        - LsbRes
+        - ParameterSize
+        - SDIExpected
+        - SSM
+
+  A825-RP:
+    layers:
+      LogicalPort:
+        - ActivityTimeout
+        - MessageSize
+        - SamplePeriod
+      RP:
+        - Name
+        - BitOffsetWithinMsg
+        - DataFormatType
+        - Label
+        - LsbRes
+        - ParameterSize
+        - SDIExpected
+        - SSM
+
+  A429-RP:
+    layers:
+      LogicalPort:
+        - ActivityTimeout
+        - MessageSize
+        - SamplePeriod
+      RP:
+        - Name
+        - BitOffsetWithinMsg
+        - DataFormatType
+        - Label
+        - LsbRes
+        - ParameterSize
+        - SDIExpected
+        - SSM
+
+  Analog-RP:
+    layers:
+      LogicalPort:
+        - ActivityTimeout
+        - MessageSize
+        - SamplePeriod
+      RP:
+        - Name
+        - BitOffsetWithinMsg
+        - DataFormatType
+        - Label
+        - LsbRes
+        - ParameterSize
+        - SDIExpected
+        - SSM
+
+  Discrete-RP:
+    layers:
+      LogicalPort:
+        - ActivityTimeout
+        - MessageSize
+        - SamplePeriod
+      RP:
+        - Name
+        - BitOffsetWithinMsg
+        - DataFormatType
+        - Label
+        - LsbRes
+        - ParameterSize
+        - SDIExpected
+        - SSM

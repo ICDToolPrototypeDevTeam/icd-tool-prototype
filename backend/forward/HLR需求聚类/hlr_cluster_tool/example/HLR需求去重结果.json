@@ -1,0 +1,411 @@
+{
+  "meta": {
+    "source_doc": "HLR_完整未故障注入.docx",
+    "req_count": 16,
+    "item_count": 29,
+    "dedup_count": 16,
+    "purpose": "需求级去重结果：每条需求唯一，合并其全部接口身份与属性类并集，供后续身份匹配阶段使用",
+    "cluster_by": "依据需求表格全部相关字段（需求中文/基本原理等）检测属性：明确提及某属性才归入该类，不从 ICD/EoICD 填充；一条需求可出现在多个类；涉及 0/1 编码定义归 OneState/ZeroState/CodedSet；多信号需求按信号 Name 拆分接口项"
+  },
+  "dedup_requirements": [
+    {
+      "req_id": "FSF21000101_HLR_199",
+      "bus": "Analog",
+      "interfaces": [
+        {
+          "label": null,
+          "name": "光耦传感器供电电压回采值",
+          "bit": null,
+          "direction": "RX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "Name"
+      ],
+      "req_text": "软件应从ADCINA3接收并解析光耦传感器供电电压回采值。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_267",
+      "bus": "A429",
+      "interfaces": [
+        {
+          "label": "L30",
+          "name": "通风BBSOV1全关微动开关反馈",
+          "bit": "15",
+          "direction": "RX"
+        },
+        {
+          "label": "L30",
+          "name": "通风BBSOV1全开微动开关反馈",
+          "bit": "16",
+          "direction": "RX"
+        }
+      ],
+      "interface_count": 2,
+      "attribute_classes": [
+        "Name",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState",
+        "BitOffsetWithinMsg",
+        "SDIExpected"
+      ],
+      "req_text": "当通道位置在“1A”或者“1B”时，软件应按照A429通信协议从A429接收数据中解析L30，逻辑如下： 当SDI=1且bit15=1时，通风BBSOV1全关微动开关反馈设为“True” 当SDI=1且bit15=0时，通风BBSOV1全关微动开关反馈设为“False” 当SDI=1且bit16=1时，通风BBSOV1全开微动开关反馈设为“True” 当SDI=1且bit16=0时，通风BBSOV1全开微动开关反馈设为“False”"
+    },
+    {
+      "req_id": "FSF21000101_HLR_278",
+      "bus": "A429",
+      "interfaces": [
+        {
+          "label": "L35",
+          "name": "AFTEFAN1不可运行/过流/过热/低转速反馈",
+          "bit": "15-18",
+          "direction": "RX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "Name",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState",
+        "BitOffsetWithinMsg",
+        "SDIExpected"
+      ],
+      "req_text": "当通道位置在“1A”或者“1B”时，软件应按照A429通信协议从A429接收数据中解析L35，逻辑如下： 当SDI=1且bit15=1时，通风AFTEFAN1不可运行反馈设为“有效” 当SDI=1且bit15=0时，通风AFTEFAN1不可运行反馈设为“无效” 当SDI=1且bit16=1时，通风AFTEFAN1过流反馈设为“有效” 当SDI=1且bit16=0时，通风AFTEFAN1过流反馈设为“无效” 当SDI=1且bit17=1时，通风AFTEFAN1过热反馈设为“有效” 当SDI=1且bit17=0时，通风AFTEFAN1过热反馈设为“无效” 当SDI=1且bit18=1时，通风AFTEFAN1低转速反馈设为“有效” 当SDI=1且bit18=0时，通风AFTEFAN1低转速反馈设为“无效”"
+    },
+    {
+      "req_id": "FSF21000101_HLR_280",
+      "bus": "A429",
+      "interfaces": [
+        {
+          "label": "L36",
+          "name": "AFTEFAN1速度信号",
+          "bit": "13-28",
+          "direction": "RX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "Name",
+        "Label",
+        "BitOffsetWithinMsg",
+        "SDIExpected"
+      ],
+      "req_text": "软件应按照A429通信协议从A429接收数据中解析L36，当SDI=1时，bit13至bit28为AFTEFAN1速度信号。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_378",
+      "bus": "A429",
+      "interfaces": [
+        {
+          "label": "L203",
+          "name": "气压高度",
+          "bit": "10-28",
+          "direction": "RX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "Name",
+        "Label",
+        "BitOffsetWithinMsg"
+      ],
+      "req_text": "软件应按照A429通信协议从A429接收数据中解析L203，其中bit10至bit28为气压高度。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4276",
+      "bus": "A429",
+      "interfaces": [
+        {
+          "label": "L126",
+          "name": "OHMS全局终止标志",
+          "bit": "10",
+          "direction": "RX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "Name",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState",
+        "BitOffsetWithinMsg"
+      ],
+      "req_text": "软件应按照A429通信协议从A429接收数据中解析L126的bit10，设置OHMS全局终止标志，逻辑如下： 当bit10=1时，OHMS全局终止标志设为“有效”； 当bit10=0时，OHMS全局终止标志设为“无效”。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_473",
+      "bus": "A429",
+      "interfaces": [
+        {
+          "label": "L126",
+          "name": "飞机架次数",
+          "bit": "21-28",
+          "direction": "RX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "Name",
+        "FuncRngMax",
+        "FuncRngMin",
+        "Label",
+        "BitOffsetWithinMsg"
+      ],
+      "req_text": "软件应按照A429通信协议从A429接收数据中解析L126，将bit21至bit28设为飞机架次数。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_478",
+      "bus": "A429",
+      "interfaces": [
+        {
+          "label": "L121",
+          "name": "气源APU引起温度",
+          "bit": "17-28",
+          "direction": "RX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "Name",
+        "FuncRngMax",
+        "FuncRngMin",
+        "Label",
+        "Units",
+        "BitOffsetWithinMsg"
+      ],
+      "req_text": "软件应按照A429通信协议从A429接收数据中解析L121，并设置气源APU引起温度，bit17至bit28为有效数据位。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_544",
+      "bus": null,
+      "interfaces": [
+        {
+          "label": null,
+          "name": "SDI",
+          "bit": "8-9",
+          "direction": "TX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "Name",
+        "BitOffsetWithinDS",
+        "CodedSet",
+        "OneState",
+        "ZeroState",
+        "SDIExpected"
+      ],
+      "req_text": "软件应根据通道位置在LABEL的SDI位写入固定数据，逻辑如下： 通道位置为“1A”时，bit8=0，bit9=0； 通道位置为“1B”时，bit8=1，bit9=0； 通道位置为“2A”时，bit8=0，bit9=1； 通道位置为“2B”时，bit8=1，bit9=1；"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4210",
+      "bus": "A429",
+      "interfaces": [
+        {
+          "label": "L11",
+          "name": null,
+          "bit": null,
+          "direction": "TX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "RefreshPeriod",
+        "TransmissionIntervalMinimum",
+        "Label"
+      ],
+      "req_text": "软件应按照A429通信协议以1000ms为周期发送A429发送数据中的L11。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_547",
+      "bus": "A429",
+      "interfaces": [
+        {
+          "label": "L11",
+          "name": "压调OFVTRV失效在关位故障有效标志",
+          "bit": "22",
+          "direction": "TX"
+        },
+        {
+          "label": "L11",
+          "name": "压调OFVTRV失效在开位故障有效标志",
+          "bit": "23",
+          "direction": "TX"
+        },
+        {
+          "label": "L11",
+          "name": "RFAN可用标志",
+          "bit": "24",
+          "direction": "TX"
+        },
+        {
+          "label": "L11",
+          "name": "通风FWDEFAN可用标志",
+          "bit": "25",
+          "direction": "TX"
+        },
+        {
+          "label": "L11",
+          "name": "通风FWDBFAN可用标志",
+          "bit": "26",
+          "direction": "TX"
+        },
+        {
+          "label": "L11",
+          "name": "通风AFTEFAN可用标志",
+          "bit": "27",
+          "direction": "TX"
+        },
+        {
+          "label": "L11",
+          "name": "通风AFTBFAN可用标志",
+          "bit": "28",
+          "direction": "TX"
+        }
+      ],
+      "interface_count": 7,
+      "attribute_classes": [
+        "Name",
+        "BitOffsetWithinDS",
+        "CodedSet",
+        "Label",
+        "OneState",
+        "ZeroState"
+      ],
+      "req_text": "软件应按照A429通信协议向429发送数据中L11写入压调OFVTRV失效在关位故障有效标志、压调OFVTRV失效在开位故障有效标志通风FWDBFAN可用标志、通风FWDEFAN可用标志，具体逻辑如下： 当压调OFVTRV失效在关位故障有效标志为“有效”时，bit22=1； 当压调OFVTRV失效在关位故障有效标志为“无效”时，bit22=0； 当压调OFVTRV失效在开位故障有效标志为“有效”时，bit23=1； 当压调OFVTRV失效在开位故障有效标志为“无效”时，bit23=0； 当RFAN可用标志为“有效”时，bit24=0； 当RFAN可用标志为“无效”时，bit24=1； 当通风FWDEFAN可用标志为“有效”时，bit25=0； 当通风FWDEFAN可用标志为“无效”时，bit25=1； 当通风FWDBFAN可用标志为“有效”时，bit26=0； 当通风FWDBFAN可用标志为“无效”时，bit26=1； 当通风AFTEFAN可用标志为“有效”时，bit27=0； 当通风AFTEFAN可用标志为“无效”时，bit27=1； 当通风AFTBFAN可用标志为“有效”时，bit28=0； 当通风AFTBFAN可用标志为“无效”时，bit28=1。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4373",
+      "bus": "A429",
+      "interfaces": [
+        {
+          "label": "L214",
+          "name": "驾驶舱温度COCKPIT_TEMP_SELECTION信号",
+          "bit": "16-28",
+          "direction": "TX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "Name",
+        "BitOffsetWithinDS",
+        "Label"
+      ],
+      "req_text": "当通道位置为“1B”时，软件应按照A429通信协议向429发送数据中的L214的bit16至bit28写入驾驶舱温度COCKPIT_TEMP_SELECTION信号。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_1237",
+      "bus": "A825",
+      "interfaces": [
+        {
+          "label": null,
+          "name": "RFAN工作模式",
+          "bit": null,
+          "direction": "RX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "Name"
+      ],
+      "req_text": "软件应按照协议，从风扇CAN接口的接口数据中解析得到RFAN的工作模式。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_4510",
+      "bus": null,
+      "interfaces": [
+        {
+          "label": "L126",
+          "name": "飞行架次数",
+          "bit": null,
+          "direction": "RX"
+        },
+        {
+          "label": "L134",
+          "name": "飞机注册号",
+          "bit": null,
+          "direction": "RX"
+        },
+        {
+          "label": "L135",
+          "name": "飞机注册号",
+          "bit": null,
+          "direction": "RX"
+        },
+        {
+          "label": "L136",
+          "name": "飞机注册号",
+          "bit": null,
+          "direction": "RX"
+        },
+        {
+          "label": "L137",
+          "name": "飞机阶段",
+          "bit": null,
+          "direction": "RX"
+        },
+        {
+          "label": "L150",
+          "name": "UTC时间",
+          "bit": null,
+          "direction": "RX"
+        },
+        {
+          "label": "L260",
+          "name": "UTC日期",
+          "bit": null,
+          "direction": "RX"
+        }
+      ],
+      "interface_count": 7,
+      "attribute_classes": [
+        "RefreshPeriod",
+        "Name",
+        "Label"
+      ],
+      "req_text": "软件应每1秒解析一次飞机状态消息，包括： LABEL126（飞行架次数）； LABEL134（飞机注册号）； LABEL135（飞机注册号）； LABEL136（飞机注册号）； LABEL137（飞机阶段）； LABEL150（UTC时间）； LABEL260（UTC日期）；"
+    },
+    {
+      "req_id": "FSF21000101_HLR_3569",
+      "bus": "A429",
+      "interfaces": [
+        {
+          "label": "L50",
+          "name": "A429通信测试信息L50",
+          "bit": null,
+          "direction": "TX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "Name",
+        "Label"
+      ],
+      "req_text": "当接收到ATP测试指令为AB_A429ARX7_RECEIVE时，软件应按照A429通信协议通过ARINC429发送通道TX2将A429通信测试信息L50写入A429发送数据中。"
+    },
+    {
+      "req_id": "FSF21000101_HLR_3573",
+      "bus": "A825",
+      "interfaces": [
+        {
+          "label": null,
+          "name": "通风RFAN速度指令",
+          "bit": null,
+          "direction": "TX"
+        }
+      ],
+      "interface_count": 1,
+      "attribute_classes": [
+        "Name",
+        "Units"
+      ],
+      "req_text": "当接收到ATP测试指令为AB_A825_TRANSMIT时，软件应将通风RFAN速度指令设置为12700（RPM）并按照A825通信协议写入A825发送数据中。"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+# EoICD 定位过滤配置（所有机型共用）
+# ====================================
+# 本文件为 AMS / FGMC / HSCU / EPS 四个项目的 LRU 白名单并集
+# （EPS 此前 skip_locate=True 不跑定位，现已改为共用本文件、关闭 skip_locate）。
+# 各项目在 common/projects.py 的 PROJECTS 里统一引用本文件，
+# 不再为机型单独维护 locate 配置。
+#
+# 规则说明：
+#   - 过滤语义为「白名单保留」：某行 Software.Name 命中下方任一允许值才保留；命中不到整行丢弃。
+#   - 同一 sheet 下的多个条件（字段）之间是 OR 关系：任意一个字段匹配到允许值即保留该行。
+#   - 同一字段下的多个允许值之间也是 OR 关系：命中任意一个即匹配。
+#   - 若某 sheet 的所有行 Software.Name 均为空（即该机型此 sheet 无对应 LRU 行，通常本身就是
+#     空 Sheet），则无法命中白名单、整 sheet 被清空 —— 符合预期，无需特殊处理。
+#   - 若后续增加多字段联合过滤，请确认是否需要改为 AND 并同步修改 locate_eoicd.py。
+
+filters:
+  publisher:
+    A664-RP:
+      Software.Name: ["HF_AMSC1", "HF_AMSC2", "HF_HSCU", "HF_FGMC", "HF_EMPC_EPS", "HF_RPDU_UP_1A", "HF_RPDU_UP_1B", "HF_RPDU_UP_2A", "HF_RPDU_UP_2B"]
+    A825-RP:
+      Software.Name: ["HF_AMSC1", "HF_AMSC2", "HF_HSCU", "HF_FGMC", "HF_EMPC_EPS", "HF_RPDU_UP_1A", "HF_RPDU_UP_1B", "HF_RPDU_UP_2A", "HF_RPDU_UP_2B"]
+    A429-RP:
+      Software.Name: ["HF_AMSC1", "HF_AMSC2", "HF_HSCU", "HF_FGMC", "HF_EMPC_EPS", "HF_RPDU_UP_1A", "HF_RPDU_UP_1B", "HF_RPDU_UP_2A", "HF_RPDU_UP_2B"]
+    Analog-RP:
+      Software.Name: ["HF_AMSC1", "HF_AMSC2", "HF_HSCU", "HF_FGMC", "HF_EMPC_EPS", "HF_RPDU_UP_1A", "HF_RPDU_UP_1B", "HF_RPDU_UP_2A", "HF_RPDU_UP_2B"]
+    Discrete-RP:
+      Software.Name: ["HF_AMSC1", "HF_AMSC2", "HF_HSCU", "HF_FGMC", "HF_EMPC_EPS", "HF_RPDU_UP_1A", "HF_RPDU_UP_1B", "HF_RPDU_UP_2A", "HF_RPDU_UP_2B"]
+  subscriber:
+    A664-RP:
+      Software.Name: ["HF_AMSC1", "HF_AMSC2", "HF_HSCU", "HF_FGMC", "HF_EMPC_EPS", "HF_RPDU_UP_1A", "HF_RPDU_UP_1B", "HF_RPDU_UP_2A", "HF_RPDU_UP_2B"]
+    A825-RP:
+      Software.Name: ["HF_AMSC1", "HF_AMSC2", "HF_HSCU", "HF_FGMC", "HF_EMPC_EPS", "HF_RPDU_UP_1A", "HF_RPDU_UP_1B", "HF_RPDU_UP_2A", "HF_RPDU_UP_2B"]
+    A429-RP:
+      Software.Name: ["HF_AMSC1", "HF_AMSC2", "HF_HSCU", "HF_FGMC", "HF_EMPC_EPS", "HF_RPDU_UP_1A", "HF_RPDU_UP_1B", "HF_RPDU_UP_2A", "HF_RPDU_UP_2B"]
+    Analog-RP:
+      Software.Name: ["HF_AMSC1", "HF_AMSC2", "HF_HSCU", "HF_FGMC", "HF_EMPC_EPS", "HF_RPDU_UP_1A", "HF_RPDU_UP_1B", "HF_RPDU_UP_2A", "HF_RPDU_UP_2B"]
+    Discrete-RP:
+      Software.Name: ["HF_AMSC1", "HF_AMSC2", "HF_HSCU", "HF_FGMC", "HF_EMPC_EPS", "HF_RPDU_UP_1A", "HF_RPDU_UP_1B", "HF_RPDU_UP_2A", "HF_RPDU_UP_2B"]

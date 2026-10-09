@@ -1,0 +1,62 @@
+{
+  "_说明": "正向检查 · 多 judge 嫁接配置。本文件只保存 env 变量『名』，真实密钥在运行环境解析，禁止把明文 key 写进本文件。路径支持相对路径（相对本文件所在目录）或绝对路径。",
+  "_judge两种模式": "多 judge 支持两种配置模式，二者用途不同、可自由混用：\n1) 异模型交叉验证 —— 各 judge 用不同 model/base_url，检验不同推理路径能否收敛到同一结论；\n2) 同模型稳定性重复 —— 用同一 model/base_url 刻意跑 N 份，检验该模型对同一输入自身判定是否稳定（结论摇摆 = 模型对该信号没有把握，正是人工复核该介入的信号）。\n「同模型重复」不是配置错误：它测得的是同一个模型的抖动，不提供第二个独立视角。注意其有效性受采样随机性约束——当前 judge 没有独立 temperature 字段，阶段2（HLR 聚类）为 0.0 确定性解码，同模型重复在聚类层必然得到完全相同的结果（相当于 3 份同样的开销买 1 份信息）；只有阶段3/4 的 0.1 存在极轻微采样差异。要让稳定性重复真正可观测，需给 judge 增加独立 temperature 并透传到阶段2/3/4。",
+  "project": "ams",
+  "input": {
+    "eoicd_pub": "input/ams/AMS_EoICD_Publisher_Table.xlsx",
+    "eoicd_sub": "input/ams/AMS_EoICD_Subscriber_Table.xlsx",
+    "hlr": "input/ams/空气管理系统控制器控制通道控制软件高层需求规范.docx",
+    "trace_dir": ""
+  },
+  "device": "",
+  "use_trace": false,
+  "aggregation": {
+    "need_review_on_split": true,
+    "_说明": "路由判定规则（对齐反向 _needs_ai_for 的可枚举规则表，由聚合层 NEED_REVIEW_RULES 定义）。默认两条：no_valid_source（无有效结论）、low_star_under_multijudge（多 judge 配置下星级≤2）。命中任一规则的信号即送 Step5/Step5.5 第二裁决；命中情况写入产物 need_review_rules/need_review_details，报告「AI 复核覆盖」小节会列出启用规则与命中数。可在此逐条关闭：\"need_review_rules\": {\"low_star_under_multijudge\": false}。",
+    "need_review_rules": {}
+  },
+  "judges": [
+    {
+      "_说明": "模型/端点来自 .env 的 ${JUDGE_DS_MODEL}/${JUDGE_DS_BASE_URL}（per-judge 独立，换模型只改 .env 对应两行，无需动本文件）。此处仅作 judge 标识与 key 映射。",
+      "name": "judge_ds",
+      "model": "${JUDGE_DS_MODEL}",
+      "base_url": "${JUDGE_DS_BASE_URL}",
+      "api_key_env": "JUDGE_DS_KEY",
+      "parallel_api_keys": ["JUDGE_DS_KEY_A", "JUDGE_DS_KEY_B"]
+    },
+    {
+      "_说明": "模型/端点来自 .env 的 ${JUDGE_QWEN_MODEL}/${JUDGE_QWEN_BASE_URL}（per-judge 独立，与 judge_ds 不同模型/厂商，构成异模型交叉验证）。换模型只改 .env 对应两行，无需动本文件。",
+      "name": "judge_qwen",
+      "model": "${JUDGE_QWEN_MODEL}",
+      "base_url": "${JUDGE_QWEN_BASE_URL}",
+      "api_key_env": "JUDGE_QWEN_KEY"
+    },
+    {
+      "_说明": "第三个异模型交叉验证（示例 OpenAI gpt-4o）。模型/端点来自 .env 的 ${JUDGE_GPT_MODEL}/${JUDGE_GPT_BASE_URL}，与 ds/qwen 均不同厂商，构成三方独立视角。换模型只改 .env 对应两行，无需动本文件。",
+      "name": "judge_gpt",
+      "model": "${JUDGE_GPT_MODEL}",
+      "base_url": "${JUDGE_GPT_BASE_URL}",
+      "api_key_env": "JUDGE_GPT_KEY"
+    },
+    {
+      "_说明": "模式2 同模型稳定性重复：刻意与 judge_ds 使用同一 model/base_url/key（均来自 ${JUDGE_DS_MODEL}/${JUDGE_DS_BASE_URL}/JUDGE_DS_KEY），用途是检验该模型对同一输入的判定稳定性，而不是提供第三个独立视角。三者结论若摇摆不定，说明该模型自身没把握，应优先送人工复核。当前阶段2 为 0.0 确定性解码，稳定性差异只在阶段3/4（0.1）可见。",
+      "name": "judge_ds_stability",
+      "model": "${JUDGE_DS_MODEL}",
+      "base_url": "${JUDGE_DS_BASE_URL}",
+      "api_key_env": "JUDGE_DS_KEY"
+    }
+  ],
+  "arbitrator": {
+    "_说明": "Step5/5.5 仲裁用的模型（model/base_url/api_key_env）。注意：仲裁不再是「配了才跑」的可选增强——need_review=True 的信号会强制进入 Step5/5.5，本段只决定用哪个模型跑。api_key_env 对应环境变量未设置时，回落到 judge[0] 的 model/base_url（并如实标注仲裁视角与 judge 同源），该批信号仍记为 skipped 而非静默跳过；本段置 \"enabled\": false 同样是降级，但会明确记为 skipped。",
+    "_同源说明": "仲裁视角与某个 judge 的 (model, base_url) 相同即视为同源。反向的复核对象是确定性层，不存在自我复核；正向仲裁面对的是 judge 的结论，同模型时这道第二裁决只是同一次判定的复述。默认（不设此项）允许同源，但会在产物与报告中显式警示独立性受限；置 false 则直接拒绝执行同源仲裁，相关信号记为 skipped，原因是同源而非「模型不可用」。建议仲裁用与 judge 不同的模型。",
+    "allow_same_as_judge": true,
+    "model": "${JUDGE_ARB_MODEL}",
+    "base_url": "${JUDGE_ARB_BASE_URL}",
+    "api_key_env": "JUDGE_ARBITRATOR_KEY"
+  },
+  "re_review": {
+    "_说明": "Step5.5 peer-aware 复查（对 ≤2★ / 需复核信号匿名化重判）。随复核路由强制运行，本节控制轮数。独立视角不足 2 个的信号（同模型重复）会跳过复查并计入产物 review_stats.review_gaps，不会伪装成已复查。",
+    "enabled": true,
+    "max_rounds": 1
+  }
+}

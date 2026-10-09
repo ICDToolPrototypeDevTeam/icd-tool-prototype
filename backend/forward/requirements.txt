@@ -1,0 +1,21 @@
+# EoICD → HLR 正向检查集成项目 统一依赖清单
+#
+# 安装（推荐使用独立虚拟环境）：
+#   python -m venv .venv
+#   .venv\Scripts\pip install -r requirements.txt
+#
+# 说明：集成脚本 run_integration.py 默认使用隔离环境
+#   C:\Users\zhaokl\.workbuddy\binaries\python\envs\eoicd_integration
+# 若该环境不存在则回退到当前 python。
+
+# --- 配置解析：EoICD 定位/裁剪/追溯配置（*.yaml）与聚类配置 ---
+PyYAML>=5.1
+
+# --- Excel 读写：EoICD 表定位与裁剪、汇总模块 xlsx 输出 ---
+openpyxl>=3.0
+
+# --- Word 读写：HLR 需求规范解析、汇总模块 docx 输出 ---
+python-docx>=0.8.11
+
+# --- AI 辅助匹配（身份/属性匹配开启 AI 时使用；--skip-ai 可不装）---
+requests>=2.25

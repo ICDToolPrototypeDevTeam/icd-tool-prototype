@@ -25,17 +25,18 @@ export default function CompletenessPage() {
   const [hlrWordFile, setHlrWordFile] = useState<FileItem | null>(null)
   const [publisherFile, setPublisherFile] = useState<FileItem | null>(null)
   const [subscriberFile, setSubscriberFile] = useState<FileItem | null>(null)
-  const [deviceIcdTraceFile, setDeviceIcdTraceFile] = useState<FileItem | null>(null)
-  const [systemDeviceTraceFile, setSystemDeviceTraceFile] = useState<FileItem | null>(null)
+  // 追溯表：单槽多文件（0-N）；几张、各是什么表由后端/正向树识别（AMS 2 张 / EPS 3 张）
+  const [traceFiles, setTraceFiles] = useState<FileItem[]>([])
   const [analysisMode, setAnalysisMode] = useState<ForwardAnalysisMode>('full')
   const [selectedPreviewFile, setSelectedPreviewFile] = useState<FileItem | null>(null)
+  // 系统类型（正向项目）：'' = 自动识别（后端按上传文件名判定，见 app/forward/projects.py）
+  const [systemType, setSystemType] = useState<string>('')
 
   function handleModeChange(mode: ForwardAnalysisMode) {
     setAnalysisMode(mode)
-    // 切换到全量分析时清空追溯表（避免遗留单张追溯表导致后端 422）
+    // 切换到全量分析时清空追溯表（全量模式不提交追溯表）
     if (mode === 'full') {
-      setDeviceIcdTraceFile(null)
-      setSystemDeviceTraceFile(null)
+      setTraceFiles([])
     }
   }
 
@@ -62,11 +63,9 @@ export default function CompletenessPage() {
       alert('请至少上传 Publisher Excel 或 Subscriber Excel')
       return
     }
-    // 追溯表必须两张齐全：只上传一张禁止提交（后端按是否上传自动判定模式）
-    const hasTrace1 = !!deviceIcdTraceFile
-    const hasTrace2 = !!systemDeviceTraceFile
-    if (hasTrace1 !== hasTrace2) {
-      alert('追溯范围分析需同时上传两张追溯表（设备→ICD 与 设备→高层需求）')
+    // 追溯模式至少一张追溯表；张数与类型不做限制（识别交给正向树，EPS 需 3 张）
+    if (analysisMode === 'trace' && traceFiles.length === 0) {
+      alert('追溯范围分析至少上传一张追溯表')
       return
     }
 
@@ -74,12 +73,16 @@ export default function CompletenessPage() {
     if (hlrWordFile.file) formData.append('hlr_word_file', hlrWordFile.file)
     if (publisherFile?.file) formData.append('eoicd_publisher_file', publisherFile.file)
     if (subscriberFile?.file) formData.append('eoicd_subscriber_file', subscriberFile.file)
-    if (deviceIcdTraceFile?.file) formData.append('device_icd_trace_file', deviceIcdTraceFile.file)
-    if (systemDeviceTraceFile?.file) formData.append('system_device_trace_file', systemDeviceTraceFile.file)
+    // 单字段多文件：同名字段重复提交，后端 trace_files: list[UploadFile] 接收
+    traceFiles.forEach((f) => {
+      if (f.file) formData.append('trace_files', f.file)
+    })
     // 注意：不向接口提交 analysis_mode，后端按追溯表上传情况自动判定
     // 显式传值（而不是「不传即沿用容器配置」）：容器 .env 可能已开 mock，
     // 只有显式 false 才能让顶栏开关双向可用。
     formData.append('use_mock_llm', mockMode ? 'true' : 'false')
+    // 系统类型（空串 = 自动识别）；后端 422 时提示用户显式选择
+    if (systemType) formData.append('controller_profile', systemType)
 
     job.start(
       () => analyzeCompletenessV4(formData),
@@ -92,10 +95,10 @@ export default function CompletenessPage() {
     setHlrWordFile(null)
     setPublisherFile(null)
     setSubscriberFile(null)
-    setDeviceIcdTraceFile(null)
-    setSystemDeviceTraceFile(null)
+    setTraceFiles([])
     setAnalysisMode('full')
     setSelectedPreviewFile(null)
+    setSystemType('')
   }
 
   /** 已终止的任务：就地续跑（后端按参数快照重启并复位取消标志），再挂回轮询 */
@@ -143,18 +146,40 @@ export default function CompletenessPage() {
             hlrWordFile={hlrWordFile}
             eoicdPublisherFile={publisherFile}
             eoicdSubscriberFile={subscriberFile}
-            deviceIcdTraceFile={deviceIcdTraceFile}
-            systemDeviceTraceFile={systemDeviceTraceFile}
+            traceFiles={traceFiles}
             analysisMode={analysisMode}
             selectedPreviewFile={selectedPreviewFile}
             onHlrWordChange={(f) => { setHlrWordFile(f); if (f) setSelectedPreviewFile(f) }}
             onEoicdPublisherChange={(f) => { setPublisherFile(f); if (f) setSelectedPreviewFile(f) }}
             onEoicdSubscriberChange={(f) => { setSubscriberFile(f); if (f) setSelectedPreviewFile(f) }}
-            onDeviceIcdTraceChange={(f) => { setDeviceIcdTraceFile(f); if (f) setSelectedPreviewFile(f) }}
-            onSystemDeviceTraceChange={(f) => { setSystemDeviceTraceFile(f); if (f) setSelectedPreviewFile(f) }}
+            onTraceFilesChange={setTraceFiles}
             onAnalysisModeChange={handleModeChange}
             onPreviewSelect={setSelectedPreviewFile}
           />
+          {/* 系统类型 selector — forward pipeline only.
+              Values come from backend/forward/common/projects.py (ams/eps/fgmc/hscu);
+              empty = auto-detect from uploaded file names. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 16, marginBottom: 16 }}>
+            <span style={{ fontSize: 14, color: '#555' }}>系统类型：</span>
+            <select
+              value={systemType}
+              onChange={(e) => setSystemType(e.target.value)}
+              style={{
+                padding: '6px 12px',
+                borderRadius: 6,
+                border: '1px solid #ddd',
+                fontSize: 14,
+                minWidth: 160,
+              }}
+            >
+              <option value="">自动识别</option>
+              <option value="ams">空气管理系统 (AMS)</option>
+              <option value="eps">配电装置 (EPS / ATA24EPS)</option>
+              <option value="fgmc">燃油系统 (FGMC)</option>
+              <option value="hscu">液压系统 (HSCU)</option>
+            </select>
+            <span style={{ fontSize: 12, color: '#888' }}>（默认自动识别；无法识别时请显式选择）</span>
+          </div>
           <div className="action-bar">
             <button className="btn btn--secondary btn--large" onClick={handleReset}>
               清空全部

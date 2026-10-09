@@ -25,6 +25,11 @@ FastAPI 后端（/api/v4）
 V4 反向管线 pipeline（6 步）
     ↓
 解析 / HLR 标注 / 反向匹配 / 多智能体裁判 / 共识复核 / 报告生成
+
+V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线，见 §7.1）
+    ↓
+阶段1 共享 → N judge 并行 → 聚合·仲裁·复查 → Word+Excel 报告
+（正向代码树 backend/forward/ 按任务复制到任务目录内运行）
 ```
 
 当前部署方式优先采用 Docker Compose，在本地同时启动前端服务和后端服务。
@@ -80,19 +85,21 @@ V4 反向管线 pipeline（6 步）
 | `job_log.py`   | 进程级任务日志缓冲、stdout/stderr Tee、线程归属与 job.log 落盘；不依赖任何 `app.*` 模块 |
 | `job_scheduler.py` | 进程内任务队列：固定 `MAX_CONCURRENT_JOBS`（默认 2）个常驻工作线程领取任务（新任务 FIFO，续跑任务插队首，不抢占执行中任务）；出队时做票据比对（同一任务的旧条目丢弃）与跳过裁决（排队期间被终止 / 放弃的任务不执行，原因写入该任务日志） |
 | `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（经 `job_scheduler` 入队 + 7 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` |
-| `v4/pipeline.py` | V4 管线编排：反向 `run_reverse_pipeline`（6 步）+ 正向 `run_forward_pipeline`（8 步） |
+| `v4/pipeline.py` | V4 反向管线编排（`run_reverse_pipeline`，6 步）；正向管线不在 `v4/` 内（见 `forward/` 与 `app/forward/` 两行） |
 | `v4/config.py` | V4 env 加载（DEEPSEEK_* / USE_MOCK_LLM / JUDGE_PROVIDERS）+ 业务常量 |
 | `v4/errors.py` | 管线异常 → 面向用户的错误分类与建议；复用 `degradation.fallback.classify_exception` |
 | `v4/models.py` | V4 Pydantic 模型（EoICDRequirement / HLRLabel / ReverseCase / ConsensusResult 等） |
 | `v4/parsers/`  | EoICD PubSub Excel + HLR Word 解析 |
-| `v4/matching/` | HLR 标注、条目过滤、信号画像、Block 聚合、HLR 分类、反向匹配、追溯预筛选；正向 `forward_block_builder` / `forward_matcher` / `hlr_identity_index` |
-| `v4/comparison/` | 多模型裁判、Review Agent 共识、一星复查、报告生成；正向 AI 三态复核 + 覆盖合并（`coverage_reviewer`） |
+| `v4/matching/` | HLR 标注、条目过滤、信号画像、Block 聚合、HLR 分类、反向匹配、追溯预筛选 |
+| `v4/comparison/` | 多模型裁判、Review Agent 共识、一星复查、报告生成 |
 | `v4/degradation/` | Provider 健康跟踪、Case 超时、熔断、星级降级 |
-| `v4/doc_generators/` | xlsx + 单模型 docx + 共识 docx 生成；正向 `forward_excel_generator` / `forward_word_generator` |
+| `v4/doc_generators/` | xlsx + 单模型 docx + 共识 docx 生成（反向） |
 | `v4/llm/`       | LLM 抽象层：`factory.py`（env 驱动 + mock fallback）、deepseek/minimax/qwen client、`mock_llm.py` |
-| `v4/prompts/`   | Prompt Markdown 文本资产（reverse_judge / consensus / re_review / forward_review） |
-| `v4/traceability/` | 追溯表预筛选（独立零耦合模块）；正向 `forward_scope`（trace/full 范围构建） |
+| `v4/prompts/`   | Prompt Markdown 文本资产（reverse_judge / consensus / re_review） |
+| `v4/traceability/` | 追溯表预筛选（独立零耦合模块） |
 | `v4/refine/` | RPDU 专属：matched ICD Block 无关过滤 + 精确/同义词补采（Issue RPDU 适配续）；Step 3 后可选阶段 |
+| `forward/`     | 正向（完整性）多 judge 一致性管线**原样代码树**（唯一事实源；每任务整树复制到 `<job_dir>/forward/` 运行） |
+| `app/forward/` | 正向适配层：`root` / `projects` / `config_builder` / `mock_server` / `execution` / `artifacts` / `adapter`；编排与翻译、零业务算法、**不 import `app.v4.*`** |
 | `output/`      | 运行时生成的输出文件存放目录                |
 
 ## 6. 前端模块划分
@@ -151,56 +158,53 @@ Step 6 报告生成
 后续标注、匹配、裁判和共识复核流程应复用解析后的结构化数据。
 ```
 
-### 7.1 正向完整性分析流程（EoICD → HLR）
+### 7.1 正向完整性分析流程（EoICD → HLR，多 judge 一致性管线）
 
-正向管线由 `v4/pipeline.py` 编排（`run_forward_pipeline`，与 `run_reverse_pipeline` 同文件），按 8 步组织，回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析（正确性比对）互补。复用解析后的统一输入（不重新解析）；候选召回以确定性索引为主，`label_hlrs()` 标注仅作为召回增强（可降级）。
+正向管线回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析（正确性比对）互补。Issue #119 起，正向改为**原样集成**的「正向待集成」多 judge 一致性管线：业务实现全部在 `backend/forward/` 原样代码树内（`multi_judge_runner.py` 编排），工程侧由适配层 `backend/app/forward/` 驱动，与反向管线（`v4/pipeline.py`）严格分离。
 
 ```text
-上传文件
+上传文件（HLR Word + EoICD PubSub Excel[+ 追溯表 0-N 张，单槽多文件，未传=全量 / 传任一张=追溯]）
     ↓
-C1 解析输入（复用 v4/parsers/*）
-   HLR Word + EoICD PubSub Excel → hlr_requirements.json + eoicd_requirements.json
+Step 1/4 阶段1 共享（EoICD 数据处理，只跑一次）
+   共享产物复制给各 judge（「输入只解析一次」在新正向中的落点）
     ↓
-C2 追溯范围
-   full（全量 DP/RP 业务对象）| trace（Table1 设备→ICD × Table2 设备→HLR，按 ERD 关联）
-   模块: v4/traceability/forward_scope.py
+Step 2/4 各 judge 并行独立判定（阶段2/3/4；每 judge 一个子进程）
+   真实模式 deepseek / minimax / qwen；MOCK 模式三个 mock judge
     ↓
-C3 业务对象块聚合
-   leaf DP/RP 条目按稳定 business_object_id（Label/信号族/端口-消息）聚合 → ForwardICDBlock
-   模块: v4/matching/forward_block_builder.py
+Step 3/4 聚合 + Step5 仲裁 + Step5.5 peer-aware 复查
+   仲裁固定 deepseek（配置 arbitrator 段）
     ↓
-C4 HLR 身份索引（确定性 + label_hlrs 召回增强）
-   hlr_classifier 正则提取 Label/信号 token/方向/分类 → 倒排 token_index；label_hlrs + enrich_all_labels 合并 AI 标注 → llm_token_index（仅召回增强，可降级，失败不影响任务）
-   模块: v4/matching/hlr_identity_index.py
-    ↓
-C5 候选召回
-   trace 模式用追溯候选；full 模式用倒排索引召回（确定性 token 优先，llm_label 仅增强），按 token 重叠数排序
-   模块: v4/matching/forward_matcher.py（candidate recall）
-    ↓
-C6 确定性覆盖判定
-   规则等级（exact_label/exact_fullname/exact_signal/parent_referenced/generic_signal/weak_signal/trace_only/no_evidence）+ 通用词约束 + llm_label 不参与 covered
-   模块: v4/matching/forward_matcher.py（deterministic judge）
-    ↓
-C7 AI 三态复核（单模型，无三模型裁判/共识）
-   needs_ai 的 possible 级对象 → covered/not_same_object/unconfirmed
-   模块: v4/comparison/coverage_reviewer.py + v4/prompts/forward_review.md
-    ↓
-C8 合并 + 报告
-   覆盖分布 + 漏写清单 + 待确认清单 → forward_coverage.json / EoICD至HLR正向完整性分析明细.xlsx / EoICD至HLR正向完整性分析报告.docx
-   模块: v4/comparison/coverage_reviewer.py（consolidate）+ v4/doc_generators/{forward_excel_generator,forward_word_generator}.py
+Step 4/4 报告生成
+   Word 报告 + Excel 明细；按固定交付名复制到 <job_dir>/output/
     ↓
 更新任务状态和输出文件路径
 ```
 
-正向分析约束：
+进度口径（前端 `ProcessingView.STAGE_LABELS`，与反向复用同一套四段）：`parse → multi_judge → review → report`；`case_index / case_total` = 已完成 / 全部 judge 数。
+
+正向集成层（Issue #119）的模块边界与约束：
 
 ```text
-正向候选召回以确定性 HLR 身份索引（hlr_classifier）为主；label_hlrs() 标注仅增强召回（llm_token_index），
-  失败时降级为纯确定性索引，且 llm_label token 绝不单独形成 covered。
-AI 三态复核采用单模型（FORWARD_REVIEW_PROVIDER），无三模型裁判/共识。
-通用信号词（STATUS/STATE/VOLTAGE/…）只在判定阶段降级，不在召回阶段过滤。
-A664 原生（A664Message 无 A429Word）标记 unsupported，不静默剔除。
+backend/forward/            正向代码树（唯一事实源，内容与「正向待集成」一致，工程侧不改其业务实现）
+backend/app/forward/        适配层（编排与翻译，零业务算法）：
+                              projects（系统类型识别：显式选择优先，否则按文件名自动识别）
+                              config_builder（mock / 真实两套配置；真实密钥仅运行环境解析、子进程 env 传入）
+                              execution（子进程执行：进度标记 / 取消 / 超时 / 杀进程树）
+                              artifacts（工作区副本 / 产物收集 / 汇总映射）
+                              adapter（run_forward_job 编排）
+分离原则                    适配层不 import 任何 app.v4.* 业务模块（仅复用 job_manager / job_log 基础设施）；
+                             正向不 import 反向、反向不 import 正向，除前端共用外无交叉共用
+并发隔离                    正向 runner 的工作区硬编码在代码树内（runs/integration_workspace、output/），
+                             两个并发任务共用一棵树会互相覆盖 → 每任务把代码树（约 2MB，仅代码）
+                             复制到 <job_dir>/forward/ 运行；续跑复用已有副本，保住 judge 中间结果；
+                             任务成功收尾时清理副本内 runs/（失败/中断保留，供续跑与排查）
+结果口径                    6 张统计卡取自判定分布（已落实→covered_direct、部分落实→covered_aggregate、
+                             未落实→uncovered，其余需人工判断项含「不一致」桶汇总为 possible）；
+                             ai_reviewed = 复核覆盖已复核条数；eoicd_count = 信号总数；hlr_count 恒 0；
+                             analysis_mode 仅表示是否上传追溯表（full / trace）
 ```
+
+旧正向实现（`v4/matching/forward_*`、`v4/comparison/coverage_reviewer`、`v4/doc_generators/forward_*`、`v4/prompts/forward_review.md`、`v4/traceability/forward_scope.py`）已随 Issue #119 删除。
 
 ## 8. 模块边界约束
 
@@ -215,7 +219,7 @@ A664 原生（A664Message 无 A429Word）标记 unsupported，不静默剔除。
 7. 任务状态管理应放在 `job_manager.py`，不应写入 `main.py`；
 8. 前端 API 调用应集中放在 `frontend/src/api/`；
 9. 前端组件不应直接处理后端复杂业务逻辑；
-10. 正向完整性分析逻辑按功能域分布：范围 `v4/traceability/forward_scope`、块聚合/召回/判定 `v4/matching/forward_*`、AI 复核与合并 `v4/comparison/coverage_reviewer`、报告 `v4/doc_generators/forward_*`、编排 `v4/pipeline.py`；正向 AI 复核为单模型，不复用反向三模型裁判/共识。
+10. 正向完整性分析逻辑必须留在 `backend/forward/` 原样代码树内（唯一事实源）；工程侧只允许 `app/forward/` 适配层做编排与翻译，**适配层不得 import 任何 `app.v4.*` 业务模块**；正向不 import 反向、反向不 import 正向，正反向分离、除前端共用外无交叉共用（Issue #119）。
 
 不得将文件解析、匹配、裁判、共识和报告输出混写在单个大文件中。
 
@@ -268,12 +272,21 @@ backend/app/
 ├── job_manager.py          # 共享 Job / JobManager（JobStatus 唯一来源）
 ├── job_log.py              # 进程级日志缓冲 / stdout-stderr Tee / job.log 落盘与恢复（不 import app.*）
 ├── job_scheduler.py        # 进程内任务队列（常驻工作线程 + 票据 + 出队跳过裁决；并发上限 MAX_CONCURRENT_JOBS）
+├── forward/                # 正向适配层（Issue #119）：编排与翻译，零业务算法，不 import app.v4.*
+│   ├── root.py             # 正向树路径 / 交付文件名 / 汇总快照名等常量
+│   ├── projects.py         # 系统类型识别（显式选择优先 / 文件名自动识别）
+│   ├── config_builder.py   # 多 judge 配置生成（mock / 真实；真实密钥仅运行环境解析、子进程 env 传入）
+│   ├── mock_server.py      # MOCK judge 服务（OpenAI 兼容端点，本地）
+│   ├── execution.py        # 子进程执行：进度标记 / 取消 / 超时 / 杀进程树
+│   ├── artifacts.py        # 工作区代码树副本 / 产物收集 / 汇总映射
+│   └── adapter.py          # 编排与翻译（run_forward_job）
 ├── api/
 │   └── v4/
-│       ├── router.py       # V4 路由聚合（health + coverage + jobs + outputs）
+│       ├── router.py       # V4 路由聚合（health + coverage + completeness + jobs + outputs）
 │       ├── schemas.py      # V4Job* Pydantic
 │       ├── runner.py       # V4 任务入队（job_scheduler）+ 线程函数（runtime 上下文绑定 + 7 个 derive_* 函数）
 │       ├── coverage.py     # POST /api/v4/coverage-analysis
+│       ├── completeness.py # POST /api/v4/completeness-analysis（含 controller_profile）
 │       ├── jobs.py         # GET /api/v4/jobs/{id}[/result]
 │       └── outputs.py      # GET /api/v4/jobs/{id}/outputs/{kind}
 └── v4/                     # V4 业务子包
@@ -281,7 +294,7 @@ backend/app/
     ├── config.py           # V4 env 加载 + 业务常量
     ├── errors.py           # 管线异常 → 用户可读的错误分类与建议
     ├── models.py           # V4 Pydantic 模型
-    ├── pipeline.py         # V4 管线编排（run_reverse_pipeline / run_forward_pipeline）
+    ├── pipeline.py         # V4 反向管线编排（run_reverse_pipeline）
     ├── parsers/            # EoICD Excel + HLR Word 解析
     ├── profiles/           # Controller profile registry（Issue #63 引入）
     │   ├── __init__.py     # ProfileRegistry 单例 + init_registry / get_registry
@@ -319,6 +332,10 @@ backend/app/
     ├── refine/             # RPDU 专属：无关 block 过滤 + 精确/同义词补采
     ├── degradation/        # Provider 健康跟踪 / Case 超时 / 熔断 / Review 降级
     └── synonyms.yaml       # 别名映射
+```
+
+```text
+backend/forward/            # 正向管线原样代码树（唯一事实源；每任务整树复制到 <job_dir>/forward/ 运行）
 ```
 
 ### 12.2 V4 业务流程（6 步反向管线）
@@ -432,6 +449,6 @@ V4 工程化集成的关键决策由 `docs/decisions/ADR-001-V4后端接入策�
 - ADR-001 中 D3（`/api/v4` 命名空间）、D4（import 适配但不改业务逻辑）、D5（mock_models 显式标识）、D6（`consistency/{model}` 扩展点）、D7（JSON 不暴露）仍有效。
 - ADR-001 中 D2 / D8 及 D1 的「暂不删 V3」部分已由 ADR-002 取代（V3 已移除、`kind` 字段已删除）。
 - ADR-002 记录了 V3 移除范围、决策点 A1（去 kind）与 B（保留 app/v4 正向原型）；其中 D4（保留正向原型）已由 ADR-003 取代（正向原型已删除）。
-- ADR-003 记录了 V4 早期正向原型与旧单模型反向 CLI 的移除范围，并约定未来正向采用 ICDBlock 级 Case、候选检索算法待定。
+- ADR-003 记录了 V4 早期正向原型与旧单模型反向 CLI 的移除范围，并约定未来正向采用 ICDBlock 级 Case、候选检索算法待定。其中**与正向相关的表述已被 Issue #119 取代**：正向已改为原样集成「正向待集成」多 judge 一致性管线（见 §7.1），不再采用 ICDBlock 级 Case 的旧设计，`v4/` 内的旧正向模块已删除。
 
 如未来 V4 路由 / Schema / JobManager / LLM 抽象层有变化，需同时更新本节与相应 ADR。

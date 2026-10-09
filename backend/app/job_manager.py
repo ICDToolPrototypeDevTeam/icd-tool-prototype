@@ -363,7 +363,7 @@ def raise_if_cancelled() -> None:
     """取消检查点（模块级）。
 
     供无法直接拿到 ``job`` 对象的深层层级（``_judge_with_degradation``、
-    ``re_review``、``coverage_reviewer``）调用。无绑定任务时静默 no-op，
+    ``re_review``）调用。无绑定任务时静默 no-op，
     因此 CLI 路径行为完全不变。
     """
     job = _bound_job()

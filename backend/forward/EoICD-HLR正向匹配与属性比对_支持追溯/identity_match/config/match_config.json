@@ -1,0 +1,110 @@
+{
+  // ============================================
+  // EoICD → HLR 正向匹配：身份匹配阶段配置文件
+  // ============================================
+  // 修改此文件后重新运行 match_engine.py 即可生效
+  // 所有路径均为相对于项目根目录的相对路径
+
+  "ai_matching": {
+    // 是否启用 AI Name 匹配（false 则使用 Mock 模式）
+    "enabled": true,
+
+    // 主 API Key：默认 key，始终有效
+    // 当并行配置的 api_keys 为空/不存在时，自动回退到此 key
+    "api_key": "",   // 必须留空：真实 Key 由环境变量 API_KEY 注入，禁止写入仓库
+
+    // API Key 环境变量名（api_key 留空时回退读取）
+    "api_key_env": "API_KEY",
+
+    // === 并行调用配置（新增）===
+    "parallel": {
+      // 是否启用并行调用
+      "enabled": true,
+
+      // 并发线程数（同时发几批给 AI）
+      // 实际并发数 = min(max_workers, api_keys 列表长度)
+      // 建议值：3~5（取决于你有多少个独立 Key）
+      "max_workers": 3,
+
+      // 并行调用专用的 API Key 列表
+      // 说明：
+      //   - 用途：多线程并发调用 AI 时，每个线程使用列表中的一个 Key
+      //   - 轮询分配：线程1用key[0]，线程2用key[1]，线程3用key[2]，线程4回到key[0]...
+      //   - 和主 key 的关系：完全独立，互不冲突；主 key 是默认/回退，api_keys 是并行专用
+      //   - 填同一个 Key 多次：用于测试服务商是否限制"同一Key的并发请求数"
+      //   - 填不同 Key：真正多账户分流，突破服务商频率限制
+      //   - 为空/不存在：自动回退到主 api_key，退化为串行逻辑
+      "api_keys": []   // 必须留空：并行 Key 同样由环境变量注入，禁止写入仓库
+    },
+    // ==========================
+
+    // 每批处理的 pair 数量
+    // 值越大 API 调用次数越少，但单请求耗时越长
+    // 建议范围：100 ~ 500
+    "batch_size": 200,
+
+    // 当某批输出不完整时的降级批次大小
+    // Fallback 机制：大 batch 失败 → 自动降级为小 batch 重试
+    "fallback_batch_size": 100,
+
+    // AI 生成的最大 token 数
+    // 每批 300 pair 约输出 3K tokens，4096 足够
+    "max_tokens": 32000,
+
+    // 温度参数，0.0~1.0，越低输出越确定
+    // Name 匹配是二值判断，建议低温度
+    "temperature": 0.1,
+
+    // 单次 API 调用的超时时间（秒）
+    // 大 batch 可能需要较长时间，建议 300 秒以上
+    "timeout_seconds": 300,
+
+    // 失败重试次数
+    "retry_times": 3,
+
+    // 两次 API 调用之间的最小间隔（秒）
+    // 用于防止触发 rate limit
+    "min_interval_seconds": 0.1
+  },
+
+  "matching_rules": {
+    // null 是否视为通配符（true = 任意一方为 null 即匹配）
+    // 适用于 bus、label、bit 三个字段
+    "null_is_wildcard": true,
+
+    // HLR label 前缀去除规则
+    // 如 "L11" → "11"，设为空字符串则不去除
+    "hlr_label_strip_prefix": "L",
+
+    // 含 null 字段 unit 的名称门控（替代 null_is_wildcard 全匹配爆炸）
+    // 仅当 null_is_wildcard 生效且 unit 含 null 字段、且 HLR name 非 None 时启用
+    "null_identity_sim_threshold": 0.3,   // T：门控阈值，保留名称覆盖比例 ≥ 30% 的候选
+    "null_identity_top_k": 30             // MAX_K：单 unit 候选簇数安全天花板（仅病理泛化名信号触发）
+  },
+
+  "output": {
+    // 是否保存拒绝归档（bus/label/name 不匹配的记录）
+    "save_rejected": true,
+
+    // 是否保存中间文件（裁剪输入、AI 结果等）
+    "save_intermediate": true,
+
+    // JSON 缩进空格数，0 则为紧凑格式
+    "indent_json": 2
+  },
+
+  "paths": {
+    // 输入数据路径
+    "eoicd_pub": "data/input/eoicd_pub_clustered.json",
+    "eoicd_sub": "data/input/eoicd_sub_clustered.json",
+    // HLR 去重结果路径（优先使用，若不存在则回退到 hlr）
+    "hlr_dedup": "data/input/hlr_dedup.json",
+    // HLR 聚类结果路径（属性匹配阶段仍需使用，身份匹配阶段作为回退）
+    "hlr": "data/input/hlr_clustered.json",
+
+    // 输出目录（身份匹配独立子目录）
+    "output_dir": "data/output/identity_match",
+    "intermediate_dir": "data/output/identity_match/intermediate",
+    "rejected_dir": "data/output/identity_match/rejected"
+  }
+}

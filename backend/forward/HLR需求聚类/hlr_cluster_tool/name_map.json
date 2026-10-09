@@ -1,0 +1,66 @@
+{
+  "FSF21000101_HLR_199": {
+    "value": "光耦传感器供电电压回采值",
+    "text_hash": "64f6aa86"
+  },
+  "FSF21000101_HLR_267": {
+    "value": "BBSOV1全关/全开微动开关反馈",
+    "text_hash": "74b21b00"
+  },
+  "FSF21000101_HLR_278": {
+    "value": "AFTEFAN1不可运行/过流/过热/低转速反馈",
+    "text_hash": "f6cf4f7c"
+  },
+  "FSF21000101_HLR_280": {
+    "value": "AFTEFAN1速度信号",
+    "text_hash": "cd81c149"
+  },
+  "FSF21000101_HLR_378": {
+    "value": "气压高度",
+    "text_hash": "ae3f8458"
+  },
+  "FSF21000101_HLR_4276": {
+    "value": "OHMS全局终止标志",
+    "text_hash": "23a80a3f"
+  },
+  "FSF21000101_HLR_473": {
+    "value": "飞机架次数",
+    "text_hash": "43f62b8a"
+  },
+  "FSF21000101_HLR_478": {
+    "value": "气源APU引起温度",
+    "text_hash": "0dfe9db2"
+  },
+  "FSF21000101_HLR_4373": {
+    "value": "驾驶舱温度COCKPIT_TEMP_SELECTION信号",
+    "text_hash": "2fd70df7"
+  },
+  "FSF21000101_HLR_1237": {
+    "value": "RFAN工作模式",
+    "text_hash": "a02b5187"
+  },
+  "FSF21000101_HLR_4510": {
+    "value": "飞机状态消息",
+    "text_hash": "8e5fda1a"
+  },
+  "FSF21000101_HLR_3569": {
+    "value": "A429通信测试信息L50",
+    "text_hash": "ac355196"
+  },
+  "FSF21000101_HLR_3573": {
+    "value": "通风RFAN速度指令",
+    "text_hash": "b0e7451a"
+  },
+  "FSF21000101_HLR_547": {
+    "value": "OFVTRV失效故障标志、风扇可用标志",
+    "text_hash": "0b6026b2"
+  },
+  "FSF21000101_HLR_544": {
+    "value": "SDI",
+    "text_hash": "d4ed77dd"
+  },
+  "FSF21000101_HLR_4210": {
+    "value": null,
+    "text_hash": "3883f5bb"
+  }
+}

@@ -1,0 +1,137 @@
+{
+  // ============================================
+  // EoICD → HLR 正向匹配：属性匹配阶段配置文件
+  // ============================================
+  // 用途：配置属性名映射、特殊匹配规则和 AI 复核参数
+  //        基于身份匹配报告（match_report_pub.json / match_report_sub.json）
+  //        进行 EoICD 属性值与 HLR 属性值的比对
+  //
+  // 修改此文件后重新运行 run_attribute_match.py 即可生效
+  // 所有路径均为相对于项目根目录的相对路径
+  // ============================================
+
+  "attribute_mapping": {
+    // 属性名映射表：EoICD 属性路径 → HLR 属性类名
+    // 说明：只映射属性名，不定义比较规则
+    // 格式："<层级>.<属性名>": "<HLR属性类名>"
+    //
+    // 注：Pub 和 Sub 的属性路径不同，但映射到同一个 HLR 属性类名
+    //     Pub 使用 DP 层，Sub 使用 RP 层
+    //
+    // === Publisher 方向属性（DP 层）===
+    // 时间相关属性
+    "LogicalPort.RefreshPeriod": "RefreshPeriod",                        // 刷新周期
+    "LogicalPort.ActivityTimeout": "ActivityTimeout",                    // 活动超时时间（Pub）
+    "CANMessage.TransmissionIntervalMinimum": "TransmissionIntervalMinimum",  // CAN层最小发送间隔
+    "CANMessage.MessageSize": "MessageSize",                             // 消息大小
+    "A664Message.MessageSize": "MessageSize",                            // A664消息大小
+    "A664Message.TransmissionIntervalMinimum": "TransmissionIntervalMinimum", // A664层最小发送间隔
+    "DP.TransmissionIntervalMinimum": "TransmissionIntervalMinimum",     // DP层最小发送间隔
+    "A429Channel.TransmissionIntervalMinimum": "TransmissionIntervalMinimum", // A429通道层发送间隔
+    // 数值范围属性
+    "DP.FuncRngMax": "FuncRngMax",                                     // 功能范围最大值
+    "DP.FuncRngMin": "FuncRngMin",                                     // 功能范围最小值
+    // 字符串属性（默认规则：不区分大小写比较）
+    "DP.Units": "Units",                                               // 物理单位
+    "DP.DataFormatType": "DataFormatType",                             // 数据格式类型
+    "DP.ParameterSize": "ParameterSize",                               // 参数大小
+    "DP.PublishedLatency": "PublishedLatency",                         // 发布延迟
+    "AnalogDiscreteParameter.PublishedLatency": "PublishedLatency",      // 模拟离散参数发布延迟
+    "DP.LsbRes": "LsbRes",                                             // 最低有效位分辨率
+    "DP.CodedSet": "CodedSet",                                         // 编码集
+    "DP.OneState": "OneState",                                         // 1状态描述
+    "DP.ZeroState": "ZeroState",                                        // 0状态描述
+    "DS.ByteOffsetWithinMsg": "ByteOffsetWithinMsg",                   // 消息内字节偏移
+    "DS.DataSetSize": "DataSetSize",                                    // 数据集大小
+    // 注：当前 HLR 数据中 Sub 方向属性类较少，以下映射为预留
+    //     若 HLR 中无对应属性类，则自动标记为 not_mentioned
+    "RP.DataFormatType": "DataFormatType",                             // 数据格式类型
+    "RP.LsbRes": "LsbRes",                                             // Sub最低有效位分辨率
+    "RP.ParameterSize": "ParameterSize",                               // 参数大小
+    "RP.SDIExpected": "SDIExpected",                                   // 源目标标识期望（预留）
+    "RP.SSM": "SSM",                                                    // 信号状态矩阵（预留）
+    "LogicalPort.MessageSize": "MessageSize",                            // Sub消息大小
+    "LogicalPort.ActivityTimeout": "ActivityTimeout",                    // 活动超时时间（Sub）
+    "LogicalPort.SamplePeriod": "SamplePeriod"                           // 采样周期（Sub）
+  },
+
+  "unit_conversion": {
+    // HLR 单位换算配置（预留，暂未启用）
+    // 设计目标：将 HLR 属性值中的单位统一换算后比较
+    // 当前状态：未启用（enabled=false），不影响匹配程序运行
+    //
+    // 后续启用时，可在此配置各物理量的单位换算规则
+    // 示例（时间类）：
+    //   "time": {
+    //     "ms": 1,
+    //     "s": 1000,
+    //     "秒": 1000,
+    //     "min": 60000,
+    //     "分钟": 60000,
+    //     "h": 3600000
+    //   }
+    "_comment": "HLR单位换算配置，待确定，目前不启用",
+    "enabled": false,
+    "rules": {}
+  },
+
+  "ai_review": {
+    // 是否启用 AI 复核 mismatch 数据
+    "enabled": true,
+
+    // API Key（直接填写，优先读取；留空则回退到环境变量）
+    "api_key": "",   // 必须留空：真实 Key 由环境变量 API_KEY 注入，禁止写入仓库
+
+    // 环境变量名（api_key 留空时回退读取）
+    "api_key_env": "API_KEY",
+
+    // 每批 AI 处理的 mismatch 对数
+    // mismatch 数量通常较少（几百对），默认值即可
+    "batch_size": 200,
+
+    // Fallback 降级批次大小（输出不完整时拆分重试）
+    "fallback_batch_size": 100,
+
+    // AI 生成的最大 token 数
+    "max_tokens": 32000,
+
+    // 温度参数，越低输出越确定
+    "temperature": 0.1,
+
+    // 单次 API 调用超时（秒）
+    "timeout_seconds": 300,
+
+    // 失败重试次数
+    "retry_times": 3,
+
+    // 两次 API 调用最小间隔（秒）
+    "min_interval_seconds": 0.1
+  },
+
+  "output": {
+    // 是否按类别分别保存（matched / mismatch / not_mentioned）
+    "save_per_category": true,
+
+    // 是否保存完整报告（含所有检查项的聚合结果）
+    "save_full_report": true,
+
+    // 是否保存中间文件（mismatch 裁剪输入、AI 复核结果）
+    "save_intermediate": true,
+
+    // JSON 缩进空格数
+    "indent_json": 2
+  },
+
+  "paths": {
+    // 输入：身份匹配阶段报告（从 identity_match 输出目录读取）
+    "input_pub": "data/output/identity_match/match_report_pub.json",
+    "input_sub": "data/output/identity_match/match_report_sub.json",
+
+    // 输入：HLR 聚类结果（用于冲突处理时补充需求原文）
+    "input_hlr": "data/input/hlr_clustered.json",
+
+    // 输出目录（属性匹配独立子目录，与身份匹配输出区分）
+    "output_dir": "data/output/attribute_match",
+    "intermediate_dir": "data/output/attribute_match/intermediate"
+  }
+}

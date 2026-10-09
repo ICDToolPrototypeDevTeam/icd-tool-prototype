@@ -1,0 +1,37 @@
+{
+  "FSF21000101_HLR_267": {
+    "value": {
+      "OneState": "bit15=1→BBSOV1全关反馈True；bit16=1→BBSOV1全开反馈True",
+      "ZeroState": "bit15=0→BBSOV1全关反馈False；bit16=0→BBSOV1全开反馈False"
+    },
+    "text_hash": "74b21b00"
+  },
+  "FSF21000101_HLR_278": {
+    "value": {
+      "OneState": "bit15=1→AFTEFAN1不可运行反馈有效；bit16=1→AFTEFAN1过流反馈有效；bit17=1→AFTEFAN1过热反馈有效；bit18=1→AFTEFAN1低转速反馈有效",
+      "ZeroState": "bit15=0→AFTEFAN1不可运行反馈无效；bit16=0→AFTEFAN1过流反馈无效；bit17=0→AFTEFAN1过热反馈无效；bit18=0→AFTEFAN1低转速反馈无效"
+    },
+    "text_hash": "f6cf4f7c"
+  },
+  "FSF21000101_HLR_4276": {
+    "value": {
+      "OneState": "有效",
+      "ZeroState": "无效"
+    },
+    "text_hash": "23a80a3f"
+  },
+  "FSF21000101_HLR_544": {
+    "value": {
+      "OneState": "bit8=1→通道位置1B/2B；bit9=1→通道位置2A/2B",
+      "ZeroState": "bit8=0→通道位置1A/2A；bit9=0→通道位置1A/1B"
+    },
+    "text_hash": "d4ed77dd"
+  },
+  "FSF21000101_HLR_547": {
+    "value": {
+      "OneState": "bit22=1→OFVTRV关位失效有效；bit23=1→开位失效有效；bit24~28=1→对应风扇不可用",
+      "ZeroState": "bit22=0→OFVTRV关位失效无效；bit23=0→开位失效无效；bit24~28=0→对应风扇可用"
+    },
+    "text_hash": "0b6026b2"
+  }
+}
