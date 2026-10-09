@@ -8,6 +8,7 @@ ADR-001 Issue A：
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +26,19 @@ ALLOWED_MODELS = {"deepseek", "minimax", "qwen"}
 
 MEDIA_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 MEDIA_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+# 容器时区常为 UTC；固定东八区偏移，保证文件名中的生成时刻与北京时间一致。
+_CN_TZ = timezone(timedelta(hours=8))
+
+
+def _stamped_name(base_name: str, path: Path) -> str:
+    """下载保存名 = 物理文件名 + 产物生成时刻后缀（东八区 YYYYMMDD_HHMM）。
+
+    取产物 mtime 而非下载时刻：同一产物重复下载文件名稳定不变。
+    """
+    stamp = datetime.fromtimestamp(path.stat().st_mtime, _CN_TZ).strftime('%Y%m%d_%H%M')
+    stem, _, ext = base_name.rpartition('.')
+    return f'{stem}_{stamp}.{ext}'
 
 
 def _manifest_task_type(job_dir: Path) -> Optional[str]:
@@ -68,7 +82,7 @@ def download_eoicd_xlsx(job_id: str):
         raise HTTPException(status_code=404, detail='eoicd xlsx not generated (job may be running or failed)')
     return FileResponse(
         path=f,
-        filename=V4_OUTPUT_FILES["eoicd_xlsx"],
+        filename=_stamped_name(V4_OUTPUT_FILES["eoicd_xlsx"], f),
         media_type=MEDIA_XLSX,
     )
 
@@ -81,7 +95,7 @@ def download_consensus_docx(job_id: str):
         raise HTTPException(status_code=404, detail='consensus docx not generated (job may be running or failed)')
     return FileResponse(
         path=f,
-        filename=V4_OUTPUT_FILES["consensus_docx"],
+        filename=_stamped_name(V4_OUTPUT_FILES["consensus_docx"], f),
         media_type=MEDIA_DOCX,
     )
 
@@ -105,7 +119,7 @@ def download_consistency_docx(job_id: str, model: str):
         )
     return FileResponse(
         path=f,
-        filename=V4_OUTPUT_FILES[key],
+        filename=_stamped_name(V4_OUTPUT_FILES[key], f),
         media_type=MEDIA_DOCX,
     )
 
@@ -118,7 +132,7 @@ def download_forward_xlsx(job_id: str):
         raise HTTPException(status_code=404, detail='forward xlsx not generated (job may be running or failed)')
     return FileResponse(
         path=f,
-        filename=FORWARD_OUTPUT_FILES["forward_xlsx"],
+        filename=_stamped_name(FORWARD_OUTPUT_FILES["forward_xlsx"], f),
         media_type=MEDIA_XLSX,
     )
 
@@ -131,6 +145,6 @@ def download_forward_docx(job_id: str):
         raise HTTPException(status_code=404, detail='forward docx not generated (job may be running or failed)')
     return FileResponse(
         path=f,
-        filename=FORWARD_OUTPUT_FILES["forward_docx"],
+        filename=_stamped_name(FORWARD_OUTPUT_FILES["forward_docx"], f),
         media_type=MEDIA_DOCX,
     )

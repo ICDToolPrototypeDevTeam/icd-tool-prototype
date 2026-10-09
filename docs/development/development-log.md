@@ -3597,3 +3597,17 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   2. 下限值（AMS/HSCU=5、FGMC=10）取「标准行数 −3」，如后续真实语料需要可在 config 调整。
   3. 需**重建后端镜像**才在服务器生效。
 - **下一步建议**：1) 重建镜像后网页空选系统类型上传全 7 行版文档，确认自动识别走通全链路；2) 提交本改动；3) issue 草稿（`issues_file/issue-hlr-自动识别行数精确匹配导致缺行文档识别失败.md`）后续处理由用户决定。
+
+## 2026-10-09 报告下载文件名追加生成时刻后缀（分支 feat/issue-126-reportname-add-timestamp）
+
+- **背景（用户提出）**：所有任务下载的报告保存名固定同名（如 `EoICD与SWHLR多模型差异分析报告.docx`），多任务收集、归档与交付时浏览器自动追加 `(1)`/`(2)`，无法区分所属任务与生成时间。方案讨论确认：**只改下载层**（7 类产物全加，不区分轻重），不动磁盘产物名 / 存在性判定 / 前端 / 接口契约。
+- **方案**：`backend/app/api/v4/outputs.py` 新增 `_stamped_name(base_name, path)` 与固定东八区偏移 `_CN_TZ`——下载保存名 = 物理文件名 + `_YYYYMMDD_HHMM`；时间戳取产物文件 **mtime** 而非下载时刻（重复下载文件名稳定不变）；容器时区常为 UTC，固定 +8 保证与北京时间一致。5 个路由函数（覆盖 7 类产物：反向 5 + 正向 2）的 `filename=` 全部接入。
+- **修改文件**：`backend/app/api/v4/outputs.py`（+helper，5 处 `filename=`）；文档 `docs/architecture/api.md`（§7 与 §12.3 下载文件名表补注）、`CHANGELOG.md`（`[Unreleased] - 2026-10-09`）。新增（gitignored）：`backend/tests/verify_download_timestamp.py`。
+- **验证方式与结果**（`backend/tests/verify_download_timestamp.py`，零 LLM，**17/17 断言全过 ALL_OK=True**）：
+  1. helper 确定性：指定 mtime 2026-10-09 17:15（东八区）→ 精确文件名；东八区跨日用例（UTC 10-08 17:30 → 文件名 `_20261009_0130`）通过——不受宿主机时区影响（**已验证**）。
+  2. 7 类下载端点：临时 `OUTPUT_DIR` + 假任务（`job.json` manifest + `output/` 产物）逐端点调用，从 Content-Disposition 解析出的保存名与期望逐一相等（单模型为 `_DeepSeek` 等后缀**之后**再追加时间戳）；重复调用文件名稳定不变；磁盘物理文件名保持不变（**已验证**）。
+  3. `py_compile app/api/v4/outputs.py` 通过（**已验证**）。
+- **遗留问题**：
+  1. 需**重建后端镜像**才在服务器生效；网页端实际下载（反向 / 正向各一条链）待镜像重建后由用户在页面上复核。
+  2. 时间戳为文件 mtime（管线写盘完成时刻），与任务状态时间可差数分钟——属预期口径。
+- **下一步建议**：1) 重建镜像后在正确性 / 完整性结果页各下载一次，核对文件名带 `_YYYYMMDD_HHMM`；2) 提交本改动（分支 `feat/issue-126-reportname-add-timestamp`）。
