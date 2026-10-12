@@ -33,9 +33,9 @@ services:
       - PYTHONUNBUFFERED=1
       - ICD_STATIC_DIR=/app/static
     restart: unless-stopped
-    # 容器内存上限：取值由 deploy.sh 按宿主实际内存算好后写进本目录的 .env
-    # （ICD_MEM_LIMIT / ICD_MEMSWAP_LIMIT）；下面 ${...:-640m} 只是「不经 deploy.sh
-    # 直接 compose up」时的保守兜底。
+    # 容器内存上限：取值按 部署说明.md §5.4 算好后写进本目录的 .env
+    # （ICD_MEM_LIMIT / ICD_MEMSWAP_LIMIT）；下面 ${...:-640m} 只是「未写本目录
+    # .env 直接 compose up」时的保守兜底。
     #
     # 为什么必须设：不设上限时容器与宿主共享内存，十万条级 EoICD 输入会把整机拖进
     # swap 抖动 —— SSH 与页面全部无响应，连「终止」都点不动，只能从容器外面杀进程。

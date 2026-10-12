@@ -7,7 +7,7 @@ REM         config = 多 judge 配置文件（默认 项目根/multi_judge_confi
 REM
 REM What it does:
 REM   1. cd 到项目根目录（本脚本位于 启动脚本\ 子目录，上一级即项目根）
-REM   2. 选择 Python 解释器（eoicd_integration venv，含 openpyxl/python-docx/requests）
+REM   2. 选择 Python 解释器（项目内 .venv，含 openpyxl/python-docx/requests）
 REM   3. 从本脚本同目录的 .env.multijudge 读取各 judge / arbitrator 的 API Key，
 REM      以及可选的 AI_MODEL / BASE_URL（单 judge 风格：config 中 judge 省略 model/base_url
 REM      或写 ${AI_MODEL}/${BASE_URL} 时，从本 .env 读取）。
@@ -23,8 +23,16 @@ set "SCRIPT_DIR=%~dp0"
 REM 切到项目根目录（本脚本位于 启动脚本\ 子目录，上一级即项目根）
 cd /d "%SCRIPT_DIR%.."
 
-REM ---- 1. Python interpreter (需含 openpyxl/python-docx/requests) ----
-set "PYTHON=C:\Users\zhaokl\.workbuddy\binaries\python\envs\eoicd_integration\Scripts\python.exe"
+REM ---- 1. Python interpreter（需含 openpyxl/python-docx/requests）----
+REM 优先级：环境变量 PYTHON > 项目内 .venv\Scripts\python.exe > PATH 的 python
+REM   → 拿到工程后只需建 .venv 并装依赖（见 requirements.txt），无需修改本脚本路径
+if defined PYTHON (
+    set "PYTHON=%PYTHON%"
+) else if exist ".venv\Scripts\python.exe" (
+    set "PYTHON=.venv\Scripts\python.exe"
+) else (
+    set "PYTHON=python"
+)
 if not exist "%PYTHON%" set "PYTHON=python"
 
 REM ---- 2. Config（第一个参数，默认 项目根/multi_judge_config.json）----

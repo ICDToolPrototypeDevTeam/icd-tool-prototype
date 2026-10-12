@@ -54,18 +54,6 @@ def _contains_keyword(text: str, keywords: list[str], ignore_case: bool = True) 
     return False
 
 
-def _first_match(values: list[str], keywords: list[str]) -> str | None:
-    """在字符串列表中找第一个「包含任一关键字」的元素"""
-    for kw in keywords:
-        kw2 = str(kw).strip()
-        if not kw2:
-            continue
-        for v in values:
-            if v and kw2 in v:
-                return v
-    return None
-
-
 # ============================ Excel 读取 ============================
 
 def collect_header_hints(cfg: dict) -> list[str]:
@@ -124,19 +112,6 @@ def _read_header(ws, max_rows: int = 5,
         if cnt > best_count:
             best_idx, best_count = i, cnt
     return best_idx + 1, [_norm(c) for c in rows[best_idx]]
-
-
-def _header_text(ws, max_rows: int = 3) -> str:
-    """取前若干行所有单元格文本，拼接用于类型识别"""
-    parts: list[str] = []
-    for i, row in enumerate(ws.iter_rows(values_only=True)):
-        for c in row:
-            s = _norm(c)
-            if s:
-                parts.append(s)
-        if i + 1 >= max_rows:
-            break
-    return " | ".join(parts)
 
 
 def _repeat_ok(tcfg: dict, header: list[str]) -> bool:

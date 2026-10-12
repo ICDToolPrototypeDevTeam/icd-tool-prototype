@@ -8,8 +8,10 @@ Word/Excel 落 ``<正向树根>/output``。两个并发任务共用一棵树必�
 :func:`cleanup_run_workspace` 清副本内 ``runs/``（中间产物可达数百 MB）；失败/中断
 任务不清理，供续跑复用与排查。
 
-Excel：runner 自己不生成 xlsx（run_manifest 只记录期望路径），由
-``multi_judge协同/gen_excel_report.py`` 读 runs 工作区的 aggregate/summary 生成。
+Excel：当前 runner（发送工具集成版V2 起）聚合完成后已自动生成 xlsx（manifest 的
+excel_report 兑现），:func:`run_excel_report` 作为兜底仍会重跑
+``multi_judge协同/gen_excel_report.py``（读 runs 工作区 aggregate/summary，
+同名同内容覆盖写，开销仅数秒）。
 """
 from __future__ import annotations
 

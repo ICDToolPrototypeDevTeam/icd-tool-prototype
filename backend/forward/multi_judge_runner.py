@@ -56,6 +56,7 @@ from multi_judge_aggregate import build_shard_from_reports, aggregate, write_out
 from multi_judge_arbitrator import run_arbitration  # noqa: E402  # 可选 Step5/5.5 LLM 仲裁层
 from multi_judge_summary import build_summary, format_summary_text  # noqa: E402
 from multi_judge_report import generate_report  # noqa: E402  # Word 共识报告（缺 python-docx 时优雅跳过）
+from gen_excel_report import generate_excel_report  # noqa: E402  # Excel 共识报告（缺 openpyxl 时优雅跳过）
 
 PYTHON = os.environ.get("PYTHON_BIN") or sys.executable
 
@@ -500,8 +501,11 @@ def run_review_route(agg: dict, shards: dict, judge_meta: dict, cfg: dict) -> di
     stats["budget"] = budget
     arb_cfg["_review_budget"] = {"left": budget} if budget > 0 else None
 
+    conc = int(os.environ.get("MULTI_JUDGE_REVIEW_CONCURRENCY", "8"))
+    conc = max(1, min(conc, 16))
+    stats["concurrency"] = conc
     print(f"\n{'=' * 70}\n▶ [复核路由] Step5 仲裁 + Step5.5 peer-aware 复查"
-          f"（{len(needed)} 条需复核信号；串行执行，不占 judge 并发额度；预算={budget or '不限'}）\n{'=' * 70}")
+          f"（{len(needed)} 条需复核信号；并发度={conc}，不占 judge 并发额度；预算={budget or '不限'}）\n{'=' * 70}")
     arb_cfg = dict(arb_cfg)
     arb_cfg["re_review"] = cfg.get("re_review") or {}
     agg = run_arbitration(agg, shards, judge_meta, arb_cfg)
@@ -607,14 +611,25 @@ def _self_test() -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="正向检查 · 多 judge 并发编排器")
-    ap.add_argument("--config", required=True, help="multi_judge_config.json 路径")
+    ap.add_argument("--config", default=None,
+                    help="multi_judge_config.json 路径（--selftest 自测时不需要）")
     ap.add_argument("--judge-timeout", type=int, default=3600,
                     help="单个 judge 的运行预算（秒）；超时只告警不杀进程，迟到补收（默认3600）")
     ap.add_argument("--only-stage1", action="store_true",
                     help="仅运行共享阶段1（EoICD 处理），不跑各 judge")
     ap.add_argument("--output", default=None,
                     help="最终聚合报告输出目录（默认 <工程>/output）")
+    ap.add_argument("--selftest", action="store_true",
+                    help="运行内置自测（不触发任何真实 LLM 调用），验证聚合层强制 need_review 路由逻辑")
     args = ap.parse_args()
+
+    if args.selftest:
+        _self_test()
+        return 0
+
+    if not args.config:
+        print("❌ 未指定 --config（运行完整多 judge 流程所需）")
+        return 1
 
     cfg = load_config(args.config)
     _normalize_ai_config(cfg)  # 让 model/base_url 支持 .env（单 judge 风格：省略或 ${AI_MODEL} 时从环境读取）
@@ -690,6 +705,10 @@ def main() -> int:
     report_path = out_dir / f"{report_stem}_{run_ts}.docx"
     generate_report(agg, summary, report_path)
 
+    # Excel 报告（与 Word 同源，自动生成；缺 openpyxl 时优雅跳过）
+    excel_path = out_dir / f"{report_stem}_{run_ts}.xlsx"
+    generate_excel_report(agg, summary, excel_path)
+
     # 运行清单：每次 run 一份，记录时间戳/配置/judge/产物路径，便于跨 run 对比与溯源
     manifest = {
         "run_timestamp": run_ts,
@@ -700,7 +719,7 @@ def main() -> int:
         ],
         "outputs": {
             "word_report": str(report_path),
-            "excel_report": str(out_dir / f"{report_stem}_{run_ts}.xlsx"),
+            "excel_report": str(excel_path),
             "aggregate_json": str(out_json),
             "aggregate_csv": str(out_csv),
             "summary_json": str(out_summary),
@@ -727,6 +746,8 @@ def main() -> int:
     print(f"   数据产物（runs 工作区）：{out_csv}")
     print(f"   汇总统计（runs 工作区）：{out_summary}")
     print(f"   交付报告（output/）：{report_path}")
+    if excel_path.exists():
+        print(f"   交付报告（output/）：{excel_path}")
     print(f"   运行清单（output/）：{manifest_path}")
     print(f"{'=' * 70}")
     return 0

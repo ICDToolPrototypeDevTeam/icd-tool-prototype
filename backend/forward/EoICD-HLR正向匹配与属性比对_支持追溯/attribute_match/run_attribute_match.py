@@ -26,7 +26,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 # 将 src 加入路径
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))

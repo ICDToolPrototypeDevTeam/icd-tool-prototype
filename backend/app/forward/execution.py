@@ -39,6 +39,10 @@ _RE_REVIEW = re.compile(r"\[复核路由\]")
 _RE_AGG_DONE = re.compile(r"✅ 多 judge 聚合完成")
 # 报告阶段起点：复核记账 + 汇总落盘后即进入最耗时的 Word 报告生成（generate_report）
 _RE_REPORT_START = re.compile(r"\[汇总\] 已写出")
+# judge 全挂 / 0 信号兜底：runner 此时仍 exit 0（Word/Excel 优雅跳过、manifest 占位），
+# 若放行会在产物收集阶段报出误导性的「交付物缺失」——改为提前失败并指明真实原因
+_RE_AGG_COUNT = re.compile(r"✅ 多 judge 聚合完成：(\d+)/(\d+)")
+_RE_NO_SIGNALS = re.compile(r"跳过：无聚合结果（0 个信号）")
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -112,10 +116,13 @@ def run_multi_judge(
         on_started(proc)
 
     completed = 0
+    agg_ok: Optional[int] = None      # 聚合行里的「正常 judge 数」（None = 未见该行）
+    agg_total: Optional[int] = None
+    zero_signals = False              # 报告因 0 个信号被跳过
 
     def _pump() -> None:
         """把子进程输出转进任务日志（Tee→日志面板）并解析进度标记。"""
-        nonlocal completed
+        nonlocal completed, agg_ok, agg_total, zero_signals
         try:
             with job_log_context(job.job_id, job):
                 for line in iter(proc.stdout.readline, ""):
@@ -150,8 +157,14 @@ def run_multi_judge(
                                          message="Step 4/4: 生成报告")
                         continue
                     if _RE_AGG_DONE.search(line):
+                        ma = _RE_AGG_COUNT.search(line)
+                        if ma:
+                            agg_ok, agg_total = int(ma.group(1)), int(ma.group(2))
                         job.set_progress(stage="report", stage_index=4, stage_total=4,
                                          message="Step 4/4: 生成报告")
+                        continue
+                    if _RE_NO_SIGNALS.search(line):
+                        zero_signals = True
         except Exception:  # noqa: BLE001 — 读流失败不得打断主循环
             pass
         finally:
@@ -178,3 +191,12 @@ def run_multi_judge(
         reader.join(timeout=10)
     if rc != 0:
         raise ForwardRunError(f"正向多 judge 运行失败（exit={rc}）；详见任务日志")
+    # judge 全挂（0/N）或 0 信号：报告被优雅跳过、manifest 只有占位路径，继续走会在
+    # 产物收集处报「交付物缺失」（误导）。在这里以真实原因失败（BUG-20261010-001）。
+    if zero_signals or agg_ok == 0:
+        detail = (f"{agg_ok}/{agg_total} judge 正常（全部失败）" if agg_ok == 0
+                  else "报告因 0 个信号被跳过")
+        raise ForwardRunError(
+            f"正向多 judge 未产出任何有效结果：{detail}，无法生成交付物；"
+            "常见原因：输入文件解析失败（非规范 OOXML 包、文件损坏）或模型服务不可用；"
+            "详见任务日志")

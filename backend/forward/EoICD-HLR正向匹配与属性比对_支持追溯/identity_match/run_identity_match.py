@@ -32,7 +32,7 @@ for d in [SRC_DIR, SHARED_DIR]:
     if str(d) not in sys.path:
         sys.path.insert(0, str(d))
 
-from utils import load_config, load_json, save_json, flatten_hlr_requirements, load_hlr_dedup
+from utils import load_json, flatten_hlr_requirements, load_hlr_dedup
 from bus_label_matcher import run_bus_label_matching
 from direction_matcher import run_direction_matching
 from name_cropper import crop_name_input
