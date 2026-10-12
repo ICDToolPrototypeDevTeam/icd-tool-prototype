@@ -99,7 +99,7 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | `v4/traceability/` | 追溯表预筛选（独立零耦合模块） |
 | `v4/refine/` | RPDU 专属：matched ICD Block 无关过滤 + 精确/同义词补采（Issue RPDU 适配续）；Step 3 后可选阶段 |
 | `forward/`     | 正向（完整性）多 judge 一致性管线**原样代码树**（唯一事实源；每任务整树复制到 `<job_dir>/forward/` 运行） |
-| `app/forward/` | 正向适配层：`root` / `projects` / `config_builder` / `mock_server` / `execution` / `artifacts` / `adapter`；编排与翻译、零业务算法、**不 import `app.v4.*`** |
+| `app/forward/` | 正向适配层：`root` / `projects` / `config_builder` / `mock_server` / `execution` / `artifacts` / `adapter`；编排与翻译、零业务算法、**不 import `app.v4.*` 业务模块**（唯一例外：零业务算法的纯 I/O 工具 `v4/parsers/zip_entry_normalize`，BUG-20261010-001） |
 | `output/`      | 运行时生成的输出文件存放目录                |
 
 ## 6. 前端模块划分
@@ -192,7 +192,8 @@ backend/app/forward/        适配层（编排与翻译，零业务算法）：
                               execution（子进程执行：进度标记 / 取消 / 超时 / 杀进程树）
                               artifacts（工作区副本 / 产物收集 / 汇总映射）
                               adapter（run_forward_job 编排）
-分离原则                    适配层不 import 任何 app.v4.* 业务模块（仅复用 job_manager / job_log 基础设施）；
+分离原则                    适配层不 import 任何 app.v4.* 业务模块（仅复用 job_manager / job_log 基础设施；
+                             另复用零业务算法的纯 I/O 工具 v4/parsers/zip_entry_normalize，仅此一项）；
                              正向不 import 反向、反向不 import 正向，除前端共用外无交叉共用
 并发隔离                    正向 runner 的工作区硬编码在代码树内（runs/integration_workspace、output/），
                              两个并发任务共用一棵树会互相覆盖 → 每任务把代码树（约 2MB，仅代码）
@@ -219,7 +220,7 @@ backend/app/forward/        适配层（编排与翻译，零业务算法）：
 7. 任务状态管理应放在 `job_manager.py`，不应写入 `main.py`；
 8. 前端 API 调用应集中放在 `frontend/src/api/`；
 9. 前端组件不应直接处理后端复杂业务逻辑；
-10. 正向完整性分析逻辑必须留在 `backend/forward/` 原样代码树内（唯一事实源）；工程侧只允许 `app/forward/` 适配层做编排与翻译，**适配层不得 import 任何 `app.v4.*` 业务模块**；正向不 import 反向、反向不 import 正向，正反向分离、除前端共用外无交叉共用（Issue #119）。
+10. 正向完整性分析逻辑必须留在 `backend/forward/` 原样代码树内（唯一事实源）；工程侧只允许 `app/forward/` 适配层做编排与翻译，**适配层不得 import 任何 `app.v4.*` 业务模块**（唯一例外：零业务算法的纯 I/O 工具 `v4/parsers/zip_entry_normalize`，按 BUG-20261010-001 复用，不得扩大）；正向不 import 反向、反向不 import 正向，正反向分离、除前端共用外无交叉共用（Issue #119）。
 
 不得将文件解析、匹配、裁判、共识和报告输出混写在单个大文件中。
 
@@ -273,6 +274,7 @@ backend/app/
 ├── job_log.py              # 进程级日志缓冲 / stdout-stderr Tee / job.log 落盘与恢复（不 import app.*）
 ├── job_scheduler.py        # 进程内任务队列（常驻工作线程 + 票据 + 出队跳过裁决；并发上限 MAX_CONCURRENT_JOBS）
 ├── forward/                # 正向适配层（Issue #119）：编排与翻译，零业务算法，不 import app.v4.*
+│                           #   （唯一例外：zip_entry_normalize 纯 I/O 工具）
 │   ├── root.py             # 正向树路径 / 交付文件名 / 汇总快照名等常量
 │   ├── projects.py         # 系统类型识别（显式选择优先 / 文件名自动识别）
 │   ├── config_builder.py   # 多 judge 配置生成（mock / 真实；真实密钥仅运行环境解析、子进程 env 传入）

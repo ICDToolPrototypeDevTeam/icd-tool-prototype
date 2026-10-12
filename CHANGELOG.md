@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-10-10
+
+### Fixed
+
+- 修复**非规范 OOXML 上传包（zip 条目名含反斜杠）使正向多 judge 全部解析失败**的问题（服务器任务 `53f2e670` 实测）。第三方 Office / 故障注入工具产出的 .docx/.xlsx，zip 中央目录里的条目名可能写成 `word\document.xml`（反斜杠），而 CPython 的 `zipfile` 只在 `os.sep != "/"` 时把它归一为 `/` —— 即**只有 Windows 容忍这类包，Linux 容器不归一**：三个 judge 读 `word/document.xml` 全部 KeyError，聚合 0 信号、报告被「优雅跳过」，任务最终却报出与真实原因无关的 `正向交付物缺失：['word_report', 'excel_report']`。现在正向适配层在进管线前对全部上传输入（HLR / EoICD 两张表 / 追溯表）复用反向同款组件（`v4/parsers/zip_entry_normalize`，同 BUG-20260923-001）检测并**就地归一化**（同名同目录替换——规范副本留在 `_normalized/` 子目录会改掉 runner 的配套文件扫描目录、漏配追溯表），已规范的包原样直通、重复调用幂等；同时执行层解析 runner 的聚合与跳过标记，**judge 全挂（0/N）或 0 信号时提前以真实原因失败**（写明「输入文件解析失败（非规范 OOXML 包、文件损坏）或模型服务不可用」），不再让用户看到误导性的「交付物缺失」。该改动需**重建后端镜像**才生效。
+
 ## [Unreleased] - 2026-10-09
 
 ### Added

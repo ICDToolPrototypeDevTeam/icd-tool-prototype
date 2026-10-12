@@ -41,13 +41,8 @@ from common.projects import get_project, project_ids  # noqa: E402  统一系统
 # 以脚本所在目录为基准
 BASE_DIR = Path(__file__).parent.resolve()
 
-RAW_DIR = _PROJECT_ROOT / "input/ams"  # 仅作示例常量；实际输入目录以 common/projects.py 的 raw_dir 为准
-PROCESSED_DIR = BASE_DIR / "data/processed"
 CONFIG_DIR = BASE_DIR / "config"
 SRC_DIR = BASE_DIR / "src"
-
-CROP_CONFIG = CONFIG_DIR / "eoicd_crop.yaml"
-TRACE_CONFIG = CONFIG_DIR / "traceability.yaml"
 
 # ---------------- 项目配置 ----------------
 # 不同项目的 EoICD 表名、输入目录、链路层数等都统一登记在 common/projects.py
