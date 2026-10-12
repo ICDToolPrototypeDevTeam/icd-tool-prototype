@@ -3709,3 +3709,12 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   2. 本分支改动（含 deploy.sh 删除与全部文档）由用户自行提交；
   3. `更新说明.md` 目前预填「20261008 → 本版」内容（含 #119/#120-123/#126），如出包前再并入其他 Issue 需先更新该文件。
 - **下一步建议**：1) 提交本分支；2) 出一次包并核对新交付包内容物（无 deploy.sh、有 更新说明.md 与附录）；3) 服务器实跑 §5 Runbook（health / 前端 200 / 内存上限生效值）；4) 此后固定走「先更新 更新说明.md → 再构建」的出包流程。
+
+## 2026-10-12 反向管线单次模型请求超时外提 LLM_TIMEOUT + 降级等待模板调整（分支 feat/issue-129-packaging-step-split）
+
+- **背景（用户提出）**：内网慢网关偶发 `ReadTimeout`（标注环节一次实证：单条 HLR 三轮重试全败即静默回退为空标注，匹配信号减弱）；同时 3 家裁判降级机制中第三家裁判的等待窗口偏紧。要求：①单次模型请求超时外提为环境变量可调；②模板默认值与 `DEGRADATION_CASE_TIMEOUT=300` 组合经测试确认无冲突。
+- **方案**：1. `llm/factory.py` 新增 `llm_timeout_seconds()`（env `LLM_TIMEOUT`，未配置/非法值回落 120），`get_llm()` 统一传给三家客户端构造；2. 三家客户端（deepseek / minimax / qwen）新增 `default_timeout` 参数（显式 `timeout=` 优先），截断重试仍以该值为基数自动 ×2；3. `.env.example`：`LLM_TIMEOUT` 以模板启用行给出（值 120 = 代码回落，仅作调大入口）；`DEGRADATION_EXTRA_WAIT` 模板默认 120 → 240；两者代码回落均保持 120；4. 冲突验证脚本（真实配置链断言 + 真实 `_judge_case_with_timeout` 缩放仿真四场景）。
+- **修改文件**：`backend/app/v4/llm/factory.py`、`deepseek_client.py`、`minimax_client.py`、`qwen_client.py`、`backend/.env.example`、`CHANGELOG.md`、`更新说明.md`；验证脚本 `backend/tests/verify_llm_timeout_env.py` / `verify_llm_timeout_live.py` / `verify_timeout_conflict.py`（tests/ 未跟踪）。
+- **验证方式与结果**：1. `verify_llm_timeout_env.py` 15 项全过（未配置回落 120 / 配置 240 生效 / 显式参数优先 / 非法值 abc、0、-5、空回落 / 截断链 [120,240]、[240,480]）（**已验证**）；2. `verify_llm_timeout_live.py` 8 项全过（真实 dotenv 链实测客户端构造超时与 `requests.post` 实收一致=240；本地 socket 层 2s 超时如期 ReadTimeout @2.03s、8s 正常完成 @2.50s）（**已验证**）；3. `verify_timeout_conflict.py` — 模板组合 120/240 与 CASE=300：关系断言全过（120<300、240≥120、300≥120）；仿真 S1 全适配 / S2 窗口内自身超时归类 TIMEOUT（非 adaptive、无 drain）@1.20s / S3 超窗转兜底占位并交 drain、3.41s 返回 / S4 不足 2 家按上限 3.01s 兜底 —— ALL PASS (2 notes)（**已验证**）；4. 全程无真实 provider 调用。
+- **遗留问题**：1. 需**重建后端镜像**才在服务器生效；2. 服务器采用 240 的额外等待需把 `DEGRADATION_EXTRA_WAIT=240` 写进 `backend/.env`（普通用户操作，重启容器生效）；不写则维持 120/120 历史行为；3. 内网慢网关场景的改善效果待部署后观察（如需再调大 `LLM_TIMEOUT`，保持小于 `DEGRADATION_CASE_TIMEOUT`）。
+- **下一步建议**：1) 提交本批改动；2) 出包时核对 `更新说明.md` 的 `.env` 模板差异；3) 部署后观察是否仍有 ReadTimeout。

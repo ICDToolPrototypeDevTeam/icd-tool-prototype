@@ -10,10 +10,11 @@ import requests
 class MiniMaxClient:
     """Calls MiniMax API with timeout, basic retry, and JSON extraction."""
 
-    def __init__(self, api_key: str, base_url: str, model: str):
+    def __init__(self, api_key: str, base_url: str, model: str, default_timeout: int = 120):
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
+        self._default_timeout = default_timeout
 
     @property
     def model(self) -> str:
@@ -24,11 +25,14 @@ class MiniMaxClient:
         messages: list[dict],
         temperature: float = 0.1,
         max_tokens: int = 1024,
-        timeout: int = 120,
+        timeout: int | None = None,
         max_retries: int = 2,
     ) -> "ChatResponse":
         """Send a chat completion request. Retries on network errors only."""
         from app.v4.llm.factory import MAX_TOKEN_CAP, ChatResponse
+
+        if timeout is None:
+            timeout = self._default_timeout
 
         # 幂等拼接 /v1：若 base_url 已经以 /v1 收尾则不再叠一次
         base = self._base_url
