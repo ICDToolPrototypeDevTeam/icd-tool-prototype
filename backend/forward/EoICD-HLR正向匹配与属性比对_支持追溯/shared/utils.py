@@ -237,41 +237,6 @@ def parse_bit_range(bit_value):
     return bits
 
 
-def is_bit_contained(eoicd_bit, hlr_bit, strategy="subset"):
-    """
-    判断 EoICD bit 与 HLR bit 的包含关系。
-
-    参数：
-    - eoicd_bit: EoICD 的 bit（单值/范围）
-    - hlr_bit: HLR 的 bit（单值/范围）
-    - strategy: "subset"（默认，严格）或 "intersect"（宽松）
-
-    返回：
-    - "high"    : EoICD bit ⊆ HLR bit（subset 策略）
-    - "medium"  : 任一方为 null，无约束
-    - "low"     : 其他情况（不满足包含关系）
-    """
-    eoicd_set = parse_bit_range(eoicd_bit)
-    hlr_set = parse_bit_range(hlr_bit)
-
-    # 任一方为 null → 中置信度
-    if eoicd_set is None or hlr_set is None:
-        return "medium"
-
-    if strategy == "subset":
-        if eoicd_set <= hlr_set:  # EoICD 是 HLR 的子集
-            return "high"
-        else:
-            return "low"
-    elif strategy == "intersect":
-        if eoicd_set & hlr_set:   # 有交集
-            return "high"
-        else:
-            return "low"
-    else:
-        raise ValueError(f"Unknown bit match strategy: {strategy}")
-
-
 def load_hlr_dedup(dedup_path, project_root=None):
     """
     加载 HLR 去重结果，将 interfaces 展开为匹配单元列表。

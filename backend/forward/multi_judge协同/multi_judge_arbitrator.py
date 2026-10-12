@@ -28,19 +28,45 @@ from __future__ import annotations
 
 import json
 import os
-import time
+import threading
 import urllib.request
 import urllib.error
-from pathlib import Path
-from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from multi_judge_aggregate import KEY_FIELDS_IDENTITY
 
 # 关键字段白名单（KEY_FIELDS，身份层 judge 结论骨架）—— 分歧即真分歧。
-# 与 multi_judge_aggregate.KEY_FIELDS_IDENTITY 对齐，喂给仲裁 LLM 用于打 category='key'。
-FORWARD_KEY_FIELDS = (
-    "verdict", "matched_hlr", "name_match_status",
-    "bus", "label", "bit", "direction",
-    "attribute_class",  # 各被比对属性的结论字段
-)
+# 单一来源：直接复用 multi_judge_aggregate.KEY_FIELDS_IDENTITY（身份层 7 元组，
+# verdict+matched_hlr+name_match_status+地址四元组），仲裁层在此之上追加
+# attribute_class（各被比对属性的结论字段），喂给仲裁 LLM 打 category='key'。
+FORWARD_KEY_FIELDS = KEY_FIELDS_IDENTITY + ("attribute_class",)
+
+
+class _CircuitBreaker:
+    """复核路由熔断器（第2点优化）：LLM 调用累计失败达阈值即整体跳闸，跳过剩余 needed，
+    避免上游服务挂掉时每条信号逐个撞超时、把复核路由拖成几十分钟甚至数小时。
+
+    串行下等价于「连续失败 N 次」；并发下为「累计失败 N 次」（用 Lock 保护计数）。
+    任意一次成功即清零计数，允许偶发抖动后自动恢复。
+    """
+    def __init__(self, threshold: int = 5):
+        self.threshold = max(1, int(threshold))
+        self._failures = 0
+        self._tripped = False
+        self._lock = threading.Lock()
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._failures += 1
+            if self._failures >= self.threshold:
+                self._tripped = True
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._failures = 0
+
+    @property
+    def tripped(self) -> bool:
+        return self._tripped
 
 
 # ---------------------------------------------------------------------------
@@ -48,8 +74,14 @@ FORWARD_KEY_FIELDS = (
 # ---------------------------------------------------------------------------
 
 def call_llm(model: str, base_url: str, api_key: str, system: str, user: str,
-             temperature: float = 0.1, timeout: int = 180) -> dict | None:
-    """调用 OpenAI 兼容 /chat/completions，要求 JSON 输出，返回解析后的 dict；失败返回 None。"""
+             temperature: float = 0.1, timeout: int | None = None) -> dict | None:
+    """调用 OpenAI 兼容 /chat/completions，要求 JSON 输出，返回解析后的 dict；失败返回 None。
+
+    timeout 默认从 env MULTI_JUDGE_REVIEW_TIMEOUT 读取（默认 60s），避免单条调用卡满 180s；
+    调用方可显式传参覆盖（第2点优化：per-signal 超时可控）。
+    """
+    if timeout is None:
+        timeout = int(os.environ.get("MULTI_JUDGE_REVIEW_TIMEOUT", "60"))
     if not (model and base_url and api_key):
         return None
     url = base_url.rstrip("/") + "/chat/completions"
@@ -99,12 +131,8 @@ CONSENSUS_SYSTEM = """你是一名航空软件需求一致性检查的独立仲�
 输入是多个独立 judge（可能不同模型）对同一 EoICD 信号做「EoICD→HLR 正向落实检查」的结论。
 请综合各方意见，给出最终仲裁结论。严格按 JSON 输出，不要多余文字。
 
-关键字段（KEY_FIELDS，身份层 judge 结论骨架）：
-- verdict（落实结论：已落实/不一致/未落实/部分落实）
-- matched_hlr（匹配到的 HLR 需求编号列表）
-- name_match_status（EoICD name 是否语义命中某 HLR）
-- bus/label/bit/direction（信号地址四元组）
-- 各被比对属性 attribute_class 的结论 single_result（属性一致/属性不一致/无提及/无具体值）
+关键字段（KEY_FIELDS，身份层 judge 结论骨架，由 FORWARD_KEY_FIELDS 单一来源驱动）：
+__KEY_FIELDS_LIST__
 仅当 judge 间在上述关键字段上出现分歧时，field_disagreements 的 category 才标 'key'；
 若仅在次要字段（属性取值文本、自然语言分析、单位说明）上分歧，标 'non_key'。
 
@@ -118,6 +146,11 @@ CONSENSUS_SYSTEM = """你是一名航空软件需求一致性检查的独立仲�
   "final_analysis": "综合判定依据（中文，简洁）",
   "confidence": 0.0~1.0
 }"""
+
+# 单一来源：prompt 字段清单由 FORWARD_KEY_FIELDS 驱动（__KEY_FIELDS_LIST__ 占位符在上方静态字符串里，
+# 这里注入，避免与常量脱节；用 replace 而非 f-string，确保下方 JSON 示例里的花括号不受影响）。
+_CONSENSUS_KEY_FIELDS_DOC = "\n".join(f"- {f}" for f in FORWARD_KEY_FIELDS)
+CONSENSUS_SYSTEM = CONSENSUS_SYSTEM.replace("__KEY_FIELDS_LIST__", _CONSENSUS_KEY_FIELDS_DOC)
 
 CONSENSUS_USER_TMPL = """信号全名：{full_name}
 
@@ -293,72 +326,6 @@ def _merge_inconsistent_attributes(backend_ia, llm_ia):
 
 
 # ---------------------------------------------------------------------------
-# 复核进度汇报（串行长阶段的可见性）
-# ---------------------------------------------------------------------------
-
-# Step5/Step5.5 是逐条串行 LLM 调用（数百条 × 单条十几秒，总时长可达小时级），
-# 期间没有任何输出会被误判成卡死（实测：界面长时间无日志，用户把健康任务终止）。
-# 每 PROGRESS_EVERY 条打一行进度；文案前缀固定，便于日志面板与排障时 grep。
-PROGRESS_EVERY = 20
-
-
-def _fmt_dur(sec: float) -> str:
-    """秒 → 「XmYYs」/「XhYYm」，供进度行与预计剩余使用。"""
-    sec = int(round(sec))
-    if sec >= 3600:
-        return "{0}h{1:02d}m".format(sec // 3600, (sec % 3600) // 60)
-    return "{0}m{1:02d}s".format(sec // 60, sec % 60)
-
-
-def _progress_line(tag: str, done: int, total: int, executed_word: str,
-                   executed: int, skipped: int, failed: int, t0: float) -> None:
-    """打一行复核进度（done>=total 时为收尾行，带总耗时）。"""
-    parts = "{0} {1} / 跳过 {2} / 失败 {3}".format(executed_word, executed, skipped, failed)
-    elapsed = time.monotonic() - t0
-    if done >= total:
-        print("  [{0}进度] {1}/{2} 完成（{3}；总用时 {4}）".format(
-            tag, done, total, parts, _fmt_dur(elapsed)))
-        return
-    eta = elapsed / done * (total - done)
-    print("  [{0}进度] {1}/{2}（{3}；已用 {4}，约剩 {5}）".format(
-        tag, done, total, parts, _fmt_dur(elapsed), _fmt_dur(eta)))
-
-
-def _review_progress(tag: str, total: int, executed_word: str):
-    """返回 (start, tick, finish) 三个进度回调，供 arbitrate / peer_aware_review 使用。
-
-    tick(kind) 的 kind ∈ {executed, skipped, failed}；累计到 PROGRESS_EVERY 的倍数
-    打一行进度，loop 结束后 finish() 打收尾行（total==0 时不产生任何输出）。
-    """
-    t0 = time.monotonic()
-    state = {"done": 0, "executed": 0, "skipped": 0, "failed": 0}
-
-    def start() -> None:
-        if total:
-            print("  [{0}进度] 0/{1} 开始（串行执行，每 {2} 条汇报一次）".format(
-                tag, total, PROGRESS_EVERY))
-
-    def tick(kind: str) -> None:
-        state["done"] += 1
-        if kind == "executed":
-            state["executed"] += 1
-        elif kind == "failed":
-            state["failed"] += 1
-        else:
-            state["skipped"] += 1
-        if total and state["done"] % PROGRESS_EVERY == 0 and state["done"] < total:
-            _progress_line(tag, state["done"], total, executed_word,
-                           state["executed"], state["skipped"], state["failed"], t0)
-
-    def finish() -> None:
-        if total:
-            _progress_line(tag, total, total, executed_word,
-                           state["executed"], state["skipped"], state["failed"], t0)
-
-    return start, tick, finish
-
-
-# ---------------------------------------------------------------------------
 # Step5 仲裁
 # ---------------------------------------------------------------------------
 
@@ -367,6 +334,10 @@ def arbitrate(agg: dict, shards: dict, arb_cfg: dict, only: set[str] | None = No
     """对 agg 中的信号跑 Step5 仲裁；only 限定信号名集合（Step5.5 重仲裁时用）。
 
     stage: trace 的阶段名（Step5.6 重仲裁传 "step5.6"，避免把复查结论盖成仲裁结论）。
+
+    第1/2点优化：逐信号并发（ThreadPoolExecutor，并发度 arb_cfg["_concurrency"]），接入熔断器
+    arb_cfg["_circuit_breaker"]——累计 LLM 失败达阈值即跳过剩余信号。各信号原地写回各自 agg[full]，
+    无共享可变状态冲突（预算扣减与熔断计数已加锁）。
     """
     model = arb_cfg.get("model")
     base_url = arb_cfg.get("base_url")
@@ -375,23 +346,32 @@ def arbitrate(agg: dict, shards: dict, arb_cfg: dict, only: set[str] | None = No
         print("  [仲裁] 未配置有效 arbitrator（model/base_url/api_key），跳过 Step5")
         return agg
 
-    n_judges = len(shards)
+    breaker = arb_cfg.get("_circuit_breaker")
+    budget = arb_cfg.get("_review_budget")
+    budget_lock = arb_cfg.get("_budget_lock") or threading.Lock()
+    concurrency = arb_cfg.get("_concurrency", 1)
     targets = [f for f in agg if (only is None or f in only)]
-    prog_start, prog_tick, prog_finish = _review_progress(
-        "仲裁" if stage == "step5" else "重仲裁", len(targets), "裁决")
-    prog_start()
-    for full in targets:
+    label = "Step5 仲裁" if stage == "step5" else "Step5.6 重仲裁"
+    if not targets:
+        return agg
+    print(f"  [复核] {label}：{len(targets)} 条信号（并发 {concurrency}）")
+
+    def _process(full: str) -> None:
         item = agg[full]
         a = item["aggregation"]
+        # 熔断器已跳闸 → 跳过剩余（第2点）
+        if breaker is not None and breaker.tripped:
+            a["review_trace"] = {"stage": stage, "applied": False,
+                                 "reason": "复核熔断器已跳闸（累计 LLM 失败达阈值），跳过本次仲裁"}
+            a["arbitrated"] = True
+            return
         shard = {j: shards[j][full] for j in shards if full in shards[j]}
         if not shard:
-            prog_tick("skipped")
-            continue
+            return
         n_valid = sum(1 for jv in item["judges"].values() if jv.get("coverage") == "ok")
 
         # 单 judge / 0 存活：仲裁者无法升级共识，保留后端结论（降级优先于 LLM）。
         if n_valid <= 1:
-            # 0 存活 provider 强制压星（反向 zero_provider 规则）
             if n_valid == 0:
                 a["star_rating"] = 1
                 a["agreement"] = "no_consensus"
@@ -402,38 +382,43 @@ def arbitrate(agg: dict, shards: dict, arb_cfg: dict, only: set[str] | None = No
                 "reason": "存活 judge 数 {0}，无第二裁决对象".format(n_valid),
             }
             a["arbitrated"] = True
-            prog_tick("skipped")
-            continue
+            return
 
         # 后端已完全共识（full）且无缺口/无需复核：无需 LLM 仲裁，保留后端结论。
         if a.get("agreement") == "full" and not a.get("need_review") and not a.get("coverage_gap"):
             a["review_trace"] = {"stage": stage, "applied": False,
                                  "reason": "后端已完全共识且无需复核，跳过 Step5"}
             a["arbitrated"] = True
-            prog_tick("skipped")
-            continue
+            return
 
         # 成本护栏（路线三）：超出复核预算的本次不跑，如实记账而非静默跳过。
-        cell = arb_cfg.get("_review_budget")
-        if cell is not None and cell["left"] <= 0:
-            a["review_trace"] = {
-                "stage": stage, "applied": False,
-                "reason": "超出复核预算（MULTI_JUDGE_REVIEW_BUDGET），本次未调用 LLM",
-            }
-            a["arbitrated"] = True
-            prog_tick("skipped")
-            continue
-        if cell is not None:
-            cell["left"] -= 1
+        if budget is not None:
+            with budget_lock:
+                if budget["left"] <= 0:
+                    a["review_trace"] = {
+                        "stage": stage, "applied": False,
+                        "reason": "超出复核预算（MULTI_JUDGE_REVIEW_BUDGET），本次未调用 LLM",
+                    }
+                    a["arbitrated"] = True
+                    return
+                budget["left"] -= 1
 
         user = _build_consensus_user(full, shard, a.get("note", ""))
-        out = call_llm(model, base_url, api_key, CONSENSUS_SYSTEM, user)
+        try:
+            out = call_llm(model, base_url, api_key, CONSENSUS_SYSTEM, user)
+        except Exception:
+            out = None
         if not isinstance(out, dict):
+            # 第2点：降级 + 记录失败（触发熔断）
+            if breaker is not None:
+                breaker.record_failure()
             a["review_trace"] = {"stage": stage, "applied": False,
                                  "reason": "Step5 仲裁 LLM 调用失败或返回非 JSON"}
             a["arbitrated"] = True
-            prog_tick("failed")
-            continue
+            return
+        # 第2点：成功复位熔断计数
+        if breaker is not None:
+            breaker.record_success()
         # 共识等级 / 结论：以 LLM 为准（仲裁者职责）
         agreement = out.get("agreement_level") or a.get("agreement")
         final_verdict = out.get("final_verdict") or a.get("final_verdict")
@@ -466,8 +451,21 @@ def arbitrate(agg: dict, shards: dict, arb_cfg: dict, only: set[str] | None = No
             "peer_review": (a.get("review_trace") or {}).get("peer_review"),
         }
         a["arbitrated"] = True
-        prog_tick("executed")
-    prog_finish()
+
+    if concurrency <= 1 or len(targets) <= 1:
+        for full in targets:
+            _process(full)
+    else:
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futures = [ex.submit(_process, full) for full in targets]
+            total = len(futures)
+            step = max(1, total // 10)
+            done = 0
+            for fut in as_completed(futures):
+                fut.result()
+                done += 1
+                if done % step == 0 or done == total:
+                    print(f"    └ 进度 {done}/{total}（{done * 100 // total}%）")
     return agg
 
 
@@ -485,9 +483,9 @@ def peer_aware_review(agg: dict, shards: dict, arb_cfg: dict,
     """对低星级信号做匿名化复查，返回更新后的 agg。
 
     #10 精简签名：低星选取由本函数自行按 star_rating 计算，调用方不再传 low_signals。
+    #9 修复：匿名化按「独立视角」分组。
 
-    #9 修复：匿名化按「独立视角」分组（同 model/base_url 的重复 judge 合并为一个判断并注明份数），
-    不再把同一 judge 复制成「判断 C」充当假的第二方；独立视角不足 2 个时跳过且不记为已复查。
+    第1/2点优化：逐信号并发（ThreadPoolExecutor），接入熔断器与预算锁。
     """
     model = arb_cfg.get("model")
     base_url = arb_cfg.get("base_url")
@@ -496,12 +494,14 @@ def peer_aware_review(agg: dict, shards: dict, arb_cfg: dict,
         return agg
 
     judge_meta = judge_meta or {}
+    breaker = arb_cfg.get("_circuit_breaker")
+    budget = arb_cfg.get("_review_budget")
+    budget_lock = arb_cfg.get("_budget_lock") or threading.Lock()
+    concurrency = arb_cfg.get("_concurrency", 1)
 
     def _mark_skipped(a: dict, reason: str, n_view: int, groups: list[list[str]] | None = None) -> None:
         """复查未生效时如实记账（不得留 peer_reviewed=True 的假象）。"""
         a["peer_reviewed"] = False
-        # 记 peer_review 子字段：Step5.6 重仲裁会刷新 trace 的 stage/applied，
-        # 但「复查到底生效没有」必须留痕，否则记账会把复查跳过误记成复核生效。
         a["review_trace"] = {"stage": "step5.5", "applied": False, "reason": reason,
                              "peer_review": {"applied": False, "reason": reason}}
         a["peer_review_info"] = {
@@ -511,41 +511,45 @@ def peer_aware_review(agg: dict, shards: dict, arb_cfg: dict,
             "groups": groups or [],
         }
 
-    low = _low_star_signals(agg)
-    prog_start, prog_tick, prog_finish = _review_progress("复查", len(low), "复查")
-    prog_start()
-    for full in low:
+    def _review_one(full: str) -> None:
         item = agg.get(full)
         if item is None:
-            prog_tick("skipped")
-            continue
+            return
+        a = item["aggregation"]
+        # 熔断已跳闸 → 跳过（第2点）
+        if breaker is not None and breaker.tripped:
+            _mark_skipped(a, "复核熔断器已跳闸（累计 LLM 失败达阈值），跳过 peer 复查", 0, [])
+            return
         shard = {j: shards[j][full] for j in shards if full in shards[j]}
         names = list(shard.keys())
         groups = _independent_groups(names, judge_meta)
         n_view = len(groups)
         if n_view < 2:
-            _mark_skipped(item["aggregation"],
+            _mark_skipped(a,
                           "独立视角数 {0} < 2（同模型重复不构成独立视角），跳过 peer 复查".format(n_view)
                           if n_view >= 1 else "无可用 judge 结论，跳过 peer 复查",
                           n_view, groups)
-            prog_tick("skipped")
-            continue
-        cell = arb_cfg.get("_review_budget")
-        if cell is not None and cell["left"] <= 0:
-            _mark_skipped(item["aggregation"],
-                          "超出复核预算（MULTI_JUDGE_REVIEW_BUDGET），跳过 peer 复查",
-                          n_view, groups)
-            prog_tick("skipped")
-            continue
-        if cell is not None:
-            cell["left"] -= 1
+            return
+        if budget is not None:
+            with budget_lock:
+                if budget["left"] <= 0:
+                    _mark_skipped(a, "超出复核预算（MULTI_JUDGE_REVIEW_BUDGET），跳过 peer 复查",
+                                  n_view, groups)
+                    return
+                budget["left"] -= 1
         user = _build_review_user(full, groups, shard)
-        out = call_llm(model, base_url, api_key, REVIEW_SYSTEM, user)
+        try:
+            out = call_llm(model, base_url, api_key, REVIEW_SYSTEM, user)
+        except Exception:
+            out = None
         if not isinstance(out, dict):
-            _mark_skipped(item["aggregation"], "复查 LLM 调用失败或返回非 JSON", n_view, groups)
-            prog_tick("failed")
-            continue
-        a = item["aggregation"]
+            # 第2点：降级 + 触发熔断
+            if breaker is not None:
+                breaker.record_failure()
+            _mark_skipped(a, "复查 LLM 调用失败或返回非 JSON", n_view, groups)
+            return
+        if breaker is not None:
+            breaker.record_success()
         # 复查结论覆盖 final_verdict / matched_hlr / 属性结论 / analysis / confidence
         if out.get("final_verdict"):
             a["final_verdict"] = out["final_verdict"]
@@ -572,8 +576,25 @@ def peer_aware_review(agg: dict, shards: dict, arb_cfg: dict,
             "judges_by_view": [{"view": chr(65 + i), "judges": g} for i, g in enumerate(groups)],
             "reason": "对 {0} 个独立视角做匿名化复查".format(n_view),
         }
-        prog_tick("executed")
-    prog_finish()
+
+    low = _low_star_signals(agg)
+    print(f"  [复核] Step5.5 复查：{len(low)} 条低星信号（并发 {concurrency}）")
+    if not low:
+        return agg
+    if concurrency <= 1 or len(low) <= 1:
+        for full in low:
+            _review_one(full)
+    else:
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futures = [ex.submit(_review_one, full) for full in low]
+            total = len(futures)
+            step = max(1, total // 10)
+            done = 0
+            for fut in as_completed(futures):
+                fut.result()
+                done += 1
+                if done % step == 0 or done == total:
+                    print(f"    └ 进度 {done}/{total}（{done * 100 // total}%）")
     return agg
 
 
@@ -584,12 +605,26 @@ def peer_aware_review(agg: dict, shards: dict, arb_cfg: dict,
 def run_arbitration(agg: dict, shards: dict, judge_meta: dict, arb_cfg: dict) -> dict:
     """完整智能层：Step5 仲裁 →（可选）Step5.5 复查循环 → 重仲裁。
 
-    #10 精简签名：复查配置并入 arb_cfg 的 "re_review" 子键（`run_review_route` 负责组装），
-    不再单独传 re_review_cfg——两者都是同一次复核路由的上下文，拆成两个位置参数没有意义。
+    #10 精简签名：复查配置并入 arb_cfg 的 "re_review" 子键。
+
+    第1/2点优化：初始化熔断器与并发度（写入 arb_cfg 供 arbitrate/peer 共享，跨阶段并发安全）；
+    第3点优化：Step5.5 复查后，仅当复查真正改变了裁决结论（final_verdict 变化）的信号才跑
+    Step5.6 重仲裁，避免对「复查与原判一致」的信号重复调用 LLM（低星信号从 3 次降到 2 次）。
     """
     if not arb_cfg:
         return agg
     re_review_cfg = arb_cfg.get("re_review") or {}
+    # 第2点：熔断器（跨 Step5/5.5/5.6 共享）
+    threshold = int(os.environ.get("MULTI_JUDGE_REVIEW_FAILSTOP", "5"))
+    arb_cfg.setdefault("_circuit_breaker", _CircuitBreaker(threshold))
+    # 第1点：并发度（默认 8，上限 16，避免打爆 LLM 服务）
+    concurrency = int(os.environ.get("MULTI_JUDGE_REVIEW_CONCURRENCY", "8"))
+    concurrency = max(1, min(concurrency, 16))
+    arb_cfg.setdefault("_concurrency", concurrency)
+    # 预算锁（并发下原子扣减 _review_budget.left）
+    if arb_cfg.get("_review_budget") is not None and "_budget_lock" not in arb_cfg:
+        arb_cfg["_budget_lock"] = threading.Lock()
+
     agg = arbitrate(agg, shards, arb_cfg)
     if not re_review_cfg.get("enabled", False):
         return agg
@@ -598,9 +633,14 @@ def run_arbitration(agg: dict, shards: dict, judge_meta: dict, arb_cfg: dict) ->
         low = _low_star_signals(agg)
         if not low:
             break
+        # 第3点：记录 peer 前的裁决结论，用于判断是否真有改变
+        before = {f: agg[f]["aggregation"].get("final_verdict") for f in low}
         agg = peer_aware_review(agg, shards, arb_cfg, judge_meta)
-        # Step5.6 仅对低星重仲裁；stage 传 step5.6，避免把复查结论盖成仲裁结论（记账失真）
-        agg = arbitrate(agg, shards, arb_cfg, only=set(low), stage="step5.6")
+        # 仅对复查真正改变了 verdict 的信号跑 Step5.6 重仲裁
+        changed = {f for f in low
+                   if agg[f]["aggregation"].get("final_verdict") != before.get(f)}
+        if changed:
+            agg = arbitrate(agg, shards, arb_cfg, only=changed, stage="step5.6")
     return agg
 
 

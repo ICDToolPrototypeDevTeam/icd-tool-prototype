@@ -73,11 +73,6 @@ def _norm_matched_hlr(value) -> tuple:
     return tuple(sorted(out))
 
 
-def _display_matched(value) -> str:
-    """把 matched_hlr 富结构压成展示串（只取 req_id，接口仅用于比对不展示）。"""
-    return ",".join(r for r, _ in _norm_matched_hlr(value))
-
-
 def _display_matched_full(value) -> str:
     """把 matched_hlr 富结构压成**带接口地址**的展示串：R12[1|0x10|8|pub],R99[2|0x33|2|sub]。
 
@@ -457,36 +452,32 @@ def aggregate(shards: dict[str, dict], judge_meta: dict, rule: dict | None = Non
                     "results": {j: info["results"][j] for j in inconsistent_judges},
                 })
 
-        # judge 间分歧（field_disagreements，仅在 KEY_FIELDS 上算）
+        # judge 间分歧（field_disagreements，由 KEY_FIELDS_IDENTITY 单一来源驱动，改一处全局生效）
         field_disagreements = []
         has_key_disagreement = False
         if n_valid > 1:
-            # verdict
-            verdicts = {j: valid[j].get("verdict") for j in valid}
-            if len(set(verdicts.values())) > 1:
-                field_disagreements.append({"field": "verdict", "category": "key",
-                                            "values": {j: verdicts[j] for j in verdicts}})
-                has_key_disagreement = True
-            # matched_hlr（富结构：req_id+接口，#5 修复——同一 req_id 不同接口亦判为分歧）
-            hlrs = {j: _norm_matched_hlr(valid[j].get("matched_hlr")) for j in valid}
-            if len(set(hlrs.values())) > 1:
-                field_disagreements.append({"field": "matched_hlr", "category": "key",
-                                            "values": {j: valid[j].get("matched_hlr") for j in valid}})
-                has_key_disagreement = True
-            # name_match_status
-            nms = {j: bool(valid[j].get("name_match_status")) for j in valid}
-            if len(set(nms.values())) > 1:
-                field_disagreements.append({"field": "name_match_status", "category": "key",
-                                            "values": {j: nms[j] for j in nms}})
-                has_key_disagreement = True
-            # 地址四元组 bus/label/bit/direction
-            for ak in ADDRESS_KEYS:
-                comp = {j: _norm_addr(valid[j].get("hlr_identity")).get(ak) for j in valid}
+            # 身份层 KEY_FIELDS：逐字段比对各 valid judge 是否一致，不一致即 key 分歧。
+            # 不同字段的取值/归一方式不同（matched_hlr 走 _norm_matched_hlr、地址四元组走
+            # _norm_addr、name_match_status 按 bool 比较），由 KEY_FIELDS_IDENTITY 统一驱动
+            # 遍历顺序与字段集——增删 key 字段只需改该常量，无需再动此处硬编码。
+            for field in KEY_FIELDS_IDENTITY:
+                if field == "matched_hlr":
+                    comp = {j: _norm_matched_hlr(valid[j].get("matched_hlr")) for j in valid}
+                    raw = {j: valid[j].get("matched_hlr") for j in valid}
+                elif field == "name_match_status":
+                    nms = {j: bool(valid[j].get("name_match_status")) for j in valid}
+                    comp = nms
+                    raw = nms
+                elif field in ADDRESS_KEYS:
+                    comp = {j: _norm_addr(valid[j].get("hlr_identity")).get(field) for j in valid}
+                    raw = {j: valid[j].get("hlr_identity") for j in valid}
+                else:  # verdict（及其它直接取值字段）
+                    comp = {j: valid[j].get(field) for j in valid}
+                    raw = comp
                 if len(set(comp.values())) > 1:
-                    field_disagreements.append({"field": ak, "category": "key",
-                                                "values": {j: valid[j].get("hlr_identity") for j in valid}})
+                    field_disagreements.append({"field": field, "category": "key", "values": raw})
                     has_key_disagreement = True
-            # 属性层 KEY_FIELDS：逐 attribute_class 结论分歧
+            # 属性层（动态 attribute_class，不在 KEY_FIELDS_IDENTITY 内，单独处理）
             for cls, info in attr_by_class.items():
                 if info["consensus"] == "分歧":
                     field_disagreements.append({"field": f"attr:{cls}", "category": "key",

@@ -1903,3 +1903,78 @@ python-docx 的 `_Row.cells` 并不是「取本行单元格」：它转到 `Tabl
 1. 仍有少量 `.cells` 用在小表上（状态 / 星级分布表、汇总行、表头行）——行数是个位数，不构成热点，本次不动。
 2. 「MOCK 中途报错」仍未定位（本批其它条目同样记为待定位），与本条无关。若那条报错其实是任务变成 `interrupted` / 提示「程序被重启过」，则属 BUG-20260923-008 的内存被杀路径（见其遗留问题第 1 条），两条要分开查。
 3. 本批改动（`docx_cells.py` + 四个生成器）**尚未提交**，与 `/force-cancel`、强制终止前端按钮等同在工作区；后者目前无 debug-log 条目、无 CHANGELOG 行（见 BUG-20260923-008 遗留问题第 6 条）。
+
+### BUG-20261010-001：非规范 OOXML 上传包（zip 条目名含反斜杠）使正向各 judge 全挂，最终报误导性「交付物缺失」
+
+#### 状态
+
+fixed（代码已改、测试与真实文件验证通过；**镜像未重建**，服务器上尚未生效）
+
+#### 发现日期
+
+2026-10-10（服务器任务 `53f2e670` 反馈报错当日定位与修复）
+
+#### 关联 Issue / PR
+
+正向集成收尾期间用户反馈：正向任务失败，末行报 `ForwardRunError: 正向交付物缺失：['word_report', 'excel_report']`（任务 `53f2e670-da82-424b-9fdc-6620a399fa6f`）。根因与反向 BUG-20260923-001 **同源同文件类**（第三方 Office / 故障注入工具保存的 .docx 条目名用了反斜杠），该问题反向已修、正向链路首次命中；本次修复复用反向现成组件。
+
+#### 问题现象
+
+1. 正向任务失败，任务日志末行为 `ForwardRunError: 正向交付物缺失：['word_report', 'excel_report']`。
+2. 往上翻任务日志：三个 judge **全部失败**，报错为 `KeyError: no item named word/document.xml in the archive`（各 judge 读 HLR docx 部件即死）。
+3. 聚合行为 `✅ 多 judge 聚合完成：0/3 judge 正常，3 失败`，其后 `[报告] 跳过：无聚合结果（0 个信号）`；runner 此时仍 **exit 0**（Word/Excel 优雅跳过、manifest 只写占位路径），流程继续走到产物收集，才报出与真实原因无关的「交付物缺失」。
+
+#### 复现方式
+
+1. 用任务 `53f2e670` 的输入重跑：HLR `.docx` 为故障注入工具产物，15 个 zip 条目中 14 个条目名是 `word\document.xml` 式反斜杠写法；上传后跑正向完整性分析（真实或 MOCK 模式均可）。
+2. 本机直接对输入副本跑 `adapter._normalize_upload_inputs` 验证：修复前 `needs_normalization=True`，修复后 `False`，且 `word/document.xml` 逐字节一致。
+3. `cd backend && python -m pytest tests/test_forward_adapter.py tests/test_forward_execution.py tests/test_zip_entry_normalize.py -q`（新增 4 条用例：就地归一化、管线前归一化、judge 全挂清晰失败、0 信号清晰失败）。
+
+#### 原因分析
+
+1. **直接原因**：ZIP/OPC 规范要求条目名用 `/` 分隔，第三方工具产物写成 `\`。CPython `zipfile.ZipInfo.__init__` 只在 `os.sep != "/"` 时把反斜杠归一为斜杠（3.10/3.11 代码相同）——**Windows（os.sep='\'）上被静默归一、一切正常；Linux 容器（os.sep='/'）不归一**，按 `word/document.xml` 查部件直接 KeyError。同一文件（字节完全一致）在 Windows 上「碰巧能读」、进容器必炸；本机已在 `os.sep='/'` 模拟下复现，确认**不是 Python 版本差异**。
+2. **误导性报错的成因**：runner 在 judge 全挂 / 0 信号时设计为「优雅跳过」报告并 exit 0；适配层放行后到产物收集阶段才失败，报「交付物缺失」——用户看不到真实原因（输入解析失败）。
+3. 反向链路已就同一类文件做过归一化（`app/v4/parsers/zip_entry_normalize.py`，纯 I/O 工具、零业务算法），正向链路此前未接入。
+
+#### 修复方案
+
+分两层，均不触碰 `backend/forward/` 原样代码树：
+
+1. **B｜上传包入口就地归一化**（`app/forward/adapter.py`）：新增 `_normalize_upload_inputs()`，`run_forward_job` 开头对 HLR / Publisher / Subscriber / 追溯表全部输入**复用反向组件** `ensure_standard_zip` 检测并重写非规范包。与反向用法的差异：反向把规范副本留在 `<目录>/_normalized/` 由调用方改指，但正向 runner 按「输入所在目录」扫描追溯表等配套文件（`run_integration.py` 的 src_dirs = pub/sub 父目录），改指子目录会**漏配配套文件**——故这里把规范副本**压回原位**（`os.replace` 同名同目录替换、清空后删 `_normalized/`）。任务输入目录是每题一份的 scratch 副本，就地替换不影响用户本机原件；已规范的包原样直通，重复调用幂等。命中时任务日志打 `[fix]` 行。另：覆盖已存在的原文件在 Windows 上偶发 `WinError 5`（目标刚被读过时，杀软/索引短暂持有句柄；实测「读后立即 replace 必失败、隔 1s 通过」，Linux 为原子 rename 无此问题），已加小步重试覆盖该窗口。
+2. **C｜judge 全挂 / 0 信号提前清晰失败**（`app/forward/execution.py`）：解析 runner 的 `✅ 多 judge 聚合完成：n/N` 与 `跳过：无聚合结果（0 个信号）` 两行；退出码检查后、产物收集前，命中 `0/N` 或 0 信号即抛 `ForwardRunError`，消息写明真实原因与常见排查方向（输入文件解析失败 / 模型服务不可用），不再让用户看到「交付物缺失」。
+
+#### 修改文件
+
+- `backend/app/forward/adapter.py`（新增 `_normalize_upload_inputs` / import / 调用点 / 重试）
+- `backend/app/forward/execution.py`（新增两行解析 + 清晰失败分支）
+- `backend/tests/test_forward_adapter.py`、`backend/tests/test_forward_execution.py`（新增 4 条用例）
+- `docs/architecture/current-architecture.md`（适配层 import 约束加唯一例外措辞）
+
+未改：`backend/forward/` 原样代码树；`app/v4/parsers/zip_entry_normalize.py` 原样复用。
+
+#### 验证方式
+
+```bash
+cd backend
+python -m pytest tests/test_forward_adapter.py tests/test_forward_execution.py \
+  tests/test_zip_entry_normalize.py -q
+python -m pytest tests/test_forward_adapter.py tests/test_forward_artifacts.py \
+  tests/test_forward_config_builder.py tests/test_forward_execution.py \
+  tests/test_forward_mock_server.py tests/test_forward_projects.py \
+  tests/test_forward_tree.py tests/test_api_forward_trace_params.py \
+  tests/test_api_mock_env_default.py tests/test_zip_entry_normalize.py -q
+```
+
+真实文件验证（本机，任务 `53f2e670` 输入副本）：修复前 15 条目 / 14 个反斜杠、`needs_normalization=True`；`_normalize_upload_inputs` 后 0 个反斜杠、`False`；位置与文件数不变、`_normalized/` 无残留；`word/document.xml` 修复前后逐字节一致（166329B）；同批 4 个 xlsx 输入均正常直通。
+
+#### 验证结果
+
+**已通过（本机，2026-10-10）**：上述两个测试选择全绿（26 passed；58 passed, 1 skipped——skip 为正向树守卫测试，源目录已移至仓库外自动跳过）；真实文件验证如上全绿；`python -m compileall` 变更模块通过。
+
+全量套件现状（`pytest tests/ -q --continue-on-collection-errors`）：172 passed / 5 failed / 1 skipped / 10 collection errors。**5 failed 与 10 errors 均为工作区既有状态、与本次改动无关**：5 failed 在 job 启动/取消语义与 `job_scheduler.py:155 except BaseException`，10 errors 为反向模块 `app.v4.reverse.*` 在本分支工作区缺失（仅剩 `__pycache__`）；以上失败测试均不 import forward（已逐一核实）。
+
+#### 遗留问题
+
+1. **需重建后端镜像** B/C 才在容器生效；验证时需**新建任务**（重新上传）——建议直接改用已生成的 `空气管理系统控制器控制通道控制软件高层需求规范_故障注入_fixed.docx`（容器内已验：0 个反斜杠条目、`document.xml` 166329B、python-docx 读出 17 表 / 38 段），失败任务 `53f2e670` 不要续跑（其输入目录里的坏文件仍在）。
+2. **故障注入工具源头未修**：生成该 docx 的工具用 `os.path.join` 拼 arcname，在 Windows 上产出反斜杠条目名。建议反馈改为显式 `"/".join`（或 `zipfile.write` 的 `arcname` 用正斜杠）。仓库外临时脚本 `V4/_fix_docx_backslash_names.py` 可批量修已有产物（Windows/Linux 检测与修复行为一致）。
+3. mock 全流程 E2E（B/C 端到端）本机未跑（用户叫停，脚本 `V4/_e2e_forward_v2.py` 备好），可并入下次 E2E 覆盖。

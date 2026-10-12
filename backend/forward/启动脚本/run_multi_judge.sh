@@ -5,7 +5,7 @@
 #
 # 作用:
 #   1. cd 到项目根目录（本脚本位于 启动脚本/ 子目录，上一级即项目根）
-#   2. 选择 Python 解释器（eoicd_integration venv，含依赖）
+#   2. 选择 Python 解释器（项目内 .venv，含依赖）
 #   3. 从本脚本同目录的 .env.multijudge 读取各 judge / arbitrator 的 API Key，
 #      以及可选的 AI_MODEL / BASE_URL（单 judge 风格：config 中 judge 省略 model/base_url
 #      或写 ${AI_MODEL}/${BASE_URL} 时，从本 .env 读取）。
@@ -15,8 +15,18 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
-# 1. Python 解释器
-PYTHON="${PYTHON:-C:/Users/zhaokl/.workbuddy/binaries/python/envs/eoicd_integration/Scripts/python.exe}"
+# 1. Python 解释器（需装 openpyxl/python-docx/requests）
+# 优先级：环境变量 PYTHON > 项目内 .venv > PATH 的 python
+#   → 拿到工程后只需建 .venv 并装依赖（见 requirements.txt），无需修改本脚本路径
+if [ -n "$PYTHON" ]; then
+  :
+elif [ -x ".venv/Scripts/python.exe" ]; then
+  PYTHON=".venv/Scripts/python.exe"
+elif [ -x ".venv/bin/python" ]; then
+  PYTHON=".venv/bin/python"
+else
+  PYTHON="python"
+fi
 [ -x "$PYTHON" ] || PYTHON="python"
 WINPY="$PYTHON"
 if command -v cygpath >/dev/null 2>&1 && [[ "$PYTHON" == *"/"* ]]; then

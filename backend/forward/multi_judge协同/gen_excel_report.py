@@ -7,7 +7,10 @@
 以及按问题类型（不一致 / 未落实 / 部分落实 / 已落实 / 覆盖缺口）拆分的分工作表，
 均可筛选、可排序。
 
-用法（在 正向检查集成 目录下，脚本已收拢到 multi_judge协同/ 子目录）：
+已接入 multi_judge_runner：聚合完成后由 runner 自动调用 generate_excel_report()
+生成同名 xlsx（与 Word 报告时间戳一致），manifest 的 excel_report 占位由此兑现。
+
+也可单独手动运行本脚本复现（在 正向检查集成 目录下，脚本已收拢到 multi_judge协同/ 子目录）：
     python multi_judge协同/gen_excel_report.py
 产物：output/EoICD至HLR正向一致性多模型共识分析报告_<YYYYMMDD_HHMM>.xlsx
       文件名时间戳与同次 run 的 Word 报告一致（取自 summary.json 的 run_timestamp），便于配对。
@@ -18,9 +21,15 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
+# openpyxl 延迟可用性探测：缺包时本模块仍可安全 import（runner 不会因缺 Excel 依赖而崩溃），
+# generate_excel_report 在调用时优雅跳过。
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    _OPENPYXL_OK = True
+except ImportError:
+    _OPENPYXL_OK = False
+    Workbook = None  # type: ignore
 
 from multi_judge_aggregate import _consensus_label
 from multi_judge_report import (
@@ -50,11 +59,15 @@ _GREEN = "FF008000"
 _YELLOW = "FFCC8800"
 _RED = "FFCC0000"
 _GRAY = "FF808080"
-_HEADER_FILL = PatternFill("solid", fgColor="FFD9E2F3")
-_TITLE_FONT = Font(bold=True, size=14)
-_HEAD_FONT = Font(bold=True, color="FF1F3864")
-_WRAP = Alignment(vertical="top", wrap_text=True)
-_TOP = Alignment(vertical="top")
+# 以下样式对象依赖 openpyxl；缺包时置 None（generate_excel_report 会先判 _OPENPYXL_OK 提前返回，不会用到）
+if _OPENPYXL_OK:
+    _HEADER_FILL = PatternFill("solid", fgColor="FFD9E2F3")
+    _TITLE_FONT = Font(bold=True, size=14)
+    _HEAD_FONT = Font(bold=True, color="FF1F3864")
+    _WRAP = Alignment(vertical="top", wrap_text=True)
+    _TOP = Alignment(vertical="top")
+else:
+    _HEADER_FILL = _TITLE_FONT = _HEAD_FONT = _WRAP = _TOP = None
 
 
 def _star_font(star: int) -> str:
@@ -227,9 +240,18 @@ def sheet_detail(wb, agg: dict, summary: dict, title="汇总页", filter_verdict
     return ws
 
 
-def main():
-    agg = json.loads(AGG.read_text(encoding="utf-8"))
-    summary = json.loads(SUM.read_text(encoding="utf-8"))
+def generate_excel_report(agg, summary, output_path):
+    """生成 Excel 共识报告（与 Word 报告同源，可筛选/排序）。
+
+    入参 agg/summary 为内存对象（由 runner 直接传入），不再从磁盘二次读取。
+    缺 openpyxl 或无聚合结果时优雅返回 None，不影响主流程。
+    """
+    if not _OPENPYXL_OK:
+        print("  [Excel报告] 跳过：未安装 openpyxl（pip install openpyxl）")
+        return None
+    if not agg:
+        print("  [Excel报告] 跳过：无聚合结果（0 个信号）")
+        return None
 
     wb = Workbook()
     sheet_summary_block(wb, summary)
@@ -241,14 +263,24 @@ def main():
         if grouped.get(v):
             sheet_detail(wb, agg, summary, title=v, filter_verdict=v)
 
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(str(output_path))
+    print(f"  [Excel报告] 已写出: {output_path}（{summary.get('total', 0)} 个信号）")
+    return wb
+
+
+def main():
+    agg = json.loads(AGG.read_text(encoding="utf-8"))
+    summary = json.loads(SUM.read_text(encoding="utf-8"))
+
     # 复用同次 run 的时间戳（runner 已写入 summary.json）；缺失则回退到当前时间
     run_ts = (summary or {}).get("run_timestamp") or datetime.now().strftime("%Y%m%d_%H%M")
     out_path = HERE / "output" / f"{REPORT_STEM}_{run_ts}.xlsx"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(str(out_path))
-    print(f"✅ Excel 已写出: {out_path}")
-    print(f"   工作表: {wb.sheetnames}")
-    print(f"   明细信号数: {summary.get('total', 0)}")
+    wb = generate_excel_report(agg, summary, out_path)
+    if wb is not None:
+        print(f"   工作表: {wb.sheetnames}")
+        print(f"   明细信号数: {summary.get('total', 0)}")
 
 
 if __name__ == "__main__":

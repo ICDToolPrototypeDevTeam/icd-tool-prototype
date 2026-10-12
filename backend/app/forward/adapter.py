@@ -7,15 +7,19 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from app.forward import artifacts, config_builder, projects, root
 from app.forward.config_builder import write_config
 from app.forward.execution import run_multi_judge
 from app.forward.mock_server import ensure_mock_server
 from app.job_manager import Job, JobStatus
+# 非规范 OOXML 包归一化：纯 I/O 工具（零业务算法，非 app.v4 业务模块）——
+# 反向 BUG-20260923-001 同款组件，正向按 BUG-20261010-001 复用
+from app.v4.parsers.zip_entry_normalize import ensure_standard_zip
 
 # 单 judge 软预算（秒；透传 --judge-timeout）
 _JUDGE_TIMEOUT_ENV = "FORWARD_JUDGE_TIMEOUT"
@@ -52,10 +56,55 @@ def _total_timeout() -> Optional[float]:
     return value if value > 0 else None
 
 
+def _normalize_upload_inputs(paths: Iterable[Optional[Path]]) -> list[str]:
+    """把非规范 OOXML 上传包（zip 条目名含反斜杠，如第三方 Office 重存件）就地归一化。
+
+    复用反向同款组件（app/v4/parsers/zip_entry_normalize，BUG-20260923-001）。该组件
+    默认把规范副本写到 <目录>/_normalized/ 交由调用方改指；但正向 runner 按「输入所在
+    目录」扫描追溯表等配套文件（backend/forward/run_integration.py 的 src_dirs =
+    pub/sub 父目录），输入路径改指子目录会漏配配套文件——故这里把规范副本压回原位
+    （同名同目录替换）。任务输入目录是每题一份的 scratch 副本，就地替换不影响用户
+    本机原件；已规范的包原样直通，重复调用幂等。返回被归一化的文件名（空 = 未命中）。
+    """
+    fixed: list[str] = []
+    for raw in paths:
+        if not raw:
+            continue
+        path = Path(raw)
+        norm_path, changed = ensure_standard_zip(path)
+        if not changed:
+            continue
+        # 覆盖已存在的原文件：Windows 上目标刚被读过时，杀软/索引会短暂持有句柄，
+        # replace 偶发 WinError 5（实测：读后立即 replace 必失败，隔 1s 即通过）；
+        # Linux 是原子 rename 无此问题。小步重试覆盖该窗口。
+        for attempt in range(5):
+            try:
+                os.replace(norm_path, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.2)
+        try:
+            norm_path.parent.rmdir()  # _normalized/ 已清空则顺手移除
+        except OSError:
+            pass
+        fixed.append(path.name)
+    return fixed
+
+
 def run_forward_job(job: Job, job_dir: Path, params: ForwardJobParams, *,
                     forward_root: Optional[Path] = None) -> None:
     """跑一次正向多 judge 分析；成功写 job.result 并置 COMPLETED，失败抛异常。"""
     src_root = Path(forward_root) if forward_root is not None else root.FORWARD_ROOT
+
+    # —— 上传包归一化：非规范 OOXML（zip 条目名含反斜杠，Linux 上读不出部件）就地
+    #    修复后再进流程；不修的话各 judge 会在解析输入时全挂、最终报误导性错误 ——
+    fixed_inputs = _normalize_upload_inputs(
+        (params.hlr_path, params.publisher_path, params.subscriber_path, *params.trace_files))
+    if fixed_inputs:
+        print(f"  [fix] 非规范 OOXML 上传包已归一化（zip 条目名含反斜杠）："
+              f"{'、'.join(fixed_inputs)}")
 
     # —— 系统类型：显式选择优先，否则按上传文件名自动识别（失败即任务失败） ——
     filenames = [p.name for p in (params.hlr_path, params.publisher_path,
@@ -90,7 +139,7 @@ def run_forward_job(job: Job, job_dir: Path, params: ForwardJobParams, *,
         judge_timeout=_env_int(_JUDGE_TIMEOUT_ENV, 3600),
         timeout=_total_timeout(), env_extra=child_env,
     )
-    # —— Excel 附件（runner 不生成；由正向自带脚本读 runs 工作区产出） ——
+    # —— Excel 附件兜底（V2 起 runner 已自动生成；此处重跑自带脚本，同名覆盖写） ——
     artifacts.run_excel_report(fwd)
 
     # —— 产物收集 + 汇总映射 + 快照落盘（jobs.py 重启后按快照反读） ——

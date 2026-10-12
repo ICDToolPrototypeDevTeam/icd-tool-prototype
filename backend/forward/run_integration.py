@@ -118,12 +118,6 @@ def run_cmd(cmd: list[str], desc: str, cwd: Path | str | None = None) -> float:
     return elapsed
 
 
-def copy_or_skip(src: Path, dst: Path) -> None:
-    """复制文件；源不存在时静默跳过（用于可选映射文件）。"""
-    if src.exists():
-        shutil.copyfile(src, dst)
-
-
 def _is_safe_to_clean(path: Path) -> bool:
     """只允许清理位于 BASE_DIR 下、名称符合预期的工作目录，避免误删。"""
     try:

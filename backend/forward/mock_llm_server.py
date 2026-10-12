@@ -17,7 +17,6 @@
 import json
 import hashlib
 import re
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 8731
