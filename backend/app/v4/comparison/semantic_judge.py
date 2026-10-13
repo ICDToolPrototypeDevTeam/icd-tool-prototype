@@ -121,7 +121,7 @@ def _append_bit_assembly_derivation(
         entries = _dedupe_coded_fields(matched_profiles, offset, size)
         if entries:
             line += (
-                f"；该位置对应 ICD 字段 {entries[0][0]}"
+                f"；该位置对应 EoICD 字段 {entries[0][0]}"
                 f"（offset={offset}, size={size}）"
             )
             codedsets = [entries[0][1]]
@@ -152,7 +152,7 @@ def _append_bit_range_derivation(parts: list[str], hlr_content: str) -> None:
     for a in extract_bit_range_assertions(hlr_content):
         lo, hi = a["lo"], a["hi"]
         parts.append(
-            f"- [推导] 位段声明：{a['text']} ⇒ 英文 bitN 与 ICD "
+            f"- [推导] 位段声明：{a['text']} ⇒ 英文 bitN 与 EoICD "
             f"BitOffsetWithinDS 同一基准（bitN 即 0 基 offset N，对应物理第 N+1 位）"
             f"⇒ 归一化位段 = offset {lo}~{hi}"
             f"（物理第{lo + 1}~{hi + 1}位，共{hi - lo + 1}位）；"
@@ -224,11 +224,11 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
 
     # ── ICD Block (benchmark) ──
     if case.matched_profiles:
-        parts.append("## EoICD 信号块（ICD 基准定义）")
-        parts.append("以下 ICD Block 是接口定义的权威来源。请以此为准，检查 HLR 中的落实情况。")
+        parts.append("## EoICD 信号块（基准定义）")
+        parts.append("以下 EoICD Block 是接口定义的权威来源。请以此为准，检查 SWHLR 中的落实情况。")
         parts.append("")
         for i, blk in enumerate(case.matched_profiles, 1):
-            parts.append(f"### ICD Block {i}: {blk.get('signal_family', 'N/A')}")
+            parts.append(f"### EoICD Block {i}: {blk.get('signal_family', 'N/A')}")
             parts.append(f"- Block Key: {blk.get('block_key', 'N/A')}")
             parts.append(f"- Label号: {blk.get('label', 'N/A')}")
             parts.append(f"- 方向: {blk.get('direction', 'N/A')}")
@@ -271,7 +271,7 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
             # 设置为1/0" → SDI=1) against ICD data alone.
             proto_fields = blk.get("word_protocol_fields", [])
             if proto_fields:
-                parts.append("- 同 word 协议字段（ICD 位偏移锚点，仅作比对上下文）:")
+                parts.append("- 同 word 协议字段（EoICD 位偏移锚点，仅作比对上下文）:")
                 for pf in proto_fields:
                     name = pf.get("name", "?")
                     attrs = pf.get("attrs", {})
@@ -284,19 +284,19 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
                     # 物理第1~8位、SDI offset=8 → 物理第9~10位），非外部规则。
                     parts.append(
                         "  位偏移约定：BitOffsetWithinDS 为 0 基偏移，offset=N 对应"
-                        "物理位第 N+1 位；HLR 正文的“第 N 位”/“第N到M位”是物理位号，"
-                        "判定时请换算为 0 基后与 ICD 位偏移比对。"
+                        "物理位第 N+1 位；SWHLR 正文的“第 N 位”/“第N到M位”是物理位号，"
+                        "判定时请换算为 0 基后与 EoICD 位偏移比对。"
                     )
                     anchor_note_added = True
 
             parts.append("")
     else:
-        parts.append("## EoICD 信号块（ICD 基准定义）")
-        parts.append("（无匹配 — 匹配层未在 EoICD 中找到对应该 HLR 的信号定义）")
+        parts.append("## EoICD 信号块（基准定义）")
+        parts.append("（无匹配 — 匹配层未在 EoICD 中找到对应该 SWHLR 的信号定义）")
         parts.append("")
 
     # ── HLR (implementation to check) ──
-    parts.append("## 软件高层需求 (HLR) — 待检查的软件实现")
+    parts.append("## 软件高层需求 (SWHLR) — 待检查的软件实现")
     parts.append(f"- ID: {hlr.get('hlr_id', 'N/A')}")
     parts.append(f"- 内容: {hlr.get('content', 'N/A')}")
     hlr_rationale = hlr.get('rationale', '')
@@ -308,7 +308,7 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
     # 误当 PARITY 的物理32位）。
     bit_decls = extract_bit_fields(hlr.get('content', ''))
     if bit_decls:
-        parts.append("- HLR 位声明（物理位号→0基换算，由正文提取，仅供比对）:")
+        parts.append("- SWHLR 位声明（物理位号→0基换算，由正文提取，仅供比对）:")
         for bf in bit_decls:
             parts.append(
                 f"  - {bf.get('text', '?')} → offset={bf.get('offset')}, size={bf.get('size')}"
@@ -326,8 +326,8 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
     parts.append(f"- 匹配类型: {mt}")
     if mt == "待确定":
         parts.append("- ⚠ 此匹配置信度较低（部分维度命中或分数偏低），请谨慎判断，confidence 适当下调")
-        parts.append("- 若能确认 ICD 要求已在 HLR 中落实或不一致，正常判断即可")
-    parts.append(f"- HLR Labels: {evidence.get('hlr_labels', [])}")
+        parts.append("- 若能确认 EoICD 要求已在 SWHLR 中落实或不一致，正常判断即可")
+    parts.append(f"- SWHLR Labels: {evidence.get('hlr_labels', [])}")
     parts.append(f"- 匹配 Block 数: {evidence.get('matched_block_count', 0)}")
 
     top_scores = evidence.get("top_scores", [])
@@ -341,10 +341,10 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
     parts.append("")
     mt = evidence.get("match_type", "")
     if mt == "待确定":
-        parts.append("请以 ICD 信号块为基准，判断其定义的接口要求是否在 HLR 中得到了落实。")
-        parts.append("注意：此匹配的可靠度较低，HLR 可能仅笼统引用了 Label 号而未描述具体信号，请据此调整 confidence。")
+        parts.append("请以 EoICD 信号块为基准，判断其定义的接口要求是否在 SWHLR 中得到了落实。")
+        parts.append("注意：此匹配的可靠度较低，SWHLR 可能仅笼统引用了 Label 号而未描述具体信号，请据此调整 confidence。")
     else:
-        parts.append("请以 ICD 信号块为基准，判断其定义的接口要求是否在 HLR 中得到了正确落实，并输出 JSON。")
+        parts.append("请以 EoICD 信号块为基准，判断其定义的接口要求是否在 SWHLR 中得到了正确落实，并输出 JSON。")
 
     return "\n".join(parts)
 

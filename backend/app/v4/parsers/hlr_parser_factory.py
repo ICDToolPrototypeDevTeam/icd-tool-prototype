@@ -47,7 +47,7 @@ def create_hlr_parser(
     if parser_cls is None:
         supported = ", ".join(sorted(_PARSER_REGISTRY.keys()))
         raise ValueError(
-            f"Unsupported HLR file format: {ext} (file: {source_path.name}). "
+            f"Unsupported SWHLR file format: {ext} (file: {source_path.name}). "
             f"Supported: {supported}"
         )
 

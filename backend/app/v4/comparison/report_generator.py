@@ -44,15 +44,15 @@ def generate_reverse_report(
 
     covered_count = status_counts.get("covered", 0)
     if covered_count:
-        key_findings.append(f"{covered_count} 条HLR与EoICD一致（接口定义正确落实）")
+        key_findings.append(f"{covered_count} 条SWHLR与EoICD一致（接口定义正确落实）")
 
     inconsistent_count = status_counts.get("inconsistent", 0)
     if inconsistent_count:
-        key_findings.append(f"{inconsistent_count} 条HLR存在与ICD不一致（方向/数据类型/范围/bit条件等）")
+        key_findings.append(f"{inconsistent_count} 条SWHLR存在与EoICD不一致（方向/数据类型/范围/bit条件等）")
 
     ai_review_count = status_counts.get("needs_review", 0)
     if ai_review_count:
-        key_findings.append(f"{ai_review_count} 条HLR经AI判定为待确认（ICD信息不足以验证HLR断言，或匹配Block与HLR无关，需人工确认）")
+        key_findings.append(f"{ai_review_count} 条SWHLR经AI判定为待确认（EoICD信息不足以验证SWHLR断言，或匹配Block与SWHLR无关，需人工确认）")
 
     # ── Match-layer 无匹配 (never sent to AI) ──
     no_match_judgments: list[ReverseJudgmentResult] = []
@@ -67,18 +67,18 @@ def generate_reverse_report(
                     matched_profiles_summary=[],
                     match_evidence={k: v for k, v in r.match_evidence.items() if k != "top_scores"},
                     coverage_status="无匹配",
-                    analysis=r.summary or "匹配层未在EoICD中找到对应的ICD信号定义，建议人工确认。",
+                    analysis=r.summary or "匹配层未在EoICD中找到对应的信号定义，建议人工确认。",
                     confidence=0.0,
                 ))
 
     no_match_count = len(no_match_judgments)
     if no_match_count:
-        key_findings.append(f"{no_match_count} 条HLR未匹配（匹配层未找到对应EoICD信号）")
+        key_findings.append(f"{no_match_count} 条SWHLR未匹配（匹配层未找到对应EoICD信号）")
 
     hlr_total = match_output.total_hlr if match_output else total
     summary = {
         "概述": (
-            f"对{hlr_total}条软件高层需求(HLR)进行EoICD反向覆盖分析（DeepSeek单模型裁判）: "
+            f"对{hlr_total}条软件高层需求(SWHLR)进行EoICD反向覆盖分析（DeepSeek单模型裁判）: "
             f"{total}条通过匹配层进入AI裁判, {no_match_count}条在匹配层未找到对应信号。"
         ),
         "判定分布": {
@@ -93,10 +93,10 @@ def generate_reverse_report(
         },
         "关键发现": key_findings,
         "建议": [
-            "一致的 HLR: EoICD定义的接口要求在HLR中正确落实，无需处理",
-            "不一致的 HLR: 逐一核对与ICD矛盾的具体属性（方向/bit/数据类型/范围等），确定以哪方为准",
-            "待确认的 HLR: ICD信息不足以验证HLR的接口断言，或所匹配Block与HLR无关，需人工逐条确认",
-            "未匹配的 HLR: 匹配层未在EoICD中找到对应信号，需检查HLR是否属于ICD接口范畴",
+            "一致的 SWHLR: EoICD定义的接口要求在SWHLR中正确落实，无需处理",
+            "不一致的 SWHLR: 逐一核对与EoICD矛盾的具体属性（方向/bit/数据类型/范围等），确定以哪方为准",
+            "待确认的 SWHLR: EoICD信息不足以验证SWHLR的接口断言，或所匹配Block与SWHLR无关，需人工逐条确认",
+            "未匹配的 SWHLR: 匹配层未在EoICD中找到对应信号，需检查SWHLR是否属于EoICD接口范畴",
         ],
     }
 
@@ -168,7 +168,7 @@ def generate_consensus_reverse_report(
                     signal_category=r.signal_category,
                     matched_profiles_summary=[],
                     coverage_status="无匹配",
-                    analysis=r.summary or "匹配层未在EoICD中找到对应的ICD信号定义，建议人工确认。",
+                    analysis=r.summary or "匹配层未在EoICD中找到对应的信号定义，建议人工确认。",
                     confidence=0.0,
                 ))
 
@@ -182,7 +182,7 @@ def generate_consensus_reverse_report(
         uncertain = sum(1 for p in pending_review if p["match_type"] == "待确定")
         no_match = sum(1 for p in pending_review if p["match_type"] == "无匹配")
         key_findings.append(
-            f"{len(pending_review)} 条HLR未进入AI裁判: "
+            f"{len(pending_review)} 条SWHLR未进入AI裁判: "
             f"{uncertain}条待确定, {no_match}条无匹配"
         )
     if covered:
@@ -203,7 +203,7 @@ def generate_consensus_reverse_report(
 
     summary = {
         "概述": (
-            f"对{hlr_total}条HLR进行多模型共识分析 (3 Agent裁判 + Review Agent复核): "
+            f"对{hlr_total}条SWHLR进行多模型共识分析 (3 Agent裁判 + Review Agent复核): "
             f"full={full_agree}, majority={majority_agree}, split={split_agree}, "
             f"平均星级={avg_stars:.1f}"
         ),

@@ -195,7 +195,7 @@ def _parse_hlr(
     When ``profile`` is ``None`` the registry's AMS default is used (so that
     pre-#63 callers get byte-identical output).
     """
-    print(f"Parsing HLR: {input_path}")
+    print(f"Parsing SWHLR: {input_path}")
     resolved = _resolve_profile(profile)
     # WPS 等第三方 Office 保存的包可能用反斜杠作条目名分隔符，Linux 上读不出部件
     # （见 parsers/zip_entry_normalize）。非规范包改用规范化副本解析；hook 也用它。
@@ -230,7 +230,7 @@ def _parse_hlr(
     print(f"  Requirements: {result.total_count}")
     print(f"  Glossary entries: {len(result.glossary)}")
     if rewritten:
-        print(f"  HLR preprocess: {rewritten} requirement(s) rewritten by profile hook")
+        print(f"  SWHLR preprocess: {rewritten} requirement(s) rewritten by profile hook")
     return result
 
 
@@ -352,9 +352,9 @@ def _match_reverse_with_trace(
     pre-#63 / pre-#74 code).
     """
     trace_index = build_trace_index(trace_dir, trace_cfg, profile=profile)
-    print(f"  Traced HLRs: {trace_index.total_hlrs_traced}")
+    print(f"  Traced SWHLRs: {trace_index.total_hlrs_traced}")
     print(f"  ERDs: {trace_index.total_erds}")
-    print(f"  ICD FullNames: {trace_index.total_icd_fullnames}")
+    print(f"  EoICD FullNames: {trace_index.total_icd_fullnames}")
     print(f"  Mapped to blocks: {trace_index.icd_mapped_to_blocks}")
     print(f"  Unmapped: {len(trace_index.icd_unmapped)}")
 
@@ -374,8 +374,8 @@ def _match_reverse_with_trace(
         else:
             group_b_hlrs.append(hlr)
 
-    print(f"  Group A (traceable): {len(group_a_hlrs)} HLRs")
-    print(f"  Group B (fallback):  {len(group_b_hlrs)} HLRs")
+    print(f"  Group A (traceable): {len(group_a_hlrs)} SWHLRs")
+    print(f"  Group B (fallback):  {len(group_b_hlrs)} SWHLRs")
     print(f"  Union traced block_keys: {len(all_traced_block_keys)}")
 
     group_a_ids = {h.requirement_id for h in group_a_hlrs}
@@ -400,7 +400,7 @@ def _match_reverse_with_trace(
                 ]
             total_filtered = sum(len(v) for v in per_hlr_filtered.values())
             print(
-                f"  Per-HLR filtered EoICD total: {total_filtered} / "
+                f"  Per-SWHLR filtered EoICD total: {total_filtered} / "
                 f"{len(eoicd_requirements)} entries"
             )
             result_a = match_reverse_per_hlr(
@@ -438,7 +438,7 @@ def _match_reverse_with_trace(
         }
         if fallback_ids:
             fallback_hlrs = [h for h in group_a_hlrs if h.requirement_id in fallback_ids]
-            print(f"  Prefilter fallback: {len(fallback_hlrs)} HLR(s) retrying on full EoICD")
+            print(f"  Prefilter fallback: {len(fallback_hlrs)} SWHLR(s) retrying on full EoICD")
             result_fb = match_reverse(
                 fallback_hlrs,
                 {k: v for k, v in hlr_labels.items() if k in fallback_ids},
@@ -990,7 +990,7 @@ def run_reverse_pipeline(
     raise_if_cancelled()
 
     if hlr.suffix == ".json":
-        print(f"  [skip] Using cached HLR JSON: {hlr}")
+        print(f"  [skip] Using cached SWHLR JSON: {hlr}")
         hlr_data = json.loads(hlr.read_text(encoding="utf-8"))
         hlr_out = HLROutput(**hlr_data)
     else:
@@ -1019,11 +1019,11 @@ def run_reverse_pipeline(
     # Step 2: HLR labeling
     print()
     print("=" * 50)
-    print("Step 2/6: HLR AI labeling")
+    print("Step 2/6: SWHLR AI labeling")
     print("=" * 50)
     clock.mark("Step 1/6: Parsing input files")
     raise_if_cancelled()
-    job.update(JobStatus.RUNNING, "Step 2/6: HLR AI labeling")
+    job.update(JobStatus.RUNNING, "Step 2/6: SWHLR AI labeling")
     labels_cache = output_dir / "hlr_labels.json"
     hlr_labels = label_hlrs(
         hlr_out.requirements,
@@ -1037,15 +1037,15 @@ def run_reverse_pipeline(
         hlr_labels,
         keywords=resolved_profile.classifier_keywords,
     )
-    print(f"  HLRs labeled: {len(hlr_labels)}")
+    print(f"  SWHLRs labeled: {len(hlr_labels)}")
 
-    clock.mark("Step 2/6: HLR AI labeling")
+    clock.mark("Step 2/6: SWHLR AI labeling")
     raise_if_cancelled()
     # Step 3: Reverse match
     print()
     print("=" * 50)
     if trace_dir:
-        print(f"Step 3/6: Traceability-filtered reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")
+        print(f"Step 3/6: Traceability-filtered reverse matching ({len(hlr_out.requirements)} SWHLR → {len(eoicd_out.requirements)} EoICD)")
         print("=" * 50)
         job.update(JobStatus.RUNNING, "Step 3/6: Traceability-filtered reverse matching")
         match_result = _match_reverse_with_trace(
@@ -1057,7 +1057,7 @@ def run_reverse_pipeline(
             profile=resolved_profile,
         )
     else:
-        print(f"Step 3/6: Reverse matching ({len(hlr_out.requirements)} HLR → {len(eoicd_out.requirements)} EoICD)")
+        print(f"Step 3/6: Reverse matching ({len(hlr_out.requirements)} SWHLR → {len(eoicd_out.requirements)} EoICD)")
         print("=" * 50)
         job.update(JobStatus.RUNNING, "Step 3/6: Reverse matching")
         match_result = match_reverse(
@@ -1079,9 +1079,9 @@ def run_reverse_pipeline(
     if refine:
         print()
         print("=" * 50)
-        print("Refine: 过滤无关 ICD Block + 精确补采 + 同义词补采")
+        print("Refine: 过滤无关 EoICD Block + 精确补采 + 同义词补采")
         print("=" * 50)
-        job.update(JobStatus.RUNNING, "Refine: 过滤无关 ICD Block + 补采")
+        job.update(JobStatus.RUNNING, "Refine: 过滤无关 EoICD Block + 补采")
         from app.v4.refine.runner import run_pipeline_refined_stage
         match_result, cases = run_pipeline_refined_stage(
             eoicd_out=eoicd_out,
