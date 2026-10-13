@@ -54,10 +54,10 @@ _STATUS_LABELS = {
 }
 
 _STATUS_DESCRIPTIONS = [
-    ("已覆盖", "SWHLR 中明确声明了与 ICD 定义一致的技术内容，ICD 接口要求在 SWHLR 中正确落实。"),
-    ("不一致", "SWHLR 中的声明与 ICD 定义存在矛盾，如数据类型、位含义、方向、数值范围等不一致，需要修正。"),
-    ("需确认", "SWHLR 与 ICD 之间存在模糊或不确定的对应关系，或匹配的 ICD Block 与 SWHLR 内容不直接相关，需人工审查。"),
-    ("无匹配", "匹配阶段未在 EoICD 中找到对应的 ICD 信号定义，可能为 SWHLR 超出 ICD 范围的内容，需人工确认。"),
+    ("已覆盖", "SWHLR 中明确声明了与 EoICD 定义一致的技术内容，EoICD 接口要求在 SWHLR 中正确落实。"),
+    ("不一致", "SWHLR 中的声明与 EoICD 定义存在矛盾，如数据类型、位含义、方向、数值范围等不一致，需要修正。"),
+    ("需确认", "SWHLR 与 EoICD 之间存在模糊或不确定的对应关系，或匹配的 EoICD Block 与 SWHLR 内容不直接相关，需人工审查。"),
+    ("无匹配", "匹配阶段未在 EoICD 中找到对应的信号定义，可能为 SWHLR 超出 EoICD 范围的内容，需人工确认。"),
 ]
 
 _MODEL_DISPLAY = {
@@ -218,7 +218,7 @@ def generate_consistency_report(
     doc.add_heading("二、分析明细", level=2)
     doc.add_paragraph(f"共 {total} 条记录（仅展示 {model_display} 裁判结果）")
 
-    detail_headers = ["序号", "SWHLR ID", "判定结果", "ICD Block", "分析摘要", "置信度"]
+    detail_headers = ["序号", "SWHLR ID", "判定结果", "EoICD Block", "分析摘要", "置信度"]
     dt = doc.add_table(rows=1, cols=len(detail_headers))
     dt.style = "Table Grid"
     dt.alignment = WD_TABLE_ALIGNMENT.CENTER

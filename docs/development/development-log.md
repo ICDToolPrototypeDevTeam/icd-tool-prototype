@@ -3718,3 +3718,38 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
 - **验证方式与结果**：1. `verify_llm_timeout_env.py` 15 项全过（未配置回落 120 / 配置 240 生效 / 显式参数优先 / 非法值 abc、0、-5、空回落 / 截断链 [120,240]、[240,480]）（**已验证**）；2. `verify_llm_timeout_live.py` 8 项全过（真实 dotenv 链实测客户端构造超时与 `requests.post` 实收一致=240；本地 socket 层 2s 超时如期 ReadTimeout @2.03s、8s 正常完成 @2.50s）（**已验证**）；3. `verify_timeout_conflict.py` — 模板组合 120/240 与 CASE=300：关系断言全过（120<300、240≥120、300≥120）；仿真 S1 全适配 / S2 窗口内自身超时归类 TIMEOUT（非 adaptive、无 drain）@1.20s / S3 超窗转兜底占位并交 drain、3.41s 返回 / S4 不足 2 家按上限 3.01s 兜底 —— ALL PASS (2 notes)（**已验证**）；4. 全程无真实 provider 调用。
 - **遗留问题**：1. 需**重建后端镜像**才在服务器生效；2. 服务器采用 240 的额外等待需把 `DEGRADATION_EXTRA_WAIT=240` 写进 `backend/.env`（普通用户操作，重启容器生效）；不写则维持 120/120 历史行为；3. 内网慢网关场景的改善效果待部署后观察（如需再调大 `LLM_TIMEOUT`，保持小于 `DEGRADATION_CASE_TIMEOUT`）。
 - **下一步建议**：1) 提交本批改动；2) 出包时核对 `更新说明.md` 的 `.env` 模板差异；3) 部署后观察是否仍有 ReadTimeout。
+
+## 2026-10-12 反向管线术语规范化：HLR→SWHLR、独立 ICD→EoICD（AI 输出链路与剩余用户可见文案）（分支 feat/issue-129-packaging-step-split）
+
+- **背景（用户提出）**：严格规范表述——提及的 HLR 应为 SWHLR、ICD 应为 EoICD。反向报告此前已改了一部分（报告标题、「SWHLR ID」列名），但 **AI 输出链路（提示词与模型复述内容）尚未规范**：模型沿用语料复述术语，报告「分析摘要」「不一致属性」等列会继续出现「ICD 定义 19 Bits, HLR 声明 17 Bits」类不规范表述（共识提示词示例 JSON 原文即如此，会被模型照搬进报告）。
+- **范围决策（用户 AskUserQuestion 确认）**：①只改反向范围（HLR→SWHLR；所有独立 ICD 短语→EoICD，含 "ICD Block"→"EoICD Block"），正向（完整性分析）整树与正向交付物文件名（`EoICD至HLR正向完整性分析报告.docx`/`明细.xlsx`）不动，避免影响其他开发线；②独立 ICD 一律改 EoICD；③项目名（ICD工具平台 / ICD Tool Platform / ICD 工具诊断信息 / ICD工具原型）保留；④代码标识符 / JSON 字段名 / 注释 / docstring / CLI 与日志输出 / 输入 Excel 表头与追溯表文件名关键词保留。
+- **完成内容**：
+  1. 提示词 4 个：`prompts/{consensus.md, reverse_judge.md, re_review.md, reverse_judge_rpdu.md}` 全量替换（并消除 re_review.md 内一处「EoICD ICD Block」重复写）；`re_review.md` 系统提示词规则真空属独立问题，本次不动。
+  2. 提示词拼装字符串：`comparison/semantic_judge.py`（信号块标题/匹配证据/位偏移约定/结尾指令 + 两条位推导行「对应 EoICD 字段」「与 EoICD BitOffsetWithinDS」）、`comparison/re_review.py`（段标题/块标题/反思引导）、`matching/hlr_labeler.py`（SYSTEM_PROMPT_TEMPLATE 首两段）、`matching/reverse_matcher.py`（💡协议级提示行、`summary="SWHLR未标注"`；`_LISTED_SIGNAL_NOISE` 为匹配逻辑不动）。
+  3. 报告与 JSON 文案：`comparison/report_generator.py`（关键发现/概述/建议/无匹配兜底分析）、`doc_generators/word_generator.py`（四态术语表 + 明细表列名 `ICD Block`→`EoICD Block`）、`doc_generators/consensus_word_generator.py`（无匹配建议行 + 明细表列名）、`llm/mock_llm.py`（三条 mock 分析文案）。
+  4. 前端反向页 5 文件：`CorrectnessPage.tsx`、`CorrectnessFileUpload.tsx`（副标题/区块标题/按钮）、`CorrectnessResultView.tsx`（统计卡「SWHLR 需求」）、`LandingPage.tsx`（正确性分析卡片描述）、`ProcessingView.tsx`（STAGE_LABELS `label:'SWHLR标注'`）。
+  5. 复查补遗（2026-10-12 用户复查「是否改全/误改」后补）：`api/v4/coverage.py` auto-detect 失败的用户可见报错「无法识别 HLR 文件所属系统类型，请手动选择系统类型上传。」（CHANGELOG 2026-10-08 记载网页可见）系审计脚本盲区（路径过滤把 `app/api/v4` 误跳过）致漏改 → 改为 SWHLR 版；`v4/profiles/rpdu/README.md` 对该消息的引用同步改（该 README 其余 HLR/ICD 均为输入文件结构/内部函数/日志示例类技术描述，按范围保留）。审计脚本已补扫 `app/api/v4`。
+- **修改文件**：上列 4 提示词 + 8 Python + 5 TSX（前端）+ `backend/app/api/v4/coverage.py`、`backend/app/v4/profiles/rpdu/README.md`（复查补遗），`CHANGELOG.md`、本文档；验证脚本 `backend/tests/verify_terminology_e2e.py`、`tests/audit_terminology.py`（tests/ 未跟踪）；同步更新既有本地脚本 `verify_sdi_derivation.py` / `verify_sdi_realdata.py` / `verify_range_derivation.py` 的旧术语断言（三处 `ICD 字段`/`与 ICD` → `EoICD`）。
+- **验证方式与结果**：
+  1. `python -m py_compile` 8 个改动 Python 文件 —— 全部通过（**已验证**）。
+  2. `tests/verify_terminology_e2e.py`（USE_MOCK_LLM=1，job 37fb82f0 真实输入、预置真实 hlr_labels.json）：Part A 直接断言 AI 可见构建器（labeler 系统提示 / reverse user prompt 四形态含位赋值与位范围推导触发 / re_review 两种）无裸术语、标题规范化 —— 18 项全过；Part B 管线跑两遍 19s/19s、无 errors、产物齐全（4 份 docx）、二跑 llm_cache 21→21 行命中缓存，产物审计（multi_judge 9 条新 mock 文案落盘 / consensus / reverse_report / 4 份 docx 全篇含表头 `EoICD Block`）无裸术语 —— 全过，VERIFY_OK（**已验证**，全程 mock 无真实 provider 调用）。
+  3. `tests/audit_terminology.py`（AST 扫描非 docstring 字符串常量 + prompts/*.md + 前端 src，正则 `(?<![A-Za-z0-9_])(HLR|ICD)(?![A-Za-z0-9_])`，自动排除注释与 ID 形 `_HLR_`）：4 个提示词 0 残留；v4 代码 23 处残留全部为 CLI/日志/进度层（pipeline「Step 2/6: HLR AI labeling」等）与匹配逻辑集合（`_LISTED_SIGNAL_NOISE`）、追溯表文件名关键词（`设备需求与系统ICD追溯表.xlsx`）——均在既定范围边界内保留；前端 11 处为项目名（App.tsx/ErrorDiagnostics/LandingPage）与正向 Completeness 页文案、JSX 注释、正向阶段标签（ProcessingView 正向 8 步组 `identity_index`）——全部符合范围决策（**已验证**）。
+  4. 前端 `npm run build`（tsc + vite）—— 通过（**已验证**）。
+  5. 复查重跑（补扫 `app/api/v4` 后）：审计脚本范围残留 37 处 = `app/v4` 代码 23 处（CLI 7 / 日志进度 13 / 匹配逻辑集 1 / 输入文件名 1 / 内部解析异常 1）+ `app/api/v4` 3 处（`coverage.py:106` 不可达内部守卫英文消息、`runner.py:637/638` 正向交付物文件名）+ 前端 11 处（项目名 4 / 正向页 4 / 注释 2 / 正向阶段标签 1）；另补扫非 v4 app 树 4 处（正向树 3 / 项目名 1）。全仓 41 处逐处核对均属锁定范围边界（CLI/日志/进度/输入文件名/正向树/项目名/注释），无用户可见反向文案遗漏；`py_compile` 复查补遗文件通过（**已验证**）。
+- **缓存影响**：llm_cache key 含完整提示词载荷 → 修改后**进行中任务**的裁判/共识/复查缓存自然失效并重判（期望行为）；历史任务输出不回溯；无需升 CACHE_VERSION。
+- **遗留问题**：1. 需**重建后端镜像 / 覆盖前端产物（frontend/dist）**才在服务器生效；2. `re_review.md` 系统提示词不含判定规则（此前复盘环节翻转正确判断的根因之一）——独立问题，另行处理；3. 真实 provider 下的输出措辞规范效果（模型是否复述规范术语）待真实任务观察。
+- **下一步建议**：1) 提交本批改动；2) 出包时把前端 `dist` 与后端镜像一起更新，`更新说明.md` 注明本变更无部署层/权限变化；3) 部署后抽一份真实反向任务核对报告文案。
+
+## 2026-10-13 反向管线术语规范化续：任务进度行/日志面板/CLI 输出全量规范化（分支 task/issue-xxx-SWHLR-EoICD-term-replaced）
+
+- **背景（用户复查后追加决策）**：用户复查「HLR AI labeling 怎么没改」——该串经 `job.update` → API `message` → 前端 `ProcessingView` 渲染为**网页任务运行中的进度行**（此前被归入「CLI 与日志输出保留」边界未改）。用户确认「全量规范化」：日志/进度层文案一并改齐。
+- **完成内容**：
+  1. `pipeline.py` 17 处：步骤横幅/进度消息/统计行（`Step 2/6: SWHLR AI labeling`、`SWHLRs labeled`、`Traced SWHLRs`、`EoICD FullNames`、`Per-SWHLR filtered`、`SWHLR(s) retrying`、`Group A/B … SWHLRs`、`Step 3/6 … SWHLR →`、`Refine: 过滤无关 EoICD Block` 等，含复数 `HLRs` 形态），改后网页进度行/日志面板同步规范。
+  2. `cli.py` 9 处：命令输出与 `--help` 文本（`Parsing SWHLR`/`Loading SWHLR data`/`Labeling N SWHLRs`/`Parse SWHLR Word to JSON` 等）。
+  3. 其余 4 处：`hlr_labeler` 标注日志 `Labeling N SWHLRs`、`hlr_parser_factory` 不支持格式异常消息、`coverage._detect_system_type` 扩展名守卫消息、`runner._parse_progress` docstring 格式示例同步。
+  4. 审计脚本 `tests/audit_terminology.py` BARE 正则扩展为 `(HLRs?|ICDs?|EOICD)`，覆盖复数与大写形态（此前复数形态为其盲区）。
+- **安全性核实**：`_parse_progress`（`runner.py:225`）仅 regex 解析 `Step X/6` **数字前缀**，后缀为纯展示文本 → 进度契约不受影响；断点续跑不依赖 message（走缓存产物）；grep 核实无测试脚本依赖旧日志文本。
+- **验证方式与结果**：1. `py_compile` 6 个改动文件通过（**已验证**）；2. 审计重跑：脚本范围残留 16 处 = 匹配逻辑集合 1（`_LISTED_SIGNAL_NOISE`，改动会变匹配行为，保留）+ 输入追溯表文件名 1 + 正向交付物文件名 2 + 前端 11（项目名 4 / 正向页 4 / 注释 2 / 正向阶段标签 1），全部为既定边界，**0 用户可见反向文案**（**已验证**）；3. `tests/verify_terminology_e2e.py` 26 项全过、VERIFY_OK（双跑 19.3s/19.5s、缓存命中 21→21）（**已验证**，全程 mock 无真实 provider 调用）。
+- **缓存影响**：无（提示词未变，llm_cache 键不含日志文本；进行中任务不因本次改动重判）。
+- **遗留问题**：日志层改动需**重建后端镜像**生效（与 10-12 批次同批出包）；无其他遗留。
+- **下一步建议**：与 10-12 术语规范化批次一并提交；出包时核对 `更新说明.md` 无需注明部署层/权限变化。

@@ -132,18 +132,18 @@ export default function CorrectnessFileUpload({
           <div className="card__icon card__icon--blue"><FolderOpen size={20} /></div>
           <div>
             <div className="card__title">文件上传</div>
-            <div className="card__subtitle">上传 HLR Word、EoICD Pub/Sub Excel 与追溯表</div>
+            <div className="card__subtitle">上传 SWHLR Word、EoICD Pub/Sub Excel 与追溯表</div>
           </div>
         </div>
         <div className="card__body" style={{ height: 'calc(100% - 81px)', overflow: 'auto' }}>
           {/* HLR Word (required) */}
           <div className="file-section">
             <div className="file-section__title">
-              <FileText size={16} /> HLR Word 文件 <span className="file-section__required">*必填</span>
+              <FileText size={16} /> SWHLR Word 文件 <span className="file-section__required">*必填</span>
             </div>
             {renderFileItem(hlrWordFile, onHlrWordChange, <FileText size={18} />)}
             {!hlrWordFile &&
-              renderUploadButton('上传 HLR Word 文件', hlrWordInputRef, '.docx', (e) =>
+              renderUploadButton('上传 SWHLR Word 文件', hlrWordInputRef, '.docx', (e) =>
                 handleSingleFile(e, onHlrWordChange)
               )}
           </div>

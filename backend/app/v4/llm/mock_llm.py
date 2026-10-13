@@ -57,17 +57,17 @@ def _mock_reverse() -> dict:
     templates = {
         "covered": {
             "coverage_status": "covered",
-            "analysis": "Mock: ICD 接口要求在 HLR 中正确落实。",
+            "analysis": "Mock: EoICD 接口要求在 SWHLR 中正确落实。",
             "confidence": 0.92,
         },
         "inconsistent": {
             "coverage_status": "inconsistent",
-            "analysis": "Mock: HLR 与 ICD 定义存在矛盾（数据类型/方向等不一致）。",
+            "analysis": "Mock: SWHLR 与 EoICD 定义存在矛盾（数据类型/方向等不一致）。",
             "confidence": 0.80,
         },
         "needs_review": {
             "coverage_status": "needs_review",
-            "analysis": "Mock: 匹配的 ICD Block 与 HLR 不相关，或无法判断覆盖关系。",
+            "analysis": "Mock: 匹配的 EoICD Block 与 SWHLR 不相关，或无法判断覆盖关系。",
             "confidence": 0.40,
         },
     }

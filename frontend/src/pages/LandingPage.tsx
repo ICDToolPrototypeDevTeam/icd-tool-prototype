@@ -25,7 +25,7 @@ export default function LandingPage() {
           <div className="entry-card__icon"><Search size={40} /></div>
           <div className="entry-card__title">正确性分析</div>
           <div className="entry-card__desc">
-            由软件高层需求（HLR）反向比对 EoICD 条目，识别差异与不一致
+            由软件高层需求（SWHLR）反向比对 EoICD 条目，识别差异与不一致
           </div>
           <div className="entry-card__cta">进入 ›</div>
         </Link>

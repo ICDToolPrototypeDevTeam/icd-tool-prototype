@@ -62,7 +62,7 @@ def _parse_eoicd(
 
 def _parse_hlr(input_path: Path, output_path: Path) -> HLROutput:
     """Parse the HLR Word document."""
-    print(f"Parsing HLR: {input_path}")
+    print(f"Parsing SWHLR: {input_path}")
     parser = HLRWordParser(input_path)
     result: HLROutput = parser.parse()
 
@@ -101,11 +101,11 @@ def _cmd_label_hlr(args: argparse.Namespace) -> None:
     reg.load_all(_P(__file__).resolve().parent / "profiles")
     profile = reg.get_or_raise(args.controller_profile)
 
-    print("Loading HLR data...")
+    print("Loading SWHLR data...")
     hlr_data = json.loads(Path(args.hlr).read_text(encoding="utf-8"))
     hlr_out = HLROutput(**hlr_data)
 
-    print(f"Labeling {len(hlr_out.requirements)} HLRs...")
+    print(f"Labeling {len(hlr_out.requirements)} SWHLRs...")
     labels = label_hlrs(
         hlr_out.requirements,
         cache_path=None,  # force re-label when explicitly invoked
@@ -123,7 +123,7 @@ def _cmd_label_hlr(args: argparse.Namespace) -> None:
         encoding="utf-8",
     )
     print(f"  Output: {out_path}")
-    print(f"  Labeled: {len(labels)} HLRs")
+    print(f"  Labeled: {len(labels)} SWHLRs")
 
 
 def _cmd_reverse_match(args: argparse.Namespace) -> None:
@@ -161,7 +161,7 @@ def _cmd_reverse_match(args: argparse.Namespace) -> None:
     )
 
     print(
-        f"Reverse matching: {len(hlr_out.requirements)} HLR items "
+        f"Reverse matching: {len(hlr_out.requirements)} SWHLR items "
         f"→ {len(eoicd_out.requirements)} EoICD items"
     )
 
@@ -308,7 +308,7 @@ def main() -> None:
     p_eoicd.add_argument("--output", required=True)
 
     # parse-hlr
-    p_hlr = sub.add_parser("parse-hlr", help="Parse HLR Word to JSON")
+    p_hlr = sub.add_parser("parse-hlr", help="Parse SWHLR Word to JSON")
     p_hlr.add_argument("--input", required=True)
     p_hlr.add_argument("--output", required=True)
 
@@ -321,7 +321,7 @@ def main() -> None:
 
     # label-hlr
     p_label = sub.add_parser(
-        "label-hlr", help="AI pre-label HLR requirements"
+        "label-hlr", help="AI pre-label SWHLR requirements"
     )
     p_label.add_argument("--hlr", required=True)
     p_label.add_argument("--output", required=True)
@@ -334,7 +334,7 @@ def main() -> None:
 
     # reverse-match
     p_rev = sub.add_parser(
-        "reverse-match", help="Reverse matching: HLR → EoICD (4-path classification)"
+        "reverse-match", help="Reverse matching: SWHLR → EoICD (4-path classification)"
     )
     p_rev.add_argument("--hlr", required=True)
     p_rev.add_argument("--eoicd", required=True)
@@ -352,7 +352,7 @@ def main() -> None:
     p_ra = sub.add_parser(
         "reverse-analyze", help="Run full reverse pipeline (parse → match → judge → report)"
     )
-    p_ra.add_argument("--hlr", required=True, help="HLR Word document or parsed JSON")
+    p_ra.add_argument("--hlr", required=True, help="SWHLR Word document or parsed JSON")
     p_ra.add_argument("--publisher", default=None, help="Publisher Excel file")
     p_ra.add_argument("--subscriber", default=None, help="Subscriber Excel file")
     p_ra.add_argument("--eoicd", default=None, help="Optional: skip parsing, use cached EoICD JSON")

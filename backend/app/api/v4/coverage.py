@@ -103,7 +103,7 @@ def _load_hlr_tables(hlr_path: Path) -> list[list[list[str]]]:
             ]
         finally:
             wb.close()
-    raise ValueError(f"Unsupported HLR extension for auto-detect: {ext}")
+    raise ValueError(f"Unsupported SWHLR extension for auto-detect: {ext}")
 
 
 def _match_auto_detect(tables: list[list[list[str]]], auto_detect: dict) -> bool:
@@ -178,7 +178,7 @@ def _detect_system_type(hlr_path: Path) -> str:
             continue
         if _match_auto_detect(tables, ad):
             return pid
-    raise ValueError("无法识别 HLR 文件所属系统类型，请手动选择系统类型上传。")
+    raise ValueError("无法识别 SWHLR 文件所属系统类型，请手动选择系统类型上传。")
 
 
 @router.post('/coverage-analysis', response_model=V4AnalyzeResponse)
