@@ -8,6 +8,7 @@ supported via profiles/{ams,fgmc}/config.yaml.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from docx import Document  # type: ignore
@@ -53,6 +54,36 @@ def _build_field_map_index(
         for h in headers:
             index[h.strip().lower()] = std_field
     return index
+
+
+def _id_row_info(table, field_index: dict[str, str]) -> tuple[bool, str]:
+    """Return ``(has_id_header_row, id_value)`` for one table.
+
+    ``has_id_header_row`` is True when some row's col-0 header resolves via
+    the field map to std_field ``"id"`` (first such row wins).
+    ``id_value`` is that row's col-1 text ("" when absent or empty).
+
+    Used by the requirement-scan layer (D2) to apply ``id_pattern`` and to
+    distinguish "looks like a requirement table but id value is odd"
+    (strong signal) from "no id row header at all" (weak signal).
+    """
+    for r in range(len(table.rows)):
+        header = _cell_text(table, r, 0)
+        if not header:
+            continue
+        if field_index.get(header.lower()) == "id":
+            return True, _cell_text(table, r, 1)
+    return False, ""
+
+
+def _first_nonempty_cell(table) -> str:
+    """First non-empty cell text of a table (row-major). For warning samples."""
+    for row in table.rows:
+        for cell in row.cells:
+            t = cell.text.strip()
+            if t:
+                return t
+    return ""
 
 
 def _extract_requirement(
@@ -145,24 +176,54 @@ class HLRWordParser:
 
         glossary: list[HLRGlossaryEntry] = []
         requirements: list[HLRRequirement] = []
+        parse_warnings: list[dict] = []
 
         field_index = _build_field_map_index(self.cfg.field_map)
+        scan_cfg = self.cfg.requirement_scan
+        id_re = re.compile(scan_cfg.id_pattern) if scan_cfg.id_pattern else None
 
-        # Glossary: tables[cfg.glossary_table_index]
-        glossary_idx = self.cfg.glossary_table_index
-        if (
-            len(tables) > glossary_idx
-            and len(tables[glossary_idx].columns) >= 3
-            and self._looks_like_glossary(tables[glossary_idx])
-        ):
+        # Glossary (D1): located by config mode — ``index`` = legacy gate on
+        # ``glossary_table_index``; ``keyword_scan`` = first table (document
+        # order) whose first row hits ``glossary_header_keywords``.
+        glossary_idx = self._locate_glossary_table(tables)
+        if glossary_idx is not None:
             glossary = self._parse_glossary(tables[glossary_idx])
 
-        # Requirement tables: everything after the glossary table
-        for table in tables[glossary_idx + 1:]:
+        # Requirement tables (D2): scan range depends on mode.
+        #  - all_tables: whole document (positions fully decoupled);
+        #  - after_glossary: after the located glossary table; when the
+        #    glossary was NOT located, the legacy start point
+        #    (``glossary_table_index + 1``) is kept so default profiles are
+        #    byte-identical to the pre-change behaviour.
+        if scan_cfg.mode == "all_tables":
+            start = 0
+        elif glossary_idx is not None:
+            start = glossary_idx + 1
+        else:
+            start = self.cfg.glossary_table_index + 1
+
+        for idx in range(start, len(tables)):
+            table = tables[idx]
             # No row-count gate: a requirement table may be missing field rows
             # (e.g. no "实现方法" row).  _extract_requirement decides by the
             # semantic criterion instead (field_map "id" row, value non-empty).
             if len(table.columns) < 2:
+                continue
+            has_id_row, id_value = _id_row_info(table, field_index)
+            if id_re is not None and id_value and not id_re.match(id_value):
+                # 强信号：有 id 行头行、值非空但不匹配 → 拒收（D2 登记）。
+                if scan_cfg.register_skipped:
+                    parse_warnings.append(
+                        {
+                            "table_index": idx,
+                            "kind": "id_pattern_rejected",
+                            "reason": (
+                                f"id 值不匹配 id_pattern（{scan_cfg.id_pattern}）："
+                                f"{id_value!r}"
+                            ),
+                            "sample": id_value[:120],
+                        }
+                    )
                 continue
             req = _extract_requirement(
                 table,
@@ -175,13 +236,58 @@ class HLRWordParser:
             )
             if req is not None:
                 requirements.append(req)
+                continue
+            # 弱信号：恰 2 列、≥ warn_min_rows 行、无 id 行头行——形状近似
+            # 需求表却不是（如修订记录表）。宽表（目录表）与空表/小表不告警。
+            if (
+                scan_cfg.register_skipped
+                and not has_id_row
+                and len(table.columns) == 2
+                and len(table.rows) >= scan_cfg.warn_min_rows
+            ):
+                parse_warnings.append(
+                    {
+                        "table_index": idx,
+                        "kind": "no_requirement_fields",
+                        "reason": "2 列表无「需求ID」行头行，未识别为需求表",
+                        "sample": _first_nonempty_cell(table)[:120],
+                    }
+                )
 
         return HLROutput(
             source_file=self.source_name,
             total_count=len(requirements),
             requirements=requirements,
             glossary=glossary,
+            parse_warnings=parse_warnings,
         )
+
+    def _locate_glossary_table(self, tables) -> int | None:
+        """Locate the glossary table index, or None when absent.
+
+        mode="index" (legacy): the table at ``glossary_table_index``, parsed
+        only when it has >=3 columns and its first row hits
+        ``glossary_header_keywords`` (empty keywords = legacy always-parse).
+
+        mode="keyword_scan" (D1): first table in document order whose first
+        row hits the keywords (same >=3-column gate).  Missing → None →
+        empty glossary.  Locating the glossary no longer implies anything
+        about the requirement-scan range.
+        """
+        if self.cfg.glossary_locate.mode == "keyword_scan":
+            for idx in range(len(tables)):
+                tbl = tables[idx]
+                if len(tbl.columns) >= 3 and self._looks_like_glossary(tbl):
+                    return idx
+            return None
+        idx = self.cfg.glossary_table_index
+        if (
+            len(tables) > idx
+            and len(tables[idx].columns) >= 3
+            and self._looks_like_glossary(tables[idx])
+        ):
+            return idx
+        return None
 
     def _looks_like_glossary(self, table) -> bool:
         """Gate glossary parsing on a header keyword.

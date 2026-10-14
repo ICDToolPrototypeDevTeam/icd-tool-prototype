@@ -222,13 +222,26 @@ def _parse_hlr(
     result.source_file = _saved_source_file
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_text_atomic(
-        output_path, result.model_dump_json(indent=2, ensure_ascii=False)
-    )
+    # 解析登记（parse_warnings）仅在非空时写入 JSON：未启用登记维度或本次
+    # 无登记的 profile，产物与改动前逐字节一致。
+    if result.parse_warnings:
+        text = result.model_dump_json(indent=2, ensure_ascii=False)
+    else:
+        text = result.model_dump_json(
+            indent=2, ensure_ascii=False, exclude={"parse_warnings"}
+        )
+    _write_text_atomic(output_path, text)
 
     print(f"  Output: {output_path}")
     print(f"  Requirements: {result.total_count}")
     print(f"  Glossary entries: {len(result.glossary)}")
+    if result.parse_warnings:
+        kinds: dict[str, int] = {}
+        for w in result.parse_warnings:
+            kind = str(w.get("kind", "unknown"))
+            kinds[kind] = kinds.get(kind, 0) + 1
+        summary = ", ".join(f"{k}={v}" for k, v in kinds.items())
+        print(f"  HLR 解析登记：{len(result.parse_warnings)} 项（{summary}）")
     if rewritten:
         print(f"  HLR preprocess: {rewritten} requirement(s) rewritten by profile hook")
     return result

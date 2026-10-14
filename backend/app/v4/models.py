@@ -137,6 +137,12 @@ class HLROutput(BaseModel):
     total_count: int
     requirements: list[HLRRequirement]
     glossary: list[HLRGlossaryEntry]
+    # 解析登记（仅当 profile 打开 requirement_scan.register_skipped 或
+    # hook 侧解析降级时才可能非空；默认 []）。写盘方（pipeline._parse_hlr）
+    # 只在非空时写入 JSON，保证未启用登记的 profile 产物逐字节不变。
+    # 条目形如 {"table_index": 4, "kind": "no_requirement_fields",
+    #           "reason": "...", "sample": "..."}。
+    parse_warnings: list[dict] = Field(default_factory=list)
 
 
 # ============================================================

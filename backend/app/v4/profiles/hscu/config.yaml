@@ -28,6 +28,18 @@ hlr_parser:
       - "验证方法"
     implementation:
       - "实现方法"
+  # —— 整篇文档适配维度（默认关闭 = 现状行为；本 profile 显式打开）——
+  # 术语表定位：关键字全表扫描（不依赖固定表索引；未命中 → 术语表为空，
+  # 且不再与需求表扫描范围挂钩）。
+  glossary_locate:
+    mode: keyword_scan
+  # 需求表识别：全表扫描（需求表与目录表/术语表位置解耦）+ id 值形态校验
+  # （^FSF29 为 HSCU 需求 ID 前缀约定）+ 跳过登记（写入 parse_warnings）。
+  requirement_scan:
+    mode: all_tables
+    id_pattern: "^FSF29"
+    register_skipped: true
+    warn_min_rows: 5
 
 classifier_keywords:
   analog:
@@ -192,6 +204,21 @@ hlr_preprocess:
   auto_parse_hlr_table_0: true    # auto-detect LBL catalog table in HLR Word; covers 12 labels (DIS_00_SYS1, DIS_03_INFO, QTY_SYS2, QTY_SYS3, PRESS_SYS1-3, TEMP_SYS1-3, PWR_CMD_HSCU, CONFIG_RPT)
   apply_to_fields:
     - "content"
+  # —— 标签总览目录表识别/解析参数（表头语义列定位）——
+  # 表级：>=min_columns 列、>=min_rows 行、>=1 行同时含 LBL_* 与 octal 样值；
+  # 列级：表头行（前 3 行中角色命中最多的行）关键字 → 最左命中列；
+  # name/octal 为核心角色（命中则严格按列取值，否则退回行内扫描），
+  # sdi/ssm/signal 为增强角色（定位不了不猜，只进日志不进 parse_warnings）。
+  label_catalog:
+    min_columns: 3
+    min_rows: 2
+    header_keywords:
+      name: ["LABEL名称", "标签名称"]
+      octal: ["LABEL号", "标签号"]
+      sdi: ["SDI"]
+      ssm: ["SSM"]
+      signal: ["信号名称", "信号名"]
+    channel_suffix_pattern: "_R\\d+$"
   # extra_mappings act as fallback / override on top of auto-parsed ones.
   # The auto-parsed table covers the 4 known-to-HSCU labels plus 8 additional
   # ones; explicit mappings here are kept for safety / forward-compatibility.
