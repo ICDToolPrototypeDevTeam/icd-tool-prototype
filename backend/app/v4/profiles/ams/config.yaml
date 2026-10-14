@@ -9,7 +9,7 @@ hlr_parser:
   filter_non_requirement: false
   field_map:
     id: ["需求ID"]
-    content: ["需求中文"]
+    content: ["需求中文", "需求正文"]
     object_type: ["对象类型"]
     is_derived: ["是否衍生"]
     rationale: ["基本原理"]

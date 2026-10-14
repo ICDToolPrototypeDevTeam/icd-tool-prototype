@@ -37,6 +37,15 @@ def use_mock_llm() -> bool:
     return os.getenv("USE_MOCK_LLM", "0") == "1"
 
 
+def llm_timeout_seconds() -> int:
+    """单次请求超时（秒）：env LLM_TIMEOUT 供内网慢网关调大，未配置/非法值回落 120（历史行为）。"""
+    try:
+        value = int(os.getenv("LLM_TIMEOUT") or "120")
+    except ValueError:
+        return 120
+    return value if value > 0 else 120
+
+
 def get_llm(provider: str = "deepseek") -> LLMClient:
     """Create an LLM client by provider name.
 
@@ -47,6 +56,8 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
     if use_mock_llm():
         from app.v4.llm.mock_llm import MockLLMClient
         return MockLLMClient()
+
+    default_timeout = llm_timeout_seconds()
 
     if provider == "deepseek":
         from app.v4.llm.deepseek_client import DeepSeekClient
@@ -60,6 +71,7 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
             api_key=api_key,
             base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+            default_timeout=default_timeout,
         )
 
     if provider == "qwen":
@@ -74,6 +86,7 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
             api_key=api_key,
             base_url=os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
             model=os.getenv("QWEN_MODEL", "qwen3.6-35b-a3b"),
+            default_timeout=default_timeout,
         )
 
     if provider == "minimax":
@@ -88,6 +101,7 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
             api_key=api_key,
             base_url=os.getenv("MINIMAX_BASE_URL", "https://api.minimax.chat"),
             model=os.getenv("MINIMAX_MODEL", "MiniMax-M2.5"),
+            default_timeout=default_timeout,
         )
 
     raise ValueError(

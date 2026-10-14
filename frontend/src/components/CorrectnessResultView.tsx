@@ -155,7 +155,7 @@ export default function CorrectnessResultView({ data, jobId, onNewTask }: Props)
 
   const statCards = [
     { label: 'EoICD 条目', value: s.eoicd_count.toLocaleString(), Icon: Table2, color: '#1565c0' },
-    { label: 'HLR 需求', value: String(s.hlr_count), Icon: FileText, color: '#1565c0' },
+    { label: 'SWHLR 需求', value: String(s.hlr_count), Icon: FileText, color: '#1565c0' },
     ...Object.entries(STATUS_META).map(([key, meta]) => ({
       label: meta.label,
       value: String(statusDist[key] || 0),

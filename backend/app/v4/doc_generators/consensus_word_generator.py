@@ -394,7 +394,7 @@ def generate_consensus_report(
         f"{_star_str(1)} 星条目（三方分歧）：三方各持不同意见，建议人工逐条复核并做出最终判断。",
         f"{_star_str(1)} 星条目（仅单源）：仅 1 个模型有效（其余模型调用失败），结论仅供参考，建议人工确认。",
         f"{_star_str(1)} 星条目（全部失效）：全部模型调用失败，AI 结论不可用，必须人工复核。",
-        "无匹配 条目：匹配层未找到对应EoICD信号，需确认HLR是否属于ICD接口范畴。",
+        "无匹配 条目：匹配层未找到对应EoICD信号，需确认SWHLR是否属于EoICD接口范畴。",
     ]
     for s in suggestions:
         doc.add_paragraph(s, style="List Bullet")
@@ -408,7 +408,7 @@ def generate_consensus_report(
     doc.add_paragraph(f"共 {len(merged_all)} 条记录"
                       f"（{judged_count} 条已裁判 + {no_match_count} 条无匹配）")
 
-    headers = ["序号", "SWHLR ID", "判定", "ICD Block",
+    headers = ["序号", "SWHLR ID", "判定", "EoICD Block",
                "不一致属性", "分析摘要", "共识", "星级"]
 
     status_labels = {

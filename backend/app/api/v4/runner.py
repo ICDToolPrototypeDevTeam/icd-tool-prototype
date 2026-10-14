@@ -228,7 +228,7 @@ def _parse_progress(message: Optional[str]) -> dict:
     V4 pipeline.py 输出格式（反向 6 步 / 正向 8 步）：
       反向（correctness，6 步）：
       - "Step 1/6: Parsing input files"
-      - "Step 2/6: HLR AI labeling"
+      - "Step 2/6: SWHLR AI labeling"
       - "Step 3/6: Reverse matching ..."
       - "Step 4/6: Multi-agent judging ..."
       - "Step 5/6: Review agent consensus ..."

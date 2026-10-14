@@ -42,9 +42,9 @@ def _throttle_seconds() -> float:
     return 0.0 if use_mock_llm() else _LABEL_THROTTLE_S
 
 
-SYSTEM_PROMPT_TEMPLATE = """你是一个航空/车辆接口控制文档（ICD）的领域专家。你的任务是对一条软件高层需求（HLR）提取结构化标签，用于后续的匹配和检索。
+SYSTEM_PROMPT_TEMPLATE = """你是一个航空/车辆接口控制文档（EoICD）的领域专家。你的任务是对一条软件高层需求（SWHLR）提取结构化标签，用于后续的匹配和检索。
 
-对每条 HLR 需求正文，提取以下标签，输出严格 JSON：
+对每条 SWHLR 需求正文，提取以下标签，输出严格 JSON：
 
 {{
   "bus_types": ["涉及的通信总线/协议类型"],
@@ -258,7 +258,7 @@ def label_hlrs(
     # 注意：LLMCache 定义了 __len__，空缓存为假值，判空必须用 is not None
     model = resolve_model(LABEL_PROVIDER) if cache is not None else ""
 
-    print(f"  [label] Labeling {total} HLRs via {llm.model}...")
+    print(f"  [label] Labeling {total} SWHLRs via {llm.model}...")
     for idx, hlr in enumerate(hlr_reqs):
         # 每条一个取消检查点：单条标注就是一次秒级模型调用，检查只是一次 Event 读取，
         # 成本可忽略。原先按步长（每 20 条）落位时，十几条的批次在整批之内只有 idx=0

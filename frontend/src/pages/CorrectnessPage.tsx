@@ -47,7 +47,7 @@ export default function CorrectnessPage() {
 
   function handleStart() {
     if (!hlrWordFile) {
-      alert('请上传 HLR Word 文件')
+      alert('请上传 SWHLR Word 文件')
       return
     }
     if (!publisherFile && !subscriberFile) {

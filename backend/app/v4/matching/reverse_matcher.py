@@ -98,7 +98,7 @@ def _has_chinese(text: str) -> bool:
 
 # —— A429 协议层规则检测 ——
 _A429_PROTOCOL_HINT = (
-    "\U0001f4a1 HLR 描述的是 A429 协议级规则（如 SSM/PARITY 等字段位号定义），"
+    "\U0001f4a1 SWHLR 描述的是 A429 协议级规则（如 SSM/PARITY 等字段位号定义），"
     "不对应单个 EoICD Block。"
 )
 
@@ -1107,7 +1107,7 @@ def match_reverse(
                 hlr_rationale=hlr.rationale,
                 match_type="无匹配",
                 overall="unmatched",
-                summary="HLR未标注",
+                summary="SWHLR未标注",
             ))
             continue
 

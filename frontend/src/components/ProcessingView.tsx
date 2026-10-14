@@ -27,7 +27,7 @@ interface Props {
 
 export const STAGE_LABELS: Record<string, string> = {
   parse: '解析文件',
-  label: 'HLR标注',
+  label: 'SWHLR标注',
   match: '反向匹配',
   multi_judge: '多模型裁判',
   review: '共识复核',

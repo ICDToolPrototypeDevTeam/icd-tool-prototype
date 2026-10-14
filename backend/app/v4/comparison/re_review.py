@@ -110,7 +110,7 @@ def _build_re_review_user_prompt(
     hlr = case.hlr_requirement
 
     # ── HLR (implementation to check) ──
-    parts.append("## 软件高层需求 (HLR)")
+    parts.append("## 软件高层需求 (SWHLR)")
     parts.append(f"- ID: {hlr.get('hlr_id', 'N/A')}")
     parts.append(f"- 内容: {hlr.get('content', 'N/A')}")
     if hlr.get("rationale"):
@@ -123,9 +123,9 @@ def _build_re_review_user_prompt(
 
     # ── ICD Block (benchmark) ──
     if case.matched_profiles:
-        parts.append("## EoICD 信号块（ICD 基准定义）")
+        parts.append("## EoICD 信号块（基准定义）")
         for i, blk in enumerate(case.matched_profiles, 1):
-            parts.append(f"### ICD Block {i}: {blk.get('signal_family', 'N/A')}")
+            parts.append(f"### EoICD Block {i}: {blk.get('signal_family', 'N/A')}")
             merged = blk.get("merged_attributes", {}) or {}
             parts.append(f"- Label号: {merged.get('Label', 'N/A')}")
             parts.append(
@@ -167,7 +167,7 @@ def _build_re_review_user_prompt(
     # ── Reflection guidance (generic, no agent-specific failure analysis) ──
     parts.append("## 反思引导")
     parts.append(
-        "- 反思你之前的判断：是否存在对 HLR 属性的误解？是否忽略了 ICD 中的某些关键定义？"
+        "- 反思你之前的判断：是否存在对 SWHLR 属性的误解？是否忽略了 EoICD 中的某些关键定义？"
     )
     parts.append("- 判断 B 和 C 的分析中，是否有你没有考虑到的关键证据？")
     parts.append("- 三个判断识别的差异点分别是什么？核心分歧在哪里？")

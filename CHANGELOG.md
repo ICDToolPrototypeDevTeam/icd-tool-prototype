@@ -2,6 +2,21 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-10-12
+
+### Added
+
+- **反向管线单次模型请求超时外提为环境变量 `LLM_TIMEOUT`（默认 120s，不设置时行为与改前逐字一致）**：此前三家 provider 客户端的每次 HTTP 请求固定 120s 静默超时（非总时长上限；截断自适应重试以该值为基数自动 ×2）。内网网关较慢时会把「慢但活着」的调用误杀——标注环节曾偶发一次 `ReadTimeout`（该条 HLR 三轮重试全败即静默回退为空标注，虽有脚本分类器兜底但匹配信号减弱）。现在客户端经工厂统一读取 `LLM_TIMEOUT`（秒；未配置或非法值回落 120），启用只需在服务器 `backend/.env` 写一行（普通用户操作，无 sudo）；与 `DEGRADATION_CASE_TIMEOUT`（默认 300s）配合时应保持前者小于后者。该改动需**重建后端镜像**才生效。
+
+### Changed
+
+- **环境变量模板调整：`LLM_TIMEOUT` 由注释选项改为模板启用行（值 120，与代码回落一致，仅作调大入口），`DEGRADATION_EXTRA_WAIT` 模板默认 120 → 240**（配套上一条外提能力）。模板组合（120/240）与 `DEGRADATION_CASE_TIMEOUT=300` 经缩放仿真（真实 `_judge_case_with_timeout` 函数、生产值 ÷100、假 provider）验证无冲突：单请求超时（120s）先于 case 上限（300s）触发（挂起请求归类为 TIMEOUT 错误而非 unclassified 截杀）；第 2 个有效结果后落后者拿到两倍于单次请求的等待窗口（`EXTRA_WAIT` 240s = 2×120s），能在 case 内走到自己的超时；被 deadline 截杀的迟到结果由 drain（300s ≥ 120s）吸收一个完整尝试；截断自愈的单次翻倍值（2×120s=240s）仍小于 case 窗口，极端链条（首次请求耗满 + 翻倍重试）的溢出部分由 drain 兜底。**代码回落值不变**：服务器 `backend/.env` 未写这两行时仍为 120/120，行为与改前逐字一致；采用 240 的额外等待需在 `.env` 写对应一行（普通用户操作，无 sudo；重启容器生效）。
+- **反向管线术语规范化：`HLR` → `SWHLR`、独立 `ICD` → `EoICD`（AI 输出链路与剩余用户可见文案）**：此前反向报告标题与「SWHLR ID」列名已规范，但 **AI 提示词与模型输出链路**仍用 `HLR`/`ICD` —— 模型会沿用语料复述术语，报告「分析摘要」「不一致属性」等内容列（如 `"EoICD 定义 19 Bits"` 类示例经模型照搬为 `"ICD 定义 19 Bits"`）继续出现不规范表述。本次统一反向**全链路**（AI 可见 + 用户可见）：4 个提示词（`consensus.md` / `reverse_judge.md` / `re_review.md` / `reverse_judge_rpdu.md`）、提示词拼装字符串（`semantic_judge` / `re_review` / `hlr_labeler` / `reverse_matcher`）、报告与 JSON 文案（`report_generator` / `word_generator` / `consensus_word_generator` / `mock_llm`）、前端正确性分析页文案（5 个文件）；报告明细表列名 `ICD Block` → `EoICD Block`；任务进度行（如网页运行中的 `Step 2/6: SWHLR AI labeling`）/ 任务日志面板输出 / CLI 输出文案（`pipeline` / `cli` / `hlr_labeler` / `hlr_parser_factory` / `coverage`，含复数 `HLRs` 形态；经 2026-10-13 补充决策一并规范化）。**范围边界（保持原样）**：正向（完整性分析）整树与正向交付物文件名、项目名称（ICD工具平台 / ICD 工具诊断信息）、代码标识符 / JSON 字段名 / 注释 / docstring / 输入 Excel 文件名关键词 / 匹配逻辑集合（`_LISTED_SIGNAL_NOISE`）。提示词变更使**进行中任务**的裁判/共识/复查缓存键自然失效并重判（期望行为）；历史任务输出不回溯。该改动需**重建后端镜像 / 覆盖前端产物**才生效。
+
+### Fixed
+
+- **修复 AMS 需求 Word 行标签使用「需求正文」时该行正文（含嵌套表）整体丢失**：部分 AMS 文档采用「需求正文」标签（与 HSCU 风格一致）而非标准「需求中文」，AMS profile 的 `field_map.content` 精确匹配未命中即跳过整行 → 全部需求正文为空并连带标注/匹配降级（实证 job `9153b86b`：5 条需求 `content` 全空、`hlr_无匹配: 5`、嵌套表未被拍平）。修复：`profiles/ams/config.yaml` 的 `content` 别名补「需求正文」（`["需求中文", "需求正文"]`，纯配置、加法式）。隔离回归：同一代码上旧/新别名对既有「需求中文」文档解析输出逐条比对一致（`92ce5d88` 4 条、`31d52e70` 13 条，零扰动）；修复后该输入 5 条正文全部正确提取（含嵌套表拍平 1832/258/549/85/281 字符）。嵌套表拍平逻辑本身无缺陷（经真实 `_cell_text` 在缺陷单元格上直接验证）。该改动需**重建后端镜像**才生效。
+
 ## [Unreleased] - 2026-10-14
 
 ### Fixed
