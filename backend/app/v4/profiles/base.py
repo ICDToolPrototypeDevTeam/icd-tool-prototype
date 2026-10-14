@@ -1,6 +1,7 @@
 """Controller profile data structures and loaders."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,48 @@ import yaml
 
 class ProfileLoadError(Exception):
     """Raised when a profile cannot be loaded or found."""
+
+
+@dataclass(frozen=True)
+class GlossaryLocateConfig:
+    """How ``HLRWordParser`` locates the abbreviation-glossary table.
+
+    ``index`` (default = legacy behaviour): use ``glossary_table_index``
+    plus the ``glossary_header_keywords`` gate.
+    ``keyword_scan``: scan all tables in document order and take the FIRST
+    one whose first row hits ``glossary_header_keywords`` (still gated on
+    >=3 columns).  No hit → empty glossary.  Locating the glossary no
+    longer constrains the requirement-scan range (see RequirementScanConfig).
+    """
+
+    mode: str = "index"  # "index" | "keyword_scan"
+
+
+@dataclass(frozen=True)
+class RequirementScanConfig:
+    """How ``HLRWordParser`` identifies requirement tables, plus optional
+    registration of skipped tables (written to ``HLROutput.parse_warnings``).
+
+    ``after_glossary`` (default = legacy behaviour): scan tables after
+    ``glossary_table_index``.  ``all_tables``: scan the whole document —
+    requirement tables decoupled from glossary/catalog-table positions.
+
+    ``id_pattern``: optional regex the id row's value must match; a
+    non-empty value that does not match rejects the table (strong signal,
+    registered as ``id_pattern_rejected`` when ``register_skipped`` is on).
+
+    ``register_skipped``: when True, tables that look like requirement
+    tables but were not collected are registered as parse warnings (weak
+    signal ``no_requirement_fields``: exactly 2 columns, >= ``warn_min_rows``
+    rows, no id header row).  Wide tables (>=3 cols) and empty/small tables
+    produce no warnings — catalog tables are recognised content handled by
+    the profile hook, not "unrecognised" material.
+    """
+
+    mode: str = "after_glossary"  # "after_glossary" | "all_tables"
+    id_pattern: str = ""
+    register_skipped: bool = False
+    warn_min_rows: int = 5
 
 
 @dataclass(frozen=True)
@@ -32,6 +75,13 @@ class HLRParserConfig:
     # in the table headers.  Replaces the previous hardcoded Chinese-literal
     # fallback so new controllers can declare any column name they use.
     non_requirement_field_aliases: tuple[str, ...] = ("is_requirement",)
+    # 整篇文档适配维度（默认 = 现状行为；仅声明它们的 profile 生效）。
+    glossary_locate: GlossaryLocateConfig = field(
+        default_factory=GlossaryLocateConfig
+    )
+    requirement_scan: RequirementScanConfig = field(
+        default_factory=RequirementScanConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -120,6 +170,33 @@ class MatcherEnhancementConfig:
 
 
 @dataclass(frozen=True)
+class LabelCatalogConfig:
+    """声明化参数：profile hook 识别/解析「标签总览」目录表（LBL→octal 映射）。
+
+    Table-level judgement uses ``min_columns`` / ``min_rows`` (catalog
+    tables are wide, multi-row; 8x2 requirement tables are excluded by
+    ``min_columns``).  Column-level location is **header-keyword semantic**
+    (``header_keywords`` maps a role → keyword list; the role's column is
+    the LEFTMOST header cell containing any keyword).  Roles:
+    ``name`` / ``octal`` are core (without both, the table falls back to
+    within-row scanning); ``sdi`` / ``ssm`` / ``signal`` are enhancements
+    (resolved-only, never guessed — 宁缺毋错).  ``channel_suffix_pattern``
+    is the name-transform regex (e.g. ``_R\\d+$``) used to also insert the
+    suffix-stripped form.
+
+    Defaults mirror the pre-config constants so profiles that omit this
+    section behave exactly as before; ``header_keywords`` defaults to empty
+    (no semantic resolution → row-scan fallback).  Controller-specific
+    keyword lists live in ``profiles/{id}/config.yaml``, not here.
+    """
+
+    min_columns: int = 3
+    min_rows: int = 2
+    header_keywords: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    channel_suffix_pattern: str = r"_R\d+$"
+
+
+@dataclass(frozen=True)
 class HLRPreprocessConfig:
     """Optional HLR pre-processing configuration for profile-specific transformations.
 
@@ -152,6 +229,8 @@ class HLRPreprocessConfig:
     table0_name_column: int = 1
     table0_octal_column: int = 2
     apply_to_fields: tuple[str, ...] = ("content",)
+    # 标签总览目录表识别/解析参数（profile hook 消费；默认 = 现状常量）。
+    label_catalog: LabelCatalogConfig = field(default_factory=LabelCatalogConfig)
 
 
 @dataclass(frozen=True)
@@ -197,6 +276,52 @@ def _to_tuple(value: Any) -> tuple:
     return value
 
 
+def _parse_glossary_locate(data: dict[str, Any] | None) -> GlossaryLocateConfig:
+    if not data:
+        return GlossaryLocateConfig()
+    mode = str(data.get("mode", "index")).lower().strip()
+    if mode not in ("index", "keyword_scan"):
+        raise ProfileLoadError(
+            f"hlr_parser.glossary_locate.mode must be 'index' or 'keyword_scan', "
+            f"got {mode!r}"
+        )
+    return GlossaryLocateConfig(mode=mode)
+
+
+def _parse_requirement_scan(data: dict[str, Any] | None) -> RequirementScanConfig:
+    if not data:
+        return RequirementScanConfig()
+    mode = str(data.get("mode", "after_glossary")).lower().strip()
+    if mode not in ("after_glossary", "all_tables"):
+        raise ProfileLoadError(
+            f"hlr_parser.requirement_scan.mode must be 'after_glossary' or "
+            f"'all_tables', got {mode!r}"
+        )
+    id_pattern = str(data.get("id_pattern", "") or "")
+    if id_pattern:
+        try:
+            re.compile(id_pattern)
+        except re.error as e:
+            raise ProfileLoadError(
+                f"hlr_parser.requirement_scan.id_pattern is not a valid regex: "
+                f"{id_pattern!r} ({e})"
+            ) from e
+    warn_min_rows_raw = data.get("warn_min_rows", 5)
+    try:
+        warn_min_rows = int(warn_min_rows_raw)
+    except (TypeError, ValueError) as e:
+        raise ProfileLoadError(
+            f"hlr_parser.requirement_scan.warn_min_rows must be an integer, "
+            f"got {warn_min_rows_raw!r}"
+        ) from e
+    return RequirementScanConfig(
+        mode=mode,
+        id_pattern=id_pattern,
+        register_skipped=bool(data.get("register_skipped", False)),
+        warn_min_rows=warn_min_rows,
+    )
+
+
 def _parse_hlr_parser(data: dict[str, Any]) -> HLRParserConfig:
     field_map_raw = data.get("field_map", {})
     field_map = {k: tuple(v) for k, v in field_map_raw.items()}
@@ -212,6 +337,8 @@ def _parse_hlr_parser(data: dict[str, Any]) -> HLRParserConfig:
         non_requirement_field_aliases=_to_tuple(
             data.get("non_requirement_field_aliases", ["is_requirement"])
         ),
+        glossary_locate=_parse_glossary_locate(data.get("glossary_locate")),
+        requirement_scan=_parse_requirement_scan(data.get("requirement_scan")),
     )
 
 
@@ -289,6 +416,32 @@ def _parse_matcher_enhancement(data: dict[str, Any] | None) -> MatcherEnhancemen
     )
 
 
+def _parse_label_catalog(data: dict[str, Any] | None) -> LabelCatalogConfig:
+    if not data:
+        return LabelCatalogConfig()
+    hk_raw = data.get("header_keywords", {}) or {}
+    if not isinstance(hk_raw, dict):
+        raise ProfileLoadError(
+            f"hlr_preprocess.label_catalog.header_keywords must be a dict, "
+            f"got {type(hk_raw).__name__}"
+        )
+    header_keywords = {str(k): _to_tuple(v) for k, v in hk_raw.items()}
+    pattern = str(data.get("channel_suffix_pattern", r"_R\d+$"))
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        raise ProfileLoadError(
+            f"hlr_preprocess.label_catalog.channel_suffix_pattern is not a "
+            f"valid regex: {pattern!r} ({e})"
+        ) from e
+    return LabelCatalogConfig(
+        min_columns=int(data.get("min_columns", 3)),
+        min_rows=int(data.get("min_rows", 2)),
+        header_keywords=header_keywords,
+        channel_suffix_pattern=pattern,
+    )
+
+
 def _parse_hlr_preprocess(data: dict[str, Any] | None) -> HLRPreprocessConfig:
     if not data:
         return HLRPreprocessConfig()
@@ -305,6 +458,7 @@ def _parse_hlr_preprocess(data: dict[str, Any] | None) -> HLRPreprocessConfig:
         table0_name_column=int(data.get("table0_name_column", 1)),
         table0_octal_column=int(data.get("table0_octal_column", 2)),
         apply_to_fields=_to_tuple(data.get("apply_to_fields", ["content"])),
+        label_catalog=_parse_label_catalog(data.get("label_catalog")),
     )
 
 

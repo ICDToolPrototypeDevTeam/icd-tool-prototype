@@ -3753,3 +3753,37 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
 - **缓存影响**：无（提示词未变，llm_cache 键不含日志文本；进行中任务不因本次改动重判）。
 - **遗留问题**：日志层改动需**重建后端镜像**生效（与 10-12 批次同批出包）；无其他遗留。
 - **下一步建议**：与 10-12 术语规范化批次一并提交；出包时核对 `更新说明.md` 无需注明部署层/权限变化。
+
+## 2026-10-13 HSCU 整篇 HLR 适配：术语表关键字定位 / 需求表全表扫描+ID 前缀校验 / 目录表表头语义定位（分支 issue-x-hscu-full-word-fix）
+
+- **背景（用户提出）**：HSCU 现有样例仅为部分片段，拿不到完整的高层需求 Word；需按"整篇文档"考虑适配性，且现实现多处写死。对照完整文档结构，识别出三类差异：①术语表不保证在 `tables[0]`（现为固定索引定位）；②需求表与标签目录表在文档中交错出现（现为"术语表之后连续扫描"）；③标签目录表宽度不固定（现 hook 按 8 列 / 4 列宽度分支 + 列索引写死）。约束：只动反向管线；维度默认关闭、仅 HSCU 开启；AMS/FGMC/RPDU 产物字节一致；HSCU 样例行为不回退；EoICD 侧与原逻辑不动；验证只跑 mock、不调真实 LLM。方案经三轮评审后通过（过程记录见 `hscu-full-doc-adaptation-plan.md`）。
+- **方案（三个 profile 维度，全部声明化配置、默认值 = 现状）**：
+  1. **D1 术语表定位** `hlr_parser.glossary_locate.mode`：`index`（默认，= 现状）/ `keyword_scan`（按文档顺序找首张"首行命中表头关键字且 ≥3 列"的表；未命中 → 空术语表，与需求扫描范围解耦）。
+  2. **D2 需求表扫描** `hlr_parser.requirement_scan`：`mode` `after_glossary`（默认，= 现状）/ `all_tables`（全篇）；`id_pattern`（装载时 `re.compile` 校验；命中表格的「需求ID」行值非空且不匹配 → 拒绝并登记 `id_pattern_rejected`）；`register_skipped` + `warn_min_rows`（弱告警 `no_requirement_fields`：恰 2 列、≥5 行、无「需求ID」行——宽表与空/小表不告警）。登记写入解析产物 `hlr_requirements.json` 新增字段 `parse_warnings`，**非空才出现**（空时 `model_dump_json(exclude=...)` → 其余 profile 保持字节一致）。
+  3. **D3 目录表识别**（`hlr_preprocess.label_catalog`）：由宽度写死改为**表头语义定位**——前 3 行中角色命中数最多者为表头行、每角色取最左命中列，角色 = name / octal / sdi / ssm / signal（关键字在 config）；name+octal 解析成功走**严格列取值**（形校验失败丢行、不再扫描兜底），否则退回行内扫描；sdi/ssm/signal **只取已解析列、不猜**（宁缺毋错，防注入错值影响匹配 Gate）。降级登记口径**已裁决（2026-10-13）**：核心角色（name/octal）问题进 `parse_warnings` JSON，增强角色每表命中只进 job log 摘要行（列明未命中角色名）；多值 SDI **维持丢弃**（消费机制核实见方案 §5.7）。
+- **修改文件**：`backend/app/v4/models.py`（`HLROutput.parse_warnings`）、`backend/app/v4/profiles/base.py`（三个新 dataclass + 装载校验）、`backend/app/v4/parsers/hlr_word_parser.py`（D1/D2 消费 + 登记）、`backend/app/v4/pipeline.py`（非空才写 + 登记摘要日志）、`backend/app/v4/profiles/hscu/hooks.py`（D3 重写）、`backend/app/v4/profiles/hscu/config.yaml`（开启三处维度）；文档 `docs/project/scope.md` §8.2.1/§8.2.2、`CHANGELOG.md`（`[Unreleased] - 2026-10-13`）。过程文档 `docs/development/hscu-full-doc-adaptation-plan.md`。新增（gitignored）：`backend/output/gen_parse_golden.py`、`backend/output/e2e_fgmc_smoke.py`、`backend/tests/test_hlr_word_parser_adaptivity.py`（T1–T16）。
+- **验证方式与结果**（零真实 LLM；铁律：跑不动/未执行的必须写"尚未验证"）：
+  1. **零影响硬门槛**：改前 P0 冻结 4 profile 解析产物 golden（生产路径 `pipeline._parse_hlr`），改后重生成并逐行 diff（剔除 `generated_at`）→ **IDENTICAL：ams / fgmc / hscu / rpdu**——HSCU 样例亦逐字节一致（完整文档无缩略语表、无登记项时预期零变化）（**已验证**）。
+  2. **新增单测** T1–T16（D1 关键字命中/未命中、D2 全表扫描/前缀拒绝/跳过登记/告警边界、D3 表头语义定位两格式/严格列取值丢行/"序号劫持"双向验证/降级登记分流/真样例 golden 对比）：**16/16 通过**；全量回归 **188 passed**（172+16），**同 5 项既有失败**（test_job_api_ext / test_job_cancel / test_job_orphan ×2 / test_runner_cancel，改前基线同样失败）、1 skipped（**已验证**）。
+  3. **HSCU mock E2E**（job `7176d176-…`，`USE_MOCK_LLM=1`）：completed、产物齐全；产物 `hlr_requirements.json` 与 P0 golden 逐字节一致；job.log 出现新日志 `目录表识别 2 张：表0 角色 5/5；表8 角色 3/5（未命中：ssm、signal）`；无「HLR 解析登记」行（登记为空，符合预期）；Stats: 10 HLR → 已匹配 3 / 待确定 3 / 无匹配 4（**已验证**）。
+  4. **FGMC mock E2E**（job `c7fffc3e-…`）：completed、产物齐全；产物与 P0 golden 逐字节一致；Stats `hlr_total=7`（符合预期）（**已验证**）。
+- **遗留问题**：
+  1. **Issue 编号待回填**：用户在本改动实施通过后创建 Issue 并回填编号。
+  2. **5 项既有 pytest 失败**为改前基线即存在（job 相关），非本次引入，未修复（超出本任务范围）。
+  3. 本地脚本 `e2e_hscu_only.py` / `e2e_fgmc_smoke.py` 从 `/result` 读 `counts` 失败（现载荷形状为 `summary`，脚本按旧 API 写）——仅影响脚本打印，PASS 判据已改用 job.log Stats；本地脚本不入库。
+  4. `backend/app/v4/cli.py` 的 `_parse_hlr` 调用缺 `profile` 位置参数（既有破损的老 CLI 路径），未动。
+  5. 需**重建后端镜像**才在服务器生效。
+  6. 方案 §5 评审可选项：弱告警噪声是否收紧（改判"仅强信号登记"）、是否补 ADR——均留评审决定。
+- **下一步建议**：1) 用户创建 Issue 并提交本分支；2) 重建镜像后用完整 HSCU 文档在页面实跑一次，核对目录表日志与登记输出；3) 按需处理遗留 6。
+
+## 2026-10-14 HSCU 别名注入补齐「信号名去通道后缀」变体（分支 issue-x-hscu-full-word-fix）
+
+- **背景（用户提出）**：`FSF29005501_HLR_023882` 类需求正文以裸信号名（无 `_R1` 后缀）列举 26 个信号，"存在只补充一部分信号别名的问题"。真实链路对照（带 6 别名 job `ca9383a2-…` vs 无别名 job `8fd932fe-…`）证明**信号名本身不构成匹配入口、L 号（别名）是唯一路由键**（无别名即「逻辑/非通信」0 候选），别名机制必须保留；要修的是"只补 6/26"。
+- **方案（A 路线，经用户选定；B 路线"注入时亲缘命名"未采用）**：目录表解析两条腿口径对齐——信号名列登记由"仅原样"改为"原样 + 去通道后缀（`_R\d+$`）"两种键（与 LBL 名称腿一致），改动仅 `_extract_label_meta` 内 5 行 + docstring 一句；合并口径不变（后登记覆盖）。
+- **修改文件**：`backend/app/v4/profiles/hscu/hooks.py`；`backend/tests/test_hlr_word_parser_adaptivity.py`（新增 T17，本地文件不入库）；金样 `backend/output/plan_goldens/hscu/hlr_requirements.json` 刷新（gitignored）。文档：本 log、`CHANGELOG.md`（`[Unreleased] - 2026-10-14`）、`docs/development/debug-log.md`（BUG-20261014-001）。
+- **验证方式与结果**（三段全绿，真实 LLM 复跑在本地 8001 完成、服务器 8000 未动）：
+  1. T1–T17 **17 passed**；全量回归 **189 passed / 5 failed / 1 skipped**，5 项失败与 10-13 留档基线同集（job/runner 相关，非本次引入）（**已验证**）。
+  2. 金样重生成 diff（剔 `generated_at`）：ams / fgmc / rpdu **0 行差异**；hscu 恰 3 处预期差异——`total_count 10→11`（用户编辑样例新增 022608 的既有漂移）、023194 +1 条同 L 号别名、022608 需求块首获别名（T13 期望条数同步 10→11）（**已验证**）。
+  3. 真实链路复跑（job `2665ca93-…`，真实三模型判重）：别名 **6→26**、hlr_labels 14 个 Label、匹配块 **24→104**、**26/26 个信号全部匹配**（各 4 个通道变体块）（**已验证**）。
+- **遗留问题**：1) 需重建后端镜像才在服务器生效；2) Issue 编号待用户回填；3) 目录表信号名单元格末尾带 `。` 会丢该行最后一个信号名（既有小观察，未在本次范围）。
+- **下一步建议**：1) 用户创建 Issue 并提交本分支；2) 重建镜像后用完整 HSCU 文档在页面实跑核对；3) 出包时并入《更新说明》。

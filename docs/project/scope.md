@@ -60,7 +60,7 @@ V4 通过 `controller_profile` 字段控制输入解析规则（默认 `ams`）�
 | --- | --- | --- | --- | --- |
 | `ams` | 空气管理系统控制器（默认） | `tables[0]` | ≥ 8 行 × ≥ 2 列 | `设备需求与系统ICD追溯表.xlsx` + `单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx`（精确名） |
 | `fgmc` | 燃油测量管理计算机 | `tables[1]` | ≥ 12 行 × ≥ 2 列（含"是否为需求"= "否" 过滤） | `*追溯*.xlsx` + `*矩阵分析*.xlsx`（glob 模式） |
-| `hscu` | 液压系统控制单元 | `tables[0]` | ≥ 8 行 × ≥ 2 列（行标签用 `需求正文` 而非 `需求中文`） | `附件1*需求*ICD*.xlsx` + `*液压*单模块需求矩阵*.xlsx` |
+| `hscu` | 液压系统控制单元 | 关键字扫描（首行含"缩略语/缩写"的表；未命中 → 空） | 全表扫描；「需求ID」行头 + 值以 `FSF29` 开头；跳过登记写入 `parse_warnings`（行标签用 `需求正文` 而非 `需求中文`） | `附件1*需求*ICD*.xlsx` + `*液压*单模块需求矩阵*.xlsx` |
 | `rpdu` | 远程功率分配单元（Issue #74） | N/A（Excel 无术语表） | `.xlsx` 工作簿（列 A/B/C → 需求编号 / 模块名称 / 需求内容） | `*配电系统需求与EoICD追溯表*.xlsx` + `*单模块需求矩阵分析*.xlsx`（header 关键字自适应） |
 
 profile 配置位于 `backend/app/v4/profiles/{id}/config.yaml`，覆盖 HLR 字段映射、分类关键词（analog / discrete / bus 等）、追溯表配置和 AI 标注示例四类内容。
@@ -76,8 +76,9 @@ Issue #74 在不破坏 AMS/FGMC/HSCU 既有行为（默认全部关闭）的前�
 1. **HLR 解析驱动**：`hlr_parser_driver.driver` 选择 `docx`（默认，`HLRWordParser`）或 `xlsx`（RPDU，`HLRExcelParser`），由 `parsers/hlr_parser_factory.py::create_hlr_parser` 按扩展名分发。
 2. **追溯表解析策略**：`trace_strategy` 选择 `profile_columns`（默认，硬编码列索引，AMS/FGMC/HSCU）或 `header_adaptive`（RPDU，按 header 关键字扫描定位列）。
 3. **反向匹配增强开关**：`matcher` 段四个 boolean/int 开关（中文后缀剥离、方向软约束、信号编号加分、top_k 候选窗口），RPDU 全部启用，其余 profile 全部默认关闭。
+4. **HLR 整篇文档适配维度**（HSCU 整篇 HLR 适配）：`hlr_parser.glossary_locate.mode` 选择 `index`（默认，= 现状）或 `keyword_scan`（关键字全表扫描定位术语表）；`hlr_parser.requirement_scan` 选择 `after_glossary`（默认，= 现状）或 `all_tables` 需求表全表扫描，并可选 `id_pattern` 值形态校验与 `register_skipped` 跳过登记（写入解析产物 `hlr_requirements.json` 的 `parse_warnings` 字段，**非空才出现**）；`hlr_preprocess.label_catalog` 将标签总览目录表识别参数声明化（`min_columns` / `min_rows` / 表头关键字角色定位 `header_keywords` / `channel_suffix_pattern`）。仅 HSCU 启用；其余 profile 默认关闭。
 
-所有增强默认关闭 → 不影响 AMS/FGMC/HSCU 输出字节一致。
+所有增强默认关闭 → 不影响 AMS/FGMC/HSCU 输出字节一致（HSCU 的 HLR 解析产物经实测亦逐字节一致，见开发纪要）。
 
 ## 4. 输入边界
 

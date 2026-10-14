@@ -17,6 +17,18 @@
 
 - **修复 AMS 需求 Word 行标签使用「需求正文」时该行正文（含嵌套表）整体丢失**：部分 AMS 文档采用「需求正文」标签（与 HSCU 风格一致）而非标准「需求中文」，AMS profile 的 `field_map.content` 精确匹配未命中即跳过整行 → 全部需求正文为空并连带标注/匹配降级（实证 job `9153b86b`：5 条需求 `content` 全空、`hlr_无匹配: 5`、嵌套表未被拍平）。修复：`profiles/ams/config.yaml` 的 `content` 别名补「需求正文」（`["需求中文", "需求正文"]`，纯配置、加法式）。隔离回归：同一代码上旧/新别名对既有「需求中文」文档解析输出逐条比对一致（`92ce5d88` 4 条、`31d52e70` 13 条，零扰动）；修复后该输入 5 条正文全部正确提取（含嵌套表拍平 1832/258/549/85/281 字符）。嵌套表拍平逻辑本身无缺陷（经真实 `_cell_text` 在缺陷单元格上直接验证）。该改动需**重建后端镜像**才生效。
 
+## [Unreleased] - 2026-10-14
+
+### Fixed
+
+- 修复 **HSCU 反向别名注入对「裸信号名」漏补**（需求正文以裸名引用信号时只补一部分别名、其余信号无法进入匹配）：目录表解析的**信号名列登记与 LABEL 名称列口径不一致**——名称列会去通道后缀（`_R1`/`_R2`）登记，信号名列只按原样登记。正文写裸名（如 `EDP1A_SW_ICCP`）时，只有"裸名恰好等于某个 LABEL 名去后缀"的信号能命中（真实样例 26 个信号仅 6 个获得别名；其余 20 个信号在 EoICD 侧存在对应块却全部无法匹配）。现信号名列与名称列同口径、同时登记「原样 + 去通道后缀」两种键，组名型 LABEL（`LBL_OVHD_5_ICCP_R1` 等，信号名列携带 `_R1/_R2`）下的信号也能被正文裸名命中。实测：样例需求别名 6→26、匹配块 24→104、**26/26 信号全部匹配**；ams / fgmc / rpdu 解析产物逐字节不变（无此代码路径）。仅 HSCU 生效，无需新增配置。该改动需**重建后端镜像**才生效。
+
+## [Unreleased] - 2026-10-13
+
+### Added
+
+- **HSCU HLR 解析整篇文档适配（解析层新增 profile 维度，默认关闭；仅 HSCU 启用）**：HSCU 目前只有裁剪版样例、拿不到完整的高层需求 Word，而解析层有三处照样例拟合——术语表按固定表索引定位、"需求表 = 术语表之后的所有表"（实际文档中标签总览目录表与需求表交错）、目录表按行宽猜 SDI/SSM/信号名列。现在把三处改为可配置的语义识别，新增三个 profile 维度（`profiles/base.py` dataclass，config 不声明 = 现状行为）：① `glossary_locate.mode: keyword_scan` —— 术语表按"首行命中缩略语关键字"全表扫描定位，未命中则为空且不再约束需求表扫描范围；② `requirement_scan.mode: all_tables` —— 需求表全表扫描（与术语表/目录表位置解耦），`id_pattern` 校验需求 ID 值形态（HSCU 用 `^FSF29`），`register_skipped` 把"疑似需求表却未收录"的表分层登记（强信号 `id_pattern_rejected` / 弱信号 `no_requirement_fields`；宽表目录表与空表/小表不告警）写入解析产物的 `parse_warnings` 字段（**非空才出现**，未启用登记的 profile 产物逐字节不变）；③ `hlr_preprocess.label_catalog` —— 标签总览目录表识别参数声明化：表级判断 `min_columns`/`min_rows`，列级改为**表头关键字语义定位**（`header_keywords` 按角色 name/octal/sdi/ssm/signal 取最左命中列，替代按行宽猜列），`name`+`octal` 命中则严格按列取值（杜绝"序号列劫持 octal"类串列），否则退回行内扫描保底；`sdi`/`ssm`/`signal` 为增强角色、定位不了不猜（宁缺毋错），增强角色的每表命中情况只打一行任务日志（如 `目录表识别 2 张：表0 角色 5/5；表8 角色 3/5（未命中：ssm、signal）`）。降级时写 `label_catalog_not_found` / `label_catalog_header_unresolved` 登记。**验收**：ams / fgmc / hscu / rpdu 四个 profile 的解析产物（含 HSCU hook 别名注入结果）经实测逐字节一致（剔时间戳）；其余三个 profile 的 config.yaml 与 hook 零改动；前端与 `/api/v4` 契约不变。该改动需**重建后端镜像**才生效。
+
 ## [Unreleased] - 2026-10-10
 
 ### Fixed

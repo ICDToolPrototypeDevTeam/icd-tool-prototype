@@ -2044,3 +2044,79 @@ USE_MOCK_LLM=1 python -X utf8 tests/verify_terminology_e2e.py   # 全管线 mock
 
 1. **需重建后端镜像**该修复才在容器生效；出包时在 `更新说明.md` 注明（无部署层 / 权限变化）。
 2. 其他系统可能存在的行标签变体（如「需求内容」等）本次未做泛化容错，出现后再按同一模式补别名。
+
+### BUG-20261014-001：HSCU 别名注入对「裸信号名」漏补——信号名列登记不去通道后缀，与 LBL 名称腿口径不一致
+
+#### 状态
+
+fixed（代码已改；单测 / 金样 / 真实链路三模型复跑验证通过；**镜像未重建**，服务器上尚未生效）
+
+#### 发现日期
+
+2026-10-14（用户反馈 `FSF29005501_HLR_023882` 类需求"只补充一部分信号别名"当日定位与修复）
+
+#### 关联 Issue / PR
+
+分支 `issue-x-hscu-full-word-fix`（Issue 编号待用户回填）。问题样例 `test-input/HSCU裁剪需求/HSCU裁剪2.docx`：需求 023882 正文 a)~z) 以裸信号名列举 26 个信号。
+
+#### 问题现象
+
+1. 023882 的 `（亦称：…）` 只注入 6 条别名（EMP1B/2B/3A/3B_TEMP_RDCU、L_ENG_N2_EEC1、R_ENG_N2_EEC2），其余 20 个信号无别名。
+2. 真实链路（job `ca9383a2-…`，本地 8001 真实三模型）：`A429显式`、已匹配、匹配 24 块——**全部**落在那 6 个别名对应的 5 个 Label（L074/75/76/77/133）；其余 20 个信号在 EoICD 侧均有对应块（L272/273/051/150/126/127/301/302/303），但全部落在未匹配列表。
+3. 无别名对照（目录表清空的同文档，job `8fd932fe-…`）：`逻辑/非通信`、0 候选、无匹配，LLM 打标 labels 亦为空——**信号名本身不构成匹配入口，L 号（别名）是唯一路由键**。
+
+#### 复现方式
+
+1. 词典现场对照（只读）：`_extract_label_meta(HSCU裁剪2.docx, hscu.label_catalog)` → `meta.get("EDP1A_SW_ICCP")` 为 `None`、`meta.get("EDP1A_SW_ICCP_R1")` 为 `{"octal": "272", ...}`。
+2. 真实链路：本地后端 8001 提交样例，对比 `backend/output/v4/<job_id>/output/reverse_matches.json` 的 `matched_profile_keys` 与 `eoicd_unmatched_profile_keys`。
+
+#### 影响范围
+
+HSCU 反向链路别名注入（`profiles/hscu/hooks.py`，仅 HSCU 配置启用）；影响凡正文以裸信号名引用信号的需求。AMS/FGMC/RPDU 无此代码路径，零影响（金样 diff 实证 0 行）。
+
+#### 原因分析
+
+目录表解析（`_extract_label_meta`）登记两条腿、口径不一致：
+
+1. **LBL 名称腿**：登记「原样 + 去通道后缀（`_R\d+$`）」两个键。当 LBL 名恰为"信号名+后缀"（如 `LBL_EMP1B_TEMP_RDCU_R1`）时，去后缀键恰等于正文裸名 → 命中（那 6 个"幸运儿"即此机制）。
+2. **信号名称腿**：只登记原样（`EDP1A_SW_ICCP_R1`），不去后缀。当 LBL 名是**组名**（`LBL_OVHD_5_ICCP_R1`、`LBL_PTU_RPDU_R1`、`LBL_UTC_TIME_OHMS_R1`、`LBL_FLT_LEG_OHMS_R1`、`LBL_AIRCRAFT_REG_OHMS_*_R1`…）时，信号名只从信号列进来、永远带 `_R1/_R2` 后缀，正文裸名查不到 → 漏补。
+
+故 26 个信号中只有"裸名 == 某 LBL 去后缀名"的 6 个命中。
+
+#### 修复方案
+
+信号名称腿与 LBL 名称腿同口径：每个信号名登记「原样 + 去通道后缀」两个键（复用既有 `suffix_re`），继承本行 octal/SDI/SSM；合并口径不变（后登记覆盖，与现状一致）。不新增配置、不写死信号名；不动注入逻辑（`preprocess_hlr_requirements`）、匹配器与 pipeline。
+
+#### 修改文件
+
+- `backend/app/v4/profiles/hscu/hooks.py`（`_extract_label_meta` 信号名登记块 5 行 + docstring 一句；`git diff --stat`：13 insertions / 8 deletions）
+- `backend/tests/test_hlr_word_parser_adaptivity.py`（新增 T17，本地文件不入库）
+- 金样刷新（gitignored）：`backend/output/plan_goldens/hscu/hlr_requirements.json`
+
+未改：`preprocess_hlr_requirements`、匹配器/分类器/pipeline、其他三个 profile、`extra_mappings` 配置路径。
+
+#### 验证方式
+
+```bash
+cd backend
+python -m pytest tests/test_hlr_word_parser_adaptivity.py -q          # T1–T17
+python -m pytest tests/ -q --ignore=<10 个引用已删 app.v4.reverse 的过时文件>
+cd .. && for p in ams fgmc hscu rpdu; do python backend/output/gen_parse_golden.py --profile $p; done   # 金样重生成 + diff
+# 真实链路（本地 8001，验证后已停）：python backend/output/userchange_recheck/run_real.py "test-input/HSCU裁剪需求/HSCU裁剪2.docx" A2_fixed
+```
+
+#### 验证结果
+
+**已通过（本机，2026-10-14）**：
+
+1. T1–T17 **17 passed**；全量回归 **189 passed / 5 failed / 1 skipped**——5 项失败（test_job_api_ext / test_job_cancel / test_job_orphan ×2 / test_runner_cancel）与 10-13 留档基线同集，非本次引入。
+2. 金样重生成 diff（剔 `generated_at`）：ams / fgmc / rpdu **0 行差异**；hscu 恰 3 处——`total_count 10→11`（用户编辑样例新增 022608 的既有漂移，T13 期望条数同步 10→11）、023194 +1 条同 L 号别名（`L051_ABV1_LOAD_VOLT_AVAIL_RPDU`，路由不变）、新增 022608 需求块（首获别名 `L051_ABV2_LOAD_VOLT_AVAIL_RPDU`）。
+3. 真实链路复跑（job `2665ca93-…`，真实 DeepSeek/MiniMax/Qwen 判重）：别名 **6→26**；hlr_labels = 14 个 Label；匹配块 **24→104**；**26/26 个信号全部匹配**（各 4 个通道变体块）。
+4. 留档：`backend/output/userchange_recheck/`（README、三组 job 结果 JSON、金样 diff、before 金样备份；gitignored）。
+
+#### 遗留问题
+
+1. 需重建后端镜像才在服务器生效。
+2. 022608 系同一通用规则的自然覆盖（计划阶段已向用户明示影响，用户确认走 A 路线）——其别名由 0 条变为 1 条。
+3. 目录表信号名单元格末尾带句号（`。`）会丢该行最后一个信号名（既有小观察，未在本次范围；见 `_extract_signal_names`，当前样例未受影响）。
+4. Issue 编号待用户回填。
