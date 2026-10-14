@@ -1978,3 +1978,69 @@ python -m pytest tests/test_forward_adapter.py tests/test_forward_artifacts.py \
 1. **需重建后端镜像** B/C 才在容器生效；验证时需**新建任务**（重新上传）——建议直接改用已生成的 `空气管理系统控制器控制通道控制软件高层需求规范_故障注入_fixed.docx`（容器内已验：0 个反斜杠条目、`document.xml` 166329B、python-docx 读出 17 表 / 38 段），失败任务 `53f2e670` 不要续跑（其输入目录里的坏文件仍在）。
 2. **故障注入工具源头未修**：生成该 docx 的工具用 `os.path.join` 拼 arcname，在 Windows 上产出反斜杠条目名。建议反馈改为显式 `"/".join`（或 `zipfile.write` 的 `arcname` 用正斜杠）。仓库外临时脚本 `V4/_fix_docx_backslash_names.py` 可批量修已有产物（Windows/Linux 检测与修复行为一致）。
 3. mock 全流程 E2E（B/C 端到端）本机未跑（用户叫停，脚本 `V4/_e2e_forward_v2.py` 备好），可并入下次 E2E 覆盖。
+
+### BUG-20261014-001：AMS 需求 Word 行标签「需求正文」未命中别名，致正文（含嵌套表）整体静默丢失
+
+#### 状态
+
+fixed（代码已改、隔离回归与 mock E2E 通过；**镜像未重建**，服务器上尚未生效）
+
+#### 发现日期
+
+2026-10-13（任务 `9153b86b` 产出异常被用户复查发现），2026-10-14 定位与修复
+
+#### 关联 Issue / PR
+
+用户复查任务 `9153b86b-0f32-4625-a10e-c8f87f39eb88`（输入 `环控需求2-含表.docx` + AMS EoICD 两张表，mock 模式）反馈「嵌套表内容未识别」。定位后确认实为**整行正文丢失**，嵌套表拍平逻辑本身无缺陷。
+
+#### 问题现象
+
+1. `hlr_requirements.json` 中 5 条需求 `content` 全为空字符串；其余字段（需求ID / 对象类型 / 是否衍生 / 基本原理 / 安全相关 / 验证方法 / 实现方法）均正确提取。
+2. 连带降级：`hlr_labels.json` 5 条标注全空（content 为空、mock 标注无信号可循）、任务日志报 `hlr_无匹配: 5`。
+3. 源 docx 中正文单元格的嵌套表**物理存在且完好**（python-docx 读出 `tcPr/p/tbl/p`，如 HLR_4720 嵌套 105 行、HLR_548 双嵌套表）。
+
+#### 复现方式
+
+```bash
+cd backend
+python -X utf8 tests/verify_ams_content_alias.py   # A 段：旧配置（仅「需求中文」）解析 == job 存储输出，复现缺陷
+```
+
+或直接用真实 `HLRWordParser` + AMS profile 解析 `output/v4/9153b86b-.../input/环控需求2-含表.docx`。
+
+#### 原因分析
+
+1. **直接原因**：该文档需求表的正文行标签为「需求正文」（与 HSCU 风格一致），而 AMS profile `field_map.content` 仅配置 `["需求中文"]`；`_build_field_map_index` 为精确匹配（lower + strip），`field_index.get("需求正文") → None` → `_extract_requirement` 命中 `if std_field is None: continue` 跳过整行，`rows_data.get("content", "")` 落空。
+2. **嵌套表逻辑无缺陷**（本次误判点）：2026-09-29 修复的 `_cell_text` 对存在嵌套表的单元格按文档序拍平（单元格 `" | "`、行间换行）——用真实函数直接读该内容格即得到 1832 字符完整文本；因行从未命中，拍平从未被调用。
+3. 其余 7 个字段标签与配置同名，故症状呈「只缺正文」的定向模式；同族 job `31d52e70`（「需求中文」版文档）解析正常，佐证非代码路径问题。
+
+#### 修复方案
+
+`backend/app/v4/profiles/ams/config.yaml`：`content: ["需求中文"]` → `["需求中文", "需求正文"]`（与 HSCU 双别名对齐）；`profiles/ams/README.md` 行标签说明同步。纯配置、加法式改动，不改任何代码。
+
+#### 修改文件
+
+- `backend/app/v4/profiles/ams/config.yaml`（content 别名）
+- `backend/app/v4/profiles/ams/README.md`（行标签说明）
+- `CHANGELOG.md`、本文档
+
+#### 验证方式
+
+```bash
+cd backend
+python -X utf8 tests/verify_ams_content_alias.py                # A 修复验证 + B 隔离回归
+USE_MOCK_LLM=1 python -X utf8 tests/verify_terminology_e2e.py   # 全管线 mock 回归（26 项）
+```
+
+#### 验证结果
+
+**已通过（本机，2026-10-14）**：
+
+1. `verify_ams_content_alias.py` 8 项全过 VERIFY_OK：修复后 5 条正文非空（1832/258/549/85/281 字符，含嵌套表拍平标记「序号 | LABEL | 周期」与 548 双嵌套表 CRC 内容）；旧配置解析结果与 job `9153b86b` 存储输出逐条一致（**复现原始缺陷**，确认定位准确）。
+2. 隔离回归：同一代码上旧/新别名对既有「需求中文」文档（`92ce5d88` 4 条、`31d52e70` 13 条）解析输出逐条一致，零扰动。
+3. `verify_terminology_e2e.py` 26 项全过 VERIFY_OK（双跑 18.6s / 18.5s、缓存 21→21），全管线无回归。
+
+#### 遗留问题
+
+1. **需重建后端镜像**该修复才在容器生效；出包时在 `更新说明.md` 注明（无部署层 / 权限变化）。
+2. 其他系统可能存在的行标签变体（如「需求内容」等）本次未做泛化容错，出现后再按同一模式补别名。
