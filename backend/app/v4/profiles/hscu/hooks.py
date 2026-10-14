@@ -307,7 +307,8 @@ def _extract_label_meta(
     (``label_cfg.channel_suffix_pattern``, e.g. ``_R\\d+$``) are inserted,
     so downstream HLR text matching works whether the body writes the
     catalog form or the body form. Signal names inherit their row's
-    octal/SDI/SSM.
+    octal/SDI/SSM and are likewise registered in both the as-is and the
+    suffix-stripped form.
 
     ``table_index`` is an optional escape hatch: when provided, skip the
     auto-detect heuristic and use ONLY the table at that index (caller
@@ -440,16 +441,20 @@ def _extract_label_meta(
                 if ssm_value:
                     entry["ssm"] = ssm_value
             # 信号名列（表头定位命中时）：该列单元格里的裸信号名各建一条
-            # 映射，继承本行 octal/SDI/SSM。
+            # 映射，继承本行 octal/SDI/SSM。登记口径与 LBL 名称腿一致：
+            # 原样 + 去通道后缀各登记一条——HSCU 正文常以裸名引用信号
+            # （如 EDP1A_SW_ICCP），而目录信号列携带通道后缀
+            # （EDP1A_SW_ICCP_R1）；只登记原样会导致裸名查不到、别名漏补。
             sig_col = role_cols.get("signal")
             if sig_col is not None and len(cells) > sig_col:
                 for sig in _extract_signal_names(cells[sig_col]):
-                    sentry = result.setdefault(sig, {"octal": "", "sdi": "", "ssm": ""})
-                    sentry["octal"] = octal_value
-                    if sdi_value:
-                        sentry["sdi"] = sdi_value
-                    if ssm_value:
-                        sentry["ssm"] = ssm_value
+                    for key in (sig, suffix_re.sub("", sig)):
+                        sentry = result.setdefault(key, {"octal": "", "sdi": "", "ssm": ""})
+                        sentry["octal"] = octal_value
+                        if sdi_value:
+                            sentry["sdi"] = sdi_value
+                        if ssm_value:
+                            sentry["ssm"] = ssm_value
 
     if role_lines:
         print(f"目录表识别 {len(chosen_indices)} 张：" + "；".join(role_lines))
