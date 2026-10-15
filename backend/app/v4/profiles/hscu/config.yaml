@@ -194,6 +194,10 @@ auto_detect:
 # The hook appends "(alias: L<octal>_<name>)" annotations to requirement
 # content so the AI labeler sees BOTH forms and emits labels in the octal form
 # that the matcher recognizes. Original text is preserved for traceability.
+#
+# 扫描源为 content + rationale（基本原理）：模板式需求正文以 XXX 占位、具体
+# 信号列在基本原理栏（"其中，XXX为以下信号：…"），仅扫正文时该类需求得不到
+# 别名；别名仍只写入 content（标注环节与匹配器的 L 号路由键只从 content 取）。
 # Reverse matcher knobs (opt-in per profile).
 # See ``MatcherEnhancementConfig`` (profiles/base.py) for semantics.
 matcher:

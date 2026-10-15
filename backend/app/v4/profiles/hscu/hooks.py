@@ -9,7 +9,11 @@ the octal label number (``L145_DIS_00_SYS1_T1A``). The reverse matcher's
 Stage1 label-prefix filter therefore cannot match HSCU requirements against
 EoICD blocks. This hook appends an ``(alias: L<octal>_<NAME>)`` annotation
 to each affected requirement's ``content`` so the AI labeler sees both forms
-and emits the octal-form labels that the matcher recognises.
+and emits the octal-form labels that the matcher recognises. Tokens are
+scanned in ``content`` and ``rationale``（基本原理）alike — template-style
+requirements keep a placeholder (``XXX``) in the 正文 and enumerate the
+concrete signals in 基本原理 — while the annotation always lands in
+``content`` (the matcher derives its routing labels from content alone).
 
 Two strategies are supported (declared in ``config.yaml`` under
 ``hlr_preprocess``):
@@ -475,10 +479,15 @@ def preprocess_hlr_requirements(
     """Rewrite HSCU HLR ``content`` to expose octal-form label aliases.
 
     Iterates over ``hlr_out.requirements`` and, for each requirement whose
-    ``content`` mentions any mapped ``LBL_<NAME>`` (with optional ``_SSM``
-    suffix), appends a per-requirement ``（亦称：L<octal>_<NAME>、...）``
-    annotation listing ONLY the aliases for LBL tokens that actually appear
-    in that requirement's content.
+    ``content`` OR ``rationale``（基本原理）mentions any mapped
+    ``LBL_<NAME>`` (with optional ``_SSM`` suffix) or mapped bare signal
+    name, appends a per-requirement ``（亦称：L<octal>_<NAME>、...）``
+    annotation — always written into ``content`` — listing ONLY the aliases
+    for tokens that actually appear in that requirement. ``rationale``
+    participates because template-style requirements keep a placeholder
+    (``XXX``) in the 正文 and enumerate the concrete signals in 基本原理;
+    the matcher derives its routing labels from ``content`` alone, so that
+    is where the alias must land.
 
     Per-requirement scoping (vs. a single global suffix) prevents annotating
     a requirement with aliases for LBL names it does not reference, which
@@ -547,17 +556,26 @@ def preprocess_hlr_requirements(
         content = req.content
         if not content:
             continue
-        # Two-pass token scan:
+        # Two-pass token scan over content AND rationale（基本原理）:
         #   1) ``LBL_<NAME>`` tokens (catalog name form)
         #   2) bare uppercase signal tokens that match a mapping entry
         #      directly (RDCU1 catalog col-5 signal names appearing in
         #      HLR body text without the ``LBL_`` prefix).
-        lbl_tokens = _LBL_TOKEN.findall(content)
+        # rationale 参与扫描的原因：模板式需求的正文用 XXX 占位符、具体信号列在
+        # 「基本原理」栏（如"其中，XXX为以下信号：A B"），只扫正文则该需求拿不到
+        # 任何别名、匹配阶段无路由键。别名仍只写入 content——标注环节与匹配器都
+        # 只从 content 取 L 号（reverse_matcher: extract_labels(hlr.content)）。
+        rationale = getattr(req, "rationale", "") or ""
+        lbl_tokens = _LBL_TOKEN.findall(content) + _LBL_TOKEN.findall(rationale)
         # Only keep bare signal tokens that resolve to a mapping entry;
         # otherwise we'd noise up the suffix with arbitrary
         # uppercase-looking words.
         bare_signal_tokens = [
-            t for t in _BARE_SIGNAL_TOKEN.findall(content)
+            t
+            for t in (
+                _BARE_SIGNAL_TOKEN.findall(content)
+                + _BARE_SIGNAL_TOKEN.findall(rationale)
+            )
             if t in bare_octal
         ]
         if not lbl_tokens and not bare_signal_tokens:
