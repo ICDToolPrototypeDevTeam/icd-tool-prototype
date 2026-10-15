@@ -2207,3 +2207,88 @@ PYTHONIOENCODING=utf-8 python backend/output/userchange_recheck/debug_23588.py  
 1. **改动未提交**（工作区 `hooks.py` 脏；当前分支 `issue-139-history-add-log`），需用户提交；需**重建后端镜像**才在服务器生效。
 2. 表级识别判据 `_identify_label_tables` 仍使用默认 ≥2 位地板（本次未放松）：若某文档**全部**目录表所有行都是一位数 LABEL号（无任何多位行做锚点），该表仍不会被识别为目录表。当前样例均有多位锚点行，未触发；后续如出现整表一位数的文档再评估。
 3. Issue 编号待用户回填。
+
+### BUG-20261015-002：HSCU 模板式需求（正文 XXX 占位）的「基本原理」栏信号未参与别名注入，匹配 0 路由键
+
+#### 状态
+
+fixed（代码已改；单测 / 金样 / 真实文档离线复跑验证通过；**改动未提交、镜像未重建**，服务器上尚未生效）
+
+#### 发现日期
+
+2026-10-15（用户新增需求 `FSF29005501_HLR_024046` 并指出「这种 XXX 描述存在于基本原理栏，需要考虑如何处理」当日定位与实施）
+
+#### 关联 Issue / PR
+
+分支 `issue-x-add-fundamental-process`（改动未提交）。前一条 BUG-20261015-001 已于提交 `8b5f5e0` 入库。Issue 编号待用户回填。样例：`test-input/HSCU裁剪需求/HSCU裁剪2.docx` 表 8（新增的 024046 需求表）。
+
+#### 问题现象
+
+1. `024046` 是**模板式需求**：正文 `当 XXX_R1_Valid为TRUE时，控制软件（A通道）应将XXX_R1的值赋给XXX，并将XXX_R1_Status的值赋给XXX_Status，并将XXX_Valid置为TRUE。`（占位符 XXX）；具体信号列在「基本原理」栏：`其中，XXX为以下信号： ABV2_LOAD_VOLT_AVAIL_RPDU ABV3_LOAD_VOLT_AVAIL_RPDU。`——二者均在目录表词典中（`L051`/SDI=2、`L051`/SDI=3）。
+2. 修复前解析产物：`024046` 的 `（亦称：…）` 为空（同文档 5 条需求中唯一 0 别名；preprocess 改写计数 4/5）。
+3. 匹配影响：Stage1 路由键 `extract_labels(content)` 实测 **`[]`** → 该需求必然落「逻辑/非通信」0 候选（信号名本身不构成匹配入口、L 号是唯一路由键——同 BUG-20261014-001 结论）。
+
+#### 复现方式
+
+1. 只读：对 `HSCU裁剪2.docx` 走生产路径 `_parse_hlr` → `024046.content` 无亦称、`rationale` 完整；`extract_labels(content) == []`（修复前）。
+2. 单测重放：`tests/test_hlr_word_parser_adaptivity.py::test_t19_rationale_signals_feed_alias_injection`（原理栏信号入别名——该断言的别名只可能来自 rationale 扫描，专为此修复设卡）。
+
+#### 影响范围
+
+HSCU 反向链路别名注入（`profiles/hscu/hooks.py`，仅 HSCU 配置启用该 hook）。影响凡正文以占位符（XXX 等）书写、具体信号列在「基本原理」栏的需求——修复前这类需求 0 别名、0 路由键、必然 0 候选。对「正文可自足」的需求：扫描源为并集且跨源去重 → 无新增别名（P0 样例 11 条逐字节不变、ams/fgmc/rpdu 金样 0 行）。既有样例中原理栏含词典内名字的共 2 条：024046（本次补 2 条别名，属修复目标）、022996（原理栏与正文重复，去重后零变化）。
+
+#### 原因分析
+
+`preprocess_hlr_requirements` 的 token 扫描写死只扫 `req.content`，而标注环节（`hlr_labeler.py:104`）与匹配器 Stage1（`reverse_matcher.py:210` `extract_labels(hlr.content)`）也都只读 content 取 L 号路由键。模板式需求把具体信号放在 `rationale`（基本原理）——该字段的解析没有问题（`config.yaml` 的 `field_map.rationale` 早已映射「基本原理」，解析产物完整）——问题在**扫描源与信息所在字段错位**：信息在 rationale，扫描（及注入目标）只看 content → 该类需求拿不到别名、无路由键。（裁判/复查环节已带基本原理：`semantic_judge.py:304`、`re_review.py:117`——但它们在路由之后出场，救不了 Stage1。）
+
+#### 修复方案
+
+扫描源扩为 **`content` + `rationale`（基本原理）**：
+
+- `lbl_tokens` 与 `bare_signal_tokens` 各自先 content 后 rationale 拼接（保持出现序稳定、正文优先）；
+- `seen` 跨源去重（同一名字在正文与原理栏重复出现时只注一次）；
+- **注入目标不变**：仍追加到 `content` 尾部 `（亦称：…）`（匹配器/标注的路由键只从 content 取）；
+- 无新配置（hook 为 HSCU 专属，行为变化仅在 HSCU 线内）。
+
+不改：匹配器 / 标注 / 裁判 / 注入格式 / 其他三个 profile。
+
+#### 修改文件
+
+- `backend/app/v4/profiles/hscu/hooks.py`（模块 docstring 1 处、函数 docstring 1 处、扫描块 1 处；本次增量 **+26/-8**）——**当前未提交**
+- `backend/app/v4/profiles/hscu/config.yaml`（`hlr_preprocess` 注释块补 4 行扫描源说明）
+- `backend/tests/test_hlr_word_parser_adaptivity.py`（新增 T19 / T19b；本地文件不入库）
+- 金样对照（gitignored）：`backend/output/plan_goldens_after3/`（与 `plan_goldens/` 剔 `generated_at` 逐条比对）
+
+未改：`_extract_label_meta`、`_identify_label_tables`、注入格式、匹配器/分类器/pipeline、其他三个 profile。
+
+#### 验证方式
+
+```bash
+cd backend
+python -m pytest tests/test_hlr_word_parser_adaptivity.py -q      # T1–T19b
+python -m pytest tests/ -q \
+  --ignore=tests/test_ams_controller.py --ignore=tests/test_fgmc_controller.py \
+  --ignore=tests/test_hscu_controller.py --ignore=tests/test_judge_prompt_dispatch.py \
+  --ignore=tests/test_reverse_base_stages.py --ignore=tests/test_reverse_controller_attrs.py \
+  --ignore=tests/test_reverse_controllers_registry.py --ignore=tests/test_reverse_ctx.py \
+  --ignore=tests/test_reverse_pipeline_entry.py --ignore=tests/test_rpdu_controller.py
+cd ..
+for p in ams fgmc hscu rpdu; do python backend/output/gen_parse_golden.py --profile $p --out-root plan_goldens_after3; done   # 与 plan_goldens 剔 generated_at 逐条 diff
+# 真实文档离线复跑：_parse_hlr(HSCU裁剪2.docx) 看 024046 尾注 + extract_labels(content)
+```
+
+#### 验证结果
+
+**已通过（本机，2026-10-15）**：
+
+1. 适配性单测 T1–T19b **21 passed**（新增 T19：原理栏信号入别名、词典外名字不注入；T19b：正文/原理重复只注一次——对应 022996 零变化约束）。
+2. 真实文档离线复跑（`_parse_hlr` 生产路径）：`024046` 得到 `（亦称：L051_ABV2_LOAD_VOLT_AVAIL_RPDU（SDI=2，SSM类型=DIS）、L051_ABV3_LOAD_VOLT_AVAIL_RPDU（SDI=3，SSM类型=DIS））`；路由键 `extract_labels(content)` **`[] → ['L051']`**；preprocess 改写计数 **4/5 → 5/5**。
+3. 金样重生成 diff（剔 `generated_at`）：ams / fgmc / hscu / rpdu **全部 0 行差异**——P0 样例（含 022996 原理栏重复名去重）逐字节不变。
+4. 全量回归 **199 passed / 6 failed / 1 skipped**——6 项失败与留档基线同集（非本次引入）；199 = 197 基线 + 本次新增 T19 / T19b。
+
+#### 遗留问题
+
+1. **改动未提交**；需**重建后端镜像**才在服务器生效。
+2. 观察（既有，未在本范围）：`LBL_X_Status` 形态的引用经 `_LBL_TOKEN` 会截成 `X_S` 而非 `X`（该正则只剥 `_SSM` 后缀）——当前样例中该形态总与普通形态（`LBL_X`）同现故无影响；若出现「只引用 `LBL_X_Status`」的正文，别名仍会缺失，后续按需评估。
+3. 原理栏扫描是「宁多勿漏」方向：若真实文档的原理栏在解释性文字中提及无关的词典内信号名，会为该需求多注入别名（扩大候选，由后续裁判环节收敛）。当前两个样例均无此形态。
+4. Issue 编号待用户回填。

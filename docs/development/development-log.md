@@ -3823,3 +3823,16 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   4. 全量回归 **197 passed / 6 failed / 1 skipped**——6 项失败与 10-13 / 10-14 留档基线同集（job/runner 5 项 + `test_parse_artifact_reuse` 陈旧断言），非本次引入（**已验证**）。
 - **遗留问题**：1) 改动未提交（当前分支 `issue-139-history-add-log` 工作区），需提交并重建后端镜像才生效；2) 表级识别判据 `_identify_label_tables` 保持 ≥2 位地板——全部行都是一位数的目录表（无多位锚点行）仍不会被识别，当前样例未触发，后续出现再评估；3) Issue 编号待用户回填。
 - **下一步建议**：1) 用户提交改动（含文档）并重建镜像，用 `HSCU裁剪2.docx` 在页面实跑核对 023588 / 022812 的别名与匹配；2) 后续新增 Issue 时把 BUG-20261015-001 的编号回填到 debug-log。
+
+## 2026-10-15 HSCU 别名注入扫描源扩展：「基本原理」栏参与（模板式需求 XXX 占位，分支 issue-x-add-fundamental-process）
+
+- **背景（用户提出）**：用户新增需求 `FSF29005501_HLR_024046`——正文是 `XXX` 占位的模板式描述（`当 XXX_R1_Valid为TRUE时…`），具体信号列在「基本原理」栏（`其中，XXX为以下信号：ABV2_LOAD_VOLT_AVAIL_RPDU ABV3_LOAD_VOLT_AVAIL_RPDU。`），并要求「这种描述如何考虑处理」。诊断确认：rationale 字段解析完整（`field_map.rationale` 早已映射），但别名注入只扫 content → 该需求 0 别名、`extract_labels(content)=[]`、0 路由键（详见 `docs/development/debug-log.md` BUG-20261015-002）。
+- **方案（A1，经用户选定；A2「加配置开关」与 C「模板展开/正文改写」未采用）**：`preprocess_hlr_requirements` 扫描源扩为 **content + rationale（基本原理）**——`lbl_tokens` / `bare_signal_tokens` 先 content 后 rationale 拼接（出现序稳定），`seen` 跨源去重；**注入目标不变**（仍追加 content 的 `（亦称：…）`），因为标注与匹配器的 L 号路由键都只从 content 取。无新配置（hook 本就 HSCU 专属，行为变化限制在 HSCU 线内；不写死「XXX为以下信号」句式）。
+- **修改文件**：`backend/app/v4/profiles/hscu/hooks.py`（模块 docstring、函数 docstring、扫描块；增量 **+26/-8**，未提交）；`backend/app/v4/profiles/hscu/config.yaml`（`hlr_preprocess` 注释补扫描源说明 4 行）；`backend/tests/test_hlr_word_parser_adaptivity.py`（新增 T19 / T19b，本地文件不入库）；金样对照 `backend/output/plan_goldens_after3/`（gitignored）。文档：本 log、`CHANGELOG.md`、`docs/development/debug-log.md`（BUG-20261015-002）。
+- **验证方式与结果**（离线验证；服务器 8000 未动）：
+  1. T1–T19b **21 passed**（新增 T19 原理栏入别名、T19b 跨源重复不双注入）（**已验证**）。
+  2. 真实文档离线复跑（`_parse_hlr`，`HSCU裁剪2.docx`）：024046 尾注 `（亦称：L051_ABV2_LOAD_VOLT_AVAIL_RPDU（SDI=2，SSM类型=DIS）、L051_ABV3_LOAD_VOLT_AVAIL_RPDU（SDI=3，SSM类型=DIS））`；路由键 `extract_labels` **`[] → ['L051']`**；preprocess 改写 4/5 → 5/5（**已验证**）。
+  3. 金样重生成 diff（剔 `generated_at`）：ams / fgmc / hscu / rpdu **全部 0 行差异**——P0 样例逐字节不变（022996 原理栏重复名去重生效）（**已验证**）。
+  4. 全量回归 **199 passed / 6 failed / 1 skipped**——6 项失败与留档基线同集，非本次引入（**已验证**）。
+- **遗留问题**：1) 改动未提交，需提交并重建镜像；2) `LBL_X_Status` 形态经 `_LBL_TOKEN` 截成 `X_S`（只剥 `_SSM`）——当前样例该形态总与普通形态同现故无影响，出现「只引用 `LBL_X_Status`」的正文再评估；3) 原理栏扫描属「宁多勿漏」：解释性提及无关词典内信号名会多注入别名（当前样例无此形态）；4) Issue 编号待用户回填。
+- **下一步建议**：1) 提交本分支并重建镜像，用 `HSCU裁剪2.docx` 页面实跑核对 024046 的别名与匹配块；2) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）；3) 后续新增 Issue 时回填 BUG-20261015-001 / 002 编号。
