@@ -3810,3 +3810,16 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   4. Issue 编号待用户回填。
   5. `docs/architecture/current-architecture.md` 的 `api/v4/` 模块树未列 `history.py`（既有遗漏，未顺手改）。
 - **下一步建议**：1) 提交本分支并重建镜像 / 覆盖前端产物；2) 按需为遗留 2 单独开 Issue（上传损坏文件应返回可读的 4xx 而不是 500）；3) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）。
+
+## 2026-10-15 HSCU 目录表一位数 LABEL号（去前导零）在严格列模式下被丢弃修复（HSCU 整篇适配线补丁，改动未提交）
+
+- **背景（用户提出）**：用户在 `HSCU裁剪2.docx` 表 4 新加 `LBL_PWR_ABV1_HSCU|1|1`、`LBL_PWR_ABV2_HSCU|2|2`、`LBL_PWR_ABV3_HSCU|3|2` 三行及需求 023588 / 022812，反馈「为什么这两条没有别名补充？023071 与上述两条写法一致却有别名」。离线诊断定位：三行为**一位数 LABEL号**（去前导零写法，`1` = 八进制 `001`），与前 10-14 修复无关，是严格列模式下位数地板误用的问题（详见 `docs/development/debug-log.md` BUG-20261015-001）。
+- **方案**：位数地板参数化——`_looks_like_octal_cell(text, min_digits=2)`（默认 2，行内扫描兜底行为逐字不变）；**严格列模式**（列由表头语义定位）调用点传 `min_digits=1`（该列按表头定义就是 LABEL号 列，一位也是合法写法）。一位值沿用 `_format_alias_octal` 零点填充到 3 位。不动 `_identify_label_tables` 表级判据、注入逻辑、匹配器 / pipeline、其他三个 profile。经用户确认后实施（附加约束：`HSCU软件高层需求-裁剪.docx` 解析结果不能受影响）。
+- **修改文件**：`backend/app/v4/profiles/hscu/hooks.py`（19 insertions / 12 deletions，**未提交**）；`backend/tests/test_hlr_word_parser_adaptivity.py`（新增 T18 / T18b，本地文件不入库）；金样对照目录 `backend/output/plan_goldens_after2/`（gitignored）。文档：本 log、`CHANGELOG.md`（`[Unreleased] - 2026-10-15`）、`docs/development/debug-log.md`（BUG-20261015-001）。
+- **验证方式与结果**（离线验证，未起真实链路；服务器 8000 未动）：
+  1. T1–T18b **19 passed**；对照模拟修复前行为（monkeypatch 回 ≥2 位地板）T18 **失败**、T18b 通过（**已验证**）。
+  2. 金样重生成 diff（剔 `generated_at`）：ams / fgmc / hscu / rpdu **全部 0 行差异**——含 P0 样例 `HSCU软件高层需求-裁剪.docx`（用户约束）逐字节不变（**已验证**）。
+  3. 真实文档离线复跑（`debug_23588.py` 生产路径）：023588 别名 **无 → 有**（`亦称：L001_PWR_ABV1_HSCU（SDI=1）`）、022812 同 L 号别名补齐、023071 不变（**已验证**）。
+  4. 全量回归 **197 passed / 6 failed / 1 skipped**——6 项失败与 10-13 / 10-14 留档基线同集（job/runner 5 项 + `test_parse_artifact_reuse` 陈旧断言），非本次引入（**已验证**）。
+- **遗留问题**：1) 改动未提交（当前分支 `issue-139-history-add-log` 工作区），需提交并重建后端镜像才生效；2) 表级识别判据 `_identify_label_tables` 保持 ≥2 位地板——全部行都是一位数的目录表（无多位锚点行）仍不会被识别，当前样例未触发，后续出现再评估；3) Issue 编号待用户回填。
+- **下一步建议**：1) 用户提交改动（含文档）并重建镜像，用 `HSCU裁剪2.docx` 在页面实跑核对 023588 / 022812 的别名与匹配；2) 后续新增 Issue 时把 BUG-20261015-001 的编号回填到 debug-log。

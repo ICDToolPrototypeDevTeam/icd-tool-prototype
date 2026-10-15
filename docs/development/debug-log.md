@@ -2120,3 +2120,90 @@ cd .. && for p in ams fgmc hscu rpdu; do python backend/output/gen_parse_golden.
 2. 022608 系同一通用规则的自然覆盖（计划阶段已向用户明示影响，用户确认走 A 路线）——其别名由 0 条变为 1 条。
 3. 目录表信号名单元格末尾带句号（`。`）会丢该行最后一个信号名（既有小观察，未在本次范围；见 `_extract_signal_names`，当前样例未受影响）。
 4. Issue 编号待用户回填。
+
+### BUG-20261015-001：HSCU 目录表一位数 LABEL号（去前导零写法）在严格列模式下被丢弃，相关需求别名缺失
+
+#### 状态
+
+fixed（代码已改；单测 / 金样离线复跑验证通过；**改动未提交、镜像未重建**，服务器上尚未生效）
+
+#### 发现日期
+
+2026-10-15（用户反馈样例 `HSCU裁剪2.docx` 新增需求 023588 / 022812「没有别名补充」当日定位与修复）
+
+#### 关联 Issue / PR
+
+HSCU 整篇适配线（PR #138 已合并）后续补丁；改动当前在工作区未提交（分支 `issue-139-history-add-log`）。Issue 编号待用户回填。样例：`test-input/HSCU裁剪需求/HSCU裁剪2.docx` 表 4（38 行 × 4 列，表头 `LABEL名称|LABEL号|SDI号|AB通道发送内容是否一致`），用户新加表内前 3 行为一位数 LABEL号。
+
+#### 问题现象
+
+1. 需求 023588（`控制软件（A通道）应将LBL_PWR_ABV1_HSCU_SSM置为SSM_DIS_NO。`）与 022812（同 LBL 的刷新率构造类需求）**没有任何 `（亦称：…）` 别名**；写法完全一致的 023071 正常带别名 `（亦称：L146_DIS_01_SYS2（SDI=2））`。
+2. 离线诊断（`debug_23588.py`，只读）：文档共 8 表，`_identify_label_tables` 判目录表 `[0, 1, 2, 4]`（表 4 角色 3/5，未命中 ssm / signal——该表头本就没有这两列，属预期）；表 4 前 3 行 `LBL_PWR_ABV1_HSCU | 1`、`LBL_PWR_ABV2_HSCU | 2`、`LBL_PWR_ABV3_HSCU | 3` 均未进字典（`bare='PWR_ABV1_HSCU' in_catalog=False`），同表多位行 `DIS_01_SYS2`（octal 146）在字典中——差异即「一位数 octal 行被整行丢弃」。
+
+#### 复现方式
+
+1. 只读诊断脚本（gitignored）：仓库根目录执行 `PYTHONIOENCODING=utf-8 python backend/output/userchange_recheck/debug_23588.py` —— 打印文档表结构、目录表识别结果、生产 `_parse_hlr` 产物中三条目标需求的 content 全文、以及正文 token 在目录字典中的命中情况。
+2. 最小重放：对同表一位数行（`LBL_PWR_ABV1_HSCU | 1 | 1`）检查 `_extract_label_meta` 返回的 meta 是否含 `PWR_ABV1_HSCU`（修复前不含）。
+3. 单测重放：`tests/test_hlr_word_parser_adaptivity.py` 的 T18（严格列一位数）对本次修复敏感（对照模拟修复前行为 → 失败）。
+
+#### 影响范围
+
+HSCU 反向链路目录表解析（`profiles/hscu/hooks.py`，仅 HSCU 配置启用此路径）。影响凡目录表 `LABEL号` 列为一位数（去前导零）的行：该行 LABEL 名称腿与信号名腿**均**进不了字典，正文引用这些 LBL / 信号的需求拿不到别名（L 号是唯一匹配路由键），匹配阶段落入「逻辑/非通信」0 候选。AMS / FGMC / RPDU 无此代码路径（金样 diff 实证 0 行）。既有 HSCU 全篇样例（`HSCU软件高层需求-裁剪.docx`）目录表无一位数行，解析产物逐字节不变（用户明确约束，已实测）。
+
+#### 原因分析
+
+`_looks_like_octal_cell` 的「≥2 位」地板被严格列模式误用：
+
+1. **地板本意**（行内扫描兜底路径 `_extract_row_mapping`）：在同一行里同时找 LBL 单元格与 octal 单元格，一位数字（`0`~`3`）更可能是 SDI 值列的值，若接受一位数会出现「SDI 列劫持 octal」。故该路径需要 ≥2 位。
+2. **误用点**（严格列模式）：10-13 引入的表头关键字语义定位（`name`+`octal` 命中即按列取值，杜绝串列）复用了同一校验函数。此时列角色已由表头语义确定，一位值是合法的去前导零写法（`1` = 八进制 `001`），不应受行内扫描的防混淆地板约束。被弃的整行无任何告警——表 4 前 3 行静默消失。
+
+（旁证：同为一位数写法差异的对照——023071 的 LBL 行 `LBL_DIS_01_SYS2 | 146` 是多位值，正常入典、正常注别名；023588 / 022812 的 LBL 行 `| 1` / `| 2` 一位数，被丢。唯一差异就是 octal 位数。）
+
+#### 修复方案
+
+位数地板参数化，按扫描路径区分：
+
+- `_looks_like_octal_cell(text, min_digits=2)`：默认 2，行内扫描兜底路径行为**逐字不变**；
+- 严格列模式调用点传 `min_digits=1`（列按表头定义就是 LABEL号 列，一位合法）。
+
+一位值沿用既有 `_format_alias_octal` 零点填充到 3 位输出（`1` → `L001_…（SDI=1）`），与 EoICD 块键口径一致。**不改**：`_identify_label_tables` 表级判据（保持默认地板）、注入逻辑 `preprocess_hlr_requirements`、匹配器与 pipeline、其他三个 profile。
+
+#### 修改文件
+
+- `backend/app/v4/profiles/hscu/hooks.py`（`_looks_like_octal_cell` 签名 + docstring、位数比较、严格列调用点；`git diff --stat`：19 insertions / 12 deletions）——**当前未提交**
+- `backend/tests/test_hlr_word_parser_adaptivity.py`（新增 T18 / T18b；本地文件不入库）
+- 金样对照（gitignored）：`backend/output/plan_goldens_after2/`（与 `plan_goldens/` 剔 `generated_at` 后逐条比对）
+- 真实文档修复前 / 后输出留档（gitignored）：`backend/output/userchange_recheck/debug_23588_out.txt` / `debug_23588_after.txt`
+
+未改：`_identify_label_tables`、`_extract_row_mapping`、`preprocess_hlr_requirements`、匹配器/分类器/pipeline、其他三个 profile 及其 config.yaml。
+
+#### 验证方式
+
+```bash
+cd backend
+python -m pytest tests/test_hlr_word_parser_adaptivity.py -q      # T1–T18b
+python -m pytest tests/ -q \
+  --ignore=tests/test_ams_controller.py --ignore=tests/test_fgmc_controller.py \
+  --ignore=tests/test_hscu_controller.py --ignore=tests/test_judge_prompt_dispatch.py \
+  --ignore=tests/test_reverse_base_stages.py --ignore=tests/test_reverse_controller_attrs.py \
+  --ignore=tests/test_reverse_controllers_registry.py --ignore=tests/test_reverse_ctx.py \
+  --ignore=tests/test_reverse_pipeline_entry.py --ignore=tests/test_rpdu_controller.py
+cd ..
+for p in ams fgmc hscu rpdu; do python backend/output/gen_parse_golden.py --profile $p --out-root plan_goldens_after2; done   # 与 plan_goldens 剔 generated_at 逐条 diff
+PYTHONIOENCODING=utf-8 python backend/output/userchange_recheck/debug_23588.py    # 真实文档离线复跑
+```
+
+#### 验证结果
+
+**已通过（本机，2026-10-15）**：
+
+1. 适配性单测 T1–T18b **19 passed**；对照模拟修复前行为（monkeypatch 回 ≥2 位地板）：T18 **失败**、T18b 通过——T18 对本次修复敏感、T18b 守护行内扫描路径不被放松。
+2. 金样重生成 diff（剔 `generated_at`）：ams / fgmc / hscu / rpdu **全部 0 行差异**——含用户约束的 P0 样例 `HSCU软件高层需求-裁剪.docx` 解析产物逐字节不变。
+3. 真实文档离线复跑（`debug_23588.py`，生产路径）：023588 别名 **无 → 有**（`亦称：L001_PWR_ABV1_HSCU（SDI=1）`）、022812 同 L 号别名补齐、023071 不变（`亦称：L146_DIS_01_SYS2（SDI=2）`）。
+4. 全量回归 **197 passed / 6 failed / 1 skipped**（20.32s）——6 项失败为留档既有漂移（5 项 job/runner + `test_parse_artifact_reuse` 10-13 术语规范化陈旧断言），与 10-13 / 10-14 基线同集，非本次引入；197 = 195 基线 + 本次新增 T18 / T18b。
+
+#### 遗留问题
+
+1. **改动未提交**（工作区 `hooks.py` 脏；当前分支 `issue-139-history-add-log`），需用户提交；需**重建后端镜像**才在服务器生效。
+2. 表级识别判据 `_identify_label_tables` 仍使用默认 ≥2 位地板（本次未放松）：若某文档**全部**目录表所有行都是一位数 LABEL号（无任何多位行做锚点），该表仍不会被识别为目录表。当前样例均有多位锚点行，未触发；后续如出现整表一位数的文档再评估。
+3. Issue 编号待用户回填。

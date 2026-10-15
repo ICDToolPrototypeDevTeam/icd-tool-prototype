@@ -100,21 +100,25 @@ def _looks_like_label_cell(text: str) -> bool:
     return t[:4].upper() == "LBL_" and (t[4:5].isalnum() or t[4:5] == "_")
 
 
-def _looks_like_octal_cell(text: str) -> bool:
+def _looks_like_octal_cell(text: str, min_digits: int = 2) -> bool:
     """True iff the cell text is an octal-like ARINC-429 label number.
 
     Must satisfy ALL of:
       - Pure decimal digits or ``L`` prefix + digits (e.g. ``145`` / ``L145``)
       - No ``?`` (placeholders like ``???``)
-      - Length >= 2 digits. ARINC-429 label numbers are 8-bit values
-        rendered as octal (3 digits, range 000..377, or 1-2 digits when
-        the leading zero is dropped — e.g. ``74`` is ``074``). 1-digit
-        values are typically SDI codes (``0`` / ``1`` / ``2`` / ``3``)
-        or refresh-rate fields, not label octal numbers.
+      - Length >= ``min_digits`` digits. ARINC-429 label numbers are 8-bit
+        values rendered as octal (3 digits, range 000..377, or fewer when
+        the leading zeros are dropped — e.g. ``74`` is ``074``, ``1`` is
+        ``001``). 1-digit values are typically SDI codes
+        (``0`` / ``1`` / ``2`` / ``3``) or refresh-rate fields, not label
+        octal numbers.
 
-    This length floor prevents SDI cells (typically single-digit
-    ``0``/``1``/``2``/``3``) from being misread as label numbers when
-    both columns are scanned within a single row.
+    The default ``min_digits=2`` floor prevents SDI cells (typically
+    single-digit ``0``/``1``/``2``/``3``) from being misread as label
+    numbers when both columns are scanned within a single row (行内扫描
+    兜底). 严格列模式（列由表头语义定位）传 ``min_digits=1``：该列按
+    表头定义就是 LABEL号 列，一位值同样是合法的去前导零写法
+    （``1`` = 八进制 ``001``），不适用行内扫描的防混淆地板。
     """
     t = text.strip()
     if not t or "?" in t:
@@ -122,7 +126,7 @@ def _looks_like_octal_cell(text: str) -> bool:
     m = _OCTAL_CELL_RE.match(t)
     if not m:
         return False
-    return len(m.group(1)) >= 2
+    return len(m.group(1)) >= min_digits
 
 
 def _identify_label_tables(tables: list, label_cfg) -> list[int]:
@@ -394,9 +398,12 @@ def _extract_label_meta(
                 name_col, octal_col = role_cols["name"], role_cols["octal"]
                 if len(cells) <= max(name_col, octal_col):
                     continue
+                # 严格列模式：octal 列由表头语义定位，一位值也是合法的
+                # 去前导零写法（1 = 八进制 001），不受行内扫描的 ≥2 位
+                # 地板约束（该地板只为防行内扫描误把 SDI 单值当 LABEL号）。
                 if not (
                     _looks_like_label_cell(cells[name_col])
-                    and _looks_like_octal_cell(cells[octal_col])
+                    and _looks_like_octal_cell(cells[octal_col], min_digits=1)
                 ):
                     continue
                 m = _OCTAL_CELL_RE.match(cells[octal_col])
