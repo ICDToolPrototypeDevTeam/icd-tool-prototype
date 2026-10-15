@@ -131,6 +131,14 @@ export function getForwardDownloadUrlV4(jobId: string, kind: V4ForwardDownloadKi
   return `${API_V4_BASE}/jobs/${jobId}/outputs/${kind}`
 }
 
+/**
+ * 运行日志（job.log）下载地址。与产出物不同，它走磁盘口径：任务失败 / 中断、
+ * 甚至进程重启之后，日志仍能下载，用于排查出错原因与执行过程。
+ */
+export function getJobLogDownloadUrlV4(jobId: string): string {
+  return `${API_V4_BASE}/jobs/${jobId}/logs/download`
+}
+
 // ========== 历史结果：列表 / 删除 ==========
 
 /** 服务器上保留的全部历史结果（磁盘口径，按创建时间倒序）。 */

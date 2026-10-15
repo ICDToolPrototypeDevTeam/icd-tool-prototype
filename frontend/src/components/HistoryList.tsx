@@ -4,6 +4,7 @@ import {
   FileSpreadsheet,
   FileText,
   RefreshCw,
+  ScrollText,
   Trash2,
   type LucideIcon,
 } from 'lucide-react'
@@ -12,6 +13,7 @@ import {
   deleteHistoryV4,
   getDownloadUrlV4,
   getForwardDownloadUrlV4,
+  getJobLogDownloadUrlV4,
   listHistoryV4,
 } from '../api'
 import type { V4HistoryItem, V4HistoryOutputs } from '../types'
@@ -271,7 +273,9 @@ export default function HistoryList() {
                   {formatTime(item.finished_at || item.created_at)} · {formatSize(item.size_bytes)}
                 </div>
 
-                {available.length > 0 ? (
+                {/* 日志与产物并列下载：失败 / 中断的任务一个产物都没有，日志往往
+                    正是用户唯一能拿到、也唯一想看的东西（出错原因与执行过程）。 */}
+                {available.length > 0 || item.has_log ? (
                   <div className="history__downloads">
                     {available.map((spec) => (
                       <a key={spec.key} className="history__download" href={spec.url(item.job_id)} download>
@@ -279,6 +283,12 @@ export default function HistoryList() {
                         {spec.label}
                       </a>
                     ))}
+                    {item.has_log && (
+                      <a className="history__download" href={getJobLogDownloadUrlV4(item.job_id)} download>
+                        <ScrollText size={14} />
+                        运行日志
+                      </a>
+                    )}
                   </div>
                 ) : (
                   <div className="history__missing">无可下载产物（任务未跑完或生成失败）</div>

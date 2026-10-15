@@ -179,6 +179,8 @@ export interface V4HistoryItem {
   outputs: V4HistoryOutputs
   /** 该任务目录占用的字节数（含上传的输入文件与中间产物） */
   size_bytes: number
+  /** 目录里是否有运行日志（job.log）；失败/中断的任务也可能有，是最需要日志的场景 */
+  has_log: boolean
   mock: boolean
 }
 

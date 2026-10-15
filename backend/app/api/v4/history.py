@@ -1,13 +1,19 @@
 # -*- coding: utf-8 -*-
-"""历史结果：列表 + 硬删除。
+"""历史结果：列表 + 硬删除 + 运行日志下载。
 
-- GET  /api/v4/history         列出服务器上保留的历史结果（磁盘口径）
-- POST /api/v4/history/delete  整目录硬删除（含该任务上传的输入文件）
+- GET  /api/v4/history                 列出服务器上保留的历史结果（磁盘口径）
+- POST /api/v4/history/delete          整目录硬删除（含该任务上传的输入文件）
+- GET  /api/v4/jobs/{job_id}/logs/download  下载该次运行的 job.log
 
 **与 ``/jobs`` 的分工**：``/jobs`` 列的是**内存**里的任务（本进程新建 + 启动扫描
 恢复的中断任务），跑完的任务在进程重启后就不在里面了；``/history`` 列的是**磁盘**
 上的任务目录，所以重启后仍然看得到、也下得动。两者不互相替代：中断任务要在
 ``/jobs`` 里「继续 / 放弃」，历史结果要在 ``/history`` 里下载 / 清理。
+
+日志下载同样走**磁盘口径**，与 ``/jobs/{job_id}/logs``（增量拉取，只认内存里的
+任务）互补：任务失败 / 中断后用户最需要的就是日志，而那时任务往往已经不在内存
+里（进程重启）或本就只留在磁盘上，因此这里不查内存登记表，直接读任务目录下的
+``job.log``。
 
 删除是 ``shutil.rmtree``，不进回收站、没有撤销，因此接口要求显式
 ``confirm=true``，且批次里只要有一个任务还在跑就整批不删（部分成功的批次会让
@@ -18,11 +24,12 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 
 from app.api.v4.runner import (
     FORWARD_OUTPUT_FILES,
@@ -37,12 +44,15 @@ from app.api.v4.schemas import (
     V4HistoryItem,
     V4HistoryOutputs,
 )
-from app.job_log import job_log_store
+from app.job_log import LOG_FILE_NAME, job_log_store
 from app.job_manager import MANIFEST_NAME, Job, JobStatus, job_manager
 from app.v4.config import get_output_root
 
 
 router = APIRouter()
+
+# 容器时区常为 UTC；固定东八区偏移，与 outputs.py 的产物命名规则一致
+_CN_TZ = timezone(timedelta(hours=8))
 
 # job_id 白名单：只接受 uuid4 的文本形式。删除动的是 ``shutil.rmtree``，路径必须
 # 先被这道正则挡住（``..`` / 路径分隔符 / 通配符全都匹配不上），落到磁盘前再做一次
@@ -54,6 +64,22 @@ _JOB_ID_RE = re.compile(
 
 def _v4_root() -> Path:
     return get_output_root() / 'v4'
+
+
+def _resolve_job_dir(job_id: str) -> Path:
+    """job_id → 任务目录；两道门槛：uuid 白名单 + 解析后必须是 ``output/v4/`` 的直接子目录。
+
+    删除动的是 ``shutil.rmtree``，下载读的是任意 job_id 拼出来的路径，两者都必须
+    先被这两道挡住（``..`` / 路径分隔符 / 通配符匹配不上正则；软链指向别处被
+    「解析后父目录必须正好是 output/v4/」挡住）。
+    """
+    if not _JOB_ID_RE.match(job_id or ''):
+        raise HTTPException(status_code=400, detail=f'invalid job_id: {job_id!r}')
+    root = _v4_root().resolve()
+    job_dir = (root / job_id).resolve()
+    if job_dir.parent != root:
+        raise HTTPException(status_code=400, detail=f'job_id escapes output root: {job_id}')
+    return job_dir
 
 
 def _dir_size(path: Path) -> int:
@@ -103,6 +129,9 @@ def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime]:
     它们不出现在任何列表里，却照样占磁盘 —— 只有在这里能看到并清理掉。
     """
     outputs = _output_flags(job_dir / 'output')
+    # 失败 / 中断的任务正是最需要日志的场景，判据只认磁盘上的 job.log 本身：
+    # 进程重启后内存 buffer 已经没了，但任务跑过就必然留下了它
+    has_log = (job_dir / LOG_FILE_NAME).is_file()
     size = _dir_size(job_dir)
     fallback = _mtime(job_dir)
 
@@ -122,6 +151,7 @@ def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime]:
                 updated_at=fallback.isoformat(),
                 outputs=outputs,
                 size_bytes=size,
+                has_log=has_log,
             ),
             fallback,
         )
@@ -141,6 +171,7 @@ def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime]:
             input_files=input_filenames_from_params(data.get('params')),
             outputs=outputs,
             size_bytes=size,
+            has_log=has_log,
             mock=bool(data.get('mock', False)),
         ),
         created,
@@ -180,6 +211,40 @@ def list_history():
     return [item for item, _ in entries]
 
 
+def _log_download_name(job_id: str, path: Path) -> str:
+    """下载保存名 = 任务号前 8 位 + 日志最后写入时刻（东八区 YYYYMMDD_HHMM）。
+
+    取 mtime 而非下载时刻（与 ``outputs.py`` 的产物命名同规则）：同一份日志重复
+    下载文件名稳定不变，且任务号前缀让同一批任务的日志在下载目录里区分得开。
+    """
+    stamp = datetime.fromtimestamp(path.stat().st_mtime, _CN_TZ).strftime('%Y%m%d_%H%M')
+    return f'job_{job_id[:8]}_{stamp}.log'
+
+
+@router.get('/jobs/{job_id}/logs/download')
+def download_job_log(job_id: str):
+    """下载该次运行的 ``job.log``（stdout/stderr 全集，含失败堆栈与执行过程）。
+
+    **磁盘口径**：不查内存登记表，因此进程重启后、任务失败 / 中断 / 被终止之后
+    照样下得动 —— 这些正是最需要日志的场景（``/jobs/{job_id}/logs`` 增量拉取只认
+    内存里的任务，重启后对这类任务直接 404）。日志由 Tee 逐行同步落盘，任务中途
+    被 OOM 杀掉也已写到最后一行为止。
+
+    日志文件不存在（任务从未真正开始、目录已被删）→ 404；job_id 非法 → 400。
+    """
+    path = _resolve_job_dir(job_id) / LOG_FILE_NAME
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail='job.log not found (job never started, or its dir was deleted)',
+        )
+    return FileResponse(
+        path=path,
+        filename=_log_download_name(job_id, path),
+        media_type='text/plain',
+    )
+
+
 @router.post('/history/delete', response_model=V4HistoryDeleteResponse)
 def delete_history(req: V4HistoryDeleteRequest):
     """硬删除历史结果：整目录 ``rmtree``，**含 ``input/`` 里用户上传的原文件**。
@@ -193,20 +258,13 @@ def delete_history(req: V4HistoryDeleteRequest):
     if not req.job_ids:
         raise HTTPException(status_code=400, detail='job_ids is empty')
 
-    root = _v4_root().resolve()
     targets: list[tuple[str, Path]] = []
     seen: set[str] = set()
     for job_id in req.job_ids:
-        if not _JOB_ID_RE.match(job_id or ''):
-            raise HTTPException(status_code=400, detail=f'invalid job_id: {job_id!r}')
         if job_id in seen:  # 同一批里重复传同一个 id：只删一次
             continue
         seen.add(job_id)
-        job_dir = (root / job_id).resolve()
-        # 解析后必须正好是 output/v4/ 的直接子目录：软链指向别处都会被这道挡住
-        if job_dir.parent != root:
-            raise HTTPException(status_code=400, detail=f'job_id escapes output root: {job_id}')
-        targets.append((job_id, job_dir))
+        targets.append((job_id, _resolve_job_dir(job_id)))
 
     blocked = [job_id for job_id, _ in targets if _is_running(job_manager.get_job(job_id))]
     if blocked:

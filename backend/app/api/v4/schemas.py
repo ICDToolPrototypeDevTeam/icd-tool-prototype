@@ -240,6 +240,10 @@ class V4HistoryItem(BaseModel):
     outputs: V4HistoryOutputs = V4HistoryOutputs()
     # 该任务目录占用的字节数（含上传的输入文件与中间产物），删除前据此告知释放空间
     size_bytes: int = 0
+    # 目录里是否有运行日志（job.log）。**不属于** outputs：那是「七类对外产物」的
+    # 词汇表，而日志是任务跑过就有的过程记录 —— 失败 / 中断的任务往往一个产物都
+    # 没有，日志却是它唯一能给出的东西，前端据此单独给一个下载入口。
+    has_log: bool = False
     # 本次运行是否 MOCK（含义同状态接口：模拟数据不可用于验收）
     mock: bool = False
 

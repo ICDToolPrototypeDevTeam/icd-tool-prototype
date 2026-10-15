@@ -3787,3 +3787,26 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   3. 真实链路复跑（job `2665ca93-…`，真实三模型判重）：别名 **6→26**、hlr_labels 14 个 Label、匹配块 **24→104**、**26/26 个信号全部匹配**（各 4 个通道变体块）（**已验证**）。
 - **遗留问题**：1) 需重建后端镜像才在服务器生效；2) Issue 编号待用户回填；3) 目录表信号名单元格末尾带 `。` 会丢该行最后一个信号名（既有小观察，未在本次范围）。
 - **下一步建议**：1) 用户创建 Issue 并提交本分支；2) 重建镜像后用完整 HSCU 文档在页面实跑核对；3) 出包时并入《更新说明》。
+
+## 2026-10-14 历史结果新增「运行日志」下载（分支 issue-x-history-add-log）
+
+- **背景（用户提出）**：历史结果页只能看服务器上保留的结果产物；任务执行失败后想看出错原因 / 执行过程没有入口——增量日志接口 `GET /api/v4/jobs/{job_id}/logs` **只认内存里的任务**（进程重启后或已跑完的任务一律 404），任务页里也早已找不到它。用户要求：**就算任务没执行完整也要能看到日志**。
+- **完成内容**：
+  1. 后端 `history.py` 新增 `GET /api/v4/jobs/{job_id}/logs/download`：**磁盘口径**直读 `output/v4/{job_id}/job.log`（不查内存登记表，进程重启后照样可下），`job_id` 白名单 + 路径归属两道门槛抽成 `_resolve_job_dir`（删除接口复用同一 helper，行为不变）；保存名 `job_{job_id 前 8 位}_{YYYYMMDD_HHMM}.log`（时刻取日志最后写入时刻、东八区，与七类产物同命名规则）。
+  2. `V4HistoryItem` 新增 `has_log`（与 `outputs` **并列**，不并入「七类对外产物」词汇表：日志不是产物、也不在 `output/` 下），由 `_history_item` 判磁盘上有没有 `job.log`。
+  3. 前端 `types.ts` / `api/index.ts` / `HistoryList.tsx`：每个 `has_log` 条目在产物链接后渲染「运行日志」下载链接（`ScrollText` 图标），无产物且无日志时才显示原「无可下载产物」；复用既有 `.history__download` 样式，CSS 零改动。
+  4. 测试：`test_history.py` 新增 4 例（`has_log` 真假、下载 200 的 path/文件名/Content-Type、缺文件 404、非法 job_id 400）；两个本地 e2e 脚本同步扩展（见验证 4 / 5）。
+- **修改文件**：`backend/app/api/v4/history.py`、`backend/app/api/v4/schemas.py`、`frontend/src/types.ts`、`frontend/src/api/index.ts`、`frontend/src/components/HistoryList.tsx`；文档 `CHANGELOG.md`、`docs/architecture/api.md`（§2 概览 + §14）、本 log。本地（`backend/tests/` 已 gitignore、不入库）：`tests/test_history.py`、`tests/e2e_history.py`、`tests/e2e_history_page.py`。
+- **验证方式与结果**：
+  1. `python -m pytest tests/test_history.py -q` → **23 passed**（含新增 4 例）（**已验证**）。
+  2. 全量 `python -m pytest tests -q --continue-on-collection-errors` → 195 passed / 6 failed / 1 skipped / 10 errors；失败与收集错误**均为本分支既有漂移**：5 项 job/runner 相关失败与 10-13 留档基线同集，第 6 项 `test_parse_artifact_reuse` 是 10-13 术语规范化的**陈旧断言**（`pipeline.py:1006` 已改印 `[skip] Using cached SWHLR JSON`，测试仍断言旧的 `HLR JSON`）；10 个收集错误来自引用 `app.v4.reverse.base`、`app.v4.shared.*` 等已不存在模块的旧实验测试文件。已核实这些文件**全不引用 history / schemas**（**已验证**）。
+  3. `npm run build`（tsc + vite）→ 通过（**已验证**）。
+  4. `python tests/e2e_history.py`（真实 uvicorn + 独立 OUTPUT_DIR）→ **全部通过**，其中最关键的一条：显式 `controller_profile=ams` 提交损坏源文件 → 任务真实跑到解析阶段失败（`BadZipFile: File is not a zip file`）→ 历史列表里 `has_log=true` 且 `outputs` 全 false → **日志下载 200 且含完整 Traceback**；另覆盖 has_log 三态、404（无 job.log）、400（非 uuid）、删除后日志一并 404（**已验证**）。
+  5. `python tests/e2e_history_page.py`（headless Chrome 渲染历史页）→ **全部通过**：失败任务渲染出「运行日志」链接且 href 指向 `/api/v4/jobs/{FAILED}/logs/download`，全页日志链接恰好 1 条（没有 job.log 的条目不出链接）（**已验证**）。
+- **遗留问题**：
+  1. 需**重建后端镜像 / 覆盖前端产物**才在服务器生效。
+  2. **既有缺陷（本次未修，超出范围）**：上传损坏的 `.docx` 且**不传** `controller_profile`（走自动识别）时，`coverage.py:_detect_system_type → _load_hlr_tables` 未捕获 `docx.opc.exceptions.PackageNotFoundError` → 上传接口直接 **500 Internal Server Error**（用户看到的是"服务器错误"而非"文件损坏"）。本次 e2e 通过显式传 `controller_profile=ams` 绕开该路径。建议单独提 Issue 修（同一路径在 completeness 上传接口的表现待查）。
+  3. 日志落盘封顶 5MB（既有设计）：超长任务的日志只保留前 5MB，失败堆栈若在 5MB 之后则不落盘。
+  4. Issue 编号待用户回填。
+  5. `docs/architecture/current-architecture.md` 的 `api/v4/` 模块树未列 `history.py`（既有遗漏，未顺手改）。
+- **下一步建议**：1) 提交本分支并重建镜像 / 覆盖前端产物；2) 按需为遗留 2 单独开 Issue（上传损坏文件应返回可读的 4xx 而不是 500）；3) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）。
