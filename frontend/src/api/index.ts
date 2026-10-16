@@ -139,6 +139,15 @@ export function getJobLogDownloadUrlV4(jobId: string): string {
   return `${API_V4_BASE}/jobs/${jobId}/logs/download`
 }
 
+/**
+ * 反向匹配中间产物（reverse_matches.json，Step 3 匹配明细）的查看地址。
+ * **浏览器内直接查看**：后端按 application/json 返回且不发 attachment，
+ * 新标签页打开即渲染，不落盘；需要留档时在页内另存。
+ */
+export function getReverseMatchesViewUrlV4(jobId: string): string {
+  return `${API_V4_BASE}/jobs/${jobId}/intermediates/reverse-matches`
+}
+
 // ========== 历史结果：列表 / 删除 ==========
 
 /** 服务器上保留的全部历史结果（磁盘口径，按创建时间倒序）。 */

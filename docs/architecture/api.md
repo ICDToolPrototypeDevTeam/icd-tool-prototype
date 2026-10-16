@@ -257,20 +257,20 @@ Content-Type：
 
 V4 `input/traceability/` 子目录用于 `enable_traceability_prefilter=true` 时追溯表落点。
 
-## 10. JSON 中间产物（不暴露）
+## 10. JSON 中间产物（默认不暴露）
 
-下列中间产物是 V4 内部数据，**不**作为下载 API 暴露，**仅**保留在 `backend/output/v4/{job_id}/output/` 内供服务端日志与后续 Issue 调试：
+下列中间产物是 V4 内部数据，**默认不**作为下载 API 暴露，**仅**保留在 `backend/output/v4/{job_id}/output/` 内供服务端日志与后续 Issue 调试：
 
 - `multi_judge_results.json`
 - `consensus_results.json`
-- `reverse_matches.json`
+- `reverse_matches.json` —— **唯一例外**：按用户要求，以「新开子路由」方式开放了**只读查看**（`GET /api/v4/jobs/{job_id}/intermediates/reverse-matches`，浏览器内联渲染、非下载，见 14.4）
 - `reverse_report.json`
 - `eoicd_requirements.json`
 - `hlr_requirements.json`
 - `hlr_labels.json`
 - `llm_cache.jsonl`（内容寻址 LLM 缓存，见第 13.2 节）
 
-如前端需要看这些数据，**不**通过 `GET /api/v4/jobs/{id}/outputs/{name}`；应在后续 Issue 加 `Accept: application/json` 内容协商或独立子路由。
+如前端需要看这些数据，**不**通过 `GET /api/v4/jobs/{id}/outputs/{name}`；应走 ADR-001 D7 预留的两条路径之一：`Accept: application/json` 内容协商，或新开独立子路由（`reverse_matches.json` 即按后者开放，见 14.4）。
 
 ## 11. API 变更原则
 
@@ -517,11 +517,13 @@ POST /api/v4/jobs/{job_id}/abandon
 
 **部署前提（Docker）**：本能力依赖 `output/` 跨进程存活。`docker-compose.yml` 已把 `./backend/output` 以 bind mount 挂到容器内 `/app/output`（且未设置 `OUTPUT_DIR`），因此 `docker compose restart` / `down` + `up` 后 manifest 仍在、中断任务不丢。若把该卷去掉、改为匿名 volume 或设置 `OUTPUT_DIR` 指向容器内非挂载路径，本能力会静默失效（重启后任务列表为空）。
 
-## 14. 历史结果接口（列表 / 删除 / 日志下载）
+## 14. 历史结果接口（列表 / 删除 / 日志下载 / 匹配中间产物查看）
 
 第 13 节的 `/jobs` 是**内存口径**（本进程新建 + 启动载入的中断任务），跑完的任务重启后即从内存消失；历史结果走**磁盘口径**：直接扫 `backend/output/v4/*/`，因此重启后仍能看到并下载以前的结果。前端入口是顶栏「历史结果」页。
 
 同一口径也覆盖**运行日志**（14.3）：任务失败 / 中断 / 被终止后，用户最需要的是出错原因与执行过程，而那时任务往往已经不在内存里 —— 日志下载因此不查内存登记表，直接读任务目录下的 `job.log`。
+
+同一口径还提供**反向匹配中间产物查看**（14.4）：`reverse_matches.json` 是 Step 3 的匹配明细，排查「某条 SWHLR 为什么没匹配上」时最直接的一手数据 —— 它只落盘、进程重启后照样在，因此查看接口同样直接读任务目录。
 
 与之配套，下载接口（第 7 节）定位任务时按「**内存 → 磁盘 manifest**」取任务类型：内存里查不到时读该目录的 `job.json`；两者都取不到（上传失败留下的残留目录没有 manifest）就不再校验类型，交由「该产物文件是否存在」决定 404 与否。修复前只认内存，进程重启后已完成任务的下载一律 404。
 
@@ -555,6 +557,7 @@ GET /api/v4/history
     },
     "size_bytes": 12345678,
     "has_log": true,
+    "has_reverse_matches": true,
     "mock": false
   }
 ]
@@ -563,6 +566,7 @@ GET /api/v4/history
 - **每个子目录都会列出**，不只有跑完的：`status` 取 manifest 原值；**没有可读 manifest** 的残留目录（上传失败留下、或 manifest 损坏）以 `status="unknown"`、`task_type=""`、时间取目录 mtime 出现 —— 这类目录不出现在任何其它列表里，却照样占磁盘，只能在这里看到并清理。
 - `outputs` 是七类对外产物的存在性布尔（反向 5 类 + 正向 2 类），与第 7 节的下载路径一一对应；全为 `false` 即「无可下载产物」（未跑完或生成失败）。
 - `has_log` 表示目录里有没有运行日志（`job.log`），与 `outputs` **并列而非其中一项**：日志不是对外产物，而是任务跑过就有的过程记录。失败 / 中断的任务常常 `outputs` 全为 `false` 却 `has_log=true` —— 这时日志是它唯一能给出的东西，前端据此单独渲染「运行日志」下载链接。
+- `has_reverse_matches` 表示目录里有没有反向匹配中间产物（`output/reverse_matches.json`，Step 3 输出），与 `has_log` 同理**不属于** `outputs` 七类词汇表。只有反向任务会写这个文件，正向任务恒为 `false`；前端据此在该条目上渲染「匹配中间产物」查看链接（14.4）。
 - `size_bytes` 为该任务目录占用的字节数（**含 `input/` 里用户上传的原始文件**与全部中间产物），供删除前告知释放空间。
 - `mock` 含义同状态接口：模拟数据不可用于验收。
 - 该接口不做鉴权（与其它接口一致），只读磁盘，不改变任何状态。
@@ -616,7 +620,25 @@ GET /api/v4/jobs/{job_id}/logs/download
 | 日志文件不存在（任务从未真正开始、目录已被删） | 404 |
 | `job_id` 非法（非 uuid / 越出 `output/v4/`） | 400 |
 
-### 14.4 历史结果错误响应（列表 / 删除）
+### 14.4 查看反向匹配中间产物
+
+```text
+GET /api/v4/jobs/{job_id}/intermediates/reverse-matches
+```
+
+返回任务输出目录下的 `reverse_matches.json`（`output/v4/{job_id}/output/reverse_matches.json`）：Step 3 匹配阶段的原始明细（每条 SWHLR 的 `match_type`、命中的 `matched_profile_keys`、匹配证据与全局统计），排查「某条 SWHLR 为什么没匹配上 / 匹配到了什么」时最直接的一手数据。
+
+- **浏览器内查看**：`Content-Type: application/json` 且**不发** `Content-Disposition`（未带 `filename`），点击后在新标签页按 JSON 渲染，不落盘；需要留档时在页内另存即可。响应体即磁盘文件原文，不重新序列化（与同事参考文件 diff 时逐字节可比）。
+- 与第 7 节 `/outputs/*` 的分工：那是七类对外产物的**下载**；本接口是 JSON 中间产物的**只读查看**。按 ADR-001 D7 的口径，JSON 中间产物默认不暴露，`reverse_matches.json` 是按 D7 预留的「新开子路由」方式开放的**唯一例外**（第 10 节），其余 6 类仍不暴露。
+- RPDU refine（Step 3.5，仅 RPDU profile）会**覆盖写盘**该文件：查看的是过滤 + 补采后的最终态。
+- 前端入口：历史结果页里每个 `has_reverse_matches=true` 的条目渲染「匹配中间产物」查看链接（新标签页打开，`target="_blank"`、无 `download` 属性）。
+
+| 场景 | HTTP |
+| --- | --- |
+| 文件不存在（正向任务、Step 3 未跑完、目录已被删） | 404 |
+| `job_id` 非法（非 uuid / 越出 `output/v4/`） | 400 |
+
+### 14.5 历史结果错误响应（列表 / 删除）
 
 | 场景 | HTTP |
 | --- | --- |

@@ -30,7 +30,7 @@ ICD工具原型 是一套「**反向**」覆盖性分析工具：从软件高层
 3. `EoICD与SWHLR单模型差异分析报告_MiniMax.docx` — MiniMax 单模型裁判结论（当前 mock fallback）。
 4. `EoICD与SWHLR单模型差异分析报告_Qwen.docx` — Qwen 单模型裁判结论（当前 mock fallback）。
 5. `EoICD与SWHLR多模型差异分析报告.docx` — 3 模型共识 + Review Agent 复核 + 星级 1-3。
-6. 7 个内部 JSON 中间产物（按 ADR-001 D7 **不**作为下载 API 暴露）：
+6. 7 个内部 JSON 中间产物（按 ADR-001 D7 **不**作为下载 API 暴露；唯一例外：`reverse_matches.json` 按用户要求开放**只读查看**入口——历史结果页新标签页内联渲染、非下载，见 `docs/architecture/api.md` 第 10 / 14.4 节）：
    - `multi_judge_results.json` / `consensus_results.json` / `reverse_matches.json` / `reverse_report.json`
    - `eoicd_requirements.json` / `hlr_requirements.json` / `hlr_labels.json`
 

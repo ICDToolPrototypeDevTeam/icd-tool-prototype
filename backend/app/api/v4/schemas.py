@@ -244,6 +244,11 @@ class V4HistoryItem(BaseModel):
     # 词汇表，而日志是任务跑过就有的过程记录 —— 失败 / 中断的任务往往一个产物都
     # 没有，日志却是它唯一能给出的东西，前端据此单独给一个下载入口。
     has_log: bool = False
+    # 目录里是否有反向匹配中间产物（output/reverse_matches.json，Step 3 输出）。
+    # 同样不属于 outputs；按 ADR-001 D7 预留的「新开子路由」方式为它单独开了
+    # 只读查看入口（GET /jobs/{job_id}/intermediates/reverse-matches），其余
+    # 6 类中间产物仍不暴露。只有反向任务会写它，正向任务恒为 False。
+    has_reverse_matches: bool = False
     # 本次运行是否 MOCK（含义同状态接口：模拟数据不可用于验收）
     mock: bool = False
 

@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-10-16
+
+### Added
+
+- **历史结果新增「匹配中间产物」（reverse_matches）浏览器内查看**：历史结果页此前只能拿到七类对外产物与运行日志，而反向匹配阶段的中间明细 `output/v4/{job_id}/output/reverse_matches.json`（Step 3 输出：每条 SWHLR 的 `match_type`、命中的 `matched_profile_keys`、匹配证据与全局统计）按 ADR-001 D7 不对任何接口暴露——排查「某条 SWHLR 为什么没匹配上」时只能登服务器看文件，而部署环境下这正是拿不到的东西。新增 `GET /api/v4/jobs/{job_id}/intermediates/reverse-matches`：**只读查看**（`Content-Type: application/json` 且不发 `Content-Disposition`，浏览器新标签页内联渲染、不落盘，需要留档时在页内另存；**响应体即磁盘原文，不重新序列化**，与同事参考文件 diff 时逐字节可比）。`GET /api/v4/history` 列表项新增 `has_reverse_matches` 字段（与 `has_log` 同理、**不属于** `outputs` 七类词汇表：只有反向任务会写该文件，正向任务恒为 `false`），前端历史结果页据此渲染「匹配中间产物」查看链接（新标签页打开、无 `download` 属性）。`job_id` 非法 → 400，文件不存在（正向任务 / Step 3 未跑完 / 目录已被删）→ 404。**ADR-001 D7 边界**：JSON 中间产物默认不暴露，本次按 D7 预留的「新开子路由」方式实施，**只开 `reverse_matches.json` 这一个例外**，其余 6 类中间产物仍不暴露（ADR-001 D7 节与「状态」节已加 2026-10-16 更新注记）。该改动需**重建后端镜像 / 覆盖前端产物**才生效。
+
 ## [Unreleased] - 2026-10-15
 
 ### Fixed

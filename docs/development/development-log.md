@@ -3836,3 +3836,31 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   4. 全量回归 **199 passed / 6 failed / 1 skipped**——6 项失败与留档基线同集，非本次引入（**已验证**）。
 - **遗留问题**：1) 改动未提交，需提交并重建镜像；2) `LBL_X_Status` 形态经 `_LBL_TOKEN` 截成 `X_S`（只剥 `_SSM`）——当前样例该形态总与普通形态同现故无影响，出现「只引用 `LBL_X_Status`」的正文再评估；3) 原理栏扫描属「宁多勿漏」：解释性提及无关词典内信号名会多注入别名（当前样例无此形态）；4) Issue 编号待用户回填。
 - **下一步建议**：1) 提交本分支并重建镜像，用 `HSCU裁剪2.docx` 页面实跑核对 024046 的别名与匹配块；2) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）；3) 后续新增 Issue 时回填 BUG-20261015-001 / 002 编号。
+
+## 2026-10-16 历史结果新增「匹配中间产物（reverse_matches）浏览器内查看」+ 历史结果/日志正反向可用性确认（分支 issue-x-x）
+
+- **背景（用户提出）**：因服务器上无法直接查看文件，此前已为历史结果加上「产出物」与「运行日志」。用户要求先**确认这两项能力在正向 / 反向两条流程下均可使用**，若均可用，再在反向历史结果中加入「查看匹配中间产物 `reverse_matches`」的功能。
+- **正反向可用性确认（先做，结论：均可用）**：
+  1. 代码层：`GET /api/v4/history` 列表与删除无 task_type 分支；运行日志落盘（`job_log_store.register`，正反两条线程同一入口）与下载对两条流程同构；产物下载为「反向 5 类 + 正向 2 类」白名单路由，正/反向交叉请求各自 404。
+  2. 实测（httpx ASGITransport 直连应用、磁盘口径、本地 207 条历史）：反向任务 `a8b8d542` —— EoICD 清单 200 / 单模型差异报告 200 / 多模型报告 200 / 运行日志 200（保存名 `job_a8b8d542_20261014_1441.log`）；正向任务 `ea402750` —— 正向明细 xlsx 200 / 正向报告 docx 200 / 运行日志 200；交叉校验（反向任务请求正向接口、正向任务请求反向接口）均 404（**已验证**）。
+  3. 说明（不影响可用性）：自动化用例只覆盖反向（正向产物/日志无用例，靠本次实测确认）；历史页为下载链接形态、无内联预览（预览只在刚完成任务的结果页）。
+- **完成内容**：
+  1. 后端 `history.py` 新增 `GET /api/v4/jobs/{job_id}/intermediates/reverse-matches`：复用 `_resolve_job_dir` 两道门槛（uuid 白名单 + 解析后归属 `output/v4/`），返回 `FileResponse(media_type='application/json')` 且**不传 filename**（不发 `Content-Disposition` → 浏览器内联渲染、非下载）；文件不存在 404、非法 job_id 400。
+  2. `V4HistoryItem` 新增 `has_reverse_matches`（与 `has_log` 同理不并入 `outputs`）；`_history_item` 判 `output/reverse_matches.json` 是否存在（文件名取自 `runner.V4_INTERMEDIATE_JSON['reverse_matches']`，不新增字面量）。
+  3. 前端 `types.ts` / `api/index.ts` / `HistoryList.tsx`：`has_reverse_matches=true` 的条目渲染「匹配中间产物」查看链接（`FileJson` 图标，`target="_blank"` + `rel="noopener noreferrer"`、**无** `download` 属性，title 提示文件名与打开方式）；复用 `.history__download` 样式，CSS 零改动。
+  4. **ADR-001 D7 口径**：JSON 中间产物默认不暴露，D7 预留「新开子路由」的开放方式——本次即按该方式实施，**只开 `reverse_matches` 一个例外**，其余 6 类不动；ADR-001 D7 节与「状态」节加 2026-10-16 更新注记（决策未变、路径在 D7 内，不新开 ADR）。
+- **修改文件**：`backend/app/api/v4/history.py`、`backend/app/api/v4/schemas.py`、`frontend/src/types.ts`、`frontend/src/api/index.ts`、`frontend/src/components/HistoryList.tsx`；文档 `CHANGELOG.md`、`docs/architecture/api.md`（§10 / §14.1 / 新增 14.4 + 原 14.4 顺延为 14.5）、`docs/project/scope.md`、`docs/project/workflow.md`、`docs/architecture/current-architecture.md`、`docs/decisions/ADR-001-V4后端接入策略.md`、本 log。本地（`backend/tests/` 已 gitignore、不入库）：`tests/test_history.py`、`tests/e2e_history.py`、`tests/e2e_history_page.py`。
+- **验证方式与结果**：
+  1. `python -m pytest tests/test_history.py -q` → **30 passed**（原 23 + 新增 7：`has_reverse_matches` 三态、内联 200（path / media_type / 无 content-disposition）、缺文件 404、非法 job_id 400×4）（**已验证**）。
+  2. 全量 `python -m pytest tests -q --continue-on-collection-errors` → **206 passed / 6 failed / 1 skipped / 10 errors**；6 项失败（job/runner 5 项 + `test_parse_artifact_reuse` 陈旧断言）与 10 个收集错误（引用已删模块的旧实验测试）与 10-14 / 10-15 留档基线同集，非本次引入（**已验证**）。
+  3. 实测（httpx ASGITransport + 本地真实历史）：反向 `a8b8d542` 查看 200（`application/json`、无 `content-disposition`、178350 B，顶层键 / 11 条 results / stats 均可解析）、历史列表 `has_reverse_matches=true`；正向 `ea402750` 同接口 404、列表 `false`；非法 job_id 400（**已验证**）。
+  4. `python tests/e2e_history.py`（真实 uvicorn + 独立 OUTPUT_DIR）→ **全部通过**：新增 11 项检查（标记四态、200 + Content-Type + 无 content-disposition + 内容与磁盘一致、无文件 404、非法 400、删除后 404）（**已验证**）。
+  5. `python tests/e2e_history_page.py`（headless Chrome，前端 `dist` 已按本次改动重建）→ **全部通过**：查看链接恰 1 条，anchor 形如 `<a class="history__download" href=".../intermediates/reverse-matches" target="_blank" rel="noopener noreferrer">`、无 `download` 属性（**已验证**）。
+  6. `npm run build`（tsc + vite）→ 通过（**已验证**）。
+- **遗留问题**：
+  1. 需**重建后端镜像 / 覆盖前端产物**才在服务器生效（无新端口 / 无新环境变量 / 无权限变化）。
+  2. 自动化用例对「正向」侧仍无覆盖（`test_history.py` 与两个 e2e 脚本全为反向；正向产物与日志靠本次实测确认）——建议后续补正向用例。
+  3. `outputs.py` 的 5 个下载路由缺 `history.py` 同款的 job_id uuid / 路径归属校验（既有实现差异，非本次引入，未顺手改）。
+  4. RPDU refine 覆盖写盘后 `reverse_matches.json` 无 pre-refine 快照（既有遗留，见 10-14 记录）；查看接口给出的是最终态。
+  5. Issue 编号待用户回填。
+- **下一步建议**：1) 用户提交本分支并重建镜像 / 覆盖前端产物；2) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）；3) 按需为遗留 2 / 3 单独开 Issue；4) 服务器实测：打开历史结果页，对一条反向任务点「匹配中间产物」，浏览器新标签页应直接渲染 JSON。
