@@ -241,7 +241,7 @@ def detect_tables(cfg: dict, raw_dirs: list[Path]) -> dict[str, list[dict]]:
             try:
                 wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
             except Exception as e:  # noqa: BLE001
-                print(f"  ⚠️  无法读取 {path.name}: {e}")
+                print(f"  [WARN]  无法读取 {path.name}: {e}")
                 continue
 
             for sheet_name in wb.sheetnames:
@@ -282,7 +282,7 @@ def detect_tables(cfg: dict, raw_dirs: list[Path]) -> dict[str, list[dict]]:
                     "type": "xlsx",
                     "sheet": sheet_name,
                 })
-                print(f"  ✅ 识别为 {matched}: {path.name} / [{sheet_name}]")
+                print(f"  [OK] 识别为 {matched}: {path.name} / [{sheet_name}]")
 
             wb.close()
 
@@ -343,7 +343,7 @@ def _extract_ids_from_clustered_json(path: Path, cfg: dict) -> set[str]:
                 if v:
                     ids.add(v)
     except Exception as e:  # noqa: BLE001
-        print(f"  ⚠️  读取 HLR JSON 失败 {path.name}: {e}")
+        print(f"  [WARN]  读取 HLR JSON 失败 {path.name}: {e}")
     return ids
 
 
@@ -356,7 +356,7 @@ def _extract_ids_from_docx(path: Path, pattern: re.Pattern) -> set[str]:
         text = re.sub(r"<[^>]+>", "\n", xml)
         ids.update(pattern.findall(text))
     except Exception as e:  # noqa: BLE001
-        print(f"  ⚠️  读取 docx 失败 {path.name}: {e}")
+        print(f"  [WARN]  读取 docx 失败 {path.name}: {e}")
     return ids
 
 
@@ -382,7 +382,7 @@ def _extract_ids_from_xlsx(path: Path, pattern: re.Pattern, cfg: dict) -> set[st
                         ids.update(pattern.findall(_norm(c)))
         wb.close()
     except Exception as e:  # noqa: BLE001
-        print(f"  ⚠️  读取 xlsx 失败 {path.name}: {e}")
+        print(f"  [WARN]  读取 xlsx 失败 {path.name}: {e}")
     return ids
 
 
@@ -398,7 +398,7 @@ def _compile_patterns(cfg: dict) -> dict[str, re.Pattern]:
             try:
                 out[level] = re.compile(p)
             except re.error as e:  # noqa: BLE001
-                print(f"  ⚠️  id_patterns.{level} 正则非法: {e}")
+                print(f"  [WARN]  id_patterns.{level} 正则非法: {e}")
     return out
 
 
@@ -643,13 +643,13 @@ def build_trace(cfg: dict, base_dir: Path, raw_dir_arg: str | None = None) -> di
             "未检测到完整追溯链路（需同时存在需求矩阵表与「EoICD↔需求」追溯表），"
             "按原方案全量保留"
         )
-        print(f"\n⚠️  {result['reason']}")
+        print(f"\n[WARN]  {result['reason']}")
         return result
 
     # ---- 起点：软件高层需求编号 ----
     if not tables["hlr_source"]:
         result["reason"] = "未找到软件高层需求输入文件，按原方案全量保留"
-        print(f"\n⚠️  {result['reason']}")
+        print(f"\n[WARN]  {result['reason']}")
         return result
 
     hlr_ids = load_hlr_ids(cfg, tables["hlr_source"])
@@ -720,13 +720,13 @@ def build_trace(cfg: dict, base_dir: Path, raw_dir_arg: str | None = None) -> di
         try:
             mapping, kind, stats = parse_icd_table(t["path"], t["sheet"], cfg)
         except ValueError as e:  # noqa: BLE001
-            print(f"  ⚠️  跳过 [{t['sheet']}]: {e}")
+            print(f"  [WARN]  跳过 [{t['sheet']}]: {e}")
             continue
         icd_stats[Path(t["path"]).name] = stats
 
         # 有效编号占比过低 → 不是真正的追溯表，忽略
         if stats.get("valid_id_ratio", 0) < 0.1:
-            print(f"  ⚠️  跳过 [{t['sheet']}]: 编号可归类比例仅 "
+            print(f"  [WARN]  跳过 [{t['sheet']}]: 编号可归类比例仅 "
                   f"{stats.get('valid_id_ratio', 0):.1%}，判定为非追溯表")
             continue
 
@@ -736,7 +736,7 @@ def build_trace(cfg: dict, base_dir: Path, raw_dir_arg: str | None = None) -> di
 
     if not icd_map:
         result["reason"] = "EoICD 追溯表解析后无有效需求编号，按原方案全量保留"
-        print(f"\n⚠️  {result['reason']}")
+        print(f"\n[WARN]  {result['reason']}")
         return result
 
     # 4 层：EoICD 追溯表左列是 SRD；3 层：左列是 ERD
@@ -748,7 +748,7 @@ def build_trace(cfg: dict, base_dir: Path, raw_dir_arg: str | None = None) -> di
             # 未检测到「系统↔设备」表，但 EoICD 追溯表 ID 列确为 SRD，
             # 直接以 EoICD 追溯表内的 SRD 主键作为目标层，避免静默归零。
             target_ids, target_name = set(icd_map.keys()), "系统层级需求(取自EoICD表)"
-            print("⚠️ 未检测到「系统↔设备」表，但 EoICD 追溯表 ID 列为 SRD，"
+            print("[WARN] 未检测到「系统↔设备」表，但 EoICD 追溯表 ID 列为 SRD，"
                   "已按 4 层链路处理并以 EoICD 表 SRD 主键作为目标层")
     else:
         chain = "3-layer"

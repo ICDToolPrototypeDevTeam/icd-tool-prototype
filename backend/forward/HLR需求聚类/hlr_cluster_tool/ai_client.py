@@ -198,7 +198,11 @@ class AIClient:
                     body = json.loads(resp.read().decode('utf-8'))
                 self.call_count += 1
                 usage = body.get('usage') or {}
-                self.usage_tokens += int(usage.get('total_tokens') or 0)
+                delta = int(usage.get('total_tokens') or 0)
+                self.usage_tokens += delta
+                if delta > 0:
+                    # 增量标记：父进程（multi_judge_runner / app execution）只做加法
+                    print(f"[tokens] delta={delta}", flush=True)
                 return self._content_of(body)
             except urllib.error.HTTPError as e:
                 detail = ''

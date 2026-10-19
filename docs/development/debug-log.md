@@ -2362,3 +2362,84 @@ python -m pytest tests/ -q --continue-on-collection-errors
 2. 内容判型对表 2 依赖 `_HLR_` 编号形态；出现无该形态的编号体系时兜底退回原报错（宁失败不误配——桥接表不被误认领正依赖此特性）。
 3. sheet 改名适配（`_select_sheet` 关键词未命中按序号静默回退）未在本次范围内，后续按需评估。
 4. Issue 编号待用户回填。
+
+## BUG-20261019-001：正向 V3 Excel 兜底报告因 sys.path 缺失导入失败
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-10-19
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限正向适配层。Issue 编号待用户回填。
+
+#### 问题现象
+
+正向任务在「报告生成」步骤失败：
+
+```text
+ForwardRunError: 正向 Excel 报告生成失败（exit=1）
+ModuleNotFoundError: No module named 'multi_judge_aggregate'
+```
+
+MOCK 与真实模型模式都会触发；runner 自身生成的 xlsx 实际已写出，但兜底步骤抛异常后任务仍被判失败。
+
+#### 复现方式
+
+```bash
+cd backend/forward
+python -c "import runpy, sys; g = runpy.run_path(sys.argv[1], run_name='forward_excel'); \
+  m = g.get('main'); m() if callable(m) else None" "multi_judge协同/gen_excel_report.py"
+```
+
+稳定复现 `ModuleNotFoundError`（在脚本第 34 行 `from multi_judge_aggregate import _consensus_label`）。
+
+#### 影响范围
+
+`backend/app/forward/artifacts.run_excel_report` → 所有走到 Excel 兜底的正向任务；反向管线不受影响。
+
+#### 原因分析
+
+（已定位）V3 的 `gen_excel_report.py` 顶层直接 import 同目录的 `multi_judge_aggregate` / `multi_judge_report` / `multi_judge_summary`。直接执行脚本时，Python 自动把脚本所在目录放到 `sys.path[0]`；但 V3 起脚本的 `__main__` 是自测入口，适配层改为 `python -c` + `runpy.run_path` 调用 `main()`，此时 `sys.path[0]` 是 `backend/forward`（cwd），`multi_judge协同/` 不在搜索路径中，三个兄弟模块不可见。属于 V3 集成适配引入的回归。
+
+#### 修复方案
+
+在 runpy 前把脚本所在目录插入 `sys.path`，等价于正常脚本执行：
+
+```python
+sys.path.insert(0, os.path.dirname(os.path.abspath(p)))
+```
+
+不改 cwd、不改 V3 脚本、不改 runner 的 Excel 生成逻辑。
+
+#### 修改文件
+
+1. `backend/app/forward/artifacts.py`（`run_excel_report` 的 `-c` 代码字符串；当前未提交）
+2. `backend/tests/test_forward_artifacts.py`（新增回归用例 `test_excel_script_can_import_sibling_modules`；本地文件不入库）
+
+#### 验证方式
+
+1. 用上方复现命令重跑：应越过 import，进入读取 `runs/integration_workspace/multi_judge_aggregate.json` 的逻辑。
+2. 构造含兄弟模块 + `main()` + `__main__` 守卫的临时脚本，调用 `run_excel_report`，确认兄弟 import 成功、只执行 `main()`。
+3. `python -m pytest backend/tests/test_forward_artifacts.py -q`。
+4. 正向目标套件 66 个用例。
+
+#### 验证结果
+
+**已通过（本机，2026-10-19）**：
+
+1. 复现命令不再报 `ModuleNotFoundError`；本地因无 `runs/integration_workspace/multi_judge_aggregate.json` 而报 `FileNotFoundError`（预期，真实任务目录中存在该文件）。
+2. 临时脚本验证通过：兄弟模块 import 成功、`main()` 被调用、`__main__` 未执行。
+3. `test_forward_artifacts.py` 10 passed（含新增回归用例）。
+4. 正向目标套件 67 passed。
+5. 尚未在真实 MOCK/真实模型任务与服务器环境复验。
+
+#### 遗留问题
+
+1. 改动未提交；需重建后端镜像才在服务器生效。
+2. 尚未执行真实端到端任务复验（MOCK E2E / 真实模型 E2E）。
+3. Issue 编号待用户回填。

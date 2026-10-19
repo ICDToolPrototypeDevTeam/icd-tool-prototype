@@ -87,7 +87,7 @@ Step 6: 报告生成
 
 ### 1.2 正向完整性分析（EoICD → HLR，多 judge 一致性管线）
 
-正向完整性分析回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析互补。管线为「正向待集成」工程的整体原样集成（唯一事实源：`backend/forward/` 代码树；每任务整体复制到 `<job_dir>/forward/` 运行），前端进度为 4 步：
+正向完整性分析回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析互补。管线为「正向检查集成-发送工具集成版 V3」工程的整体原样集成（唯一事实源：`backend/forward/` 代码树；每任务整体复制到 `<job_dir>/forward/` 运行），前端进度为 4 步：
 
 ```text
 用户上传 HLR Word + EoICD PubSub Excel (Publisher 或 Subscriber 至少一个) + 可选追溯表（0-N 张，单槽多文件；
@@ -101,7 +101,9 @@ Step 1/4: 解析输入文件（阶段1 共享）
     ↓
 Step 2/4: 多模型裁判判定（judge 数 = 配置的 judge 总数，MOCK 为 3）
     每个 judge 一次完整正向检查运行（阶段2/3/4，均调 AI），在独立子进程 + 独立 env +
-    独立工作区 + 独立 map 缓存中并行执行，互不干扰；超时 judge 不 kill，由后台线程补收
+    独立工作区 + 独立 map 缓存中并行执行，互不干扰；超时 judge 不 kill，由后台线程补收。
+    V3 起每个 judge 默认在 HLR 聚类阶段调用 AI 增量生成该 judge 专属的
+    name / state / signal 映射（--ai-update）；MOCK 配置由适配层显式关闭，保证免密钥可跑
     ↓
 Step 3/4: 共识复核
     各 judge 的阶段5 结果（report_{pub,sub}.json）按 signal_full_name 对齐聚合 →

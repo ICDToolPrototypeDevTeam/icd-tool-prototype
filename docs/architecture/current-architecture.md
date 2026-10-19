@@ -163,7 +163,7 @@ Step 6 报告生成
 
 ### 7.1 正向完整性分析流程（EoICD → HLR，多 judge 一致性管线）
 
-正向管线回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析（正确性比对）互补。Issue #119 起，正向改为**原样集成**的「正向待集成」多 judge 一致性管线：业务实现全部在 `backend/forward/` 原样代码树内（`multi_judge_runner.py` 编排），工程侧由适配层 `backend/app/forward/` 驱动，与反向管线（`v4/pipeline.py`）严格分离。
+正向管线回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析（正确性比对）互补。Issue #119 起，正向改为**原样集成**的多 judge 一致性管线，当前代码树对应「正向检查集成-发送工具集成版 V3」：业务实现全部在 `backend/forward/` 原样代码树内（`multi_judge_runner.py` 编排），工程侧由适配层 `backend/app/forward/` 驱动，与反向管线（`v4/pipeline.py`）严格分离。
 
 ```text
 上传文件（HLR Word + EoICD PubSub Excel[+ 追溯表 0-N 张，单槽多文件，未传=全量 / 传任一张=追溯]）
@@ -188,7 +188,7 @@ Step 4/4 报告生成
 正向集成层（Issue #119）的模块边界与约束：
 
 ```text
-backend/forward/            正向代码树（唯一事实源，内容与「正向待集成」一致，工程侧不改其业务实现）
+backend/forward/            正向代码树（唯一事实源，内容与「发送工具集成版 V3」一致，工程侧不改其业务实现）
 backend/app/forward/        适配层（编排与翻译，零业务算法）：
                               projects（系统类型识别：显式选择优先，否则按文件名自动识别）
                               config_builder（mock / 真实两套配置；真实密钥仅运行环境解析、子进程 env 传入）
@@ -462,7 +462,7 @@ V4 工程化集成的关键决策由 `docs/decisions/ADR-001-V4后端接入策�
 - ADR-001 中 D3（`/api/v4` 命名空间）、D4（import 适配但不改业务逻辑）、D5（mock_models 显式标识）、D6（`consistency/{model}` 扩展点）、D7（JSON 不暴露）仍有效。
 - ADR-001 中 D2 / D8 及 D1 的「暂不删 V3」部分已由 ADR-002 取代（V3 已移除、`kind` 字段已删除）。
 - ADR-002 记录了 V3 移除范围、决策点 A1（去 kind）与 B（保留 app/v4 正向原型）；其中 D4（保留正向原型）已由 ADR-003 取代（正向原型已删除）。
-- ADR-003 记录了 V4 早期正向原型与旧单模型反向 CLI 的移除范围，并约定未来正向采用 ICDBlock 级 Case、候选检索算法待定。其中**与正向相关的表述已被 Issue #119 取代**：正向已改为原样集成「正向待集成」多 judge 一致性管线（见 §7.1），不再采用 ICDBlock 级 Case 的旧设计，`v4/` 内的旧正向模块已删除。
+- ADR-003 记录了 V4 早期正向原型与旧单模型反向 CLI 的移除范围，并约定未来正向采用 ICDBlock 级 Case、候选检索算法待定。其中**与正向相关的表述已被 Issue #119 取代**：正向已改为原样集成「发送工具集成版 V3」多 judge 一致性管线（见 §7.1），不再采用 ICDBlock 级 Case 的旧设计，`v4/` 内的旧正向模块已删除。
 
 如未来 V4 路由 / Schema / JobManager / LLM 抽象层有变化，需同时更新本节与相应 ADR。
 
@@ -508,13 +508,18 @@ judge 子进程（identity / attribute matcher）
   → shared/utils.record_token_usage：模块内线程安全累加，并 print("[tokens] delta=N")
   → run_identity_match / run_attribute_match 在 atexit 写 sidecar：
        <judge_ws>/data/output/{identity_match,attribute_match}/token_usage.json
+judge 子进程（AI 映射生成，V3 起 --ai-update 默认开启）
+  → hlr_cluster_tool/ai_client.py 每次响应累加并 print("[tokens] delta=N")
+  → cluster_hlr 在映射文件同目录写 sidecar：<judge_ws>/ai_update_token_usage.json
 仲裁调用
   → multi_judge_arbitrator.record_token_usage（同一契约：累加 + 增量标记）
   ↓ stdout 逐层冒泡（run_integration.run_cmd → runner → execution._pump）
-父进程 Job：只解析 [tokens] delta=N 并做加法（累计值行忽略，避免重复计数）
+父进程 Job：只解析 [tokens] delta=N 并做加法（累计值行忽略，避免重复计数；
+            V3 runner 回显 judge 输出时会加 "[judge_N name] " 前缀，故按 search 解析）
   ↓
-multi_judge_runner：启动每 judge 前清理旧 sidecar（续跑防重复计数）
-  → 汇总各 judge sidecar + 本轮仲裁值 + --base-tokens（续跑前总量）
+multi_judge_runner：启动每 judge 前清理三类旧 sidecar（续跑防重复计数）
+  → 汇总各 judge sidecar（identity + attribute + AI 映射）+ 本轮仲裁值
+    + --base-tokens（续跑前总量）
   → summary.token_usage → 正向 DOCX
 adapter 对账（必须在 cleanup_run_workspace 删除 runs/ 之前）：
   run_delta = max(实时增量, 汇总增量)
@@ -523,4 +528,4 @@ adapter 对账（必须在 cleanup_run_workspace 删除 runs/ 之前）：
   → job.result.token_usage 与 forward_summary.json
 ```
 
-约束：父进程只认增量标记（`[tokens] delta=N`）；sidecar 路径是 runner 与入口脚本之间的契约，未来若与「正向待集成」源树同步，必须连同增量标记、sidecar 文件名/路径、`--base-tokens` 一并保留，否则逐字节一致性测试会失败。
+约束：父进程只认增量标记（`[tokens] delta=N`）；三类 sidecar 路径（identity / attribute / AI 映射）是 runner 与入口脚本之间的契约，未来若与「发送工具集成版」源树同步，必须连同增量标记、sidecar 文件名/路径、`--base-tokens` 一并保留，否则逐字节一致性测试会失败。V3 起 runner 会把 judge 子进程的关键行加 `[judge_N name] ` 前缀回显，父进程解析必须用 search 而非 match。

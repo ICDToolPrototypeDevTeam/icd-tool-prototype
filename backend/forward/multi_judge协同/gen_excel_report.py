@@ -223,7 +223,9 @@ def sheet_detail(wb, agg: dict, summary: dict, title="汇总页", filter_verdict
         # #12 子分类列（对齐单 judge：已识别未承接 / 未识别）
         ws.cell(r, 4, SUB_CLASS_DISPLAY.get(a.get("sub_classification")) or "—").alignment = _WRAP
         ws.cell(r, 5, a.get("matched_hlr_consensus") or "—").alignment = _WRAP
-        ws.cell(r, 6, _format_attrs(a.get("inconsistent_attributes"))).alignment = _WRAP
+        ws.cell(r, 6, _format_attrs(a.get("inconsistent_attributes"),
+                                    final_verdict=a.get("final_verdict"),
+                                    n_judges=a.get("n_judges_participating"))).alignment = _WRAP
         c6 = ws.cell(r, 7, a.get("consensus_label") or _consensus_label(star, ""))
         c6.font = Font(color=_star_font(star))
         c6.alignment = _TOP
@@ -236,7 +238,7 @@ def sheet_detail(wb, agg: dict, summary: dict, title="汇总页", filter_verdict
     last = r - 1
     ws.auto_filter.ref = f"A1:I{last}"
     ws.freeze_panes = "A2"
-    _set_widths(ws, {"A": 6, "B": 42, "C": 10, "D": 34, "E": 34, "F": 22, "G": 18, "H": 8, "I": 50})
+    _set_widths(ws, {"A": 6, "B": 42, "C": 10, "D": 34, "E": 34, "F": 32, "G": 18, "H": 8, "I": 90})
     return ws
 
 
@@ -270,6 +272,62 @@ def generate_excel_report(agg, summary, output_path):
     return wb
 
 
+def _self_test() -> None:
+    """最小自测：颜色 hex 合法 + Sheet 名长度 + _star_font 各档有值 + 生成端到端冒烟。
+
+    不依赖真实数据文件，传入合成的最小 agg/summary，验证「能生成不崩 + 关键不变量在位」。
+    """
+    import tempfile as _tf
+
+    # 高频回归点 1：_VERDICT_FONT 与 VERDICT_GROUPS 一一对应（防「分组改了颜色忘改」类回归）
+    assert set(_VERDICT_FONT.keys()) == set(VERDICT_GROUPS), \
+        f"_VERDICT_FONT({set(_VERDICT_FONT)}) 与 VERDICT_GROUPS({set(VERDICT_GROUPS)}) 不一致"
+    # 高频回归点 2：所有颜色必须为合法 8 位 ARGB hex
+    for k, v in {**_VERDICT_FONT, "_GREEN": _GREEN, "_YELLOW": _YELLOW,
+                 "_RED": _RED, "_GRAY": _GRAY}.items():
+        assert isinstance(v, str) and len(v) == 8 and v.startswith("FF"), \
+            f"{k}={v!r} 不是合法 ARGB hex（要求 8 位 FF 开头）"
+    # 高频回归点 3：_star_font 各档（5/3-4/1-2/其它）必须有合法 ARGB
+    for s in (0, 1, 2, 3, 4, 5, 99):
+        c = _star_font(s)
+        assert isinstance(c, str) and len(c) == 8, f"_star_font({s})={c!r}"
+    # 高频回归点 4：Sheet 名长度不超 Excel 31 字限制（基础常量自检）
+    # sheet_detail 中 title 直接作为 Sheet 名 → 必须 < 31 字；目前传入的 VERDICT_GROUPS
+    # 各值均在 4 字内（"不一致"/"未落实"/"部分落实"/"已落实"/"覆盖缺口"/"待确认"），是安全边界。
+    for v in VERDICT_GROUPS:
+        assert len(v) <= 31, f"Sheet 名「{v}」超 31 字上限"
+
+    # 端到端冒烟：最小 agg/summary 跑一遍 generate_excel_report，验证能生成不崩
+    if not _OPENPYXL_OK:
+        print("gen_excel_report 自测跳过：未安装 openpyxl（pip install openpyxl）")
+        return
+    _agg = {
+        "SIG_A": {"aggregation": {"star_rating": 5, "agreement": "full",
+                                   "final_verdict": "已落实",
+                                   "matched_hlr_consensus": "R1",
+                                   "inconsistent_attributes": [], "note": "3/3 一致"}},
+        "SIG_B": {"aggregation": {"star_rating": 1, "agreement": "split",
+                                   "final_verdict": "不一致",
+                                   "matched_hlr_consensus": "R2",
+                                   "inconsistent_attributes": [{"attribute": "周期"}],
+                                   "note": "1/2：分歧"}},
+    }
+    _summary = {"total": 2, "star_distribution": {"1": 1, "5": 1},
+                "agreement_distribution": {"full": 1, "split": 1},
+                "status_distribution": {"已落实": 1, "不一致": 1},
+                "average_star_rating": 3.0, "review_coverage": {"available": False}}
+    _out = Path(_tf.mkdtemp()) / "test.xlsx"
+    _wb = generate_excel_report(_agg, _summary, _out)
+    assert _wb is not None and _out.exists() and _out.stat().st_size > 0, _out
+    # 至少包含汇总页（"汇总页"）+ 按问题分组的明细页（只创建有数据的类型：已落实 / 不一致）
+    assert "汇总页" in _wb.sheetnames, _wb.sheetnames
+    for v in ("已落实", "不一致"):
+        if _summary["status_distribution"].get(v, 0) > 0:
+            assert v in _wb.sheetnames, f"分组页缺失：{v} not in {_wb.sheetnames}"
+    print("gen_excel_report 自测通过（颜色 ARGB 合法/_star_font 各档/Sheet 名长度/"
+          "VERDICT_GROUPS-_VERDICT_FONT 对应/端到端冒烟 均符合预期）")
+
+
 def main():
     agg = json.loads(AGG.read_text(encoding="utf-8"))
     summary = json.loads(SUM.read_text(encoding="utf-8"))
@@ -284,4 +342,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    _self_test()

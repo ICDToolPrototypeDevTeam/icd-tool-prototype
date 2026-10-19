@@ -51,6 +51,64 @@
 
 ## 3. 开发记录
 
+### 2026-10-19 正向管线升级并集成「发送工具集成版 V3」
+
+#### 任务目标
+
+正向管线发布 V3（`E:\Work\2026\ICD_SKILL\V4\正向检查集成-发送工具集成版V3`），要求按前次 V2 的方式原封不动集成，不影响反向管线，并保证 token 用量统计与任务终止在正向继续可用。
+
+#### 完成内容
+
+1. 同步 `backend/forward/` 代码树：26 个文件更新、3 个上游已删除的启动脚本同步删除（`.env.example` / `run_ai.bat` / `run_ai.sh`）、新增上游 `tests/`（6 个自测文件）；工程专用的 `mock_llm_server.py` 保留。
+2. V3 业务变化原样落地：ASCII 进度标记；每 judge 专属 AI 映射（`--ai-update`，`ai_update_maps` 默认 true）；映射原子写入 + `generation` + 单映射容错；`parallel_api_keys`；`word_detail_mode` 默认 `exceptions_only`；工作区白名单校验；Tier1 单位归一化。
+3. 适配层适配：`app/forward/execution.py` 的进度正则改为 V3 ASCII 标记；`app/forward/config_builder.py` 的 MOCK 配置显式关闭 `ai_update_maps`；`app/forward/artifacts.py` 的 Excel 兜底改为 runpy 调用 V3 的 `main()`。
+4. token 链路扩展：新增 AI 映射 sidecar（`<judge_ws>/ai_update_token_usage.json`），与 identity / attribute sidecar、`[tokens] delta=N`、`--base-tokens` 契约合并；runner 启动 judge 前清理三种 sidecar；summary / Word 报告继续写任务累计用量。
+5. 安全与日志：`run_integration.py` 的命令行日志对 `--ai-key` 值脱敏为 `***`；适配层日志/进度以 V3 输出为准。
+6. 文档同步：`CHANGELOG.md`、`docs/project/workflow.md`、`docs/architecture/current-architecture.md`、`backend/forward/使用说明.md`。
+
+#### 修改文件
+
+1. `backend/forward/`（26 个更新 / 3 个删除 / `tests/` 新增，详见任务汇报）
+2. `backend/app/forward/execution.py`
+3. `backend/app/forward/artifacts.py`
+4. `backend/app/forward/config_builder.py`
+5. `backend/app/forward/adapter.py`（注释）
+6. `backend/tests/test_forward_execution.py`
+7. `backend/tests/test_forward_token_plumbing.py`
+8. `backend/tests/test_forward_config_builder.py`
+9. `CHANGELOG.md`
+10. `docs/project/workflow.md`
+11. `docs/architecture/current-architecture.md`
+12. `backend/forward/使用说明.md`
+
+#### 验证方式
+
+1. `python -m compileall -q backend/forward backend/app/forward backend/tests`
+2. `python -m pytest backend/tests/test_forward_execution.py backend/tests/test_forward_token_plumbing.py backend/tests/test_forward_artifacts.py backend/tests/test_forward_config_builder.py backend/tests/test_forward_adapter.py backend/tests/test_forward_mock_server.py backend/tests/test_forward_projects.py backend/tests/test_api_forward_trace_params.py backend/tests/test_api_mock_env_default.py backend/tests/test_zip_entry_normalize.py -q`
+3. `python backend/forward/tests/run_all.py`
+4. `python backend/forward/multi_judge_runner.py --selftest`
+5. V3 源树与 `backend/forward/` 做忽略行尾的逐文件 diff，确认差异仅为 token / 脱敏 / 工程说明。
+
+#### 验证结果
+
+1. `compileall` 通过（exit 0）。
+2. 适配层目标单测：66 passed。
+3. V3 `tests/run_all.py`：aggregate / ai_maps / arbitrator / runner_review_route / summary / report / excel 全部通过。
+4. `multi_judge_runner.py --selftest`：exit 0，全部自测通过。
+5. 一致性 diff：仅 12 个文件存在差异，均为预期项（token 采集 10 处、`--ai-key` 脱敏、`使用说明.md` 增补 §6.1）；无遗漏文件。
+6. **尚未验证**：真实模型 E2E、MOCK 端到端任务、服务器环境部署验证均未执行。
+
+#### 遗留问题
+
+1. `--ai-key` 仅对日志文本脱敏，仍会出现在子进程命令行（OS 进程列表可见）；如需彻底隔离需改为环境变量传递，属于上游接口变更。
+2. V3 `使用说明.md` 仍引用已删除的 `run_ai.bat` / `run_ai.sh`（上游文档不一致），本次按“原封不动”保留，未擅自改写。
+3. 真实模型下 `ai_update_maps` 默认开启会新增 AI 调用与 token 消耗；如遇 API 400，可在配置层置 false（适配层未提供前端开关）。
+
+#### 下一步建议
+
+1. 在服务器用 MOCK 配置跑一次完整正向任务，验证进度、终止、token 展示与两个交付物。
+2. 再跑一次真实模型小样本，核对 `summary.token_usage`、Word 报告「总 Token 用量」与前端展示一致。
+
 ### 2026-10-19 运行时模型设置（前端可改三个模型名）
 
 #### 任务目标

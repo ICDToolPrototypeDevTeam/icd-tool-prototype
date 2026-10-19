@@ -34,12 +34,28 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
+
+# 强制 stdout/stderr 用 UTF-8（errors=replace 保证永不因编码崩溃），
+# 兜底防止老旧子进程/外部脚本仍有遗留的彩色 emoji 或半角符号，runner 自身已统一 ASCII。
+# 不依赖外部 PYTHONIOENCODING 是否生效。
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    # 写进 os.environ：所有派生子进程（stage1 链 run_integration.py / judge 链）自动继承，
+    # 其 stdout 走管道时也会用 UTF-8，不再因 emoji 崩溃。
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+except Exception:
+    pass
 
 # 复用工程内 common 包（safe_load_json 支持 // 注释）
 BASE_DIR = Path(__file__).resolve().parent
@@ -77,6 +93,53 @@ SUMMARY_FOLDER_HINT = os.environ.get("MULTI_JUDGE_SUMMARY_HINT", "EoICD到软件
 # Word 共识报告文件名（对齐反向 consensus_docx 的定位：产物固定名、可被平台按名校验）
 REPORT_FILE_NAME = os.environ.get(
     "MULTI_JUDGE_REPORT_NAME", "EoICD至HLR正向一致性多模型共识分析报告.docx")
+
+
+# ---------------------------------------------------------------------------
+# Token 用量 sidecar（子进程契约，见 shared/utils.py 与 cluster_hlr.py）
+# ---------------------------------------------------------------------------
+# run_integration.generate_match_config / generate_attr_config 把两个阶段的
+# output_dir 固定在 <judge_ws>/data/output/{identity_match,attribute_match}；
+# 两个入口脚本在 atexit 时把本进程累计 token 写到该目录下的 token_usage.json。
+# V3 起每个 judge 还会用 --ai-update 生成 name/state/signal 映射，cluster_hlr
+# 把该进程的 token 写到 <judge_ws>/ai_update_token_usage.json。
+# 只扫这些确定路径（不递归），避免把历史残留文件算进来。
+
+_TOKEN_SIDECAR_PARTS = (
+    ("data", "output", "identity_match", "token_usage.json"),
+    ("data", "output", "attribute_match", "token_usage.json"),
+    ("ai_update_token_usage.json",),
+)
+
+
+def _token_sidecar_paths(judge_ws: Path) -> list[Path]:
+    return [Path(judge_ws).joinpath(*parts) for parts in _TOKEN_SIDECAR_PARTS]
+
+
+def _read_token_sidecars(judge_ws: Path) -> int:
+    """汇总一个 judge 各阶段的 token；缺失 / 损坏按 0。"""
+    total = 0
+    for path in _token_sidecar_paths(judge_ws):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            value = data.get("total_tokens") if isinstance(data, dict) else data
+            if value is None or isinstance(value, bool):
+                continue
+            total += max(0, int(value))
+        except Exception:  # noqa: BLE001 — 单个 sidecar 坏了不影响其它统计
+            continue
+    return total
+
+
+def _clear_token_sidecars(judge_ws: Path) -> None:
+    """启动 judge 前清掉旧 sidecar：复用工作区续跑时防止上一轮数值重复计数。"""
+    for path in _token_sidecar_paths(judge_ws):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:  # noqa: BLE001 — 清不掉也不影响运行
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -155,47 +218,207 @@ def _latest_summary_folder(ws: Path) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# Token 用量 sidecar（子进程契约，见 shared/utils.py）
+# 工作区清理：白名单式（保留 AI map 缓存，其余全部重置）
 # ---------------------------------------------------------------------------
-# run_integration.generate_match_config / generate_attr_config 把两个阶段的
-# output_dir 固定在 <judge_ws>/data/output/{identity_match,attribute_match}；
-# 两个入口脚本在 atexit 时把本进程累计 token 写到该目录下的 token_usage.json。
-# 只扫这两个确定路径（不递归），避免把历史残留文件算进来。
+# 2026-10-16：run_integration 以 --no-clean 运行（为复用 AI map 缓存），而它的
+# prepare_workspace() 只"建目录 + 复制"、从不清理 ⇒ 换分析对象后，上一轮的输入
+# （EoICD 表 / 追溯表 / HLR 文档）与产物（eoicd_processed/*_Located.xlsx、
+# output/<设备名…时间戳>/、summary/data/…）持续累积，并被本轮误用。已证后果：
+#   ① 上一轮追溯表/HLR 被当作本轮输入喂入；
+#   ② eoicd_processed/ 里残留上一轮 *_Located.xlsx；
+#   ③ summary.py 的 _detect_device_name() 扫 raw 里的 *.docx 取设备名 ⇒ 本轮输出
+#      目录被命名成上一轮的设备名（实测 eps 轮次出现上一轮 ams 的设备名）；
+#   ④ 历史 output/summary/data 目录累积，异常时 _latest_summary_folder 可能回落取旧。
+# 因此每个工作区在**开始前**重置为"只剩 map 缓存"。
+# 安全边界：只遍历 ws 自身、不递归兄弟目录；且 ws 名必须是 shared 或 judge_*。
+KEEP_IN_WORKSPACE = {"name_map.json", "state_map.json", "signal_map.json"}
 
-_TOKEN_SIDECAR_PARTS = (
-    ("data", "output", "identity_match", "token_usage.json"),
-    ("data", "output", "attribute_match", "token_usage.json"),
-)
 
+def _clean_workspace(ws: Path, keep_names: set[str]) -> None:
+    """把工作区重置为"只保留 keep_names 里的文件"，其余（子目录 + 文件）全删。
 
-def _token_sidecar_paths(judge_ws: Path) -> list[Path]:
-    return [Path(judge_ws).joinpath(*parts) for parts in _TOKEN_SIDECAR_PARTS]
-
-
-def _read_token_sidecars(judge_ws: Path) -> int:
-    """汇总一个 judge 两个阶段的 token；缺失 / 损坏按 0。"""
-    total = 0
-    for path in _token_sidecar_paths(judge_ws):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            value = data.get("total_tokens") if isinstance(data, dict) else data
-            if value is None or isinstance(value, bool):
-                continue
-            total += max(0, int(value))
-        except Exception:  # noqa: BLE001 — 单个 sidecar 坏了不影响其它统计
+    keep_names 传空集即整目录清空（用于 shared/，阶段1 不产 map）。
+    失败不中断（单文件删不掉仅告警，交由后续覆盖）。
+    """
+    if not ws.exists() or not ws.is_dir():
+        return
+    if ws.name != "shared" and not ws.name.startswith("judge_"):
+        print(f"  [WARN] 拒绝清理非预期工作区目录：{ws}")
+        return
+    removed = 0
+    for item in ws.iterdir():
+        if item.is_symlink():
+            try:
+                item.unlink()
+                removed += 1
+            except OSError:
+                pass
             continue
-    return total
-
-
-def _clear_token_sidecars(judge_ws: Path) -> None:
-    """启动 judge 前清掉旧 sidecar：复用工作区续跑时防止上一轮数值重复计数。"""
-    for path in _token_sidecar_paths(judge_ws):
+        if item.is_file() and item.name in keep_names:
+            continue
         try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        except Exception:  # noqa: BLE001 — 清不掉也不影响运行
-            pass
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                item.unlink()
+            removed += 1
+        except OSError as e:
+            print(f"  [WARN] 清理失败（跳过）：{item.name}（{e}）")
+    kept = sorted(keep_names) if keep_names else []
+    print(f"  [CLEAN] 工作区重置：{ws.name}（移除 {removed} 项，保留 {kept or '无'}）")
+
+
+def _reset_run_area(root: Path) -> None:
+    """清理 runs/integration_workspace 下**顶层**的每轮重生成内容：logs/ 与聚合产物。
+
+    judge_*/ 与 shared/ 不在此处理（它们要按白名单保留 AI map 缓存，见 _clean_workspace）。
+    """
+    logs = root / "logs"
+    if logs.is_dir():
+        shutil.rmtree(logs, ignore_errors=True)
+        print("  [CLEAN] 已清空运行日志目录：logs/")
+    for name in ("multi_judge_aggregate.json", "multi_judge_aggregate.csv",
+                 "multi_judge_review_stats.json", "multi_judge_summary.json"):
+        p = root / name
+        if p.exists():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# AI map 缓存健康检查（仅告警，不阻断；与 ai_maps.py 写入端的 generation 字段配套）
+# ---------------------------------------------------------------------------
+# 目的：每 judge 启动前自检本 judge 目录的 3 个 map（name / state / signal），
+# 防止「judge_C signal_map.json 缺失」一类「半成品」被静默使用。
+# 4 种状态分级（用户 2026-10-18 复盘，align 选项 A）：
+#   [WARN] 缺失                文件不存在
+#   [WARN] JSON 解析失败       文件存在但内容损坏
+#   [WARN] 半成品              有 generation 但 name(entry<covered) — 真"半成品"
+#   [WARN] 老格式且不齐全      无 generation 且 name(entry<covered) — 老 map + 数据也不全
+#   [INFO] 老格式数据齐全      无 generation 但 name(entry≥covered) — P1.2 改动前的旧产物
+#   [MAP]  健康                有 generation 且 name(entry≥covered)
+# 注意：state/signal 是 partial 覆盖（AI 没识别到就不写），不参与 entry vs covered
+# 的"半成品"判据；它们的 entry<covered 是设计预期，视为"齐全"。
+# 不阻断：本函数是诊断性，不替换 load_all_maps 的兜底链（缺文件时仍可走正则）。
+def _check_map_health(judge_ws: Path, label: str) -> None:
+    """扫本 judge 目录的 3 个 map，按 4 种状态分级输出：
+
+    - 缺失 / JSON 解析失败 / 半成品 / 老格式且不齐全 → [WARN]
+    - 老格式但数据齐全（仅缺元数据）                  → [INFO]
+    - 有 generation 且数据齐全                         → [MAP]
+
+    不解析 HLR 文档，纯文件层；不阻断流程。
+    """
+    warns: list[str] = []
+    infos: list[str] = []
+    maps: list[str] = []
+    for fname, kind in (("name_map.json", "name"),
+                        ("state_map.json", "state"),
+                        ("signal_map.json", "signal")):
+        p = judge_ws / fname
+        if not p.exists():
+            warns.append(f"{kind}: 缺失")
+            continue
+        try:
+            with open(p, encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as e:
+            warns.append(f"{kind}: JSON 解析失败（{e.__class__.__name__}）")
+            continue
+        meta = raw.get("__meta__") or {}
+        gen = meta.get("generation")
+        covered = meta.get("covered_reqs") or []
+        n_entries = sum(1 for k in raw if not str(k).startswith("__"))
+        cov_n = len(covered)
+        gen_str = str(gen) if gen is not None else "?"
+        is_legacy = gen is None or int(gen or 0) <= 0
+        # 仅 name 是 full 覆盖，entry<covered 才算"数据不齐全"
+        is_incomplete = (kind == "name") and n_entries < cov_n
+        if is_legacy and is_incomplete:
+            warns.append(
+                f"{kind}: 老格式且不齐全 gen={gen_str} entry={n_entries} covered={cov_n}")
+        elif is_incomplete:
+            warns.append(
+                f"{kind}: 半成品 gen={gen_str} entry={n_entries} covered={cov_n}")
+        elif is_legacy:
+            infos.append(
+                f"{kind}: 老格式（无 generation 字段）entry={n_entries} covered={cov_n}")
+        else:
+            maps.append(
+                f"{kind}: gen={gen_str} entry={n_entries} covered={cov_n}")
+    if warns:
+        print(f"  [WARN] {label} AI map 健康检查：{' | '.join(warns)}")
+    if infos:
+        print(f"  [INFO] {label} AI map 健康检查：{' | '.join(infos)}")
+    if maps:
+        print(f"  [MAP]  {label} AI map 健康检查：{' | '.join(maps)}")
+
+
+# ---------------------------------------------------------------------------
+# 子进程输出过滤式 tee（关键步骤回显 console，全量进日志）
+# ---------------------------------------------------------------------------
+# 2026-10-15：用户要查看每个 judge 的过程，但子模块逐信号 print 仍只进日志；
+# 用正则匹配 7 类关键行（阶段开始 / 阶段成功失败 / 流程启动 / 流程完成 / 告警 / 清理 / token），
+# 写日志时同时 echo 到 console。子模块逐信号 print 仍只进日志，不刷屏。
+# 注意：子进程模块的 emoji 已统一换成 ASCII 标记（> / [OK] / [FAIL] / [START] / [WARN] / [CLEAN]），
+# 故此处正则同步改为匹配 ASCII 标记（否则关键行匹配不上、不再回显）。
+_KEY_LINE_PATTERNS = [
+    re.compile(r"^>\s"),                       # 子阶段开始（run_integration.run_cmd:84 "> {desc}"）
+    re.compile(r"\|\s*耗时:"),                  # 子阶段完成/失败（"... | 耗时: Ns"）
+    re.compile(r"^\[START\]"),                 # 集成流程启动横幅（run_integration:729）
+    re.compile(r"\[OK\]\s*集成流程全部完成"),     # 集成完成（run_integration:784）
+    re.compile(r"^\[WARN\]"),                  # 告警（强制/拒绝/回退/清理等）
+    re.compile(r"^\[CLEAN\]"),                 # 清理提示（run_integration:712）
+    re.compile(r"^\[tokens\]\s+delta="),       # token 增量（父进程只做加法）
+]
+
+
+def _is_key_line(line: str) -> bool:
+    """判断一行子进程输出是否值得 echo 到 console。"""
+    s = line.lstrip()
+    return any(p.search(s) for p in _KEY_LINE_PATTERNS)
+
+
+# 控制台 echo 用：防御性代码——所有子进程模块已统一 ASCII（> / [OK] / [FAIL] 等），
+# 但历史上曾依赖符号区分关键行，万一以后子模块漏出彩色 emoji，
+# 下面的 _CONSOLE_SYMBOLS / _EMOJI_STRIP 仍可在回显前降级，控制台永不乱码。
+# 日志文件与控制台现在口径一致：均保留原文（已是 ASCII，无需再剥离）。
+_CONSOLE_SYMBOLS = str.maketrans({"▶": ">", "─": "-", "═": "="})
+_EMOJI_STRIP = re.compile(r"[✅❌⚠🚀🧹📊📁]\uFE0F?\s*")
+
+
+def _ascii_for_console(s: str) -> str:
+    """控制台回显前：符号转 ASCII、彩色 emoji 删除（防非 UTF-8 控制台乱码）。"""
+    return _EMOJI_STRIP.sub("", s.translate(_CONSOLE_SYMBOLS))
+
+
+def _drain_output(proc: subprocess.Popen, log_file, prefix: str) -> None:
+    """后台线程：逐行读子进程 stdout，写日志 + 关键行 echo 到 console。
+
+    proc.stdout 必须为 PIPE（text mode, encoding="utf-8", errors="replace"）。
+    进程退出后 stdout EOF，循环自然结束。daemon=False 保证主线程 join 能等到收尾。
+    日志写原文（UTF-8）；console echo 前做 ASCII 化（防非 UTF-8 控制台乱码）。
+
+    实现说明（2026-10-19 修复回归）：
+    曾尝试改用 `proc.stdout.read1(4096)` 按 chunk 读取（防 PIPE buffer 满阻塞），
+    但 POC 测试发现 chunk 读取在某些场景下让 drain 0 写入——子进程 print 完后
+    drain 卡在等"更多字节"而非返回 EOF（TextIOWrapper.read1 底层 BufferedReader.read1
+    行为：读到 size 字节或 EOF 才返回，但 PIPE buffer 不满 size 时也会阻塞）。
+    回滚到 `for line in proc.stdout:` 按 \\n 阻塞读——子进程每次 print 都有 \\n，
+    能及时读出；D4 修复（run_integration 主流程 print 全加 flush=True）已让
+    实际生产场景不撞 PIPE buffer 满，所以 chunk 读取是多余改进。
+    """
+    if proc.stdout is None:
+        return
+    for line in proc.stdout:
+        log_file.write(line)
+        log_file.flush()
+        if _is_key_line(line):
+            # 关键行回显：去尾换行 + ASCII 化 + 加 prefix（[阶段1] / [judge_X]）便于辨识
+            stripped = _ascii_for_console(line.rstrip("\n"))
+            print(f"  {prefix} {stripped}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +426,7 @@ def _clear_token_sidecars(judge_ws: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def run_stage1_shared(cfg: dict, shared_ws: Path, env: dict) -> None:
-    print(f"\n{'=' * 70}\n▶ [阶段1 共享] EoICD 数据处理 → {shared_ws}\n{'=' * 70}")
+    print(f"\n> [阶段1 共享] EoICD 数据处理 -> {shared_ws}")
     cmd = [
         PYTHON, str(BASE_DIR / "run_integration.py"),
         "--step", "eoicd",
@@ -221,24 +444,82 @@ def run_stage1_shared(cfg: dict, shared_ws: Path, env: dict) -> None:
         cmd += ["--trace-dir", cfg["trace_dir"]]
     if cfg.get("use_trace"):
         cmd += ["--use-trace"]
-    # 阶段1 无 AI，沿用当前进程 env 即可
-    subprocess.run(cmd, env=env, check=True)
+    # 阶段1 无 AI，沿用当前进程 env 即可。
+    # 子进程 stdout/stderr 重定向到日志文件，关键步骤（> 阶段X / [OK]/[FAIL] 成功失败 / [START] / [WARN] / [CLEAN]）
+    # 同步 echo 到 console（过滤式 tee），子模块逐信号 print 仍只进日志。
+    log_dir = BASE_DIR / "runs" / "integration_workspace" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "stage1.log"
+    with open(log_path, "w", encoding="utf-8") as _lf:
+        try:
+            proc = subprocess.Popen(cmd, env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, encoding="utf-8", errors="replace")
+            drainer = threading.Thread(
+                target=_drain_output, args=(proc, _lf, "[阶段1]"), daemon=False)
+            drainer.start()
+            try:
+                rc = proc.wait()
+            finally:
+                drainer.join(timeout=10)
+            if rc != 0:
+                raise subprocess.CalledProcessError(rc, cmd)
+        except subprocess.CalledProcessError as _e:
+            print(f"  阶段1 运行失败（返回码 {_e.returncode}），详细日志见 {log_path}")
+            raise
+    print(f"  [阶段1] 运行日志已写入：{log_path}")
 
 
 # ---------------------------------------------------------------------------
 # 单 judge 运行（子进程，独立 env + 工作区 + map 缓存）
 # ---------------------------------------------------------------------------
 
-def run_single_judge(judge: dict, idx: int, cfg: dict, shared_ws: Path,
-                     judge_ws: Path, out_dir: Path, timeout: int,
-                     procs: dict, procs_lock: threading.Lock) -> dict:
+@dataclass
+class JudgeRunContext:
+    """run_single_judge 的入参容器。
+
+    改造动机：原签名 9 个位置参数（`judge, idx, cfg, shared_ws, judge_ws,
+    out_dir, timeout, procs, procs_lock`），调用点要靠位置记忆，且
+    `shared_ws` / `judge_ws` 同名前缀易混、IDE 与类型检查帮不上忙。
+
+    改后：单参数 `ctx: JudgeRunContext`，构造 + 属性访问都自解释。
+    字段顺序对齐原 9 参数，方便从 `_worker` 处逐个填入。
+
+    注：`timeout` 在本函数体不直接使用（orchestrate 持有 timeout 算 deadline，
+    run_single_judge 通过 ctx.procs 登记表配合 watchdog）；保留字段以备 per-judge
+    子预算扩展。`procs_lock` 函数体**直接**用 `ctx.procs_lock`（不解包成局部变量，
+    避免遗留 NameError；P3.2 改 dataclass 时曾因 `_ = ctx.procs_lock` 占位
+    导致 Popen 启动后立即 NameError，被 except Exception 静默吃掉）。
+    """
+    judge: dict                       # 配置段里的单 judge 项
+    idx: int                          # 在 frozen 列表里的下标
+    cfg: dict                         # 整体配置（input / aggregation / project 等）
+    shared_ws: Path                   # 共享阶段1工作区
+    judge_ws: Path                    # 本 judge 工作区
+    out_dir: Path                     # 本 judge 阶段5输出目录
+    timeout: int                      # per-judge 预算（秒）
+    procs: dict                       # 全局 Popen 登记表（idx -> Popen）
+    procs_lock: threading.Lock        # 保护 procs 的写锁
+
+
+def run_single_judge(ctx: JudgeRunContext) -> dict:
     """运行一个 judge（阶段2/3/4/5），返回该 judge 的分片或错误标记。
 
     返回 {name, ws, shard, coverage, error}
     coverage: "ok" 正常；"error" 运行失败/超时被杀；"gap" 部分信号缺失。
     """
+    # 把 ctx 字段解开为本函数常用的局部变量（保持与原 9 参数版本一致的命名风格，减少函数体内的改动）。
+    # 注意：procs_lock / procs **不**解出——函数体下方 L533/L544 直接 `with ctx.procs_lock:` /
+    # `ctx.procs[idx] = proc` / `ctx.procs.pop(idx, None)`，避免遗留 NameError（P3.2 改 dataclass
+    # 时曾因 `_ = ctx.procs_lock` 占位导致 NameError，Popen 抛异常被静默吃，production 0/3 失败）。
+    judge = ctx.judge
+    idx = ctx.idx
+    cfg = ctx.cfg
+    shared_ws = ctx.shared_ws
+    judge_ws = ctx.judge_ws
+    out_dir = ctx.out_dir
     name = judge["name"]
-    print(f"\n{'#' * 70}\n# ▶ judge[{idx}] {name}  ({judge.get('model')})\n{'#' * 70}")
+    print(f"\n> judge[{idx}] {name}  ({judge.get('model')})")
 
     # 复制共享阶段1产物（raw 输入 + eoicd_processed）到本 judge 工作区
     ws_raw = judge_ws / "data" / "raw"
@@ -257,7 +538,11 @@ def run_single_judge(judge: dict, idx: int, cfg: dict, shared_ws: Path,
     for p in (nm, sm, gm):
         p.parent.mkdir(parents=True, exist_ok=True)
 
+    # AI map 健康检查（诊断性，缺文件/老格式/半成品仅 WARN，不阻断本 judge 运行）
+    _check_map_health(judge_ws, f"judge[{idx} {name}]")
+
     env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")  # 子进程(run_integration.py 等)打印 emoji 时也不崩
     # judge["model"]/["base_url"] 已在 _normalize_ai_config 中解析（config 字面量 或 .env 的 ${AI_MODEL}）
     env["AI_MODEL"] = judge["model"]
     env["BASE_URL"] = judge["base_url"]
@@ -288,29 +573,54 @@ def run_single_judge(judge: dict, idx: int, cfg: dict, shared_ws: Path,
     if cfg.get("use_trace"):
         cmd += ["--use-trace"]
     cmd += ["--name-map", str(nm), "--state-map", str(sm), "--signal-map", str(gm)]
+    # 每 judge 各自生成自己的 name/state/signal 映射（方案 A：per-judge 隔离）。
+    # 默认开启；API 配置未就绪（如 400）时可将配置里 ai_update_maps 置 false 跳过，避免重复失败。
+    if cfg.get("ai_update_maps", True):
+        cmd.append("--ai-update")
 
     # 复用工作区续跑时，上一轮的 sidecar 会留在这里；先清掉再启动，避免重复计数
     _clear_token_sidecars(judge_ws)
 
     t0 = time.time()
+    # 子进程 stdout/stderr 重定向到按 judge 命名的日志文件，关键步骤（> 阶段X / [OK]/[FAIL] 成功失败 /
+    # [START] / [WARN] / [CLEAN]）同步 echo 到 console（过滤式 tee）；失败/异常时打印指向日志的告警，排错入口不丢。
+    log_dir = BASE_DIR / "runs" / "integration_workspace" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    _safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    log_path = log_dir / f"judge_{idx}_{_safe}.log"
     try:
-        # 不靠 subprocess timeout 杀进程（超时任务继续跑，由迟到补收统一收集）；
-        # 但把 Popen 句柄登记到 procs，供 orchestrate 的硬上限 watchdog 在极端卡死时 terminate()。
-        proc = subprocess.Popen(cmd, env=env, cwd=str(BASE_DIR))
-        with procs_lock:
-            procs[idx] = proc
-        try:
-            rc = proc.wait()
-        finally:
-            with procs_lock:
-                procs.pop(idx, None)
-    except Exception as e:  # 极端情况
+        with open(log_path, "w", encoding="utf-8") as _lf:
+            # 不靠 subprocess timeout 杀进程（超时任务继续跑，由迟到补收统一收集）；
+            # 但把 Popen 句柄登记到 procs，供 orchestrate 的硬上限 watchdog 在极端卡死时 terminate()。
+            proc = subprocess.Popen(cmd, env=env, cwd=str(BASE_DIR),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, encoding="utf-8", errors="replace")
+            with ctx.procs_lock:
+                ctx.procs[idx] = proc
+            # 后台线程：写日志 + 关键行 echo console
+            drainer = threading.Thread(
+                target=_drain_output, args=(proc, _lf, f"[judge_{idx} {name}]"),
+                daemon=False)
+            drainer.start()
+            try:
+                rc = proc.wait()
+            finally:
+                with ctx.procs_lock:
+                    ctx.procs.pop(idx, None)
+                drainer.join(timeout=10)
+    except Exception as e:  # 极端情况（启动失败等）
+        # 必须 print 异常根因——之前 P3.2 的 procs_lock NameError 在这里被静默吃掉，
+        # 导致 production 跑出 0/3 judge 失败 + 0 信号却没有任何错误信息。
+        import traceback as _tb
+        _tb.print_exc()
+        print(f"[Popen 启动失败] judge[{idx} {name}] {type(e).__name__}: {e}",
+              flush=True)
         return {"name": name, "ws": str(judge_ws), "shard": {}, "coverage": "error",
                 "error": f"启动失败: {e}", "token_usage": _read_token_sidecars(judge_ws)}
     elapsed = time.time() - t0
 
     if rc != 0:
-        print(f"  ⚠️  judge {name} 运行返回非0（{rc}），该 judge 标记为 error")
+        print(f"  judge {name} 运行返回非0（{rc}），详细日志见 {log_path}，该 judge 标记为 error")
         return {"name": name, "ws": str(judge_ws), "shard": {}, "coverage": "error",
                 "error": f"returncode={rc}", "elapsed": elapsed,
                 "token_usage": _read_token_sidecars(judge_ws)}
@@ -322,7 +632,7 @@ def run_single_judge(judge: dict, idx: int, cfg: dict, shared_ws: Path,
                 "error": "未找到 stage-5 输出", "elapsed": elapsed,
                 "token_usage": _read_token_sidecars(judge_ws)}
     shard = build_shard_from_reports(folder)
-    print(f"  ✅ judge {name} 完成（{elapsed:.1f}s），分片 {len(shard)} 个信号")
+    print(f"  judge {name} 完成（{elapsed:.1f}s），分片 {len(shard)} 个信号")
     return {"name": name, "ws": str(judge_ws), "shard": shard, "coverage": "ok",
             "elapsed": elapsed, "token_usage": _read_token_sidecars(judge_ws)}
 
@@ -348,6 +658,10 @@ def orchestrate(cfg: dict, timeout: int) -> dict[str, dict]:
                 print(f"  [清理] 删除孤儿工作区：{_child.name}")
     shared_ws = root / "shared"
     shared_ws.mkdir(parents=True, exist_ok=True)
+    # 本轮开始前重置运行区：顶层日志/聚合产物每次重生成，先清避免陈旧数据误导；
+    # shared/ 无 map，整目录重置（清掉上一轮残留的输入与 *_Located.xlsx 等）。
+    _reset_run_area(root)
+    _clean_workspace(shared_ws, set())
 
     # 阶段1 共享（沿用当前进程 env，无 AI）
     run_stage1_shared(cfg, shared_ws, dict(os.environ))
@@ -361,11 +675,19 @@ def orchestrate(cfg: dict, timeout: int) -> dict[str, dict]:
     procs_lock = threading.Lock()
 
     def _worker(idx, judge):
-        out_dir = root / f"judge_{idx}_{judge['name']}" / "output"
-        out_dir.mkdir(parents=True, exist_ok=True)
         ws = root / f"judge_{idx}_{judge['name']}"
-        res = run_single_judge(judge, idx, cfg, shared_ws, ws, out_dir, timeout,
-                               procs, procs_lock)
+        # 先重置本 judge 工作区（只留 3 个 AI map 缓存），再重建 output 目录；
+        # 必须在 run_single_judge 复制"共享阶段1产物"之前，否则会连复制进来的
+        # eoicd_processed/ 一起清掉（judge 只跑 hlr/identity/attribute/summary，
+        # 阶段1 产物依赖这里复制进来）。
+        _clean_workspace(ws, KEEP_IN_WORKSPACE)
+        out_dir = ws / "output"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ctx = JudgeRunContext(
+            judge=judge, idx=idx, cfg=cfg, shared_ws=shared_ws, judge_ws=ws,
+            out_dir=out_dir, timeout=timeout, procs=procs, procs_lock=procs_lock,
+        )
+        res = run_single_judge(ctx)
         with lock:
             results[judge["name"]] = res
 
@@ -380,19 +702,19 @@ def orchestrate(cfg: dict, timeout: int) -> dict[str, dict]:
         remaining = max(0.1, deadline - time.time())
         t.join(timeout=remaining)
         if t.is_alive():
-            print(f"  ⏳ 仍有 judge 在迟到运行（超过预算），继续等待其补收结果（不中断）…")
+            print(f"  [LATE] 仍有 judge 在迟到运行（超过预算），继续等待其补收结果（不中断）…")
 
     # 硬上限 watchdog（#2 修复）：软上限(deadline)后额外宽限 HARD_GRACE 秒做最后的迟到补收；
     # 宽限结束仍存活的子进程视为卡死（API 挂起/死循环），强制 terminate()，避免拖挂整个 runner
     # （原实现最后 `for t in threads: t.join()` 无 timeout，单 judge 卡死会永久阻塞）。
     if any(t.is_alive() for t in threads):
-        print(f"\n  ⛔ 软上限已过仍有 judge 未结束，进入硬上限宽限（{HARD_GRACE}s）后强制终止挂起子进程…")
+        print(f"\n  [HARD-LIMIT] 软上限已过仍有 judge 未结束，进入硬上限宽限（{HARD_GRACE}s）后强制终止挂起子进程…")
         time.sleep(HARD_GRACE)
         with procs_lock:
             stuck = list(procs.items())
         for idx, proc in stuck:
             if proc.poll() is None:
-                print(f"  ⛔ 强制终止挂起的 judge[{idx}] 子进程 (pid={proc.pid})")
+                print(f"  [HARD-LIMIT] 强制终止挂起的 judge[{idx}] 子进程 (pid={proc.pid})")
                 try:
                     proc.terminate()
                 except Exception:
@@ -411,7 +733,7 @@ def orchestrate(cfg: dict, timeout: int) -> dict[str, dict]:
     for t in threads:
         t.join(timeout=120)
         if t.is_alive():
-            print(f"  ⚠️ 某 judge 工作线程无法 join（可能 Python 级卡死），其分片将缺失")
+            print(f"  某 judge 工作线程无法 join（可能 Python 级卡死），其分片将缺失")
 
     # 对未返回结果的 judge 补 coverage=error（硬超时终止等极端场景）
     for judge in frozen:
@@ -543,22 +865,24 @@ def run_review_route(agg: dict, shards: dict, judge_meta: dict, cfg: dict) -> di
         block = arb_cfg.get("_block_reason")
         reason = block or "仲裁模型不可用（model/base_url/api_key 缺失）"
         _record_skip(stats, reason, len(needed))
-        print("  [复核路由] ⚠️ {0}，{1} 条待复核信号未获第二裁决"
+        print("  [复核路由] {0}，{1} 条待复核信号未获第二裁决"
               "（已记入 review_stats.skipped）".format(reason, len(needed)))
         return stats
     if stats["arb_same_as_judge"]:
-        print("  [复核路由] ⚠️ 仲裁视角与 judge 同源（{0}）：第二裁决只是同一次判定的复述，"
+        print("  [复核路由] 仲裁视角与 judge 同源（{0}）：第二裁决只是同一次判定的复述，"
               "独立性受限，相关结论不宜当作交叉验证依据".format(model))
 
     budget = int(os.environ.get(REVIEW_BUDGET_ENV, "0") or 0)
     stats["budget"] = budget
     arb_cfg["_review_budget"] = {"left": budget} if budget > 0 else None
 
+    # 注意：默认值须与 multi_judge_arbitrator.run_arbitration 保持一致（同一 env，
+    # 否则此处展示的并发度与实际生效值不符）。2026-10-15 由 6 改回 8。
     conc = int(os.environ.get("MULTI_JUDGE_REVIEW_CONCURRENCY", "8"))
     conc = max(1, min(conc, 16))
     stats["concurrency"] = conc
-    print(f"\n{'=' * 70}\n▶ [复核路由] Step5 仲裁 + Step5.5 peer-aware 复查"
-          f"（{len(needed)} 条需复核信号；并发度={conc}，不占 judge 并发额度；预算={budget or '不限'}）\n{'=' * 70}")
+    print(f"\n> [复核路由] Step5 仲裁 + Step5.5 peer-aware 复查"
+          f"（{len(needed)} 条需复核信号；并发度={conc}，不占 judge 并发额度；预算={budget or '不限'}）")
     arb_cfg = dict(arb_cfg)
     arb_cfg["re_review"] = cfg.get("re_review") or {}
     agg = run_arbitration(agg, shards, judge_meta, arb_cfg)
@@ -586,80 +910,6 @@ def run_review_route(agg: dict, shards: dict, judge_meta: dict, cfg: dict) -> di
     return stats
 
 
-def _self_test() -> None:
-    """复核路由自测：不触发任何真实 LLM 调用（走「模型不可用」降级分支记账）。"""
-    from multi_judge_aggregate import aggregate
-
-    # 0 存活 → need_review=True（聚合层已强制标记）
-    shards = {
-        "judge_a": {"S1": {"matched_hlr": [], "verdict": "待确认", "name_match_status": False,
-                           "hlr_identity": None, "coverage": "error", "attributes": []}},
-        "judge_b": {"S1": {"matched_hlr": [], "verdict": "待确认", "name_match_status": False,
-                           "hlr_identity": None, "coverage": "error", "attributes": []}},
-    }
-    meta = {j: {"model": "m", "base_url": "b", "key_hash": "k", "frozen": True} for j in shards}
-    agg = aggregate(shards, meta, {}, n_configured=2)
-    assert agg["S1"]["aggregation"]["need_review"] is True
-
-    # 1) 未配 arbitrator 段 → 回落 judge[0]，但拿不到 key → 记账 skipped，不得静默
-    cfg = {"judges": [{"name": "judge_a", "model": "deepseek", "base_url": "x",
-                       "api_key_env": "_NO_SUCH_KEY_"}]}
-    arb, source = _resolve_arbitrator_cfg(cfg)
-    assert arb["model"] == "deepseek"
-    assert "同源" in source, source
-    st = run_review_route(agg, shards, meta, cfg)
-    assert st["needed"] == 1 and st["executed"] == 0 and st["skipped"] == 1, st
-    assert any("仲裁模型不可用" in k for k in st["reasons"]), st["reasons"]
-    assert "回落" in st["arb_source"], st["arb_source"]
-
-    # 2) 显式 enabled=false → 同样记账，来源说明点明是「降级且可见」
-    cfg_off = {"judges": cfg["judges"], "arbitrator": {"enabled": False, "model": "m"}}
-    arb_off, src_off = _resolve_arbitrator_cfg(cfg_off)
-    assert "显式关闭" in arb_off.get("_block_reason", ""), arb_off
-    assert "显式关闭" in src_off, src_off
-    st2 = run_review_route(agg, shards, meta, cfg_off)
-    assert st2["skipped"] == 1 and st2["executed"] == 0, st2
-    assert "显式关闭" in st2["arb_source"], st2["arb_source"]
-
-    # 2b) 同源识别：仲裁模型与 judge[0] 相同 → 需被显式点出，且默认允许但警示
-    cfg_same = {"judges": cfg["judges"],
-                "arbitrator": {"model": "deepseek", "base_url": "x",
-                               "api_key_env": "_NO_SUCH_KEY_", "allow_same_as_judge": True}}
-    arb_same, src_same = _resolve_arbitrator_cfg(cfg_same)
-    assert arb_same.get("_same_as_judge") is True, arb_same
-    assert "同源" in src_same and "独立性受限" in src_same, src_same
-    st_same = run_review_route(agg, shards, meta, cfg_same)
-    assert st_same["arb_same_as_judge"] is True, st_same
-    assert st_same["arb_model"] == "deepseek", st_same
-
-    # 2c) 同源 + 配置禁止 → 直接拒跑并记账，理由要写清是同源而非「模型不可用」
-    cfg_nosame = dict(cfg_same, arbitrator=dict(
-        cfg_same["arbitrator"], allow_same_as_judge=False))
-    arb_nosame, src_nosame = _resolve_arbitrator_cfg(cfg_nosame)
-    assert "禁止同源仲裁" in arb_nosame.get("_block_reason", ""), arb_nosame
-    st_ns = run_review_route(agg, shards, meta, cfg_nosame)
-    assert st_ns["skipped"] == 1 and st_ns["executed"] == 0, st_ns
-    assert any("禁止同源仲裁" in k for k in st_ns["reasons"]), st_ns["reasons"]
-
-    # 2d) 异模型仲裁 → 不得误判同源
-    cfg_diff = {"judges": cfg["judges"],
-                "arbitrator": {"model": "qwen-max", "base_url": "y",
-                               "api_key_env": "_NO_SUCH_KEY_2_"}}
-    arb_diff, _ = _resolve_arbitrator_cfg(cfg_diff)
-    assert arb_diff.get("_same_as_judge") is False, arb_diff
-    assert run_review_route(agg, shards, meta, cfg_diff)["arb_same_as_judge"] is False
-
-    # 3) 无待复核信号时不产生任何记账噪音（全共识 → need_review=False）
-    ok_entry = {"matched_hlr": ["R1"], "verdict": "已落实", "name_match_status": True,
-                "hlr_identity": {"bus": "1", "label": "0x10", "bit": "8", "direction": "pub"},
-                "coverage": "ok", "attributes": []}
-    agg_ok = aggregate({"judge_a": {"S1": dict(ok_entry)}, "judge_b": {"S1": dict(ok_entry)}},
-                       meta, {}, n_configured=2)
-    assert agg_ok["S1"]["aggregation"]["need_review"] is False
-    assert run_review_route(agg_ok, shards, meta, cfg)["needed"] == 0
-
-    print("✅ multi_judge_runner 复核路由自测通过（回落/显式关闭/无 key 降级均按 skipped 记账；"
-          "同源识别、同源禁止拒跑、异模型不误判均符合预期）")
 
 
 def main() -> int:
@@ -679,22 +929,24 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.selftest:
-        _self_test()
+        # 自测已迁出到 tests/test_runner_review_route.py（生产文件瘦身）
+        from tests.test_runner_review_route import run_all as _run_self_test
+        _run_self_test()
         return 0
 
     if not args.config:
-        print("❌ 未指定 --config（运行完整多 judge 流程所需）")
+        print("未指定 --config（运行完整多 judge 流程所需）")
         return 1
 
     cfg = load_config(args.config)
     _normalize_ai_config(cfg)  # 让 model/base_url 支持 .env（单 judge 风格：省略或 ${AI_MODEL} 时从环境读取）
     if not cfg.get("judges"):
-        print("❌ 配置中未找到 judges 列表")
+        print("配置中未找到 judges 列表")
         return 1
 
     if args.only_stage1:
         run_stage1_shared(cfg, BASE_DIR / "runs" / "integration_workspace" / "shared", dict(os.environ))
-        print("✅ 仅阶段1共享完成")
+        print("仅阶段1共享完成")
         return 0
 
     # 每轮从 0 累积仲裁 token；续跑前总量由 --base-tokens 单独传入
@@ -766,13 +1018,18 @@ def main() -> int:
     out_summary.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"  [汇总] 已写出：{out_summary}")
-    # Word 报告：文件名带运行时间戳（保留 env MULTI_JUDGE_REPORT_NAME 覆盖能力）
+    # Word / Excel 报告共用运行时间戳与文件名词干（report_stem），保证两者配对；
+    # Excel 文件名需在生成 Word 前确定，以便把实际文件名传进 Word 正文（详见《xxx.xlsx》）。
     report_stem = Path(REPORT_FILE_NAME).stem
     report_path = out_dir / f"{report_stem}_{run_ts}.docx"
-    generate_report(agg, summary, report_path)
+    excel_path = out_dir / f"{report_stem}_{run_ts}.xlsx"
+    # 明细展示模式（默认 exceptions_only 只列异常信号；大数据量下显著降低生成耗时）
+    report_cfg = cfg.get("report", {}) or {}
+    word_detail_mode = report_cfg.get("word_detail_mode", "exceptions_only")
+    generate_report(agg, summary, report_path, word_detail_mode=word_detail_mode,
+                    excel_filename=excel_path.name)
 
     # Excel 报告（与 Word 同源，自动生成；缺 openpyxl 时优雅跳过）
-    excel_path = out_dir / f"{report_stem}_{run_ts}.xlsx"
     generate_excel_report(agg, summary, excel_path)
 
     # 运行清单：每次 run 一份，记录时间戳/配置/judge/产物路径，便于跨 run 对比与溯源
@@ -802,13 +1059,12 @@ def main() -> int:
     n_err = sum(1 for r in results.values() if r["coverage"] == "error")
     n_total = len(results)
     n_review = sum(1 for it in agg.values() if it["aggregation"]["need_review"])
-    print(f"\n{'=' * 70}")
-    print(f"✅ 多 judge 聚合完成：{n_ok}/{n_total} judge 正常，{n_err} 失败")
+    print(f"\n> 多 judge 聚合完成：{n_ok}/{n_total} judge 正常，{n_err} 失败")
     print(f"   信号总数：{len(agg)}；需复核信号：{n_review}")
     print(f"   Token 用量：本轮 {judge_tokens + arb_tokens:,}"
           f"（judge {judge_tokens:,} + 仲裁 {arb_tokens:,}），累计 {total_tokens:,}")
     print(f"   总耗时：{time.time() - t0:.1f}s")
-    print("  ── 汇总 ──")
+    print("  -- 汇总 --")
     print("   " + format_summary_text(summary))
     print(f"   数据产物（runs 工作区）：{out_json}")
     print(f"   数据产物（runs 工作区）：{out_csv}")
@@ -817,7 +1073,8 @@ def main() -> int:
     if excel_path.exists():
         print(f"   交付报告（output/）：{excel_path}")
     print(f"   运行清单（output/）：{manifest_path}")
-    print(f"{'=' * 70}")
+    print(f"   运行日志（runs 工作区/logs/，含阶段1 与每 judge 详细输出）："
+          f"{BASE_DIR / 'runs' / 'integration_workspace' / 'logs'}")
     return 0
 
 

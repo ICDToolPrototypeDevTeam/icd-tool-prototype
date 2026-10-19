@@ -84,6 +84,9 @@ def build_mock_config(*, project: str, eoicd_pub: Optional[Path], eoicd_sub: Opt
     """
     cfg = _base_config(project=project, eoicd_pub=eoicd_pub, eoicd_sub=eoicd_sub,
                        hlr=hlr, use_trace=use_trace)
+    # V3 起 runner 默认给每个 judge 加 --ai-update（AI 生成 name/state/signal 映射）。
+    # mock 模式下映射无实际意义，关掉以减少无谓调用并保持 mock 运行稳定。
+    cfg["ai_update_maps"] = False
     cfg["judges"] = [
         {"name": "judge_ds", "model": "mock-ds",
          "base_url": MOCK_BASE_URL, "api_key_env": MOCK_KEY_ENV},

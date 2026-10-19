@@ -8,10 +8,11 @@ Word/Excel 落 ``<正向树根>/output``。两个并发任务共用一棵树必�
 :func:`cleanup_run_workspace` 清副本内 ``runs/``（中间产物可达数百 MB）；失败/中断
 任务不清理，供续跑复用与排查。
 
-Excel：当前 runner（发送工具集成版V2 起）聚合完成后已自动生成 xlsx（manifest 的
+Excel：当前 runner（发送工具集成版 V3）聚合完成后已自动生成 xlsx（manifest 的
 excel_report 兑现），:func:`run_excel_report` 作为兜底仍会重跑
-``multi_judge协同/gen_excel_report.py``（读 runs 工作区 aggregate/summary，
-同名同内容覆盖写，开销仅数秒）。
+``multi_judge协同/gen_excel_report.py`` 的 ``main()``（读 runs 工作区
+aggregate/summary，同名同内容覆盖写，开销仅数秒）。注意 V3 起脚本的
+``__main__`` 是自测入口（``_self_test``），不能靠直接执行脚本来兜底。
 """
 from __future__ import annotations
 
@@ -63,16 +64,32 @@ def prepare_job_tree(job_dir: Path, *, forward_root: Path, reuse: bool) -> Path:
 
 
 def run_excel_report(forward_dir: Path) -> None:
-    """跑 gen_excel_report.py 生成 xlsx（读 runs 工作区，无参数）。"""
+    """跑 gen_excel_report.py 的 main() 生成 xlsx（读 runs 工作区，无参数）。
+
+    V3 起脚本的 ``__main__`` 改为自测入口（``_self_test``），直接执行脚本只会
+    跑自测、不重生成正式 xlsx；因此用 runpy 加载模块后显式调用 ``main()``。
+    """
     script = forward_dir.joinpath(*EXCEL_SCRIPT)
     if not script.is_file():
         raise ForwardRunError(f"正向 Excel 脚本缺失：{script}")
-    # 脚本末尾 print("✅ Excel 已写出…")：中文 Windows（GBK 管道）下缺该变量会
-    # UnicodeEncodeError → exit=1（E2E 实测 trace 任务在此失败）
+    # 脚本 print 中文：中文 Windows（GBK 管道）下缺该变量会 UnicodeEncodeError
+    # → exit=1（E2E 实测 trace 任务在此失败）
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    # V3 脚本有 main()：显式调用；老式脚本没有 main() 时，run_path 的顶层执行
+    # 本身就是有效入口（兼容既有测试/历史脚本）。
+    # 必须把脚本所在目录插入 sys.path：脚本顶层 import 同目录的
+    # multi_judge_aggregate / multi_judge_report / multi_judge_summary。
+    # 直接执行脚本时 Python 会自动这么做；用 `python -c` + runpy 时不会，
+    # 缺这一步会在 import 处 ModuleNotFoundError。
+    code = ("import os, runpy, sys; "
+            "p = sys.argv[1]; "
+            "sys.path.insert(0, os.path.dirname(os.path.abspath(p))); "
+            "g = runpy.run_path(p, run_name='forward_excel'); "
+            "m = g.get('main'); "
+            "m() if callable(m) else None")
     proc = subprocess.run(
-        [sys.executable, str(script)], cwd=str(forward_dir), env=env,
+        [sys.executable, "-c", code, str(script)], cwd=str(forward_dir), env=env,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:

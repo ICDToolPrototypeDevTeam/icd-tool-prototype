@@ -28,11 +28,14 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import threading
 import urllib.request
 import urllib.error
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from multi_judge_aggregate import KEY_FIELDS_IDENTITY
+from multi_judge_aggregate import (KEY_FIELDS_IDENTITY, _display_matched_full,
+                                 build_analysis_summary, derive_sub_classification)
 
 # 关键字段白名单（KEY_FIELDS，身份层 judge 结论骨架）—— 分歧即真分歧。
 # 单一来源：直接复用 multi_judge_aggregate.KEY_FIELDS_IDENTITY（身份层 7 元组，
@@ -42,11 +45,10 @@ FORWARD_KEY_FIELDS = KEY_FIELDS_IDENTITY + ("attribute_class",)
 
 
 # ---------------------------------------------------------------------------
-# Token 用量（Step5 / Step5.5 仲裁调用）
+# Token 用量采集（仲裁进程内；runner 结束时经 get_token_total() 汇总）
 # ---------------------------------------------------------------------------
-# 与 shared/utils.py 的契约一致：累加本进程的仲裁调用，向 stdout 打印增量
-# 标记（由父进程实时汇总），并由 runner 用 get_token_total() 写入总结。
-# 本模块会被独立脚本直接 import，故不依赖 shared/ 的 sys.path。
+# 每次成功响应后打印增量标记 [tokens] delta=N（由父进程实时汇总），并由
+# runner 用 get_token_total() 写入总结。只对正增量打印，MOCK/无 usage 不刷屏。
 _TOKEN_TOTAL = 0
 _TOKEN_LOCK = threading.Lock()
 
@@ -80,7 +82,7 @@ def _extract_total_tokens(usage) -> int:
 
 
 def record_token_usage(usage) -> int:
-    """累加一次仲裁响应并打印增量标记；绝不抛异常。"""
+    """累加一次仲裁调用的 token 并打印增量标记；绝不抛异常。"""
     try:
         delta = _extract_total_tokens(usage)
         if delta <= 0:
@@ -90,7 +92,7 @@ def record_token_usage(usage) -> int:
             _TOKEN_TOTAL += delta
         print(f"[tokens] delta={delta}", flush=True)
         return delta
-    except Exception:  # noqa: BLE001 — 统计是旁路，绝不影响仲裁
+    except Exception:  # noqa: BLE001 — 统计是旁路，绝不影响模型调用
         return 0
 
 
@@ -101,7 +103,7 @@ def get_token_total() -> int:
 
 
 def reset_token_usage() -> None:
-    """复位本进程累计值（runner 每次运行开始时调用）。"""
+    """复位本进程累计值（runner 每轮开始时调用 / 单测用）。"""
     global _TOKEN_TOTAL
     with _TOKEN_LOCK:
         _TOKEN_TOTAL = 0
@@ -113,8 +115,12 @@ class _CircuitBreaker:
 
     串行下等价于「连续失败 N 次」；并发下为「累计失败 N 次」（用 Lock 保护计数）。
     任意一次成功即清零计数，允许偶发抖动后自动恢复。
+
+    阈值默认 15（2026-10-15 由 5 调大）：实测 4 次 TimeoutError + 1 次 JSON 解析噪声即
+    恰好踩到阈值 5，导致 270 条待复核信号一次性全被跳过（executed=0）。瞬时抖动/端点排队
+    不应触发全局止损；15 次累计失败才判定为「端点系统性故障」。
     """
-    def __init__(self, threshold: int = 5):
+    def __init__(self, threshold: int = 15):
         self.threshold = max(1, int(threshold))
         self._failures = 0
         self._tripped = False
@@ -136,20 +142,110 @@ class _CircuitBreaker:
 
 
 # ---------------------------------------------------------------------------
+# LLM 调用失败落盘（纯诊断，零行为影响）
+# ---------------------------------------------------------------------------
+# 目的：call_llm 失败时把「为什么失败」记入 JSON Lines，供事后判断
+#   ① 超时是「同一时刻集中爆发」（端点限流/排队特征）还是「零星散布」（链路抖动特征）；
+#   ② 是否集中在少数「prompt 特别大」的信号上（输入侧问题）。
+# 记录范围：**每一次尝试失败都记**（`final: false` = 中间失败、随后会重试；`final: true` = 重试耗尽）。
+# 这样即使该次调用最终成功，也能统计「尝试失败率 / 失败时刻分布」，而不只有最终失败。
+# 纯追加日志，不改返回值/重试次数/熔断逻辑；落盘自身异常一律吞掉，绝不影响主流程。
+_FAIL_LOG_LOCK = threading.Lock()
+_FAIL_LOG_STATE = {"written": 0}
+_FAIL_LOG_MAX = 2000         # 最多记录条数（防端点系统性故障时磁盘暴涨；超出后静默不再记）
+                             # 2026-10-15 由 200 提到 2000：改为「每次尝试失败」都记（含随后重试成功的），
+                             # 单轮日志量放大（294 信号 × 最多 3 次尝试 ≈ 900 条），故放宽上限（约 2MB）
+_FAIL_LOG_SNIP = 500         # 原始响应对头/尾各截取的字符数
+
+
+def _arb_fail_log_path() -> Path:
+    """落盘路径：<项目根>/runs/integration_workspace/logs/arb_fail.jsonl。
+    放 runs 内部工作区，不进 output/ 交付物（不污染交付、业务数据不外泄）。"""
+    return (Path(__file__).resolve().parents[1]
+            / "runs" / "integration_workspace" / "logs" / "arb_fail.jsonl")
+
+
+def _snip(s, n: int = _FAIL_LOG_SNIP):
+    """取字符串对头/尾各 n 字符；未超长则原样返回。"""
+    if not s:
+        return None
+    s = str(s)
+    if len(s) <= 2 * n:
+        return s
+    return s[:n] + " ……<snip>…… " + s[-n:]
+
+
+def _record_llm_failure(record: dict) -> None:
+    """追加一条失败记录到 JSONL（加锁 + 限量 + 截断）；任何异常静默忽略。"""
+    try:
+        with _FAIL_LOG_LOCK:
+            if _FAIL_LOG_STATE["written"] >= _FAIL_LOG_MAX:
+                return
+            path = _arb_fail_log_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            _FAIL_LOG_STATE["written"] += 1
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # 最小 OpenAI 兼容 LLM 客户端（标准库 urllib，无第三方依赖）
 # ---------------------------------------------------------------------------
 
 def call_llm(model: str, base_url: str, api_key: str, system: str, user: str,
-             temperature: float = 0.1, timeout: int | None = None) -> dict | None:
+             temperature: float = 0.1, timeout: int | None = None,
+             max_retries: int | None = None, ctx: dict | None = None) -> dict | None:
     """调用 OpenAI 兼容 /chat/completions，要求 JSON 输出，返回解析后的 dict；失败返回 None。
 
     timeout 默认从 env MULTI_JUDGE_REVIEW_TIMEOUT 读取（默认 60s），避免单条调用卡满 180s；
-    调用方可显式传参覆盖（第2点优化：per-signal 超时可控）。
+    调用方可显式传参覆盖（per-signal 超时可控）。
+    max_retries 默认从 env MULTI_JUDGE_REVIEW_RETRIES 读取（默认 2），在瞬时网络/代理抖动
+    （连接重置、远程断开、DNS 失败、超时、5xx、429）时指数退避重试（1s/2s…），避免单次抖动
+    即触发上层熔断器、导致整批 249 条全部跳过。注意：401/403 等鉴权/额度错误为永久错误，
+    不重试（重试无意义，且会无意义消耗重试额度）。
+
+    ctx（可选）：诊断上下文，如 {"full": 信号全名, "stage": "step5|step5.5"}；
+    仅用于失败落盘（_record_llm_failure），不影响请求内容与返回值。
     """
     if timeout is None:
         timeout = int(os.environ.get("MULTI_JUDGE_REVIEW_TIMEOUT", "60"))
+    if max_retries is None:
+        max_retries = int(os.environ.get("MULTI_JUDGE_REVIEW_RETRIES", "2"))
     if not (model and base_url and api_key):
         return None
+    ctx = ctx or {}
+    _t0 = time.time()
+
+    def _fail(err_name: str, err_msg, attempt: int, http_code=None,
+              raw_body=None, raw_content=None, final: bool = True) -> None:
+        """落盘一条失败记录（诊断用）。
+
+        final=True  = 重试耗尽后的最终失败（该次调用作废）；
+        final=False = 中间某次尝试失败、随后仍会重试（用于统计失败率与时间分布）。
+        """
+        _record_llm_failure({
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "final": final,                            # 是否最终失败（False=中间失败、后有重试）
+            "full": ctx.get("full"),
+            "stage": ctx.get("stage"),
+            "model": model,
+            "base_url": base_url,
+            "err": err_name,
+            "err_msg": str(err_msg)[:500],
+            "attempt": attempt,                        # 第几次尝试失败（1 = 首次）
+            "max_attempts": max_retries + 1,           # 总尝试次数上限（= 首次 + max_retries）
+            "elapsed_s": round(time.time() - _t0, 1),  # 进入函数→本次失败的总耗时
+            "timeout": timeout,
+            "system_chars": len(system or ""),
+            "user_chars": len(user or ""),
+            "prompt_chars": len(system or "") + len(user or ""),  # 判断是否「大 prompt 信号」
+            "http_code": http_code,
+            "resp_body": _snip(raw_body),              # 信封原文（若已读到）
+            "resp_content": _snip(raw_content),        # 模型 content 原文（解析失败时最有价值）
+        })
+
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
@@ -166,18 +262,58 @@ def call_llm(model: str, base_url: str, api_key: str, system: str, user: str,
                  "Authorization": f"Bearer {api_key}"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        if isinstance(data, dict):
+    raw_body = None      # 最近一次成功读到的 HTTP 响应原文
+    raw_content = None   # 最近一次取到的模型 content 原文（json 解析失败时供取证）
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw_body = resp.read().decode("utf-8")
+            data = json.loads(raw_body)
             # 先计数再取 content：解析成功即是一次真实计费调用
             record_token_usage(data.get("usage"))
-        content = data["choices"][0]["message"]["content"]
-        return json.loads(content)
-    except (urllib.error.URLError, urllib.error.HTTPError, KeyError,
-            json.JSONDecodeError, Exception) as e:
-        print(f"  [仲裁] LLM 调用失败（{type(e).__name__}: {e}），跳过智能层，保留后端聚合")
-        return None
+            raw_content = data["choices"][0]["message"]["content"]
+            return json.loads(raw_content)
+        except urllib.error.HTTPError as e:
+            # 401/403 = 鉴权/额度，永久错误，不重试
+            if getattr(e, "code", 0) in (401, 403):
+                print(f"  [仲裁] LLM 调用失败（HTTP {getattr(e, 'code', '?')}：{e}），"
+                      f"鉴权/额度错误，跳过智能层，保留后端聚合")
+                _fail("HTTPError", e, attempt + 1, http_code=getattr(e, "code", None),
+                      raw_body=raw_body)
+                return None
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                print(f"  [仲裁] LLM 调用失败（HTTP {getattr(e, 'code', '?')}），"
+                      f"{wait}s 后重试（{attempt + 1}/{max_retries}）")
+                # 中间失败也落盘（final=False）：即便随后重试成功，也要能统计失败率与时间分布
+                _fail("HTTPError", e, attempt + 1, http_code=getattr(e, "code", None),
+                      raw_body=raw_body, final=False)
+                time.sleep(wait)
+                continue
+            print(f"  [仲裁] LLM 调用失败（HTTP {getattr(e, 'code', '?')}），"
+                  f"重试耗尽，跳过智能层，保留后端聚合")
+            _fail("HTTPError", e, attempt + 1, http_code=getattr(e, "code", None),
+                  raw_body=raw_body)
+            return None
+        except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
+            # 连接重置 / 远程断开 / DNS 失败 / 超时 / 解析失败 → 退避重试
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                print(f"  [仲裁] LLM 调用失败（{type(e).__name__}: {e}），"
+                      f"{wait}s 后重试（{attempt + 1}/{max_retries}）")
+                # 中间失败也落盘（final=False）：即便随后重试成功，也要能统计失败率与时间分布
+                _fail(type(e).__name__, e, attempt + 1,
+                      raw_body=raw_body, raw_content=raw_content, final=False)
+                time.sleep(wait)
+                continue
+            print(f"  [仲裁] LLM 调用失败（{type(e).__name__}: {e}），"
+                  f"重试耗尽，跳过智能层，保留后端聚合")
+            # raw_content 非空 ⇒ 是「模型 content 解析失败」（如 Extra data）；
+            # raw_content 为空 ⇒ 是「连接/超时/信封解析失败」。二者据此可区分。
+            _fail(type(e).__name__, e, attempt + 1,
+                  raw_body=raw_body, raw_content=raw_content)
+            return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -205,14 +341,33 @@ __KEY_FIELDS_LIST__
 仅当 judge 间在上述关键字段上出现分歧时，field_disagreements 的 category 才标 'key'；
 若仅在次要字段（属性取值文本、自然语言分析、单位说明）上分歧，标 'non_key'。
 
+【inconsistent_attributes 填写约束（务必遵守）】
+attribute_class 只能填「属性比对」中真实出现的属性类名（如 RP.SDIExpected、LogicalPort.SamplePeriod 等
+EoICD/HLR 属性清单里的名字）。严禁把下列内容写进本字段：
+  - 身份层字段（bus / label / bit / direction）——身份层分歧请写进 field_disagreements；
+  - 自造的描述性类别（如 "属性覆盖完整性"、"属性核验"、"身份属性"、"属性覆盖情况" 等）。
+若某属性只是"证据不足/覆盖不全"，请不要写入 inconsistent_attributes，可在 final_analysis 说明。
+
+【结构化纠错：attribute_reconciled（重要，务必使用）】
+如果你在综合判断时发现某个 judge 对某项属性判错了（典型：把 "1000 vs 1000ms" 这类单位等价的
+情况误判为不一致；或未正确识别 bit 位与信号的对应关系而误判），**不要只写在 final_analysis 的文字里**，
+必须逐属性写入 attribute_reconciled，让裁定可被程序执行：
+  - attribute_class：属性类名（同上，必须是真实属性类）；
+  - single_result：你裁定的**正确**结论（属性一致|属性不一致|无提及|无具体值）；
+  - wrong_judges：判错的 judge 名列表（可多个；若无人判错则留空数组）；
+  - reason：一句话说明错因。
+**token 约束**：凡已在 attribute_reconciled 中声明过的逐属性裁定，final_analysis 里不要再重复展开
+（同一理解不要既写散文又写结构化字段）；final_analysis 只写整体判定依据与未被该字段覆盖的要点。
+
 输出 JSON 字段：
 {
   "agreement_level": "full|majority|split|single_source|no_consensus",
   "final_verdict": "已落实|不一致|未落实|部分落实|待确认",
   "final_matched_hlr": ["需求编号", ...],
   "inconsistent_attributes": [{"attribute_class":"...","detail":"...","judges":["judge名",...]}],
+  "attribute_reconciled": [{"attribute_class":"...","single_result":"属性一致|属性不一致|无提及|无具体值","wrong_judges":["judge名",...],"reason":"..."}],
   "field_disagreements": [{"field":"verdict|matched_hlr|name_match_status|bus|label|bit|direction|attr:属性类","category":"key|non_key","summary":"简要分歧说明"}],
-  "final_analysis": "综合判定依据（中文，简洁）",
+  "final_analysis": "综合判定依据（中文，简洁；不要重复 attribute_reconciled 已声明的逐属性裁定）",
   "confidence": 0.0~1.0
 }"""
 
@@ -257,17 +412,38 @@ REVIEW_SYSTEM = """你是一名航空软件需求一致性检查的复查仲裁�
 # 构造 judge 展示块
 # ---------------------------------------------------------------------------
 
+def _compress_attribute_lines(attrs):
+    """压缩属性明细：仅逐条列出非「属性一致」的属性（事实不一致 / 各 judge 分歧），
+    「属性一致」与「无提及」压缩为计数摘要，显著削减仲裁 prompt 的 token 体积
+    （一致属性通常占多数时尤其明显）。后端聚合已对一致属性达成共识，仲裁裁决只需看分歧点，
+    且后端 inconsistent_attributes / field_disagreements 为准、LLM 仅增补，故不丢事实。"""
+    detail = []
+    n_consist = 0
+    n_notm = 0
+    for a in (attrs or []):
+        sr = a.get("single_result")
+        if sr == "属性一致":
+            n_consist += 1
+        elif sr == "无提及":
+            n_notm += 1
+        else:
+            detail.append(f"{a.get('attribute_class')}={sr}"
+                          f"(EoICD:{a.get('eoicd_value')}/HLR:{a.get('hlr_value')})")
+    return detail, n_consist, n_notm
+
+
 def _judge_block(shard_entry: dict, name: str) -> str:
     e = shard_entry
-    attrs = e.get("attributes") or []
-    attr_lines = "; ".join(
-        f"{a.get('attribute_class')}={a.get('single_result')}"
-        f"(EoICD:{a.get('eoicd_value')}/HLR:{a.get('hlr_value')})"
-        for a in attrs
-    ) or "无属性"
+    detail, n_consist, n_notm = _compress_attribute_lines(e.get("attributes"))
+    pieces = list(detail)
+    if n_consist:
+        pieces.append(f"{n_consist}项一致")
+    if n_notm:
+        pieces.append(f"{n_notm}项无提及")
+    attr_str = "[" + ("; ".join(pieces) if pieces else "无属性") + "]"
     return (f"- {name}: verdict={e.get('verdict')}, matched_hlr={e.get('matched_hlr')}, "
             f"name_match={e.get('name_match_status')}, identity={e.get('hlr_identity')}, "
-            f"属性=[{attr_lines}]")
+            f"属性={attr_str}")
 
 
 def _build_consensus_user(full: str, shard: dict, backend_note: str) -> str:
@@ -308,15 +484,16 @@ def _independent_groups(names: list[str], judge_meta: dict | None) -> list[list[
 
 def _entry_body(entry: dict) -> str:
     """匿名化的单份结论正文（不含 judge 名/模型名，避免仲裁者锚定到具体来源）。"""
-    attrs = entry.get("attributes") or []
-    attr_lines = "; ".join(
-        f"{a.get('attribute_class')}={a.get('single_result')}"
-        f"(EoICD:{a.get('eoicd_value')}/HLR:{a.get('hlr_value')})"
-        for a in attrs
-    ) or "无属性"
+    detail, n_consist, n_notm = _compress_attribute_lines(entry.get("attributes"))
+    pieces = list(detail)
+    if n_consist:
+        pieces.append(f"{n_consist}项一致")
+    if n_notm:
+        pieces.append(f"{n_notm}项无提及")
+    attr_str = "[" + ("; ".join(pieces) if pieces else "无属性") + "]"
     return (f"verdict={entry.get('verdict')}, matched_hlr={entry.get('matched_hlr')}, "
             f"name_match={entry.get('name_match_status')}, identity={entry.get('hlr_identity')}, "
-            f"属性=[{attr_lines}]")
+            f"属性={attr_str}")
 
 
 def _render_group(entries: list[tuple[str, dict]], label: str, first: bool) -> str:
@@ -382,16 +559,153 @@ def _ia_key(d):
     return (d.get("attribute_class") or d.get("field") or "", str(d.get("description", ""))[:40])
 
 
-def _merge_inconsistent_attributes(backend_ia, llm_ia):
-    """事实不一致：后端为准，LLM 可增补语义层事实（去重，不丢后端事实）。"""
+def _merge_inconsistent_attributes(backend_ia, llm_ia, valid_classes=None, dropped_sink=None):
+    """事实不一致：后端为准，LLM 可增补语义层事实（去重，不丢后端事实）。
+
+    白名单约束（2026-10-15 新增）：LLM「新增」的属性类必须落在 valid_classes
+    （= 真实属性比对类集合，即 attr_consensus_detail 的键）内。实测 LLM 常把两类东西
+    当属性类写进本字段，污染报告「属性比对」列：
+      ① 身份层字段（bus / label / bit / direction）——身份层分歧本有专用字段
+         field_disagreements(category=key)，属重复/错位；
+      ② 自造的描述性类别（"属性覆盖完整性" / "属性核验" / "属性覆盖情况" …）。
+    越界条目不再并入，改记入 dropped_sink 留痕（供追溯，不进展示）。
+    valid_classes=None 时不做白名单（兼容旧调用）。
+
+    注意：仅约束「LLM 新增」条目；后端条目一律保留（后端属性类天然来自真实比对）。
+    """
     base = [dict(d) for d in (backend_ia or [])]
     seen = {_ia_key(d) for d in base}
     for d in (llm_ia or []):
         k = _ia_key(d)
-        if k not in seen:
-            base.append(dict(d))
-            seen.add(k)
+        if k in seen:
+            continue
+        cls = d.get("attribute_class") or d.get("field")
+        if valid_classes is not None and cls not in valid_classes:
+            if dropped_sink is not None:
+                dropped_sink.append(dict(d))
+            continue
+        base.append(dict(d))
+        seen.add(k)
     return base
+
+
+def _reconcile_and_recompute(a: dict, out: dict) -> None:
+    """方案Y（配套）：仲裁 LLM 判为「属性一致」的属性，回写清除后端不一致标记，并一次性重算
+    派生字段，保证一行（a 字典）自洽。JSON/CSV/Word 报告均现读 a，故只要这里改对整行即同步。
+
+    - 清除：从 inconsistent_attributes 与 field_disagreements(attr:* key 项) 删除被仲裁判一致的属性类；
+    - 重算：has_key / star_rating（map_star）/ need_review（修永真：不再 OR 旧值，仅保留
+      no_valid_source / coverage_gap 等合法标记）。
+    仅当 out["attribute_reconciled"] 显式标记 single_result=="属性一致" 才清除，避免 LLM 误删真实不一致。
+
+    D1（全量）：LLM 逐属性裁定量整体留痕到 a["attribute_rulings"]（含 wrong_judges / reason），
+    供报告与追溯查"哪个 judge 在哪项属性上判错"——这是"纠正 judge 错误"的唯一结构化落点，
+    因为信号级 final_verdict 只有五档，无法承载 judge 级的对错裁定。
+    """
+    rulings = [dict(r) for r in (out.get("attribute_reconciled") or []) if r.get("attribute_class")]
+    if rulings:
+        a["attribute_rulings"] = rulings
+    reconciled = {
+        r.get("attribute_class"): r for r in (out.get("attribute_reconciled") or [])
+        if r.get("single_result") == "属性一致"
+    }
+    if reconciled:
+        a["inconsistent_attributes"] = [
+            d for d in (a.get("inconsistent_attributes") or [])
+            if d.get("attribute_class") not in reconciled
+        ]
+        a["field_disagreements"] = [
+            d for d in (a.get("field_disagreements") or [])
+            if not (d.get("category") == "key"
+                    and isinstance(d.get("field"), str)
+                    and d["field"].startswith("attr:")
+                    and d["field"][len("attr:"):] in reconciled)
+        ]
+
+    has_key = any(d.get("category") == "key" for d in (a.get("field_disagreements") or []))
+    agreement = a.get("agreement") or "split"
+    a["star_rating"] = map_star(agreement, has_key)
+
+    # 修 need_review 永真：不再 `or a.get("need_review")`。仅保留无有效源/覆盖缺口等合法标记。
+    persistent = ("no_valid_source" in (a.get("need_review_rules") or [])) or bool(a.get("coverage_gap"))
+    a["need_review"] = (
+        (a["star_rating"] <= 2)
+        or has_key
+        or bool(a.get("inconsistent_attributes"))
+        or persistent
+    )
+
+
+# ---------------------------------------------------------------------------
+# 自相矛盾兜底扫描（零成本：纯规则、不调 LLM）
+# ---------------------------------------------------------------------------
+
+# "纠正/否定既有判定"类措辞。命中说明 LLM 在叙述里已经推翻了某个 judge 的判定
+# （甚至明确说某属性其实一致），但结构化回写（attribute_reconciled）没有落地——
+# 于是报告会出现"自己说自己判错了，却仍按错判展示"的自相矛盾。
+_CONTRADICTION_KEYWORDS = (
+    "误判", "判错", "误将", "错误包含", "识别错误", "未精准识别", "未正确识别",
+    "应为", "应当为", "更正为", "纠正", "其实一致", "实则一致", "实际一致",
+    "并非不一致", "不应判", "错误地", "属于误判",
+)
+
+
+def _scan_self_contradiction(a: dict) -> dict | None:
+    """零成本兜底：叙述已推翻、数据未回写 → 标记「待人工确认」。
+
+    判据（三条同时满足才命中，避免误报）：
+      ① 信号级 final_verdict **不是「不一致」**——若本来就判不一致，属性列在不一致清单里
+         是自洽的（实测：verdict=不一致 的信号里"识别错误/未精准识别"等措辞多是在**确认**分歧，
+         例如"判断C指出B的识别错误，结论仍为不一致"，若不加此条会大量误报）；
+      ② final_analysis 或某个 field_disagreements[].summary 含纠正类措辞；
+      ③ inconsistent_attributes 或 field_disagreements 的 attr:* 项**仍在**（没被结构化回写清掉）。
+
+    命中时 attributes 只列"文本点名到、且仍在清单里"的属性（可为空——叙述未点名具体属性时
+    只能给出信号级提示，由人工核对）。
+
+    只做标记与留痕，**不改判定、不改星级、不改复核路由**（纯可观测性补丁）。
+    """
+    if (a.get("final_verdict") or "") == "不一致":
+        return None
+
+    texts = []
+    if a.get("final_analysis"):
+        texts.append(str(a["final_analysis"]))
+    for d in (a.get("field_disagreements") or []):
+        if isinstance(d, dict) and d.get("summary"):
+            texts.append(str(d["summary"]))
+    blob = " ".join(texts).strip()
+    if not blob:
+        return None
+    if not any(k in blob for k in _CONTRADICTION_KEYWORDS):
+        return None
+
+    stuck: list[str] = []
+    for d in (a.get("inconsistent_attributes") or []):
+        cls = d.get("attribute_class") if isinstance(d, dict) else None
+        if cls and str(cls) in blob and str(cls) not in stuck:
+            stuck.append(str(cls))
+    for d in (a.get("field_disagreements") or []):
+        f = d.get("field") if isinstance(d, dict) else None
+        if isinstance(f, str) and f.startswith("attr:"):
+            cls = f[len("attr:"):]
+            if cls in blob and cls not in stuck:
+                stuck.append(cls)
+
+    has_attr_key = any(
+        isinstance(d, dict) and str(d.get("field", "")).startswith("attr:")
+        for d in (a.get("field_disagreements") or [])
+    )
+    if not (stuck or a.get("inconsistent_attributes") or has_attr_key):
+        return None
+
+    return {
+        "detected": True,
+        "attributes": stuck,
+        "evidence": blob[:200],
+        "action": "待人工确认",
+        "reason": "叙述含纠正类措辞、且信号级判定并非「不一致」，但「属性比对」仍保留不一致条目",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +788,8 @@ def arbitrate(agg: dict, shards: dict, arb_cfg: dict, only: set[str] | None = No
 
         user = _build_consensus_user(full, shard, a.get("note", ""))
         try:
-            out = call_llm(model, base_url, api_key, CONSENSUS_SYSTEM, user)
+            out = call_llm(model, base_url, api_key, CONSENSUS_SYSTEM, user,
+                           ctx={"full": full, "stage": stage})
         except Exception:
             out = None
         if not isinstance(out, dict):
@@ -496,22 +811,23 @@ def arbitrate(agg: dict, shards: dict, arb_cfg: dict, only: set[str] | None = No
         merged_fd = _merge_field_disagreements(
             a.get("field_disagreements"), out.get("field_disagreements")
         )
-        # KEY_FIELDS 二分：合并后 key 类分歧才触发降级
-        has_key = any(d.get("category") == "key" for d in merged_fd)
-        star = map_star(agreement, has_key)
-        need_review = (star <= 2) or bool(a.get("need_review"))
-
         a["agreement"] = agreement
-        a["star_rating"] = star
         a["final_verdict"] = final_verdict
-        # 事实不一致：后端事实不丢，LLM 可增补（去重）
+        # 事实不一致：后端事实不丢，LLM 可增补（去重）；越界的 LLM 条目（身份层字段/自造类）不并入，
+        # 白名单 = 真实属性比对类（attr_consensus_detail 的键），被丢弃的记入 llm_attributes_dropped 留痕。
+        _dropped_ia: list = []
         a["inconsistent_attributes"] = _merge_inconsistent_attributes(
-            a.get("inconsistent_attributes"), out.get("inconsistent_attributes")
+            a.get("inconsistent_attributes"), out.get("inconsistent_attributes"),
+            valid_classes=set((a.get("attr_consensus_detail") or {}).keys()),
+            dropped_sink=_dropped_ia,
         )
+        if _dropped_ia:
+            a["llm_attributes_dropped"] = _dropped_ia
         a["field_disagreements"] = merged_fd
         a["final_analysis"] = out.get("final_analysis", "")
         a["confidence"] = out.get("confidence")
-        a["need_review"] = need_review
+        # 方案Y（配套）：仲裁判一致的属性回写清除 + 派生字段一次性重算（修 need_review 永真）
+        _reconcile_and_recompute(a, out)
         # 保留已写入的 peer_review 子字段：重仲裁(stage=step5.6)生效不代表复查也生效，
         # 直接整体赋值会把「复查因独立视角不足被跳过」这条事实抹掉。
         a["review_trace"] = {
@@ -585,66 +901,86 @@ def peer_aware_review(agg: dict, shards: dict, arb_cfg: dict,
         if item is None:
             return
         a = item["aggregation"]
-        # 熔断已跳闸 → 跳过（第2点）
-        if breaker is not None and breaker.tripped:
-            _mark_skipped(a, "复核熔断器已跳闸（累计 LLM 失败达阈值），跳过 peer 复查", 0, [])
-            return
-        shard = {j: shards[j][full] for j in shards if full in shards[j]}
-        names = list(shard.keys())
-        groups = _independent_groups(names, judge_meta)
-        n_view = len(groups)
-        if n_view < 2:
-            _mark_skipped(a,
-                          "独立视角数 {0} < 2（同模型重复不构成独立视角），跳过 peer 复查".format(n_view)
-                          if n_view >= 1 else "无可用 judge 结论，跳过 peer 复查",
-                          n_view, groups)
-            return
-        if budget is not None:
-            with budget_lock:
-                if budget["left"] <= 0:
-                    _mark_skipped(a, "超出复核预算（MULTI_JUDGE_REVIEW_BUDGET），跳过 peer 复查",
-                                  n_view, groups)
-                    return
-                budget["left"] -= 1
-        user = _build_review_user(full, groups, shard)
+        n_view = 0
+        groups: list = []
         try:
-            out = call_llm(model, base_url, api_key, REVIEW_SYSTEM, user)
-        except Exception:
-            out = None
-        if not isinstance(out, dict):
-            # 第2点：降级 + 触发熔断
+            # 熔断已跳闸 → 跳过（第2点）
+            if breaker is not None and breaker.tripped:
+                _mark_skipped(a, "复核熔断器已跳闸（累计 LLM 失败达阈值），跳过 peer 复查", 0, [])
+                return
+            shard = {j: shards[j][full] for j in shards if full in shards[j]}
+            names = list(shard.keys())
+            groups = _independent_groups(names, judge_meta)
+            n_view = len(groups)
+            if n_view < 2:
+                _mark_skipped(a,
+                              "独立视角数 {0} < 2（同模型重复不构成独立视角），跳过 peer 复查".format(n_view)
+                              if n_view >= 1 else "无可用 judge 结论，跳过 peer 复查",
+                              n_view, groups)
+                return
+            if budget is not None:
+                with budget_lock:
+                    if budget["left"] <= 0:
+                        _mark_skipped(a, "超出复核预算（MULTI_JUDGE_REVIEW_BUDGET），跳过 peer 复查",
+                                      n_view, groups)
+                        return
+                    budget["left"] -= 1
+            user = _build_review_user(full, groups, shard)
+            try:
+                # 本函数无 stage 变量（阶段名硬编码为 "step5.5"，同 _mark_skipped），
+                # 诊断上下文用字面量，勿引用不存在的 stage。
+                out = call_llm(model, base_url, api_key, REVIEW_SYSTEM, user,
+                               ctx={"full": full, "stage": "step5.5"})
+            except Exception:
+                out = None
+            if not isinstance(out, dict):
+                # 第2点：降级 + 触发熔断
+                if breaker is not None:
+                    breaker.record_failure()
+                _mark_skipped(a, "复查 LLM 调用失败或返回非 JSON", n_view, groups)
+                return
             if breaker is not None:
-                breaker.record_failure()
-            _mark_skipped(a, "复查 LLM 调用失败或返回非 JSON", n_view, groups)
-            return
-        if breaker is not None:
-            breaker.record_success()
-        # 复查结论覆盖 final_verdict / matched_hlr / 属性结论 / analysis / confidence
-        if out.get("final_verdict"):
-            a["final_verdict"] = out["final_verdict"]
-        if isinstance(out.get("final_matched_hlr"), list):
-            a["identity_consensus"] = f"{out['final_verdict']}→" + ",".join(out["final_matched_hlr"])
-        reconciled = {r.get("attribute_class"): r for r in (out.get("attribute_reconciled") or [])}
-        for d in a.get("structured_diff", []):
-            cls = d.get("attribute_class")
-            if cls in reconciled:
-                d["diff_type"] = reconciled[cls].get("single_result", d["diff_type"])
-        if out.get("analysis"):
-            a["final_analysis"] = out["analysis"]
-        if out.get("confidence") is not None:
-            a["confidence"] = out["confidence"]
-        a["peer_reviewed"] = True
-        a["review_trace"] = {
-            "stage": "step5.5", "applied": True,
-            "reason": "对 {0} 个独立视角做匿名化复查".format(n_view),
-            "peer_review": {"applied": True, "reason": "对 {0} 个独立视角做匿名化复查".format(n_view)},
-        }
-        a["peer_review_info"] = {
-            "applied": True,
-            "independent_views": n_view,
-            "judges_by_view": [{"view": chr(65 + i), "judges": g} for i, g in enumerate(groups)],
-            "reason": "对 {0} 个独立视角做匿名化复查".format(n_view),
-        }
+                breaker.record_success()
+            # 复查结论覆盖 final_verdict / matched_hlr / 属性结论 / analysis / confidence
+            if out.get("final_verdict"):
+                a["final_verdict"] = out["final_verdict"]
+            # 第B点：final_matched_hlr 富结构为 [[req_id, iface], ...]（#5 修复），也可能退化为
+            # 扁平 [req_id, ...]；复用聚合层 _display_matched_full 渲染，避免对嵌套列表直接 join
+            # 触发 TypeError。空值/缺失则不覆盖身份共识（保留聚合阶段结论）。
+            if out.get("final_matched_hlr"):
+                a["identity_consensus"] = (
+                    f"{out['final_verdict']}→" + _display_matched_full(out["final_matched_hlr"])
+                )
+            reconciled = {r.get("attribute_class"): r for r in (out.get("attribute_reconciled") or [])}
+            for d in a.get("structured_diff", []):
+                cls = d.get("attribute_class")
+                if cls in reconciled:
+                    d["diff_type"] = reconciled[cls].get("single_result", d["diff_type"])
+            if out.get("analysis"):
+                a["final_analysis"] = out["analysis"]
+            if out.get("confidence") is not None:
+                a["confidence"] = out["confidence"]
+            # D1（最小）：Step5.5 此前只把 attribute_reconciled 用来重贴 structured_diff 标签，
+            # 不回写清除、不重算派生字段——LLM 的裁定"能叙述不能行动"。此处补挂同一清除函数，
+            # 使判为「属性一致」的属性同时从 inconsistent_attributes 与 field_disagreements(attr:*)
+            # 移除，并重算 has_key / star_rating / need_review（零新增输出 schema，token 中性）。
+            _reconcile_and_recompute(a, out)
+            a["peer_reviewed"] = True
+            a["review_trace"] = {
+                "stage": "step5.5", "applied": True,
+                "reason": "对 {0} 个独立视角做匿名化复查".format(n_view),
+                "peer_review": {"applied": True, "reason": "对 {0} 个独立视角做匿名化复查".format(n_view)},
+            }
+            a["peer_review_info"] = {
+                "applied": True,
+                "independent_views": n_view,
+                "judges_by_view": [{"view": chr(65 + i), "judges": g} for i, g in enumerate(groups)],
+                "reason": "对 {0} 个独立视角做匿名化复查".format(n_view),
+            }
+        except Exception as exc:  # 第C点：任何意外异常（含 LLM 返回畸形 final_matched_hlr）局部降级，
+            # 不连坐整次运行——保留 Step5 结论，标记 peer 复查跳过，由 review_trace 诚实记账。
+            _mark_skipped(a, "复查过程异常（{0}），已跳过 peer 复查，保留 Step5 结论".format(type(exc).__name__),
+                          n_view, groups)
 
     low = _low_star_signals(agg)
     print(f"  [复核] Step5.5 复查：{len(low)} 条低星信号（并发 {concurrency}）")
@@ -684,9 +1020,12 @@ def run_arbitration(agg: dict, shards: dict, judge_meta: dict, arb_cfg: dict) ->
         return agg
     re_review_cfg = arb_cfg.get("re_review") or {}
     # 第2点：熔断器（跨 Step5/5.5/5.6 共享）
-    threshold = int(os.environ.get("MULTI_JUDGE_REVIEW_FAILSTOP", "5"))
+    # 阈值默认 15（2026-10-15 由 5 调大）：避免少量瞬时超时（实测 4~5 次）误触发全局跳闸，
+    # 把整批复核信号（数百条）一次跳过；真·系统性故障仍由累计 15 次失败 + 预算兜底止损。
+    threshold = int(os.environ.get("MULTI_JUDGE_REVIEW_FAILSTOP", "15"))
     arb_cfg.setdefault("_circuit_breaker", _CircuitBreaker(threshold))
     # 第1点：并发度（默认 8，上限 16，避免打爆 LLM 服务）
+    # 2026-10-15：8→6 试行后未观察到超时改善（本次超时次数未记录），故按用户决定改回 8。
     concurrency = int(os.environ.get("MULTI_JUDGE_REVIEW_CONCURRENCY", "8"))
     concurrency = max(1, min(concurrency, 16))
     arb_cfg.setdefault("_concurrency", concurrency)
@@ -695,203 +1034,79 @@ def run_arbitration(agg: dict, shards: dict, judge_meta: dict, arb_cfg: dict) ->
         arb_cfg["_budget_lock"] = threading.Lock()
 
     agg = arbitrate(agg, shards, arb_cfg)
-    if not re_review_cfg.get("enabled", False):
-        return agg
-    max_rounds = int(re_review_cfg.get("max_rounds", 1))
-    for _ in range(max_rounds):
-        low = _low_star_signals(agg)
-        if not low:
-            break
-        # 第3点：记录 peer 前的裁决结论，用于判断是否真有改变
-        before = {f: agg[f]["aggregation"].get("final_verdict") for f in low}
-        agg = peer_aware_review(agg, shards, arb_cfg, judge_meta)
-        # 仅对复查真正改变了 verdict 的信号跑 Step5.6 重仲裁
-        changed = {f for f in low
-                   if agg[f]["aggregation"].get("final_verdict") != before.get(f)}
-        if changed:
-            agg = arbitrate(agg, shards, arb_cfg, only=changed, stage="step5.6")
+    if re_review_cfg.get("enabled", False):
+        max_rounds = int(re_review_cfg.get("max_rounds", 1))
+        for _ in range(max_rounds):
+            low = _low_star_signals(agg)
+            if not low:
+                break
+            # 第3点：记录 peer 前的裁决结论，用于判断是否真有改变
+            before = {f: agg[f]["aggregation"].get("final_verdict") for f in low}
+            agg = peer_aware_review(agg, shards, arb_cfg, judge_meta)
+            # 仅对复查真正改变了 verdict 的信号跑 Step5.6 重仲裁
+            changed = {f for f in low
+                       if agg[f]["aggregation"].get("final_verdict") != before.get(f)}
+            if changed:
+                agg = arbitrate(agg, shards, arb_cfg, only=changed, stage="step5.6")
+
+    # 方案 A：仲裁后重算 analysis_summary，使其与最终（仲裁后）判定口径一致。
+    # 用仲裁后的 final_verdict / 合并后的 inconsistent_attributes 与 field_disagreements 重新生成；
+    # 当仲裁推翻了 judge 多数判定时，build_analysis_summary 会自动切换为「仲裁判定」口径并标注原分布。
+    # 未走仲裁（arb_cfg 为空）或仲裁跳过的信号，final_verdict 与共识字段均未变，重算结果与原摘要逐字一致。
+    #
+    # 零成本兜底：同步扫描「叙述已推翻、结构化未回写」的自相矛盾信号（纯规则，不调 LLM）。
+    # 命中时标记 a["self_contradiction"]、写入 review_trace，并在摘要末尾补一句提示，
+    # 避免报告出现"自己说自己判错了、却仍按错判展示"而不被察觉。
+    for full, item in agg.items():
+        a = item["aggregation"]
+        # 子类重算（修缺陷：arbitrate() 只改 final_verdict，不更新 sub_classification）。
+        # 若仲裁把 verdict 改判为「未落实」而该字段仍为 None/旧值，报告「未落实」的两个
+        # 二级小节（报告按该字段分流）都会收不到它 ⇒ 漏项。此处与 analysis_summary 同处重算，
+        # 用同一 derive_sub_classification 单一来源，保证字段与摘要、报告分组三者口径一致。
+        # 未走仲裁、未改判的信号：verdict 与 judges 均未变，重算结果与原值逐字相同（幂等）。
+        a["sub_classification"] = derive_sub_classification(
+            a.get("final_verdict"), item.get("judges", {})
+        )
+        sc = _scan_self_contradiction(a)
+        if sc:
+            a["self_contradiction"] = sc
+            _rt = dict(a.get("review_trace") or {})
+            _rt["self_contradiction"] = sc
+            a["review_trace"] = _rt
+        a["analysis_summary"] = build_analysis_summary(
+            final_verdict=a.get("final_verdict"),
+            judges_with=item.get("judges", {}),
+            attr_by_class=a.get("attr_consensus_detail") or {},
+            inconsistent_attributes=a.get("inconsistent_attributes") or [],
+            field_disagreements=a.get("field_disagreements") or [],
+            divergence=a.get("divergence", False),
+            n_judges=a.get("n_judges_participating", 1),
+        )
+        if sc:
+            if sc["attributes"]:
+                a["analysis_summary"] += (
+                    "；该信号叙述显示存在被判错但仍列于「属性比对」的项（"
+                    + "、".join(sc["attributes"]) + "），已标记待人工确认。"
+                )
+            else:
+                a["analysis_summary"] += (
+                    "；该信号叙述显示存在被判错的属性裁定，但「属性比对」仍保留不一致条目，"
+                    "已标记待人工确认。"
+                )
     return agg
 
 
 # ---------------------------------------------------------------------------
 # 离线自测（不依赖 LLM）
 # ---------------------------------------------------------------------------
-
-def _self_test() -> None:
-    # 1) map_star 对照反向星级表
-    assert map_star("full", False) == 5
-    assert map_star("full", True) == 4
-    assert map_star("majority", False) == 3
-    assert map_star("majority", True) == 2
-    assert map_star("split", False) == 1
-    assert map_star("single_source", False) == 1
-
-    # 2) 0 存活降级路径（通过 arbitrate 注入假 call_llm）
-    fake = {
-        "agreement_level": "full", "final_verdict": "已落实",
-        "final_matched_hlr": ["R1"], "inconsistent_attributes": [],
-        "field_disagreements": [{"field": "verdict", "category": "key", "summary": "x"}],
-        "final_analysis": "ok", "confidence": 0.9,
-    }
-    import multi_judge_aggregate as agg_mod
-    shards = {"j1": {"S1": {"verdict": "已落实", "matched_hlr": ["R1"], "name_match_status": True,
-                            "hlr_identity": None, "coverage": "ok", "attributes": []}}}
-    agg = agg_mod.aggregate(shards, {"j1": {}})
-    # 单 judge 配置：后端给 5★（正常路径，#1 退化兼容），仲裁器不覆盖 LLM 的 full（降级优先）
-    global call_llm
-    orig = call_llm
-    os.environ["X"] = "dummy-key"  # 通过 guard，call_llm 已被 mock 替换
-    call_llm = lambda *a, **k: fake  # noqa: E731
-    try:
-        agg2 = arbitrate(agg, shards, {"model": "m", "base_url": "u", "api_key_env": "X"})
-        # 多 judge 配置但仅 1 存活（降级）：后端压 1★，仲裁器仍保留（不升级）
-        agg_deg = agg_mod.aggregate({"j1": shards["j1"], "j2": {}},
-                                    {"j1": {}, "j2": {}}, {}, n_configured=2)
-        agg_deg2 = arbitrate(agg_deg, {"j1": shards["j1"], "j2": {}},
-                             {"model": "m", "base_url": "u", "api_key_env": "X"})
-    finally:
-        call_llm = orig
-        os.environ.pop("X", None)
-    # 单 judge 配置 → single_source + 5★（正常路径，仲裁器不升级）
-    assert agg2["S1"]["aggregation"]["agreement"] == "single_source"
-    assert agg2["S1"]["aggregation"]["star_rating"] == 5
-    assert agg2["S1"]["aggregation"]["arbitrated"] is True
-    # 多 judge 仅 1 存活（降级）→ 1★ 且需复核（仲裁器不升级）
-    assert agg_deg2["S1"]["aggregation"]["star_rating"] == 1
-    assert agg_deg2["S1"]["aggregation"]["need_review"] is True
-
-    # 2b) #3 合并式 field_disagreements：后端 values 必须保留，LLM 仅补 category/summary
-    sh = {
-        "j1": {"S1": {"verdict": "已落实", "matched_hlr": ["R1"], "name_match_status": True,
-                      "hlr_identity": {"bus": "A"}, "coverage": "ok",
-                      "attributes": [{"attribute_class": "刷新率", "single_result": "属性不一致",
-                                     "eoicd_value": "60", "hlr_value": "30"}]}},
-        "j2": {"S1": {"verdict": "不一致", "matched_hlr": ["R2"], "name_match_status": True,
-                      "hlr_identity": {"bus": "A"}, "coverage": "ok",
-                      "attributes": [{"attribute_class": "刷新率", "single_result": "属性一致",
-                                     "eoicd_value": "30", "hlr_value": "30"}]}},
-    }
-    meta = {"j1": {"model": "m", "base_url": "u", "key_hash": "k", "frozen": True},
-            "j2": {"model": "m", "base_url": "u", "key_hash": "k", "frozen": True}}
-    agg3 = agg_mod.aggregate(sh, meta, {}, n_configured=2)
-    fd_before = {d["field"]: d for d in agg3["S1"]["aggregation"]["field_disagreements"]}
-    assert "matched_hlr" in fd_before and "verdict" in fd_before and any(
-        f.startswith("attr:") for f in fd_before), "后端应已产出含 values 的分歧"
-    # LLM 只回 verdict 一个字段（降为非 key + 加 summary），故意遗漏 matched_hlr/attr
-    fake3 = {
-        "agreement_level": "majority", "final_verdict": "不一致",
-        "inconsistent_attributes": [{"attribute_class": "分辨率", "description": "LLM 新发现的事实不一致"}],
-        "field_disagreements": [{"field": "verdict", "category": "non_key", "summary": "语义同属未落实类"}],
-        "final_analysis": "merged", "confidence": 0.8,
-    }
-    orig3 = call_llm
-    os.environ["X"] = "dummy-key"
-    call_llm = lambda *a, **k: fake3  # noqa: E731
-    try:
-        agg3r = arbitrate(agg3, sh, {"model": "m", "base_url": "u", "api_key_env": "X"})
-    finally:
-        call_llm = orig3
-        os.environ.pop("X", None)
-    fd_after = {d["field"]: d for d in agg3r["S1"]["aggregation"]["field_disagreements"]}
-    # 1) 后端 matched_hlr 仍保留（LLM 没提但不得丢）
-    assert "matched_hlr" in fd_after, "合并后不得丢失后端 matched_hlr 分歧"
-    assert "values" in fd_after["matched_hlr"], "后端 values 必须保留"
-    # 2) verdict 被 LLM 覆盖 category + 注入 summary，values 仍在
-    assert fd_after["verdict"]["category"] == "non_key"
-    assert fd_after["verdict"]["summary"] == "语义同属未落实类"
-    assert fd_after["verdict"]["values"], "verdict 的 values 必须保留"
-    # 3) attr 分歧（后端有）合并后仍保留
-    assert any(f.startswith("attr:") for f in fd_after), "attr 分歧不得丢失"
-    # 4) 事实不一致：后端 + LLM 合并去重（=2 项）
-    assert len(agg3r["S1"]["aggregation"]["inconsistent_attributes"]) == 2, "事实应合并去重"
-    print("✅ #3 合并式 field_disagreements / inconsistent_attributes 通过")
-
-    # 3) #9 peer 复查：按独立视角分组 + 动态 prompt（不再有克隆 C）
-    def _e9(v: str) -> dict:
-        return {"verdict": v, "matched_hlr": ["R1"], "name_match_status": True,
-                "hlr_identity": {"bus": "1"}, "coverage": "ok",
-                "attributes": [{"attribute_class": "周期", "single_result": "属性不一致",
-                                "eoicd_value": "1", "hlr_value": "2"}]}
-
-    shards9 = {"judge_ds": _e9("不一致"), "judge_ds_stability": _e9("不一致"), "judge_qwen": _e9("已落实")}
-    meta9 = {
-        "judge_ds": {"model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1"},
-        "judge_ds_stability": {"model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1"},
-        "judge_qwen": {"model": "qwen-max", "base_url": "https://dashscope.aliyuncs.com/v1"},
-    }
-    # 3a) 同 model/base_url 的 judge 合并为一个视角，异模型各自成组
-    g9 = _independent_groups(list(shards9), meta9)
-    assert [len(x) for x in g9] == [2, 1], g9
-    # meta 缺失时退化为逐个独立视角
-    assert [len(x) for x in _independent_groups(["j1", "j2"], {})] == [1, 1]
-
-    # 3b) prompt 按实际视角数拼装：只有 A/B，绝不出现克隆的「判断 C」
-    u9 = _build_review_user("S3", g9, shards9)
-    assert "判断 A" in u9 and "判断 B" in u9, u9
-    assert "判断 C" not in u9, "不得出现克隆的第三个判断（#9）"
-    assert "共 2 份同模型重复" in u9, u9
-    assert "重复不构成独立共识" in u9, u9
-
-    # 3c) 独立视角 < 2（两个 judge 同模型）：跳过复查，且如实记 False（不留「已复查」假象）
-    # verdict 两派不同 → split 1★，确保落在复查的选取口径内（star<=2）。
-    sh_same = {"a": {"S3": _e9("不一致")}, "b": {"S3": _e9("已落实")}}
-    meta_same = {"a": meta9["judge_ds"], "b": meta9["judge_ds_stability"]}
-    agg_same = agg_mod.aggregate(sh_same, meta_same, {}, n_configured=2)
-    orig9 = call_llm
-    os.environ["AR9"] = "dummy-key"
-    call_llm = lambda *a, **k: {"final_verdict": "已落实", "final_matched_hlr": ["R9"],
-                                "attribute_reconciled": [], "analysis": "x", "confidence": 0.9}
-    try:
-        out_same = peer_aware_review(agg_same, sh_same,
-                                     {"model": "m", "base_url": "u", "api_key_env": "AR9"},
-                                     meta_same)
-        # 3d) 正常路径：3 个 judge / 2 个独立视角 → 复查生效并记账
-        sh_ok = {"a": {"S3": _e9("不一致")},
-                 "b": {"S3": _e9("不一致")},
-                 "c": {"S3": _e9("已落实")}}
-        meta_ok = {"a": meta9["judge_ds"],
-                   "b": meta9["judge_ds_stability"],
-                   "c": meta9["judge_qwen"]}
-        agg_ok = agg_mod.aggregate(sh_ok, meta_ok, {}, n_configured=3)
-        out_ok = peer_aware_review(agg_ok, sh_ok,
-                                   {"model": "m", "base_url": "u", "api_key_env": "AR9"},
-                                   meta_ok)
-    finally:
-        call_llm = orig9
-        os.environ.pop("AR9", None)
-
-    a_same = out_same["S3"]["aggregation"]
-    assert a_same["peer_reviewed"] is False
-    assert "独立视角数 1" in a_same["peer_review_info"]["reason"], a_same["peer_review_info"]
-    a_ok = out_ok["S3"]["aggregation"]
-    assert a_ok["peer_reviewed"] is True
-    assert a_ok["peer_review_info"]["independent_views"] == 2, a_ok["peer_review_info"]
-    assert a_ok["peer_review_info"]["judges_by_view"][0]["judges"] == ["a", "b"]
-
-    # 3e) #10 精简签名：复查配置并入 arb_cfg["re_review"]，4 参数即可跑完整链路
-    orig10 = call_llm
-    os.environ["AR10"] = "dummy-key"
-    call_llm = lambda *a, **k: {"final_verdict": "不一致", "final_matched_hlr": ["R1"],
-                                "attribute_reconciled": [], "analysis": "x", "confidence": 0.9}
-    try:
-        cfg10 = {"model": "m", "base_url": "u", "api_key_env": "AR10",
-                 "re_review": {"enabled": True, "max_rounds": 1}}
-        out10 = run_arbitration(agg_mod.aggregate(sh_ok, meta_ok, {}, n_configured=3),
-                                sh_ok, meta_ok, cfg10)
-    finally:
-        call_llm = orig10
-        os.environ.pop("AR10", None)
-    a10 = out10["S3"]["aggregation"]
-    # 复查确实跑过（2 个独立视角），且 Step5.6 重仲裁后复查留痕不被抹掉
-    assert a10["peer_review_info"]["independent_views"] == 2, a10["peer_review_info"]
-    assert (a10.get("review_trace") or {}).get("peer_review", {}).get("applied") is True, a10["review_trace"]
-
-    blk = _build_consensus_user("S2", {"j1": shards9["judge_ds"]}, "note")
-    assert "S2" in blk and "j1" in blk
-
-    print("✅ #9 独立视角分组匿名化复查通过（无克隆 C / 同模型合并 / 视角不足跳过并记账）")
-    print("✅ #10 run_arbitration 精简签名通过（4 参数；re_review 并入 arb_cfg 照常驱动复查链路）")
-
-
+# 自测已迁出到 tests/test_arbitrator.py（生产文件瘦身、便于 pytest 化）。
+# 旧 CLI 兼容：python multi_judge_arbitrator.py 仍可触发，转调 tests/ 入口。
 if __name__ == "__main__":
-    _self_test()
+    import sys as _sys
+    from pathlib import Path as _Path
+    _root = _Path(__file__).resolve().parent.parent
+    if str(_root) not in _sys.path:
+        _sys.path.insert(0, str(_root))
+    from tests.test_arbitrator import run_all as _run_self_test
+    _run_self_test()
+

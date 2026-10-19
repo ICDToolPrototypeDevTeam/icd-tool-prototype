@@ -68,7 +68,7 @@ DEDUP_TOOL = SRC_DIR / "dedup_eoicd.py"
 def run_cmd(cmd: list[str], desc: str) -> tuple[int, float]:
     """运行命令，返回 (返回码, 耗时秒)"""
     print(f"\n{'='*60}")
-    print(f"▶ {desc}")
+    print(f"> {desc}")
     print(f"  命令: {' '.join(cmd)}")
     print(f"{'='*60}")
     
@@ -76,7 +76,7 @@ def run_cmd(cmd: list[str], desc: str) -> tuple[int, float]:
     result = subprocess.run(cmd, capture_output=False, text=True)
     elapsed = time.time() - start
     
-    status = "✅ 成功" if result.returncode == 0 else "❌ 失败"
+    status = "[OK] 成功" if result.returncode == 0 else "[FAIL] 失败"
     print(f"\n{status} | 耗时: {elapsed:.2f}s")
     
     return result.returncode, elapsed
@@ -124,7 +124,7 @@ def step_locate(processed_dir: Path, config_dir: Path, proj: dict,
         timings[f"locate_{side}"] = elapsed
 
         if rc != 0:
-            print(f"❌ 定位失败 [{side}]，终止流程")
+            print(f"[FAIL] 定位失败 [{side}]，终止流程")
             sys.exit(1)
 
     return timings
@@ -156,7 +156,7 @@ def step_crop(processed_dir: Path, config_dir: Path, proj: dict,
         timings[f"crop_{side}"] = elapsed
 
         if rc != 0:
-            print(f"❌ 裁剪失败 [{side}]，终止流程")
+            print(f"[FAIL] 裁剪失败 [{side}]，终止流程")
             sys.exit(1)
 
     return timings
@@ -179,7 +179,7 @@ def step_trace(processed_dir: Path, config_dir: Path, raw_dir: Path) -> dict[str
     timings["trace"] = elapsed
 
     if rc != 0:
-        print("⚠️  追溯解析失败，按原方案继续（全量保留）")
+        print("[WARN]  追溯解析失败，按原方案继续（全量保留）")
 
     return timings
 
@@ -217,7 +217,7 @@ def step_dedup(processed_dir: Path, proj: dict) -> dict[str, float]:
         timings[f"dedup_{side}"] = elapsed
 
         if rc != 0:
-            print(f"❌ 去重失败 [{side}]，终止流程")
+            print(f"[FAIL] 去重失败 [{side}]，终止流程")
             sys.exit(1)
 
     return timings
@@ -226,17 +226,17 @@ def step_dedup(processed_dir: Path, proj: dict) -> dict[str, float]:
 def print_summary(timings: dict[str, float], processed_dir: Path) -> None:
     """打印最终摘要"""
     print(f"\n{'='*60}")
-    print("📊 数据处理完成摘要")
+    print("[SUM] 数据处理完成摘要")
     print(f"{'='*60}")
     
     total_time = sum(timings.values())
     
-    print(f"\n⏱️ 各步骤耗时:")
+    print(f"\n[TIME] 各步骤耗时:")
     for name, t in sorted(timings.items()):
         print(f"  {name:20s}: {t:6.2f}s")
     print(f"  {'总计':20s}: {total_time:6.2f}s")
     
-    print(f"\n📁 输出文件:")
+    print(f"\n[DIR] 输出文件:")
     for f in sorted(processed_dir.glob("*")):
         size_mb = f.stat().st_size / (1024 * 1024)
         print(f"  {f.name:40s} {size_mb:6.1f} MB")
@@ -253,7 +253,7 @@ def print_summary(timings: dict[str, float], processed_dir: Path) -> None:
             except Exception:
                 pass
     
-    print(f"\n✅ 全部完成！总耗时: {total_time:.2f}s")
+    print(f"\n[OK] 全部完成！总耗时: {total_time:.2f}s")
 
 
 # ============================ 主入口 ============================
@@ -280,7 +280,7 @@ def main():
 
     timings: dict[str, float] = {}
 
-    print(f"🚀 EoICD 数据处理开始")
+    print(f"[START] EoICD 数据处理开始")
     print(f"   项目:     {args.project}")
     print(f"   输入目录: {raw_dir}")
     print(f"   输出目录: {processed_dir}")
@@ -290,7 +290,7 @@ def main():
         if f is None:
             continue
         if not f.exists():
-            print(f"❌ 输入文件不存在: {f}")
+            print(f"[FAIL] 输入文件不存在: {f}")
             sys.exit(1)
 
     if args.step in ("locate", "all"):
@@ -303,7 +303,7 @@ def main():
         if (config_dir / "traceability.yaml").exists():
             timings.update(step_trace(processed_dir, config_dir, raw_dir))
         else:
-            print("\n⚠️  未找到 config/traceability.yaml，跳过追溯步骤")
+            print("\n[WARN]  未找到 config/traceability.yaml，跳过追溯步骤")
 
     if args.step in ("dedup", "all"):
         timings.update(step_dedup(processed_dir, proj))
