@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   ClipboardList,
+  FileJson,
   FileSpreadsheet,
   FileText,
   RefreshCw,
@@ -14,6 +15,7 @@ import {
   getDownloadUrlV4,
   getForwardDownloadUrlV4,
   getJobLogDownloadUrlV4,
+  getReverseMatchesViewUrlV4,
   listHistoryV4,
 } from '../api'
 import type { V4HistoryItem, V4HistoryOutputs } from '../types'
@@ -273,9 +275,11 @@ export default function HistoryList() {
                   {formatTime(item.finished_at || item.created_at)} · {formatSize(item.size_bytes)}
                 </div>
 
-                {/* 日志与产物并列下载：失败 / 中断的任务一个产物都没有，日志往往
-                    正是用户唯一能拿到、也唯一想看的东西（出错原因与执行过程）。 */}
-                {available.length > 0 || item.has_log ? (
+                {/* 日志与产物并列：失败 / 中断的任务一个产物都没有，日志往往
+                    正是用户唯一能拿到、也唯一想看的东西（出错原因与执行过程）；
+                    匹配中间产物（reverse_matches）是「查看」而非下载——新标签页
+                    打开、浏览器直接按 JSON 渲染，排查匹配问题时不必先把文件下走。 */}
+                {available.length > 0 || item.has_reverse_matches || item.has_log ? (
                   <div className="history__downloads">
                     {available.map((spec) => (
                       <a key={spec.key} className="history__download" href={spec.url(item.job_id)} download>
@@ -283,6 +287,18 @@ export default function HistoryList() {
                         {spec.label}
                       </a>
                     ))}
+                    {item.has_reverse_matches && (
+                      <a
+                        className="history__download"
+                        href={getReverseMatchesViewUrlV4(item.job_id)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="reverse_matches.json · 浏览器内直接查看（新标签页）"
+                      >
+                        <FileJson size={14} />
+                        匹配中间产物
+                      </a>
+                    )}
                     {item.has_log && (
                       <a className="history__download" href={getJobLogDownloadUrlV4(item.job_id)} download>
                         <ScrollText size={14} />

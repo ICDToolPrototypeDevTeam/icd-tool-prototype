@@ -30,7 +30,7 @@ ICD工具原型 是一套「**反向**」覆盖性分析工具：从软件高层
 3. `EoICD与SWHLR单模型差异分析报告_MiniMax.docx` — MiniMax 单模型裁判结论（当前 mock fallback）。
 4. `EoICD与SWHLR单模型差异分析报告_Qwen.docx` — Qwen 单模型裁判结论（当前 mock fallback）。
 5. `EoICD与SWHLR多模型差异分析报告.docx` — 3 模型共识 + Review Agent 复核 + 星级 1-3。
-6. 7 个内部 JSON 中间产物（按 ADR-001 D7 **不**作为下载 API 暴露）：
+6. 7 个内部 JSON 中间产物（按 ADR-001 D7 **不**作为下载 API 暴露；唯一例外：`reverse_matches.json` 按用户要求开放**只读查看**入口——历史结果页新标签页内联渲染、非下载，见 `docs/architecture/api.md` 第 10 / 14.4 节）：
    - `multi_judge_results.json` / `consensus_results.json` / `reverse_matches.json` / `reverse_report.json`
    - `eoicd_requirements.json` / `hlr_requirements.json` / `hlr_labels.json`
 
@@ -64,6 +64,8 @@ V4 通过 `controller_profile` 字段控制输入解析规则（默认 `ams`）�
 | `rpdu` | 远程功率分配单元（Issue #74） | N/A（Excel 无术语表） | `.xlsx` 工作簿（列 A/B/C → 需求编号 / 模块名称 / 需求内容） | `*配电系统需求与EoICD追溯表*.xlsx` + `*单模块需求矩阵分析*.xlsx`（header 关键字自适应） |
 
 profile 配置位于 `backend/app/v4/profiles/{id}/config.yaml`，覆盖 HLR 字段映射、分类关键词（analog / discrete / bus 等）、追溯表配置和 AI 标注示例四类内容。
+
+追溯表文件定位为「模式优先 + 内容兜底」：先按上表模式匹配文件名；某张表未命中模式时按内容判型自动识别（表 1 = 任一 sheet 首个非空行同时含 ERD 与 ICD 列头关键词；表 2 = 前 50 行内含 `_HLR_` 高层需求编号），以适配改名（版本后缀、落盘清洗、编码降级）后的文件；两类判定均不命中时仍报「输入文件缺失」（任务失败）。候选池按 `.xlsx` 扩展名收集、不区分大小写。
 
 不带 `controller_profile` 字段时行为与 Issue A 完全一致（AMS 默认），向后兼容。
 

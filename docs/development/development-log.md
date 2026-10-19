@@ -3836,3 +3836,56 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   4. 全量回归 **199 passed / 6 failed / 1 skipped**——6 项失败与留档基线同集，非本次引入（**已验证**）。
 - **遗留问题**：1) 改动未提交，需提交并重建镜像；2) `LBL_X_Status` 形态经 `_LBL_TOKEN` 截成 `X_S`（只剥 `_SSM`）——当前样例该形态总与普通形态同现故无影响，出现「只引用 `LBL_X_Status`」的正文再评估；3) 原理栏扫描属「宁多勿漏」：解释性提及无关词典内信号名会多注入别名（当前样例无此形态）；4) Issue 编号待用户回填。
 - **下一步建议**：1) 提交本分支并重建镜像，用 `HSCU裁剪2.docx` 页面实跑核对 024046 的别名与匹配块；2) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）；3) 后续新增 Issue 时回填 BUG-20261015-001 / 002 编号。
+
+## 2026-10-16 历史结果新增「匹配中间产物（reverse_matches）浏览器内查看」+ 历史结果/日志正反向可用性确认（分支 issue-x-x）
+
+- **背景（用户提出）**：因服务器上无法直接查看文件，此前已为历史结果加上「产出物」与「运行日志」。用户要求先**确认这两项能力在正向 / 反向两条流程下均可使用**，若均可用，再在反向历史结果中加入「查看匹配中间产物 `reverse_matches`」的功能。
+- **正反向可用性确认（先做，结论：均可用）**：
+  1. 代码层：`GET /api/v4/history` 列表与删除无 task_type 分支；运行日志落盘（`job_log_store.register`，正反两条线程同一入口）与下载对两条流程同构；产物下载为「反向 5 类 + 正向 2 类」白名单路由，正/反向交叉请求各自 404。
+  2. 实测（httpx ASGITransport 直连应用、磁盘口径、本地 207 条历史）：反向任务 `a8b8d542` —— EoICD 清单 200 / 单模型差异报告 200 / 多模型报告 200 / 运行日志 200（保存名 `job_a8b8d542_20261014_1441.log`）；正向任务 `ea402750` —— 正向明细 xlsx 200 / 正向报告 docx 200 / 运行日志 200；交叉校验（反向任务请求正向接口、正向任务请求反向接口）均 404（**已验证**）。
+  3. 说明（不影响可用性）：自动化用例只覆盖反向（正向产物/日志无用例，靠本次实测确认）；历史页为下载链接形态、无内联预览（预览只在刚完成任务的结果页）。
+- **完成内容**：
+  1. 后端 `history.py` 新增 `GET /api/v4/jobs/{job_id}/intermediates/reverse-matches`：复用 `_resolve_job_dir` 两道门槛（uuid 白名单 + 解析后归属 `output/v4/`），返回 `FileResponse(media_type='application/json')` 且**不传 filename**（不发 `Content-Disposition` → 浏览器内联渲染、非下载）；文件不存在 404、非法 job_id 400。
+  2. `V4HistoryItem` 新增 `has_reverse_matches`（与 `has_log` 同理不并入 `outputs`）；`_history_item` 判 `output/reverse_matches.json` 是否存在（文件名取自 `runner.V4_INTERMEDIATE_JSON['reverse_matches']`，不新增字面量）。
+  3. 前端 `types.ts` / `api/index.ts` / `HistoryList.tsx`：`has_reverse_matches=true` 的条目渲染「匹配中间产物」查看链接（`FileJson` 图标，`target="_blank"` + `rel="noopener noreferrer"`、**无** `download` 属性，title 提示文件名与打开方式）；复用 `.history__download` 样式，CSS 零改动。
+  4. **ADR-001 D7 口径**：JSON 中间产物默认不暴露，D7 预留「新开子路由」的开放方式——本次即按该方式实施，**只开 `reverse_matches` 一个例外**，其余 6 类不动；ADR-001 D7 节与「状态」节加 2026-10-16 更新注记（决策未变、路径在 D7 内，不新开 ADR）。
+- **修改文件**：`backend/app/api/v4/history.py`、`backend/app/api/v4/schemas.py`、`frontend/src/types.ts`、`frontend/src/api/index.ts`、`frontend/src/components/HistoryList.tsx`；文档 `CHANGELOG.md`、`docs/architecture/api.md`（§10 / §14.1 / 新增 14.4 + 原 14.4 顺延为 14.5）、`docs/project/scope.md`、`docs/project/workflow.md`、`docs/architecture/current-architecture.md`、`docs/decisions/ADR-001-V4后端接入策略.md`、本 log。本地（`backend/tests/` 已 gitignore、不入库）：`tests/test_history.py`、`tests/e2e_history.py`、`tests/e2e_history_page.py`。
+- **验证方式与结果**：
+  1. `python -m pytest tests/test_history.py -q` → **30 passed**（原 23 + 新增 7：`has_reverse_matches` 三态、内联 200（path / media_type / 无 content-disposition）、缺文件 404、非法 job_id 400×4）（**已验证**）。
+  2. 全量 `python -m pytest tests -q --continue-on-collection-errors` → **206 passed / 6 failed / 1 skipped / 10 errors**；6 项失败（job/runner 5 项 + `test_parse_artifact_reuse` 陈旧断言）与 10 个收集错误（引用已删模块的旧实验测试）与 10-14 / 10-15 留档基线同集，非本次引入（**已验证**）。
+  3. 实测（httpx ASGITransport + 本地真实历史）：反向 `a8b8d542` 查看 200（`application/json`、无 `content-disposition`、178350 B，顶层键 / 11 条 results / stats 均可解析）、历史列表 `has_reverse_matches=true`；正向 `ea402750` 同接口 404、列表 `false`；非法 job_id 400（**已验证**）。
+  4. `python tests/e2e_history.py`（真实 uvicorn + 独立 OUTPUT_DIR）→ **全部通过**：新增 11 项检查（标记四态、200 + Content-Type + 无 content-disposition + 内容与磁盘一致、无文件 404、非法 400、删除后 404）（**已验证**）。
+  5. `python tests/e2e_history_page.py`（headless Chrome，前端 `dist` 已按本次改动重建）→ **全部通过**：查看链接恰 1 条，anchor 形如 `<a class="history__download" href=".../intermediates/reverse-matches" target="_blank" rel="noopener noreferrer">`、无 `download` 属性（**已验证**）。
+  6. `npm run build`（tsc + vite）→ 通过（**已验证**）。
+- **遗留问题**：
+  1. 需**重建后端镜像 / 覆盖前端产物**才在服务器生效（无新端口 / 无新环境变量 / 无权限变化）。
+  2. 自动化用例对「正向」侧仍无覆盖（`test_history.py` 与两个 e2e 脚本全为反向；正向产物与日志靠本次实测确认）——建议后续补正向用例。
+  3. `outputs.py` 的 5 个下载路由缺 `history.py` 同款的 job_id uuid / 路径归属校验（既有实现差异，非本次引入，未顺手改）。
+  4. RPDU refine 覆盖写盘后 `reverse_matches.json` 无 pre-refine 快照（既有遗留，见 10-14 记录）；查看接口给出的是最终态。
+  5. Issue 编号待用户回填。
+- **下一步建议**：1) 用户提交本分支并重建镜像 / 覆盖前端产物；2) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）；3) 按需为遗留 2 / 3 单独开 Issue；4) 服务器实测：打开历史结果页，对一条反向任务点「匹配中间产物」，浏览器新标签页应直接渲染 JSON。
+
+## 2026-10-16 反向追溯表文件名适配：内容判型兜底定位（分支 issue-x-x，改动未提交）
+
+- **背景（用户提出）**：用户问「反向中各控制器追溯表输入现在是否按名称写死？追溯表名称有区别时无法正常使用，需更智能适配」（范围仅限反向）。
+- **定位（结论：确实按名称写死，集中在文件名定位一环）**：
+  1. `_discover_trace_files`（`backend/app/v4/traceability/trace_parser.py`）纯按 `filename_patterns` 定位两张表，未命中即抛 `FileNotFoundError`（归类 `INPUT_FILE`）→ 任务 FAILED；强度因 profile 而异——AMS 为**无通配的精确字面名**（改一个字即挂），FGMC/HSCU/RPDU 为关键词 glob（名字丢了关键词即挂）。
+  2. 历史回退：老代码曾有「主名失败 → `glob("*.xlsx")` 排序兜底」（CHANGELOG 有记录），Issue #63 / #74 profile 重构后消失，属回归。
+  3. 真实证据：`backend/output/v4/` 现存 **12 个降级命名任务目录**（编码降级 `______ICD_______FGMC_____.xlsx`、落盘清洗把全角括号变 `_` 等），用当前代码实测全部 `FileNotFoundError`（如 FGMC `37a71900` 丢 Table 1、AMS `0af61c2a` 丢 Table 2）。
+  4. 附带两处同名类缺陷：候选池用 `glob("*.xlsx")`（Linux 容器下 `.XLSX` 漏掉）；一个文件名同时命中两套模式时被两张表同时读（另一候选反被忽略）。
+- **方案（经用户确认后实施；不加配置、不动 profile）**：
+  1. 文件名模式优先路径保持逐字不变；
+  2. 某槽位未命中时**按内容判型兜底**：表 1 = 任一 sheet 首个非空行同时含 ERD（`_TABLE1_ERD_KEYWORDS`）与 ICD（`_TABLE1_ICD_KEYWORDS`）列头关键词；表 2 = 前 50 行 × 12 列内含 `_HLR_` 高层需求编号（4 控制器 13 个正常/降级文件预演全部判别正确，RPDU 桥接表与表 1 文件均不命中）；识别成功打 `[trace] Table N located by content …`，失败保持原报错；
+  3. 小修：候选池 `.xlsx` 大小写不敏感；表 2 名称匹配优先避开已被表 1 认领的文件（仅剩单文件时回退共享旧行为）；
+  4. 「单文件同时承载两表」能力保留（内容判型对「两表皆像」的文件作末位候选）。
+- **修改文件**：`backend/app/v4/traceability/trace_parser.py`（唯一代码文件；+`_HLR_ID_MARKER`/`_PROBE_*` 常量、+`_probe_table1_like`/`_probe_table2_like`/`_locate_missing_table_by_content`、重写 `_discover_trace_files` 前半段；**未提交**）；`backend/tests/test_trace_discovery_fallback.py`（新增 8 用例，本地文件不入库）。文档：本 log、`CHANGELOG.md`（`[Unreleased] - 2026-10-16` Fixed）、`docs/project/scope.md`（§8.2.1 后补定位说明）、`docs/development/debug-log.md`（BUG-20261016-001）。
+- **验证方式与结果**（离线验证；服务器 8000 未动）：
+  1. 零回归：4 个 profile 的正常任务索引摘要（HLR→Block 全量 sha1 + 计数）与改前**全部一致**（ams 265/10/364/296、fgmc 9/6/160/550、hscu 15/9/6/30、rpdu 673/1392/53669/601835）（**已验证**）。
+  2. 降级恢复：12 个降级命名真实目录**全部由 FileNotFoundError 变为成功**，且 AMS / FGMC 的计数与同名正常任务完全相同（内容判型选出的文件与按名匹配等价）（**已验证**）。
+  3. 新增单测 **8 passed**（模式优先、双改名、单改名、`.XLSX`、防双认领、单文件共享、桥接不被认领、误传仍报错）；全量回归 **214 passed / 6 failed / 1 skipped / 10 errors**——6 失败与 10 收集错误与留档基线同集，214 = 206 基线 + 新增 8（**已验证**）。
+- **遗留问题**：
+  1. 改动未提交；需**重建后端镜像**才在服务器生效（无新端口 / 无新环境变量 / 无权限变化）。
+  2. 内容判型对表 2 依赖 `_HLR_` 编号形态；出现无该形态的编号体系时兜底会退回原报错（宁失败不误配——桥接表不被误认领正依赖此特性）。
+  3. 次级相关问题未动（超出本次范围）：sheet 改名适配（`_select_sheet` 关键词未命中时按序号静默回退）；`coverage.py` 上传 `accept` 允许 `.xls` 而后端仅收 `.xlsx` 的不一致；正向流程另有独立追溯识别（`backend/forward/`）。
+  4. Issue 编号待用户回填。
+- **下一步建议**：1) 用户提交本分支并重建镜像；2) 服务器实测：上传一张改名后的追溯表（如把 AMS 表 2 的 `（）` 改成半角 `()`）跑一条反向任务，日志应出现 `Table N located by content` 且任务正常完成；3) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）。

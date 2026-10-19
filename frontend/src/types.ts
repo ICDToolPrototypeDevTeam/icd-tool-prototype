@@ -181,6 +181,8 @@ export interface V4HistoryItem {
   size_bytes: number
   /** 目录里是否有运行日志（job.log）；失败/中断的任务也可能有，是最需要日志的场景 */
   has_log: boolean
+  /** 目录里是否有反向匹配中间产物（output/reverse_matches.json）；只有反向任务可能有 */
+  has_reverse_matches: boolean
   mock: boolean
 }
 

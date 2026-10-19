@@ -400,13 +400,13 @@ backend/forward/            # 正向管线原样代码树（唯一事实源；�
     ├── eoicd_requirements.json          # 内部
     ├── hlr_requirements.json            # 内部
     ├── hlr_labels.json                  # 内部（Step 2 输出）
-    ├── reverse_matches.json             # 内部（Step 3 输出）
+    ├── reverse_matches.json             # 内部（Step 3 输出；历史结果页可只读查看，见 api.md 14.4）
     ├── multi_judge_results.json         # 内部（Step 4 输出；mock_models 也从此文件提取）
     ├── consensus_results.json           # 内部（Step 5 输出）
     └── reverse_report.json              # 内部（Step 6 输出）
 ```
 
-5 类对外下载对应 `V4_OUTPUT_FILES` 常量（`backend/app/api/v4/runner.py`），是 SSoT。7 个 JSON 中间产物按 ADR-001 D7 不作为下载 API 暴露。
+5 类对外下载对应 `V4_OUTPUT_FILES` 常量（`backend/app/api/v4/runner.py`），是 SSoT。7 个 JSON 中间产物按 ADR-001 D7 不作为下载 API 暴露；唯一例外是 `reverse_matches.json` 的**只读查看**子路由（`GET /jobs/{job_id}/intermediates/reverse-matches`，浏览器内联渲染、非下载，见 `docs/architecture/api.md` 第 10 / 14.4 节），其余 6 类仍不暴露。
 
 ### 12.4 V4 LLM 抽象层
 

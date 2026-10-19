@@ -186,7 +186,7 @@ Review Agent 汇总三个模型的结论，对分歧处复核，给出最终判�
 
 1. **输入只解析一次**：HLROutput / EoICDOutput 一次解析后供后续步骤复用。
 2. **mock_models 显式标识**：ADR-001 D5。`/result.mock_models` 与 `/status.mock_models` 都返回当前实际 mock 的 provider 列表。
-3. **JSON 中间产物不暴露**：ADR-001 D7。7 类 JSON 仅落盘，不通过 API 下载。
+3. **JSON 中间产物不暴露**：ADR-001 D7。7 类 JSON 仅落盘，不通过 API 下载；唯一例外：`reverse_matches.json` 按用户要求开放**只读查看**（历史结果页新标签页内联渲染，非下载，见 `docs/architecture/api.md` 14.4）。
 4. **env 保存/恢复**：V4 runner 后台线程在进入时备份 `JUDGE_PROVIDERS` 与 `USE_MOCK_LLM`，`try/finally` 按 None/赋值恢复。
 5. **追溯表预筛选（可选）**：仅 `enable_traceability_prefilter=true` 时走 `matching/traceability.py`，否则 `_match_reverse_with_trace` 跳过。
 6. **降级保护**：Step 4 的 `_judge_with_degradation()` 在每 case 前过滤 unhealthy provider，已熔断的 provider 不再发起 HTTP 调用。任务提交受信号量限流（`DEGRADATION_MAX_INFLIGHT`，默认 6），超限任务在 submit 前阻塞等待。超时的 provider 先补 error judgment 占位而不中断 case，任务本体转入后台线程池。Step 4.5 在总预算（`DEGRADATION_DRAIN_BUDGET`，默认 300s）内统一 join，drain 任务数受上限约束（`DEGRADATION_DRAIN_MAX_TASKS`，默认 60），超限任务被 cancel（未执行的取消，已执行的结果丢弃）。迟到的有效结果替换占位后进入 Step 5 共识。Step 4 失败兜底（JSON 解析失败 / API 错误 / 重试耗尽）统一归一为 `coverage_status="error"`。Step 5 的 `_apply_degradation_review()` 对 Review Agent 输出做后处理，不修改 `review_judgments()` 本身；Step 5.6 复查后重新应用降级约束。降级 star cap 与 5 星体系一致（0 存活 → 1★、1 存活 → ≤1★、2 存活 → ≤2★，3 存活不限）。

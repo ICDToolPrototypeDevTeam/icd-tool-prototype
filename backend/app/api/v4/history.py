@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""历史结果：列表 + 硬删除 + 运行日志下载。
+"""历史结果：列表 + 硬删除 + 运行日志下载 + 匹配中间产物查看。
 
 - GET  /api/v4/history                 列出服务器上保留的历史结果（磁盘口径）
 - POST /api/v4/history/delete          整目录硬删除（含该任务上传的输入文件）
 - GET  /api/v4/jobs/{job_id}/logs/download  下载该次运行的 job.log
+- GET  /api/v4/jobs/{job_id}/intermediates/reverse-matches  浏览器内查看反向匹配
+  中间产物（ADR-001 D7 预留的「新开子路由」方式，只开这一个中间产物）
 
 **与 ``/jobs`` 的分工**：``/jobs`` 列的是**内存**里的任务（本进程新建 + 启动扫描
 恢复的中断任务），跑完的任务在进程重启后就不在里面了；``/history`` 列的是**磁盘**
@@ -33,6 +35,7 @@ from fastapi.responses import FileResponse
 
 from app.api.v4.runner import (
     FORWARD_OUTPUT_FILES,
+    V4_INTERMEDIATE_JSON,
     V4_OUTPUT_FILES,
     input_filenames_from_params,
 )
@@ -60,6 +63,11 @@ _CN_TZ = timezone(timedelta(hours=8))
 _JOB_ID_RE = re.compile(
     r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 )
+
+# 反向匹配中间产物（Step 3 输出，文件名 SSoT 在 runner.V4_INTERMEDIATE_JSON）。
+# ADR-001 D7 原本不暴露 JSON 中间产物，并预留了「新开子路由」的开放方式；本模块
+# 按该方式只开 reverse_matches 一个查看口，其余 6 类中间产物仍不暴露。
+_REVERSE_MATCHES_FILE = V4_INTERMEDIATE_JSON['reverse_matches']
 
 
 def _v4_root() -> Path:
@@ -128,10 +136,14 @@ def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime]:
     manifest 缺失 / 损坏时退化为「只剩目录」的记录：上传失败会留下这类残留目录，
     它们不出现在任何列表里，却照样占磁盘 —— 只有在这里能看到并清理掉。
     """
-    outputs = _output_flags(job_dir / 'output')
+    out_dir = job_dir / 'output'
+    outputs = _output_flags(out_dir)
     # 失败 / 中断的任务正是最需要日志的场景，判据只认磁盘上的 job.log 本身：
     # 进程重启后内存 buffer 已经没了，但任务跑过就必然留下了它
     has_log = (job_dir / LOG_FILE_NAME).is_file()
+    # 反向匹配中间产物（Step 3 输出）：只有反向任务会写它，正向任务 / 残留目录自然
+    # 为 False。与 has_log 同理，不并入 outputs —— 那是「七类对外产物」的词汇表
+    has_reverse_matches = (out_dir / _REVERSE_MATCHES_FILE).is_file()
     size = _dir_size(job_dir)
     fallback = _mtime(job_dir)
 
@@ -152,6 +164,7 @@ def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime]:
                 outputs=outputs,
                 size_bytes=size,
                 has_log=has_log,
+                has_reverse_matches=has_reverse_matches,
             ),
             fallback,
         )
@@ -172,6 +185,7 @@ def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime]:
             outputs=outputs,
             size_bytes=size,
             has_log=has_log,
+            has_reverse_matches=has_reverse_matches,
             mock=bool(data.get('mock', False)),
         ),
         created,
@@ -243,6 +257,27 @@ def download_job_log(job_id: str):
         filename=_log_download_name(job_id, path),
         media_type='text/plain',
     )
+
+
+@router.get('/jobs/{job_id}/intermediates/reverse-matches')
+def view_reverse_matches(job_id: str):
+    """浏览器内查看反向匹配中间产物 ``output/reverse_matches.json``（Step 3 匹配明细）。
+
+    ADR-001 D7 原本不暴露 JSON 中间产物，并预留了「新开子路由」的开放方式；本路由
+    即按该方式为用户开的口子，**只开 ``reverse_matches`` 一个**，其余 6 类中间产物
+    仍不暴露。不传 ``filename``，因此不发 ``Content-Disposition``：浏览器在新标签页
+    里直接按 JSON 渲染，需要留档时页内另存即可。
+
+    文件不存在（正向任务、Step 3 未跑完、目录已被删）→ 404；job_id 非法 → 400
+    （两道校验同日志下载，走同一个 ``_resolve_job_dir``）。
+    """
+    path = _resolve_job_dir(job_id) / 'output' / _REVERSE_MATCHES_FILE
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail='reverse_matches.json not found (forward job, or pipeline stopped before Step 3)',
+        )
+    return FileResponse(path=path, media_type='application/json')
 
 
 @router.post('/history/delete', response_model=V4HistoryDeleteResponse)
