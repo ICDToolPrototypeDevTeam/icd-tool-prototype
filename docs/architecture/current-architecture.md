@@ -47,7 +47,8 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 5. 调用后端 `/api/v4/coverage-analysis` 创建任务；
 6. 展示任务处理状态（六步进度）；
 7. 展示处理结果摘要（统计卡片 + 星级分布）；
-8. 提供输出文档预览与下载入口。
+8. 提供输出文档预览与下载入口；
+9. 提供模型设置页面，运行时修改三个模型名称（无需重启服务）。
 
 前端不负责：
 
@@ -84,7 +85,8 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | `job_manager.py` | 内存任务状态管理（`JobStatus` / `Job` / `JobManager`） |
 | `job_log.py`   | 进程级任务日志缓冲、stdout/stderr Tee、线程归属与 job.log 落盘；不依赖任何 `app.*` 模块 |
 | `job_scheduler.py` | 进程内任务队列：固定 `MAX_CONCURRENT_JOBS`（默认 2）个常驻工作线程领取任务（新任务 FIFO，续跑任务插队首，不抢占执行中任务）；出队时做票据比对（同一任务的旧条目丢弃）与跳过裁决（排队期间被终止 / 放弃的任务不执行，原因写入该任务日志） |
-| `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（经 `job_scheduler` 入队 + 7 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` |
+| `runtime_settings.py` | 运行时模型设置：三个模型名原子落盘到 `OUTPUT_DIR/settings.json`，保存时写入 `os.environ`，启动时回读；不依赖任何业务管线 |
+| `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（经 `job_scheduler` 入队 + 7 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` / `settings.py` |
 | `v4/pipeline.py` | V4 反向管线编排（`run_reverse_pipeline`，6 步）；正向管线不在 `v4/` 内（见 `forward/` 与 `app/forward/` 两行） |
 | `v4/config.py` | V4 env 加载（DEEPSEEK_* / USE_MOCK_LLM / JUDGE_PROVIDERS）+ 业务常量 |
 | `v4/errors.py` | 管线异常 → 面向用户的错误分类与建议；复用 `degradation.fallback.classify_exception` |
@@ -273,6 +275,7 @@ backend/app/
 ├── job_manager.py          # 共享 Job / JobManager（JobStatus 唯一来源）
 ├── job_log.py              # 进程级日志缓冲 / stdout-stderr Tee / job.log 落盘与恢复（不 import app.*）
 ├── job_scheduler.py        # 进程内任务队列（常驻工作线程 + 票据 + 出队跳过裁决；并发上限 MAX_CONCURRENT_JOBS）
+├── runtime_settings.py     # 运行时模型设置：output/settings.json 持久化 + os.environ 热应用
 ├── forward/                # 正向适配层（Issue #119）：编排与翻译，零业务算法，不 import app.v4.*
 │                           #   （唯一例外：zip_entry_normalize 纯 I/O 工具）
 │   ├── root.py             # 正向树路径 / 交付文件名 / 汇总快照名等常量
@@ -284,13 +287,14 @@ backend/app/
 │   └── adapter.py          # 编排与翻译（run_forward_job）
 ├── api/
 │   └── v4/
-│       ├── router.py       # V4 路由聚合（health + coverage + completeness + jobs + outputs）
-│       ├── schemas.py      # V4Job* Pydantic
+│       ├── router.py       # V4 路由聚合（health + coverage + completeness + jobs + outputs + history + settings）
+│       ├── schemas.py      # V4Job* / V4ModelSettings* Pydantic
 │       ├── runner.py       # V4 任务入队（job_scheduler）+ 线程函数（runtime 上下文绑定 + 7 个 derive_* 函数）
 │       ├── coverage.py     # POST /api/v4/coverage-analysis
 │       ├── completeness.py # POST /api/v4/completeness-analysis（含 controller_profile）
 │       ├── jobs.py         # GET /api/v4/jobs/{id}[/result]
-│       └── outputs.py      # GET /api/v4/jobs/{id}/outputs/{kind}
+│       ├── outputs.py      # GET /api/v4/jobs/{id}/outputs/{kind}
+│       └── settings.py     # GET/PUT /api/v4/settings（运行时模型名）
 └── v4/                     # V4 业务子包
     ├── cli.py              # V4 CLI 入口
     ├── config.py           # V4 env 加载 + 业务常量
@@ -433,6 +437,11 @@ llm/mock_llm.py
   MockLLMClient.chat(messages, ...) -> ChatResponse
     返写死 JSON，按 MOCK_JUDGE_RESULT 切 covered / inconsistent / needs_review
 ```
+
+三个模型名（`DEEPSEEK_MODEL` / `MINIMAX_MODEL` / `QWEN_MODEL`）支持运行时修改：
+`app/runtime_settings.py` 把前端保存的值写入 `OUTPUT_DIR/settings.json` 并立即更新
+`os.environ`；`get_llm()` 每次调用、正向 `config_builder` 每个任务开始时读取，因此
+无需重启。启动时 `main.py` lifespan 回读落盘值（优先于 `.env`）。
 
 V4 内 LLM 调用入口：
 - `comparison/semantic_judge.py` × 2 处

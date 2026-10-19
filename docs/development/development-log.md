@@ -51,6 +51,63 @@
 
 ## 3. 开发记录
 
+### 2026-10-19 运行时模型设置（前端可改三个模型名）
+
+#### 任务目标
+
+服务器部署完成后无法直接编辑服务器上的 `backend/.env`，此前每次调整 DeepSeek / MiniMax / Qwen 三个模型名都需要服务器人员重新部署。新增前端「模型设置」页和对应 API，使模型名可以在页面上直接修改、立即生效，并在容器重启后保留。
+
+#### 完成内容
+
+1. 新增 `backend/app/runtime_settings.py`：三个模型名原子落盘到 `OUTPUT_DIR/settings.json`，保存时立即更新 `os.environ`，启动时回读（优先于 `.env`）；损坏/字段不合法的设置文件只告警并回落部署配置。
+2. 新增 `GET /api/v4/settings` / `PUT /api/v4/settings`（`backend/app/api/v4/settings.py`）：校验非空、去首尾空格、长度上限 200、拒绝控制字符；写盘失败返回 500。
+3. `main.py` lifespan 启动回读，并在配置自检日志中补充当前模型名（不打印密钥）。
+4. `factory.py` 抽出 `DEFAULT_MODELS` 常量为默认模型名单一来源（行为不变）。
+5. 前端新增 `SettingsPage`（`/settings`）与顶部导航「模型设置」：三行厂商卡片、等宽输入框、保存/撤销、页内提示、部署默认/已自定义状态与上次保存时间；新增 API 封装与类型。
+6. 文档同步：`docs/architecture/api.md`（第 2、9、15 节）、`docs/architecture/current-architecture.md`、`CHANGELOG.md`、`部署说明.md`。
+
+#### 修改文件
+
+1. `backend/app/runtime_settings.py`（新增）
+2. `backend/app/api/v4/settings.py`（新增）
+3. `backend/app/api/v4/schemas.py`
+4. `backend/app/api/v4/router.py`
+5. `backend/app/main.py`
+6. `backend/app/v4/llm/factory.py`
+7. `backend/tests/test_runtime_settings.py`（新增）
+8. `frontend/src/pages/SettingsPage.tsx`（新增）
+9. `frontend/src/App.tsx`
+10. `frontend/src/api/index.ts`
+11. `frontend/src/types.ts`
+12. `frontend/src/index.css`
+
+#### 验证方式
+
+1. `python -m pytest backend/tests/test_runtime_settings.py -q`
+2. `python -m pytest backend/tests -q --continue-on-collection-errors`
+3. `npm --prefix frontend run build`
+4. 启动 uvicorn（临时 `OUTPUT_DIR`），依次 GET → PUT → GET → 重启 → GET；并验证空白模型名返回 422、`settings.json` 落盘内容正确。
+
+#### 验证结果
+
+1. 新增单测：8 passed。
+2. 后端全量可收集用例：222 passed / 1 skipped / 6 failed / 10 collection errors。6 个失败均为任务取消/解析复用相关的既有漂移（与改动前基线一致，本次未触碰）；10 个 collection error 为当前分支不存在的 `app.v4.reverse.*` 旧测试，属既有问题。
+3. 前端 `tsc && vite build` 通过。
+4. HTTP 往返验证通过：GET 初始为 `.env` 值；PUT 后返回 `customized=true`；重启后 GET 仍为落盘值；空白值返回 422；`settings.json` 内容与返回一致。
+5. 未做浏览器内的视觉验收（仅构建通过）。
+
+#### 遗留问题
+
+1. 系统无鉴权，能访问页面的用户都可以修改模型名；仅适用于内网演示环境。
+2. 修改对运行中任务的后续模型调用同样生效；页面已提示建议等任务结束后再保存。如需「任务级快照」需另开 Issue。
+3. 持久化值优先于 `.env`；如需恢复部署配置，需删除 `output/settings.json` 后重启服务。
+4. 重新部署时需保留 `backend/output/` 目录，设置才不丢失（与历史结果同卷）。
+
+#### 下一步建议
+
+1. 在服务器上完成一次「页面改模型名 → 新建任务 → 日志确认模型名」的真实验收。
+2. 如后续需要，再评估是否把 API key / base URL 一并纳入设置页（需先解决密钥展示与鉴权问题）。
+
 ### 2026-09-03 Issue RPDU 适配续：RPDU refine 后处理整合到 V4 主线
 
 #### 任务目标

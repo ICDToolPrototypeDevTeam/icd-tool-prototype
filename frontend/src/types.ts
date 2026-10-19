@@ -191,3 +191,21 @@ export interface V4HistoryDeleteResponse {
   failed: { job_id: string; error: string }[]
   total_freed_bytes: number
 }
+
+// ========== V4 运行时模型设置 ==========
+
+/** 当前生效的三个模型名；customized=false 表示沿用部署配置（.env）。 */
+export interface V4ModelSettings {
+  deepseek_model: string
+  minimax_model: string
+  qwen_model: string
+  customized: boolean
+  /** 仅 customized=true 时有值（ISO 8601，带 +08:00 偏移） */
+  updated_at: string | null
+}
+
+/** PUT /api/v4/settings 请求体（三个字段全量提交）。 */
+export type V4ModelSettingsUpdate = Pick<
+  V4ModelSettings,
+  'deepseek_model' | 'minimax_model' | 'qwen_model'
+>

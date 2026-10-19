@@ -5,6 +5,7 @@ import LandingPage from './pages/LandingPage'
 import CorrectnessPage from './pages/CorrectnessPage'
 import CompletenessPage from './pages/CompletenessPage'
 import HistoryPage from './pages/HistoryPage'
+import SettingsPage from './pages/SettingsPage'
 
 export default function App() {
   const { v4Online } = useV4Health()
@@ -56,6 +57,14 @@ export default function App() {
           >
             历史结果
           </NavLink>
+          <NavLink
+            to="/settings"
+            className={({ isActive }) =>
+              `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
+            }
+          >
+            模型设置
+          </NavLink>
         </nav>
 
         <div className="header__status">
@@ -88,6 +97,7 @@ export default function App() {
           <Route path="/correctness" element={<CorrectnessPage />} />
           <Route path="/completeness" element={<CompletenessPage />} />
           <Route path="/history" element={<HistoryPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.job_manager import JobStatus
 
@@ -283,3 +283,34 @@ class V4HistoryDeleteResponse(BaseModel):
     deleted: list[V4HistoryDeleteResult] = []
     failed: list[V4HistoryDeleteFailure] = []
     total_freed_bytes: int = 0
+
+
+# ============================================================================
+# 运行时模型设置
+# ============================================================================
+
+
+class V4ModelSettingsUpdate(BaseModel):
+    """PUT /api/v4/settings 请求体：三个模型名全量提交。
+
+    ``str_strip_whitespace`` 先去空格再校验长度，避免「只输空格」通过
+    ``min_length``；落盘前 ``runtime_settings`` 还会再做一次同样的校验。
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    deepseek_model: str = Field(min_length=1, max_length=200)
+    minimax_model: str = Field(min_length=1, max_length=200)
+    qwen_model: str = Field(min_length=1, max_length=200)
+
+
+class V4ModelSettings(BaseModel):
+    """GET/PUT /api/v4/settings 响应：当前生效值 + 是否自定义 + 保存时间。"""
+
+    deepseek_model: str
+    minimax_model: str
+    qwen_model: str
+    # False = 沿用部署配置（backend/.env）或 factory 默认值
+    customized: bool = False
+    # 仅 customized=True 时有值（ISO 8601，带 +08:00 偏移）
+    updated_at: Optional[str] = None

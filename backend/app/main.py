@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.v4.router import router as v4_router
 from app.job_log import install_log_tee, set_config_lines
 from app.job_manager import job_manager
+from app.runtime_settings import load_persisted_settings
 from app.v4.config import get_output_root
 
 # 安装 stdout/stderr Tee（幂等）。必须尽早执行，使应用自身的 print 都能被
@@ -39,6 +40,10 @@ def _config_snapshot() -> list[str]:
         f'{name}={"yes" if (os.getenv(f"{name}_API_KEY") or "").strip() else "no"}'
         for name in ('DEEPSEEK', 'MINIMAX', 'QWEN')
     )
+    models = ' / '.join(
+        f'{name}={os.getenv(f"{name}_MODEL") or "(未配置)"}'
+        for name in ('DEEPSEEK', 'MINIMAX', 'QWEN')
+    )
     return [
         '[config] USE_MOCK_LLM={} (容器配置) | {} | JUDGE_PROVIDERS={} | '
         'OUTPUT_DIR={} | STATIC_DIR={}'.format(
@@ -47,12 +52,19 @@ def _config_snapshot() -> list[str]:
             os.getenv('JUDGE_PROVIDERS', '(默认)'),
             get_output_root(),
             os.getenv('ICD_STATIC_DIR', '(未设置)'),
-        )
+        ),
+        f'[config] MODELS {models}',
     ]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 先回读前端保存的模型设置，使其覆盖 .env 并体现在下面的配置自检里。
+    # 设置文件损坏 / 无权限时只告警，回落 .env，不影响启动。
+    try:
+        load_persisted_settings()
+    except Exception as e:  # noqa: BLE001
+        print(f'[settings] load failed: {type(e).__name__}: {e}', file=sys.stderr)
     # 启动扫描：把上一个进程遗留的未完成任务标记为 interrupted，供前端选择
     # 继续 / 放弃。任何异常都不得影响启动。
     try:

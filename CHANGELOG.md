@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-10-19
+
+### Added
+
+- **前端新增「模型设置」页：运行时修改 DeepSeek / MiniMax / Qwen 三个模型名，无需重新部署**：服务器部署完成后现场无法编辑 `backend/.env`，此前每次改模型名都必须让服务器人员重建容器。新增 `GET /api/v4/settings`（读取当前生效值、是否自定义、上次保存时间）与 `PUT /api/v4/settings`（三个字段全量提交，校验空/超长/控制字符）。保存时原子写入 `OUTPUT_DIR/settings.json`（Docker 中即挂载的 `./backend/output/settings.json`，容器重建后保留）并立即更新 `os.environ`；反向 `v4/llm/factory.get_llm()` 每次调用、正向 `forward/config_builder` 每个任务开始时读取模型名，因此保存后无需重启。启动时 `main.py` lifespan 回读落盘值（优先于 `.env`），损坏/字段不合法的设置文件只告警并回落部署配置。前端顶部导航新增「模型设置」（`/settings`）：三行厂商卡片 + 等宽输入框 + 保存/撤销 + 页内成功/失败提示，沿用现有视觉语言；默认状态显示「部署默认」，保存后显示「已自定义」与上次保存时间。API key / base_url / `JUDGE_PROVIDERS` 不在本页管理；当前系统无鉴权，能访问页面的用户都可以修改（内网演示原型的已知限制）。新增后端单测 8 个。该改动需**重建后端镜像 / 覆盖前端产物**才生效。
+
 ## [Unreleased] - 2026-10-16
 
 ### Added
