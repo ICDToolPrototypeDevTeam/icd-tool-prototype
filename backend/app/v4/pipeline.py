@@ -1270,14 +1270,14 @@ def run_reverse_pipeline(
     print(f"  Summary: {report.summary}")
 
     # ── Word reports ──
-    # 取一次快照给全部 4 份报告共用：迟到的 drain future 可能在本行之后继续累加，
-    # 若每份报告各读一次，4 份文档的数字会互不一致。未启用统计（CLI）时传 None，
-    # 报告不写该行。
-    token_snapshot = (
-        max(0, int(getattr(job, "total_tokens", 0) or 0))
-        if getattr(job, "token_usage_tracked", False)
-        else None
-    )
+    # 总量与分模型用量在同一把锁内取一次快照：单模型报告写各自模型用量
+    # （同一 provider 的标注/裁判/共识调用都算它的），多模型报告写任务总量。
+    # 迟到 drain future 可能在本行之后继续累加；共用一次快照可保证 4 份文档
+    # 口径一致。未启用统计（CLI）时传 None，报告不写该行。
+    if getattr(job, "token_usage_tracked", False):
+        token_snapshot, tokens_by_model = job.token_usage_snapshot()
+    else:
+        token_snapshot, tokens_by_model = None, {}
     model_display = {"deepseek": "DeepSeek", "minimax": "MiniMax", "qwen": "Qwen"}
     for model in ("deepseek", "minimax", "qwen"):
         display = model_display[model]
@@ -1286,7 +1286,9 @@ def run_reverse_pipeline(
             report_path,
             output_dir / f"EoICD与SWHLR单模型差异分析报告_{display}.docx",
             model=model,
-            total_tokens=token_snapshot,
+            total_tokens=(
+                tokens_by_model.get(model, 0) if token_snapshot is not None else None
+            ),
         )
 
     print("  → 多模型报告")

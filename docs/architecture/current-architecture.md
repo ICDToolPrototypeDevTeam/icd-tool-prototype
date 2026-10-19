@@ -468,12 +468,14 @@ V4 工程化集成的关键决策由 `docs/decisions/ADR-001-V4后端接入策�
 
 ### 12.6 任务 token 用量统计（累计总量）
 
-任务的状态、结果、历史接口与全部 DOCX 报告都展示一个累计 token 总量。只统计总量，不拆输入/输出、不拆模型、不提供调用次数。
+任务的状态、结果、历史接口展示一个累计 token 总量；DOCX 报告中，反向 3 份单模型报告展示对应模型自身的累计用量，多模型共识报告与正向报告展示任务总量。接口层不暴露分模型数据，也不拆输入/输出或调用次数。
 
 ```text
-Job.total_tokens: int                  # 内存中的唯一事实值
-Job.token_usage_tracked: bool          # 仅内存：该任务是否启用统计（CLI 为 False）
-job.json -> token_usage.total_tokens   # 5 秒节流 + 终态强制落盘；from_manifest 容错恢复
+Job.total_tokens: int                    # 内存中的唯一对外事实值
+Job.tokens_by_provider: dict[str, int]   # 分 provider 累计（反向单模型报告用）
+Job.token_usage_tracked: bool            # 仅内存：该任务是否启用统计（CLI 为 False）
+job.json -> token_usage.total_tokens     # 5 秒节流 + 终态强制落盘；from_manifest 容错恢复
+job.json -> token_usage.by_provider      # 与总量同时落盘/恢复；旧 manifest 为空
 ```
 
 统计口径与边界：
@@ -482,19 +484,21 @@ job.json -> token_usage.total_tokens   # 5 秒节流 + 终态强制落盘；from
 - **续跑累计**：`relaunch_from_manifest` 刻意不清零 `total_tokens`，任务续跑后从原值继续；新任务从 0 开始。
 - **旧任务**：manifest 无 `token_usage` 键 → 接口返回 `null`、前端隐藏、DOCX 不写行；不把未统计伪装成 0。
 - **MOCK**：未产生真实调用，0 是有效值，前端以 MOCK 标签说明。
-- **报告时点**：反向 Step 6 在生成 4 份 DOCX 前取一次快照，4 份共用同一数字；生成报告后迟到的并发调用只反映在完成页/API 的实时值中，报告允许略小。
+- **分模型口径**：provider 的所有调用都计入该 provider（DeepSeek 的标注、裁判、共识、复查调用均计入 DeepSeek；MiniMax/Qwen 为各自裁判调用），因此三份单模型报告之和等于总量中这三个 provider 的部分。正向只有一份报告，set_token_usage 只写总量。
+- **报告时点**：反向 Step 6 在生成 4 份 DOCX 前取一次「总量 + 分 provider」快照，4 份共用（单模型取各自分项，共识取总量）；生成报告后迟到的并发调用只反映在完成页/API 的实时值中，报告允许略小。
 
 反向（正确性）采集链：
 
 ```text
 deepseek / qwen / minimax client
-  resp.json() 之后立即 record_token_usage(body["usage"])
+  resp.json() 之后立即 record_token_usage(body["usage"], provider=<client.PROVIDER>)
     # 截断重试的每一次 HTTP 响应都计数；业务调用点零改动
   → app/token_usage.extract_total_tokens
-  → current_job().add_token_usage(delta)
+  → current_job().add_token_usage(delta, provider=...)
     # Job 归属来自 job_log 的线程局部上下文；Step4/5.5 线程池已由 bind_thread_context 保留
-  → Job.total_tokens（线程安全 + 节流落盘）
-  → pipeline Step6 快照 → 3 份单模型 DOCX + 1 份共识 DOCX
+  → Job.total_tokens + Job.tokens_by_provider（线程安全 + 节流落盘）
+  → pipeline Step6 取「总量 + 分 provider」快照
+      → 3 份单模型 DOCX（各写该模型分项）+ 1 份共识 DOCX（写总量）
 ```
 
 正向（完整性）采集链（跨 3 层进程）：

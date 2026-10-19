@@ -61,9 +61,10 @@ def extract_total_tokens(usage: Any) -> int:
     return total
 
 
-def record_token_usage(usage: Any) -> int:
+def record_token_usage(usage: Any, provider: str | None = None) -> int:
     """把一次响应的 token 用量计入当前线程绑定的 Job。
 
+    ``provider`` 用于分模型统计（反向三份单模型报告）；不传则只累加总量。
     返回解析出的本次用量（无 Job / Job 不支持统计时同样返回，调用方无须关心
     是否真的记上了）。任何异常都被吞掉 —— 统计失败不能影响模型调用。
     """
@@ -72,7 +73,14 @@ def record_token_usage(usage: Any) -> int:
         job = current_job()
         add = getattr(job, 'add_token_usage', None)
         if callable(add):
-            add(total)
+            if provider:
+                try:
+                    add(total, provider=provider)
+                except TypeError:
+                    # 兼容不接受 provider 的轻量假 Job（测试 / 外部注入）
+                    add(total)
+            else:
+                add(total)
         return total
     except Exception:  # noqa: BLE001 — 统计是旁路，绝不影响主流程
         return 0
