@@ -38,6 +38,7 @@ from app.api.v4.schemas import (
     V4JobResultResponse,
     V4JobResultSummary,
     V4JobStatusResponse,
+    V4TokenUsage,
 )
 from app.job_log import LOG_FILE_NAME, job_log_store
 from app.job_manager import JobStatus, job_manager
@@ -55,6 +56,42 @@ def _get_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail='job not found')
     return job
+
+
+def _parse_token_usage(raw) -> Optional[V4TokenUsage]:
+    """容错解析 ``{"total_tokens": N}`` 或裸数字；无有效值返回 None。
+
+    旧任务没有该字段 → None（前端隐藏）；MOCK 任务的 0 是有效值。
+    """
+    if isinstance(raw, dict):
+        raw = raw.get('total_tokens')
+    elif isinstance(raw, bool):
+        return None
+    if raw is None:
+        return None
+    try:
+        return V4TokenUsage(total_tokens=max(0, int(raw)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _job_token_usage(job, res: Optional[dict] = None) -> Optional[V4TokenUsage]:
+    """取任务的累计 token 用量。
+
+    优先读内存（``token_usage_tracked`` 或总量 > 0）；未启用统计时回退到结果
+    字典（正向对账会把最终值写进 ``job.result``）。都没有 → None：旧任务不得
+    伪装成 0。
+    """
+    tracked = bool(getattr(job, 'token_usage_tracked', False))
+    try:
+        total = max(0, int(getattr(job, 'total_tokens', 0) or 0))
+    except (TypeError, ValueError):
+        total = 0
+    if tracked or total > 0:
+        return V4TokenUsage(total_tokens=total)
+    if isinstance(res, dict):
+        return _parse_token_usage(res.get('token_usage'))
+    return None
 
 
 def _job_log_path(job) -> Path:
@@ -114,6 +151,7 @@ def get_v4_job_status(job_id: str):
         mock_models=mock_models,
         mock=bool(job.mock),
         cancel_requested=bool(job.cancel_requested),
+        token_usage=_job_token_usage(job),
         error=job.error or None,
         created_at=job.created_at.isoformat(),
         updated_at=job.updated_at.isoformat(),
@@ -163,6 +201,7 @@ def _reverse_result(job, base_outputs_dir: Path) -> V4JobResultResponse:
         outputs=job_outputs,
         mock_models=res.get('mock_models', mock_models) or [],
         errors=res.get('errors', []) or [],
+        token_usage=_job_token_usage(job, res),
     )
 
 
@@ -206,6 +245,7 @@ def _forward_result(job, base_outputs_dir: Path) -> V4ForwardJobResultResponse:
         summary=result_summary,
         outputs=job_outputs,
         errors=res.get('errors', []) or [],
+        token_usage=_job_token_usage(job, res),
     )
 
 

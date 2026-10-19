@@ -5,11 +5,14 @@ import {
 } from 'lucide-react'
 import { getDownloadUrlV4, getPreviewHtmlV4 } from '../api'
 import type { V4JobResultResponse, V4DownloadKind } from '../types'
+import TokenUsageCard from './TokenUsageCard'
 
 interface Props {
   data: V4JobResultResponse
   jobId: string
   onNewTask: () => void
+  /** MOCK 模式下 token 为 0 是正确值，用标签说明 */
+  mock?: boolean
 }
 
 // 图标用 lucide-react 内联 SVG：服务器镜像里只有 9 种西文字体，emoji 会渲染成方框
@@ -148,7 +151,7 @@ function StarBar({
   )
 }
 
-export default function CorrectnessResultView({ data, jobId, onNewTask }: Props) {
+export default function CorrectnessResultView({ data, jobId, onNewTask, mock }: Props) {
   const s = data.summary
   const statusDist = s.status_distribution || {}
   const starDist = s.star_distribution || {}
@@ -166,6 +169,8 @@ export default function CorrectnessResultView({ data, jobId, onNewTask }: Props)
 
   return (
     <>
+      <TokenUsageCard totalTokens={data.token_usage?.total_tokens ?? null} mock={mock} />
+
       {/* Stat cards row */}
       <div className="stat-cards">
         {statCards.map((sc) => (

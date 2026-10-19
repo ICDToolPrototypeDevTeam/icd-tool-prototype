@@ -36,6 +36,8 @@ API 设计应遵守以下原则：
 | `/api/v4/jobs/{job_id}/outputs/forward-docx`   | `GET`  | 下载正向完整性分析报告（docx）            |
 | `/api/v4/history`                              | `GET`  | 查询服务器上保留的历史结果（磁盘口径，含内存中没有的已完成任务） |
 | `/api/v4/history/delete`                       | `POST` | 硬删除历史结果（整目录，含上传的输入文件；需 `confirm=true`） |
+| `/api/v4/settings`                             | `GET`  | 查询当前生效的三个模型名（运行时设置） |
+| `/api/v4/settings`                             | `PUT`  | 保存三个模型名并立即生效（落盘 `output/settings.json`，无需重启） |
 
 `{model}` ∈ `{deepseek, minimax, qwen}`。
 
@@ -113,6 +115,7 @@ GET /api/v4/jobs/{job_id}
   "mock_models": ["minimax", "qwen"],
   "mock": false,
   "cancel_requested": false,
+  "token_usage": { "total_tokens": 123456 },
   "error": null,
   "created_at": "ISO-8601",
   "updated_at": "ISO-8601"
@@ -126,6 +129,15 @@ GET /api/v4/jobs/{job_id}
 `interrupted` / `abandoned` 为任务中断恢复相关状态，见第 13 节。
 
 `mock` 表示本次运行是否按 MOCK 模式执行（结果页据此提示「模拟数据不可用于验收」）；`cancel_requested` 表示已请求终止、正等待管线在检查点停止，前端据此把终止按钮显示为「正在终止…」。
+
+`token_usage` 是任务**累计**消耗的模型 token 总量（只暴露总量，不拆输入/输出、不拆模型、不提供调用次数）。口径如下：
+
+- 仅 API 任务统计：新任务从 0 开始；续跑（`resume`）在原值上继续累加，不因重跑步骤而清零。MOCK 任务的 `0` 是**有效值**（未产生真实调用），前端用 MOCK 标签说明。
+- **旧任务**（本功能上线前创建、manifest 中没有该字段）返回 `null`：前端不展示、DOCX 不写该行 —— 不把未统计伪装成 0。
+- 运行中读内存实时值；落盘按 5 秒节流，进入终态时强制落盘。完成页/结果接口读**实时值**，可能比 DOCX 报告里的数字略大（报告取生成时点的一次性快照，之后迟到的并发调用不计入报告）。
+- 反向与正向口径一致；正向跨 judge 子进程的消耗经增量标记与 sidecar 汇总后对账，见 `docs/architecture/current-architecture.md`。
+- CLI 路径不绑定 `Job`，不统计、返回体不适用。
+- 接口只暴露总量；DOCX 报告口径更细：反向 3 份单模型报告各写该模型自身的累计用量（同一 provider 的标注、裁判、共识、复查调用都计入该模型），多模型共识报告与正向报告写任务总量。分模型数据只在本服务内部累计，不进入 API。
 
 `canceled` 表示运行中的任务被用户主动终止（`POST /api/v4/jobs/{job_id}/cancel`，见第 2 节）；它与 `abandoned` 语义不同：`abandoned` 指任务被中断 / 被终止后由用户放弃，是**终态**，`canceled` 指**仍在运行**的任务被终止，**不是终态** —— 被终止的任务可 `resume` 续跑（按参数快照重跑，续跑前复位取消标志）或 `abandon` 收尾。两者都不删除任何文件；终止是协作式的，`status` 会保持 `running` / `pending` 直至管线在检查点停止，接口不返回虚构的中间状态。
 
@@ -197,9 +209,12 @@ GET /api/v4/jobs/{job_id}/result
     "total_case_timeouts": 0,
     "review_star_capped_count": 0
   },
+  "token_usage": { "total_tokens": 123456 },
   "errors": []
 }
 ```
+
+`token_usage` 口径同状态接口（累计总量；旧任务为 `null`；MOCK 的 0 为有效值）。
 
 `outputs.*` 5 个布尔为 false 时表示对应 docx/xlsx 未生成（pipeline 中途失败、文件被 GC 等）。
 
@@ -252,6 +267,7 @@ Content-Type：
 | 版本 | 根目录 | 内部结构 |
 | --- | --- | --- |
 | V4 | `backend/output/v4/{job_id}/` | 分层：`input/`（用户上传原始文件）+ `output/`（pipeline 产物） |
+| 运行时设置 | `backend/output/settings.json` | 三个模型名（见第 15 节）；容器重建后保留 |
 
 `docker-compose.yml` volume 映射 `./backend/output:/app/output`。
 
@@ -354,9 +370,12 @@ GET /api/v4/jobs/{job_id}/result
     "forward_xlsx": true,
     "forward_docx": true
   },
+  "token_usage": { "total_tokens": 123456 },
   "errors": []
 }
 ```
+
+`token_usage` 口径同状态接口（累计总量；旧任务为 `null`；MOCK 的 0 为有效值）。正向值由各 judge 的 sidecar 与父进程实时增量对账得出（取本轮较大者），再叠加续跑前的历史总量。
 
 字段口径（Issue #119 新正向管线）：
 
@@ -558,7 +577,8 @@ GET /api/v4/history
     "size_bytes": 12345678,
     "has_log": true,
     "has_reverse_matches": true,
-    "mock": false
+    "mock": false,
+    "token_usage": { "total_tokens": 123456 }
   }
 ]
 ```
@@ -569,6 +589,7 @@ GET /api/v4/history
 - `has_reverse_matches` 表示目录里有没有反向匹配中间产物（`output/reverse_matches.json`，Step 3 输出），与 `has_log` 同理**不属于** `outputs` 七类词汇表。只有反向任务会写这个文件，正向任务恒为 `false`；前端据此在该条目上渲染「匹配中间产物」查看链接（14.4）。
 - `size_bytes` 为该任务目录占用的字节数（**含 `input/` 里用户上传的原始文件**与全部中间产物），供删除前告知释放空间。
 - `mock` 含义同状态接口：模拟数据不可用于验收。
+- `token_usage` 读 manifest 的 `token_usage` 字段，口径同状态接口：累计总量；**旧任务无该键 → `null`**（前端不显示），新任务的 `0`（如 MOCK）照常显示。
 - 该接口不做鉴权（与其它接口一致），只读磁盘，不改变任何状态。
 
 ### 14.2 删除历史结果（硬删除）
@@ -645,3 +666,59 @@ GET /api/v4/jobs/{job_id}/intermediates/reverse-matches
 | `job_ids` 为空，或缺 `confirm=true` | 400 |
 | `job_id` 非法（非 uuid / 越出 `output/v4/`） | 400 |
 | 批次内有任务正在运行 | 409 |
+
+## 15. 运行时模型设置接口
+
+用于在服务器部署完成后，直接从前端修改三个模型名，避免为改配置重新部署/重建容器。
+
+### 15.1 查询设置
+
+```text
+GET /api/v4/settings
+```
+
+预期返回：
+
+```json
+{
+  "deepseek_model": "deepseek-v4-flash",
+  "minimax_model": "MiniMax-M2.5",
+  "qwen_model": "qwen3.6-35b-a3b",
+  "customized": false,
+  "updated_at": null
+}
+```
+
+- `customized=false`：三个名字来自部署配置（`backend/.env`）或代码默认值；`updated_at=null`。
+- `customized=true`：来自服务器输出目录下的 `settings.json`；`updated_at` 为上次保存时间（ISO 8601，东八区）。
+
+### 15.2 更新设置
+
+```text
+PUT /api/v4/settings
+Content-Type: application/json
+```
+
+请求体（三个字段全量提交）：
+
+```json
+{
+  "deepseek_model": "deepseek-v4-flash",
+  "minimax_model": "MiniMax-M2.5",
+  "qwen_model": "qwen3.6-35b-a3b"
+}
+```
+
+- 先去首尾空格再校验；空、超过 200 字符或含换行/控制字符 → 422。
+- 原子写入 `OUTPUT_DIR/settings.json`（Docker 中即挂载的 `./backend/output/settings.json`），并立即更新进程环境变量。
+- 反向管线（`v4/llm/factory.get_llm()`）每次调用、正向管线（`forward/config_builder`）每个任务开始时都读取模型名，因此**无需重启**；修改只影响之后的模型调用，正在运行的任务若继续发起调用会读到新值。
+- 持久化值**优先于** `backend/.env`；若要让 `.env` 重新生效，删除 `output/settings.json` 后重启服务。
+- 只管理模型名。API key / base_url / `JUDGE_PROVIDERS` 仍由部署配置管理；`USE_MOCK_LLM=1` 时模型名不参与实际调用。
+- 当前系统无鉴权，能访问页面的用户都可以修改（内网演示原型的已知限制）。
+
+### 15.3 错误响应
+
+| 场景 | HTTP |
+| --- | --- |
+| 模型名为空 / 超长 / 含控制字符 / 类型不对 | 422 |
+| 设置文件无法写入（权限、磁盘等） | 500 |

@@ -6,9 +6,13 @@ from __future__ import annotations
 import time
 import requests
 
+from app.token_usage import record_token_usage
+
 
 class MiniMaxClient:
     """Calls MiniMax API with timeout, basic retry, and JSON extraction."""
+
+    PROVIDER = "minimax"
 
     def __init__(self, api_key: str, base_url: str, model: str, default_timeout: int = 120):
         self._api_key = api_key
@@ -64,6 +68,8 @@ class MiniMaxClient:
                     )
                     resp.raise_for_status()
                     body = resp.json()
+                    # 先计数再取 choices：截断重试的每一次响应都算真实消耗
+                    record_token_usage(body.get("usage"), provider=self.PROVIDER)
                     content = body["choices"][0]["message"]["content"]
                     usage = body.get("usage", {})
                     finish_reason = body["choices"][0].get("finish_reason", "")

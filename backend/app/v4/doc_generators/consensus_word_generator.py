@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Optional
 
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor
@@ -152,6 +153,7 @@ def generate_consensus_report(
     consensus_path: Path,
     match_path: Path,
     output_path: Path,
+    total_tokens: Optional[int] = None,
 ) -> None:
     """Generate a multi-model consensus analysis Word document.
 
@@ -241,6 +243,8 @@ def generate_consensus_report(
     doc.add_paragraph(
         f"生成时间: {consensus_data.get('generated_at', 'N/A')[:19]}"
     )
+    if total_tokens is not None:
+        doc.add_paragraph(f"总 Token 用量: {total_tokens:,}")
 
     # ── Summary section ──
     doc.add_heading("一、差异分析总结", level=2)

@@ -2,6 +2,13 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-10-19
+
+### Added
+
+- **任务 token 用量统计与展示：运行中实时累计、完成页、全部 DOCX 报告与历史列表**：此前任务执行过程中和完成后都看不到模型 token 消耗。本次新增按任务累计的**总 token 用量**：反向在三个 LLM 客户端每次 `resp.json()` 后采集（截断重试的每一次响应都计入，业务调用点零改动）；正向在三个真实调用点（identity / attribute matcher + 仲裁器）采集，经子进程 stdout 增量标记逐层汇总到父任务。任务状态接口、反向/正向结果接口与历史列表展示任务总量；5 份 DOCX 中，反向 3 份单模型报告各展示**该模型自身**的累计用量（同一 provider 的标注、裁判、共识、复查调用均计入该模型），多模型共识报告与正向报告展示任务总量。口径：接口与前端**只展示总量**（不拆输入/输出、不展示调用次数）；报告所需的分 provider 用量独立累计并随 manifest 持久化，不进入 API；**续跑累计**（`relaunch_from_manifest` 不清零，正向经 `--base-tokens` 传入续跑前总量）；**旧任务**（升级前 manifest 无该字段）接口返回 `null`、前端隐藏、DOCX 不写行，不伪装成 0；**MOCK** 任务 0 为有效值并带 MOCK 标签；**CLI** 不绑定任务，报告不写该行。前端：运行中显示「已消耗 Token」pill（状态轮询 10s → 5s），完成页新增 Token 用量卡片，历史项追加 `· Token N`；数值为空时自动隐藏，窄屏有紧凑样式。内部实现：`Job.total_tokens` 线程安全累加 + 5 秒节流落 manifest；正向 `[tokens] delta=N` 增量标记 + 每 stage sidecar + adapter 绝对对账 `base + max(实时增量, 汇总增量)`；反向 Step 6 在生成 4 份 DOCX 前取一次「总量 + 分模型」快照共用。**无新增依赖 / 环境变量 / 端口**，数据写入现有 `job.json`。该改动需**重建后端镜像 / 覆盖前端产物**才生效。
+- **前端新增「模型设置」页：运行时修改 DeepSeek / MiniMax / Qwen 三个模型名，无需重新部署**：服务器部署完成后现场无法编辑 `backend/.env`，此前每次改模型名都必须让服务器人员重建容器。新增 `GET /api/v4/settings`（读取当前生效值、是否自定义、上次保存时间）与 `PUT /api/v4/settings`（三个字段全量提交，校验空/超长/控制字符）。保存时原子写入 `OUTPUT_DIR/settings.json`（Docker 中即挂载的 `./backend/output/settings.json`，容器重建后保留）并立即更新 `os.environ`；反向 `v4/llm/factory.get_llm()` 每次调用、正向 `forward/config_builder` 每个任务开始时读取模型名，因此保存后无需重启。启动时 `main.py` lifespan 回读落盘值（优先于 `.env`），损坏/字段不合法的设置文件只告警并回落部署配置。前端顶部导航新增「模型设置」（`/settings`）：三行厂商卡片 + 等宽输入框 + 保存/撤销 + 页内成功/失败提示，沿用现有视觉语言；默认状态显示「部署默认」，保存后显示「已自定义」与上次保存时间。API key / base_url / `JUDGE_PROVIDERS` 不在本页管理；当前系统无鉴权，能访问页面的用户都可以修改（内网演示原型的已知限制）。新增后端单测 8 个。该改动需**重建后端镜像 / 覆盖前端产物**才生效。
+
 ## [Unreleased] - 2026-10-16
 
 ### Added

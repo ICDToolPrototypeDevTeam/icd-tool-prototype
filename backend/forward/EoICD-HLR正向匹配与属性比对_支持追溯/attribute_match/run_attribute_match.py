@@ -21,6 +21,7 @@ EoICD → HLR 正向匹配：属性匹配阶段 — 一键运行入口
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import sys
@@ -47,6 +48,8 @@ if str(_p) not in sys.path:
     sys.path.insert(0, str(_p))
 
 from common import safe_load_json  # noqa: E402
+
+from utils import write_token_sidecar  # noqa: E402  (shared/ 已在上方加入 sys.path)
 
 from attr_script_matcher import run_script_matching
 from attr_result_integrator import save_process_results, generate_final_report
@@ -381,6 +384,15 @@ def main():
     config = load_config(args.config)
     print(f"  AI 复核: {'启用' if config.get('ai_review', {}).get('enabled', True) else '禁用'}")
     print(f"  单位换算: {'启用' if config.get('unit_conversion', {}).get('enabled', False) else '禁用（预留）'}")
+
+    # token 用量 sidecar：进程退出时落盘，供 multi_judge_runner 生成报告时汇总。
+    atexit.register(
+        write_token_sidecar,
+        os.path.join(
+            resolve_path(config["paths"]["output_dir"], project_root),
+            "token_usage.json",
+        ),
+    )
 
     t0 = time.time()
 

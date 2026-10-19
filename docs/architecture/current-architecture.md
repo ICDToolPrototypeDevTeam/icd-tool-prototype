@@ -47,7 +47,8 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 5. 调用后端 `/api/v4/coverage-analysis` 创建任务；
 6. 展示任务处理状态（六步进度）；
 7. 展示处理结果摘要（统计卡片 + 星级分布）；
-8. 提供输出文档预览与下载入口。
+8. 提供输出文档预览与下载入口；
+9. 提供模型设置页面，运行时修改三个模型名称（无需重启服务）。
 
 前端不负责：
 
@@ -81,10 +82,12 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | 模块             | 职责                            |
 | -------------- | ----------------------------- |
 | `main.py`      | FastAPI 应用入口，仅 CORS + `/api/v4` 路由装载 |
-| `job_manager.py` | 内存任务状态管理（`JobStatus` / `Job` / `JobManager`） |
+| `job_manager.py` | 内存任务状态管理（`JobStatus` / `Job` / `JobManager`）；持有任务累计 token（`total_tokens`）与 manifest 持久化 |
+| `token_usage.py` | 反向 LLM token 采集：解析 OpenAI 兼容 `usage` 的三种形状，并从线程绑定的 Job 累加（只 import `job_log`，不 import `job_manager`，避免循环依赖） |
 | `job_log.py`   | 进程级任务日志缓冲、stdout/stderr Tee、线程归属与 job.log 落盘；不依赖任何 `app.*` 模块 |
 | `job_scheduler.py` | 进程内任务队列：固定 `MAX_CONCURRENT_JOBS`（默认 2）个常驻工作线程领取任务（新任务 FIFO，续跑任务插队首，不抢占执行中任务）；出队时做票据比对（同一任务的旧条目丢弃）与跳过裁决（排队期间被终止 / 放弃的任务不执行，原因写入该任务日志） |
-| `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（经 `job_scheduler` 入队 + 7 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` |
+| `runtime_settings.py` | 运行时模型设置：三个模型名原子落盘到 `OUTPUT_DIR/settings.json`，保存时写入 `os.environ`，启动时回读；不依赖任何业务管线 |
+| `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（经 `job_scheduler` 入队 + 7 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` / `settings.py` |
 | `v4/pipeline.py` | V4 反向管线编排（`run_reverse_pipeline`，6 步）；正向管线不在 `v4/` 内（见 `forward/` 与 `app/forward/` 两行） |
 | `v4/config.py` | V4 env 加载（DEEPSEEK_* / USE_MOCK_LLM / JUDGE_PROVIDERS）+ 业务常量 |
 | `v4/errors.py` | 管线异常 → 面向用户的错误分类与建议；复用 `degradation.fallback.classify_exception` |
@@ -273,6 +276,8 @@ backend/app/
 ├── job_manager.py          # 共享 Job / JobManager（JobStatus 唯一来源）
 ├── job_log.py              # 进程级日志缓冲 / stdout-stderr Tee / job.log 落盘与恢复（不 import app.*）
 ├── job_scheduler.py        # 进程内任务队列（常驻工作线程 + 票据 + 出队跳过裁决；并发上限 MAX_CONCURRENT_JOBS）
+├── token_usage.py          # 反向 token 采集（usage 解析 + 绑定 Job 累加；不 import job_manager）
+├── runtime_settings.py     # 运行时模型设置：output/settings.json 持久化 + os.environ 热应用
 ├── forward/                # 正向适配层（Issue #119）：编排与翻译，零业务算法，不 import app.v4.*
 │                           #   （唯一例外：zip_entry_normalize 纯 I/O 工具）
 │   ├── root.py             # 正向树路径 / 交付文件名 / 汇总快照名等常量
@@ -284,13 +289,14 @@ backend/app/
 │   └── adapter.py          # 编排与翻译（run_forward_job）
 ├── api/
 │   └── v4/
-│       ├── router.py       # V4 路由聚合（health + coverage + completeness + jobs + outputs）
-│       ├── schemas.py      # V4Job* Pydantic
+│       ├── router.py       # V4 路由聚合（health + coverage + completeness + jobs + outputs + history + settings）
+│       ├── schemas.py      # V4Job* / V4ModelSettings* Pydantic
 │       ├── runner.py       # V4 任务入队（job_scheduler）+ 线程函数（runtime 上下文绑定 + 7 个 derive_* 函数）
 │       ├── coverage.py     # POST /api/v4/coverage-analysis
 │       ├── completeness.py # POST /api/v4/completeness-analysis（含 controller_profile）
 │       ├── jobs.py         # GET /api/v4/jobs/{id}[/result]
-│       └── outputs.py      # GET /api/v4/jobs/{id}/outputs/{kind}
+│       ├── outputs.py      # GET /api/v4/jobs/{id}/outputs/{kind}
+│       └── settings.py     # GET/PUT /api/v4/settings（运行时模型名）
 └── v4/                     # V4 业务子包
     ├── cli.py              # V4 CLI 入口
     ├── config.py           # V4 env 加载 + 业务常量
@@ -434,6 +440,11 @@ llm/mock_llm.py
     返写死 JSON，按 MOCK_JUDGE_RESULT 切 covered / inconsistent / needs_review
 ```
 
+三个模型名（`DEEPSEEK_MODEL` / `MINIMAX_MODEL` / `QWEN_MODEL`）支持运行时修改：
+`app/runtime_settings.py` 把前端保存的值写入 `OUTPUT_DIR/settings.json` 并立即更新
+`os.environ`；`get_llm()` 每次调用、正向 `config_builder` 每个任务开始时读取，因此
+无需重启。启动时 `main.py` lifespan 回读落盘值（优先于 `.env`）。
+
 V4 内 LLM 调用入口：
 - `comparison/semantic_judge.py` × 2 处
 - `comparison/multi_judge.py`（按 provider 列表循环调）
@@ -454,3 +465,62 @@ V4 工程化集成的关键决策由 `docs/decisions/ADR-001-V4后端接入策�
 - ADR-003 记录了 V4 早期正向原型与旧单模型反向 CLI 的移除范围，并约定未来正向采用 ICDBlock 级 Case、候选检索算法待定。其中**与正向相关的表述已被 Issue #119 取代**：正向已改为原样集成「正向待集成」多 judge 一致性管线（见 §7.1），不再采用 ICDBlock 级 Case 的旧设计，`v4/` 内的旧正向模块已删除。
 
 如未来 V4 路由 / Schema / JobManager / LLM 抽象层有变化，需同时更新本节与相应 ADR。
+
+### 12.6 任务 token 用量统计（累计总量）
+
+任务的状态、结果、历史接口展示一个累计 token 总量；DOCX 报告中，反向 3 份单模型报告展示对应模型自身的累计用量，多模型共识报告与正向报告展示任务总量。接口层不暴露分模型数据，也不拆输入/输出或调用次数。
+
+```text
+Job.total_tokens: int                    # 内存中的唯一对外事实值
+Job.tokens_by_provider: dict[str, int]   # 分 provider 累计（反向单模型报告用）
+Job.token_usage_tracked: bool            # 仅内存：该任务是否启用统计（CLI 为 False）
+job.json -> token_usage.total_tokens     # 5 秒节流 + 终态强制落盘；from_manifest 容错恢复
+job.json -> token_usage.by_provider      # 与总量同时落盘/恢复；旧 manifest 为空
+```
+
+统计口径与边界：
+
+- **仅 API 任务**：`runner._begin_job_run()` 在管线启动时置 `token_usage_tracked=True`；CLI 不绑定 `Job`，报告不写该行。
+- **续跑累计**：`relaunch_from_manifest` 刻意不清零 `total_tokens`，任务续跑后从原值继续；新任务从 0 开始。
+- **旧任务**：manifest 无 `token_usage` 键 → 接口返回 `null`、前端隐藏、DOCX 不写行；不把未统计伪装成 0。
+- **MOCK**：未产生真实调用，0 是有效值，前端以 MOCK 标签说明。
+- **分模型口径**：provider 的所有调用都计入该 provider（DeepSeek 的标注、裁判、共识、复查调用均计入 DeepSeek；MiniMax/Qwen 为各自裁判调用），因此三份单模型报告之和等于总量中这三个 provider 的部分。正向只有一份报告，set_token_usage 只写总量。
+- **报告时点**：反向 Step 6 在生成 4 份 DOCX 前取一次「总量 + 分 provider」快照，4 份共用（单模型取各自分项，共识取总量）；生成报告后迟到的并发调用只反映在完成页/API 的实时值中，报告允许略小。
+
+反向（正确性）采集链：
+
+```text
+deepseek / qwen / minimax client
+  resp.json() 之后立即 record_token_usage(body["usage"], provider=<client.PROVIDER>)
+    # 截断重试的每一次 HTTP 响应都计数；业务调用点零改动
+  → app/token_usage.extract_total_tokens
+  → current_job().add_token_usage(delta, provider=...)
+    # Job 归属来自 job_log 的线程局部上下文；Step4/5.5 线程池已由 bind_thread_context 保留
+  → Job.total_tokens + Job.tokens_by_provider（线程安全 + 节流落盘）
+  → pipeline Step6 取「总量 + 分 provider」快照
+      → 3 份单模型 DOCX（各写该模型分项）+ 1 份共识 DOCX（写总量）
+```
+
+正向（完整性）采集链（跨 3 层进程）：
+
+```text
+judge 子进程（identity / attribute matcher）
+  → shared/utils.record_token_usage：模块内线程安全累加，并 print("[tokens] delta=N")
+  → run_identity_match / run_attribute_match 在 atexit 写 sidecar：
+       <judge_ws>/data/output/{identity_match,attribute_match}/token_usage.json
+仲裁调用
+  → multi_judge_arbitrator.record_token_usage（同一契约：累加 + 增量标记）
+  ↓ stdout 逐层冒泡（run_integration.run_cmd → runner → execution._pump）
+父进程 Job：只解析 [tokens] delta=N 并做加法（累计值行忽略，避免重复计数）
+  ↓
+multi_judge_runner：启动每 judge 前清理旧 sidecar（续跑防重复计数）
+  → 汇总各 judge sidecar + 本轮仲裁值 + --base-tokens（续跑前总量）
+  → summary.token_usage → 正向 DOCX
+adapter 对账（必须在 cleanup_run_workspace 删除 runs/ 之前）：
+  run_delta = max(实时增量, 汇总增量)
+  final = base_tokens + run_delta
+  → job.set_token_usage(final, force_flush=True)（绝对赋值，不累加）
+  → job.result.token_usage 与 forward_summary.json
+```
+
+约束：父进程只认增量标记（`[tokens] delta=N`）；sidecar 路径是 runner 与入口脚本之间的契约，未来若与「正向待集成」源树同步，必须连同增量标记、sidecar 文件名/路径、`--base-tokens` 一并保留，否则逐字节一致性测试会失败。

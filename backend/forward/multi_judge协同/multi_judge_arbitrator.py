@@ -41,6 +41,72 @@ from multi_judge_aggregate import KEY_FIELDS_IDENTITY
 FORWARD_KEY_FIELDS = KEY_FIELDS_IDENTITY + ("attribute_class",)
 
 
+# ---------------------------------------------------------------------------
+# Token 用量（Step5 / Step5.5 仲裁调用）
+# ---------------------------------------------------------------------------
+# 与 shared/utils.py 的契约一致：累加本进程的仲裁调用，向 stdout 打印增量
+# 标记（由父进程实时汇总），并由 runner 用 get_token_total() 写入总结。
+# 本模块会被独立脚本直接 import，故不依赖 shared/ 的 sys.path。
+_TOKEN_TOTAL = 0
+_TOKEN_LOCK = threading.Lock()
+
+
+def _extract_total_tokens(usage) -> int:
+    """从 OpenAI 兼容的 usage 提取总 token；无效值返回 0。"""
+    if not isinstance(usage, dict):
+        return 0
+
+    def _int(value) -> int:
+        if value is None or isinstance(value, bool):
+            return 0
+        try:
+            number = int(float(value)) if isinstance(value, str) else int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return max(0, number)
+
+    total = _int(usage.get("total_tokens"))
+    if total > 0:
+        return total
+    for prompt_key, completion_key in (
+        ("prompt_tokens", "completion_tokens"),
+        ("input_tokens", "output_tokens"),
+    ):
+        if prompt_key in usage or completion_key in usage:
+            summed = _int(usage.get(prompt_key)) + _int(usage.get(completion_key))
+            if summed > 0:
+                return summed
+    return total
+
+
+def record_token_usage(usage) -> int:
+    """累加一次仲裁响应并打印增量标记；绝不抛异常。"""
+    try:
+        delta = _extract_total_tokens(usage)
+        if delta <= 0:
+            return 0
+        global _TOKEN_TOTAL
+        with _TOKEN_LOCK:
+            _TOKEN_TOTAL += delta
+        print(f"[tokens] delta={delta}", flush=True)
+        return delta
+    except Exception:  # noqa: BLE001 — 统计是旁路，绝不影响仲裁
+        return 0
+
+
+def get_token_total() -> int:
+    """返回本进程仲裁调用累计 token。"""
+    with _TOKEN_LOCK:
+        return _TOKEN_TOTAL
+
+
+def reset_token_usage() -> None:
+    """复位本进程累计值（runner 每次运行开始时调用）。"""
+    global _TOKEN_TOTAL
+    with _TOKEN_LOCK:
+        _TOKEN_TOTAL = 0
+
+
 class _CircuitBreaker:
     """复核路由熔断器（第2点优化）：LLM 调用累计失败达阈值即整体跳闸，跳过剩余 needed，
     避免上游服务挂掉时每条信号逐个撞超时、把复核路由拖成几十分钟甚至数小时。
@@ -103,6 +169,9 @@ def call_llm(model: str, base_url: str, api_key: str, system: str, user: str,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+        if isinstance(data, dict):
+            # 先计数再取 content：解析成功即是一次真实计费调用
+            record_token_usage(data.get("usage"))
         content = data["choices"][0]["message"]["content"]
         return json.loads(content)
     except (urllib.error.URLError, urllib.error.HTTPError, KeyError,

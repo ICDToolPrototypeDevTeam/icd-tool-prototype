@@ -138,6 +138,12 @@ def _begin_job_run(job: Job, job_dir: Path, requested_mock: Optional[bool]) -> O
     except Exception:  # noqa: BLE001 — stub job（既有测试）没有该方法时忽略
         pass
     try:
+        # API 任务从本次运行开始启用 token 统计（CLI 不走本函数）。只置内存标记：
+        # 报告据此决定是否写「总 Token 用量」行，不能把未统计伪装成 0。
+        job.token_usage_tracked = True
+    except Exception:  # noqa: BLE001 — stub job / __slots__ 时忽略
+        pass
+    try:
         buf = job_log_store.register(job.job_id, job_dir / LOG_FILE_NAME)
         prev = bind_job_log(job.job_id, job)
         job.mock = mock_mode_enabled()
@@ -597,6 +603,7 @@ def relaunch_from_manifest(job: Job, job_dir: Path) -> None:
     # 恢复运行标记 + 计数重置（二次恢复不得累加上一轮的计数）
     job.resumed = True
     job.reuse = {"reused": 0, "rerun": 0}
+    # 刻意**不**重置 total_tokens：续跑口径是「累计整个任务」，新任务才从 0 开始。
     # 不在此处预置 RUNNING：入队由 job_scheduler.submit 统一落 pending + 排队提示，
     # 排队期间前端如实显示「等待开始 / 任务已排队…」；真正开跑由管线线程入口
     # 落 running + Step 1/N（否则排队等待时会被显示成「正在分析」）。

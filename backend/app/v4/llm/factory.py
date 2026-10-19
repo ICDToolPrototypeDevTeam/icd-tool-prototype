@@ -12,6 +12,14 @@ from app.runtime_context import current_runtime
 # 截断自适应重试的 max_tokens 上限（各模型的 max output 防止无限倍增）
 MAX_TOKEN_CAP = 16384
 
+# 各 provider 的默认模型名（.env 未配置对应 *_MODEL 时生效）。
+# 运行时模型设置页也复用该表，避免两处 fallback 漂移。
+DEFAULT_MODELS = {
+    "deepseek": "deepseek-v4-flash",
+    "minimax": "MiniMax-M2.5",
+    "qwen": "qwen3.6-35b-a3b",
+}
+
 
 class ChatResponse(TypedDict):
     content: str
@@ -70,7 +78,7 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
         return DeepSeekClient(
             api_key=api_key,
             base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-            model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+            model=os.getenv("DEEPSEEK_MODEL", DEFAULT_MODELS["deepseek"]),
             default_timeout=default_timeout,
         )
 
@@ -85,7 +93,7 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
         return QwenClient(
             api_key=api_key,
             base_url=os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-            model=os.getenv("QWEN_MODEL", "qwen3.6-35b-a3b"),
+            model=os.getenv("QWEN_MODEL", DEFAULT_MODELS["qwen"]),
             default_timeout=default_timeout,
         )
 
@@ -100,7 +108,7 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
         return MiniMaxClient(
             api_key=api_key,
             base_url=os.getenv("MINIMAX_BASE_URL", "https://api.minimax.chat"),
-            model=os.getenv("MINIMAX_MODEL", "MiniMax-M2.5"),
+            model=os.getenv("MINIMAX_MODEL", DEFAULT_MODELS["minimax"]),
             default_timeout=default_timeout,
         )
 

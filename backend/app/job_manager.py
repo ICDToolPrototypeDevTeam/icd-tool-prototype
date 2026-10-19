@@ -29,6 +29,10 @@ MANIFEST_SCHEMA_VERSION = 1
 # 大量原子写；阶段切换或超过该间隔才落盘（内存值始终即时更新）。
 PROGRESS_PERSIST_INTERVAL_S = 5.0
 
+# token 累加的落盘节流窗口。每次 LLM 响应都可能调用 add_token_usage，
+# 若逐次写盘，长任务会产生大量原子写；前端读取的是内存值，不受影响。
+TOKEN_PERSIST_INTERVAL_S = 5.0
+
 # 终态：进入后写入 finished_at
 _TERMINAL_STATUSES = frozenset({
     'completed', 'failed', 'canceled', 'abandoned',
@@ -86,6 +90,16 @@ class Job:
         # 恢复运行标记与实时复用计数（API 路径使用；随 manifest 持久化）
         self.resumed: bool = False
         self.reuse: Optional[dict] = None
+        # —— Token 用量（累计整个任务；随 manifest 持久化）——
+        # 只存总量：一次真实 LLM 响应的 usage 计一次，续跑后继续累加。
+        self.total_tokens: int = 0
+        # 分 provider 用量（反向单模型报告用）：provider 名 → 累计 token。
+        # 正向只有一份报告，不需要分模型统计（set_token_usage 只写总量）。
+        self.tokens_by_provider: dict[str, int] = {}
+        # 是否启用统计（仅内存）：API 任务在 _begin_job_run 置 True；
+        # CLI 未绑定任务、旧 manifest 无该字段时为 False，报告据此决定是否写
+        # Token 用量行 —— 不能把「未统计」伪装成 0。
+        self.token_usage_tracked: bool = False
         # —— 可观测性与任务控制（Issue：服务器可观测与任务控制）——
         # 结构化进度：由 pipeline 每步 / 每 case 上报，避免从 message 正则解析
         self.progress: Optional[dict] = None
@@ -110,6 +124,12 @@ class Job:
         # ``now - 0.0 >= 5.0``（time.monotonic 是系统运行时长），
         # 于是每个任务的第一次上报都会写盘，节流对首个 case 形同虚设。
         self._last_progress_persist: float = time.monotonic()
+        # token 累加可能来自多个模型调用线程：锁内只做加法，落盘在锁外。
+        self._token_lock = threading.Lock()
+        self._last_token_persist: float = time.monotonic()
+        # 进度线程与 token 线程都会写同一份 job.json：把「构造 payload + 原子写」
+        # 整体串行化，避免旧 payload 在新值之后落盘、把 token 写回旧值。
+        self._persist_lock = threading.Lock()
 
     def set_dir(self, job_dir: Path, params: dict) -> None:
         """绑定输出目录与任务参数快照，并立即落盘 manifest。
@@ -132,28 +152,41 @@ class Job:
         """
         if self.job_dir is None:
             return
-        payload = {
-            'schema_version': MANIFEST_SCHEMA_VERSION,
-            'job_id': self.job_id,
-            'task_type': self.task_type,
-            'status': self.status.value,
-            'message': self.message,
-            'created_at': self.created_at.isoformat(),
-            'updated_at': self.updated_at.isoformat(),
-            'params': self.params,
-            'resumed': self.resumed,
-            'reuse': self.reuse,
-            'progress': self.progress,
-            'error': self.error,
-            'mock': self.mock,
-            'finished_at': self.finished_at.isoformat() if self.finished_at else None,
-            'cancel_requested': self.cancel_requested,
-        }
         path = self.job_dir / MANIFEST_NAME
         try:
-            text = json.dumps(payload, indent=2, ensure_ascii=False)
-            with _LOCK:
-                _atomic_write(path, text)
+            # 每 Job 一把锁：进度线程与 token 线程并发写时，构造 payload 与
+            # 原子写必须是一个整体，否则旧快照可能后落盘、覆盖更大的 token 值。
+            with self._persist_lock:
+                with self._token_lock:
+                    total_tokens = max(0, int(self.total_tokens))
+                    by_provider = {
+                        str(key): max(0, int(value))
+                        for key, value in self.tokens_by_provider.items()
+                    }
+                payload = {
+                    'schema_version': MANIFEST_SCHEMA_VERSION,
+                    'job_id': self.job_id,
+                    'task_type': self.task_type,
+                    'status': self.status.value,
+                    'message': self.message,
+                    'created_at': self.created_at.isoformat(),
+                    'updated_at': self.updated_at.isoformat(),
+                    'params': self.params,
+                    'resumed': self.resumed,
+                    'reuse': self.reuse,
+                    'progress': self.progress,
+                    'error': self.error,
+                    'mock': self.mock,
+                    'finished_at': self.finished_at.isoformat() if self.finished_at else None,
+                    'cancel_requested': self.cancel_requested,
+                    'token_usage': {
+                        'total_tokens': total_tokens,
+                        'by_provider': by_provider,
+                    },
+                }
+                text = json.dumps(payload, indent=2, ensure_ascii=False)
+                with _LOCK:
+                    _atomic_write(path, text)
         except Exception:  # noqa: BLE001 — 磁盘满 / 权限不足 / 目录被删时静默降级为「仅内存」
             pass
 
@@ -175,6 +208,83 @@ class Job:
         self.reuse = {'reused': int(reused), 'rerun': int(rerun)}
         self.updated_at = datetime.now(timezone.utc)
         self._persist()
+
+    def _token_should_flush(self, force_flush: bool) -> bool:
+        """判断本次 token 变更是否需要落盘（调用方必须已持有 ``_token_lock``）。"""
+        now = time.monotonic()
+        terminal = self.status.value in _TERMINAL_STATUSES
+        if force_flush or terminal or (now - self._last_token_persist) >= TOKEN_PERSIST_INTERVAL_S:
+            self._last_token_persist = now
+            return True
+        return False
+
+    def add_token_usage(
+        self,
+        total: int,
+        *,
+        provider: Optional[str] = None,
+        force_flush: bool = False,
+    ) -> int:
+        """累加本次 LLM 响应消耗的 token（增量，线程安全）。
+
+        刻意不受 ``hard_killed`` 限制：强制终止后迟到的调用仍真实消耗了 token，
+        数字应如实记录；本方法也不改 ``updated_at``，避免让已终止的任务看起来
+        又活动过。
+
+        ``total`` 非法或为负时按 0 处理（仍标记为已统计：MOCK 的 0 也是有效值）。
+        传入 ``provider`` 时同步累加该 provider 的分项用量（反向单模型报告用）；
+        分项是旁路信息，解析失败不影响总量。返回累加后的总量。
+        """
+        try:
+            delta = int(total)
+        except (TypeError, ValueError):
+            delta = 0
+        if delta < 0:
+            delta = 0
+        provider_key = provider.strip() if isinstance(provider, str) else ""
+        with self._token_lock:
+            self.total_tokens = max(0, int(self.total_tokens) + delta)
+            if provider_key and delta > 0:
+                self.tokens_by_provider[provider_key] = (
+                    max(0, int(self.tokens_by_provider.get(provider_key, 0))) + delta
+                )
+            self.token_usage_tracked = True
+            current = self.total_tokens
+            should_flush = self._token_should_flush(force_flush)
+        if should_flush:
+            self._persist()
+        return current
+
+    def token_usage_snapshot(self) -> tuple[int, dict[str, int]]:
+        """取「总量 + 分 provider 用量」的一致快照（报告生成用）。
+
+        在同一把锁内复制，避免报告生成期间迟到的调用让总量与分项互相对不上。
+        """
+        with self._token_lock:
+            total = max(0, int(self.total_tokens))
+            by_provider = {
+                str(key): max(0, int(value))
+                for key, value in self.tokens_by_provider.items()
+            }
+        return total, by_provider
+
+    def set_token_usage(self, total: int, *, force_flush: bool = False) -> int:
+        """绝对赋值 token 总量（正向管线对账用；线程安全）。
+
+        只用于「同一任务已有一个更可靠的累计值」的场景，不能与
+        :meth:`add_token_usage` 混用来累加同一批调用，否则会重复计数。
+        """
+        try:
+            value = max(0, int(total))
+        except (TypeError, ValueError):
+            value = 0
+        with self._token_lock:
+            self.total_tokens = value
+            self.token_usage_tracked = True
+            should_flush = self._token_should_flush(force_flush)
+        if should_flush:
+            self._persist()
+        return value
 
     def set_progress(
         self,
@@ -346,6 +456,38 @@ class Job:
         raw_error = data.get('error')
         job.error = raw_error if isinstance(raw_error, dict) else None
         job.mock = bool(data.get('mock', False))
+        # token：旧 manifest 没有该键 → 不标记为已统计（前端/报告显示为空）；
+        # 新 manifest 即使是 0 也标记（MOCK 的 0 是有效值）。
+        raw_token_usage = data.get('token_usage')
+        if raw_token_usage is not None:
+            job.token_usage_tracked = True
+            raw_by_provider = None
+            if isinstance(raw_token_usage, dict):
+                raw_total = raw_token_usage.get('total_tokens')
+                raw_by_provider = raw_token_usage.get('by_provider')
+            elif isinstance(raw_token_usage, bool):
+                raw_total = None
+            elif isinstance(raw_token_usage, (int, float)):
+                raw_total = raw_token_usage
+            else:
+                raw_total = None
+            try:
+                job.total_tokens = max(0, int(raw_total)) if raw_total is not None else 0
+            except (TypeError, ValueError):
+                job.total_tokens = 0
+            # 旧 manifest 只有 total_tokens：分项为空，单模型报告回落到 0。
+            if isinstance(raw_by_provider, dict):
+                restored: dict[str, int] = {}
+                for key, value in raw_by_provider.items():
+                    if not isinstance(key, str) or not key.strip() or isinstance(value, bool):
+                        continue
+                    try:
+                        amount = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if amount > 0:
+                        restored[key.strip()] = amount
+                job.tokens_by_provider = restored
         raw_finished = data.get('finished_at')
         job.finished_at = datetime.fromisoformat(raw_finished) if raw_finished else None
         # 刻意不恢复「已请求取消」：重启后新进程应从干净状态开始

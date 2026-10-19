@@ -17,6 +17,7 @@ EoICD → HLR 正向匹配：身份匹配阶段 — 一键运行入口
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import sys
@@ -32,7 +33,12 @@ for d in [SRC_DIR, SHARED_DIR]:
     if str(d) not in sys.path:
         sys.path.insert(0, str(d))
 
-from utils import load_json, flatten_hlr_requirements, load_hlr_dedup
+from utils import (
+    load_json,
+    flatten_hlr_requirements,
+    load_hlr_dedup,
+    write_token_sidecar,
+)
 from bus_label_matcher import run_bus_label_matching
 from direction_matcher import run_direction_matching
 from name_cropper import crop_name_input
@@ -569,6 +575,13 @@ def main():
     t0 = time.time()
 
     paths = config["paths"]
+
+    # token 用量 sidecar：进程退出时落盘，供 multi_judge_runner 生成报告时汇总。
+    # 相对路径按 PROJECT_ROOT 解析（与上面创建输出目录的规则一致）。
+    atexit.register(
+        write_token_sidecar,
+        PROJECT_ROOT / paths["output_dir"] / "token_usage.json",
+    )
 
     # Publisher 侧：仅当处理方向包含 pub 且输入文件存在时才加载；
     # 仅 Subscriber 侧的项目无 publisher 输入，跳过 pub 方向（不崩，镜像 sub 处理）。

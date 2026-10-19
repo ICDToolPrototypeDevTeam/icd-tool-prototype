@@ -150,6 +150,18 @@ def map_summary(forward_summary: dict, *, use_trace: bool) -> dict:
         ai_reviewed = int(review.get("reviewed", 0) or 0)
     except Exception:  # noqa: BLE001
         ai_reviewed = 0
+    # token（runner 写的是「base + 本轮」累计值）；旧 summary 无该字段时按 0，
+    # adapter 会再用实时增量对账，不会把旧任务误报成有统计。
+    token_usage = forward_summary.get("token_usage")
+    if isinstance(token_usage, dict):
+        token_usage = token_usage.get("total_tokens")
+    if isinstance(token_usage, bool) or token_usage is None:
+        total_tokens = 0
+    else:
+        try:
+            total_tokens = max(0, int(token_usage))
+        except (TypeError, ValueError):
+            total_tokens = 0
     return {
         "analysis_mode": "trace" if use_trace else "full",
         "total_blocks": total,
@@ -163,6 +175,7 @@ def map_summary(forward_summary: dict, *, use_trace: bool) -> dict:
         "ai_reviewed": ai_reviewed,
         "eoicd_count": total,
         "hlr_count": 0,
+        "token_usage": {"total_tokens": total_tokens},
     }
 
 

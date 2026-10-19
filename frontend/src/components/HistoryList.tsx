@@ -273,6 +273,9 @@ export default function HistoryList() {
                 </div>
                 <div className="history__meta">
                   {formatTime(item.finished_at || item.created_at)} · {formatSize(item.size_bytes)}
+                  {item.token_usage != null && (
+                    <> · Token {item.token_usage.total_tokens.toLocaleString()}</>
+                  )}
                 </div>
 
                 {/* 日志与产物并列：失败 / 中断的任务一个产物都没有，日志往往

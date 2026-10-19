@@ -53,7 +53,11 @@ if str(MULTI_JUDGE_DIR) not in sys.path:
     sys.path.insert(0, str(MULTI_JUDGE_DIR))
 
 from multi_judge_aggregate import build_shard_from_reports, aggregate, write_outputs  # noqa: E402
-from multi_judge_arbitrator import run_arbitration  # noqa: E402  # 可选 Step5/5.5 LLM 仲裁层
+from multi_judge_arbitrator import (  # noqa: E402  # 可选 Step5/5.5 LLM 仲裁层
+    run_arbitration,
+    get_token_total,
+    reset_token_usage,
+)
 from multi_judge_summary import build_summary, format_summary_text  # noqa: E402
 from multi_judge_report import generate_report  # noqa: E402  # Word 共识报告（缺 python-docx 时优雅跳过）
 from gen_excel_report import generate_excel_report  # noqa: E402  # Excel 共识报告（缺 openpyxl 时优雅跳过）
@@ -151,6 +155,50 @@ def _latest_summary_folder(ws: Path) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
+# Token 用量 sidecar（子进程契约，见 shared/utils.py）
+# ---------------------------------------------------------------------------
+# run_integration.generate_match_config / generate_attr_config 把两个阶段的
+# output_dir 固定在 <judge_ws>/data/output/{identity_match,attribute_match}；
+# 两个入口脚本在 atexit 时把本进程累计 token 写到该目录下的 token_usage.json。
+# 只扫这两个确定路径（不递归），避免把历史残留文件算进来。
+
+_TOKEN_SIDECAR_PARTS = (
+    ("data", "output", "identity_match", "token_usage.json"),
+    ("data", "output", "attribute_match", "token_usage.json"),
+)
+
+
+def _token_sidecar_paths(judge_ws: Path) -> list[Path]:
+    return [Path(judge_ws).joinpath(*parts) for parts in _TOKEN_SIDECAR_PARTS]
+
+
+def _read_token_sidecars(judge_ws: Path) -> int:
+    """汇总一个 judge 两个阶段的 token；缺失 / 损坏按 0。"""
+    total = 0
+    for path in _token_sidecar_paths(judge_ws):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            value = data.get("total_tokens") if isinstance(data, dict) else data
+            if value is None or isinstance(value, bool):
+                continue
+            total += max(0, int(value))
+        except Exception:  # noqa: BLE001 — 单个 sidecar 坏了不影响其它统计
+            continue
+    return total
+
+
+def _clear_token_sidecars(judge_ws: Path) -> None:
+    """启动 judge 前清掉旧 sidecar：复用工作区续跑时防止上一轮数值重复计数。"""
+    for path in _token_sidecar_paths(judge_ws):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:  # noqa: BLE001 — 清不掉也不影响运行
+            pass
+
+
+# ---------------------------------------------------------------------------
 # 阶段1：共享 EoICD 处理
 # ---------------------------------------------------------------------------
 
@@ -241,6 +289,9 @@ def run_single_judge(judge: dict, idx: int, cfg: dict, shared_ws: Path,
         cmd += ["--use-trace"]
     cmd += ["--name-map", str(nm), "--state-map", str(sm), "--signal-map", str(gm)]
 
+    # 复用工作区续跑时，上一轮的 sidecar 会留在这里；先清掉再启动，避免重复计数
+    _clear_token_sidecars(judge_ws)
+
     t0 = time.time()
     try:
         # 不靠 subprocess timeout 杀进程（超时任务继续跑，由迟到补收统一收集）；
@@ -255,23 +306,25 @@ def run_single_judge(judge: dict, idx: int, cfg: dict, shared_ws: Path,
                 procs.pop(idx, None)
     except Exception as e:  # 极端情况
         return {"name": name, "ws": str(judge_ws), "shard": {}, "coverage": "error",
-                "error": f"启动失败: {e}"}
+                "error": f"启动失败: {e}", "token_usage": _read_token_sidecars(judge_ws)}
     elapsed = time.time() - t0
 
     if rc != 0:
         print(f"  ⚠️  judge {name} 运行返回非0（{rc}），该 judge 标记为 error")
         return {"name": name, "ws": str(judge_ws), "shard": {}, "coverage": "error",
-                "error": f"returncode={rc}", "elapsed": elapsed}
+                "error": f"returncode={rc}", "elapsed": elapsed,
+                "token_usage": _read_token_sidecars(judge_ws)}
 
     # 收集 stage-5 report → 分片
     folder = _latest_summary_folder(judge_ws)
     if folder is None:
         return {"name": name, "ws": str(judge_ws), "shard": {}, "coverage": "error",
-                "error": "未找到 stage-5 输出", "elapsed": elapsed}
+                "error": "未找到 stage-5 输出", "elapsed": elapsed,
+                "token_usage": _read_token_sidecars(judge_ws)}
     shard = build_shard_from_reports(folder)
     print(f"  ✅ judge {name} 完成（{elapsed:.1f}s），分片 {len(shard)} 个信号")
     return {"name": name, "ws": str(judge_ws), "shard": shard, "coverage": "ok",
-            "elapsed": elapsed}
+            "elapsed": elapsed, "token_usage": _read_token_sidecars(judge_ws)}
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +672,8 @@ def main() -> int:
                     help="仅运行共享阶段1（EoICD 处理），不跑各 judge")
     ap.add_argument("--output", default=None,
                     help="最终聚合报告输出目录（默认 <工程>/output）")
+    ap.add_argument("--base-tokens", type=int, default=0,
+                    help="本次运行前该任务已累计的 token（续跑时由父进程传入；默认 0）")
     ap.add_argument("--selftest", action="store_true",
                     help="运行内置自测（不触发任何真实 LLM 调用），验证聚合层强制 need_review 路由逻辑")
     args = ap.parse_args()
@@ -641,6 +696,9 @@ def main() -> int:
         run_stage1_shared(cfg, BASE_DIR / "runs" / "integration_workspace" / "shared", dict(os.environ))
         print("✅ 仅阶段1共享完成")
         return 0
+
+    # 每轮从 0 累积仲裁 token；续跑前总量由 --base-tokens 单独传入
+    reset_token_usage()
 
     t0 = time.time()
     # 统一运行时间戳：同一次 run 的 Word 与 xlsx 共用后缀，便于配对与跨 run 对比
@@ -669,6 +727,13 @@ def main() -> int:
     # 复核路由：need_review=True 的信号强制进入 Step5/5.5（不再依赖 config 手动开）
     review_stats = run_review_route(agg, shards, judge_meta, cfg)
 
+    # token 汇总（报告用）：各 judge 的 sidecar + 本轮仲裁调用；续跑前的总量
+    # 由父进程经 --base-tokens 传入，因此报告数字是「整个任务累计」口径。
+    judge_tokens = sum(max(0, int(r.get("token_usage") or 0)) for r in results.values())
+    arb_tokens = get_token_total()
+    base_tokens = max(0, int(args.base_tokens or 0))
+    total_tokens = base_tokens + judge_tokens + arb_tokens
+
     # 输出目录：
     #  - out_dir：用户向交付物（Word 报告）落点，默认 <工程>/output
     #  - data_dir：数据类中间产物（聚合/CSV/复核记账/汇总）下沉到 runs 工作区，不进 output/
@@ -696,6 +761,7 @@ def main() -> int:
     # + Word 共识报告（复核覆盖必须进报告，否则低星结论无法自证是否过过第二裁决）
     summary = build_summary(agg, review_stats)
     summary["run_timestamp"] = run_ts
+    summary["token_usage"] = {"total_tokens": total_tokens}
     out_summary = data_dir / "multi_judge_summary.json"
     out_summary.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -739,6 +805,8 @@ def main() -> int:
     print(f"\n{'=' * 70}")
     print(f"✅ 多 judge 聚合完成：{n_ok}/{n_total} judge 正常，{n_err} 失败")
     print(f"   信号总数：{len(agg)}；需复核信号：{n_review}")
+    print(f"   Token 用量：本轮 {judge_tokens + arb_tokens:,}"
+          f"（judge {judge_tokens:,} + 仲裁 {arb_tokens:,}），累计 {total_tokens:,}")
     print(f"   总耗时：{time.time() - t0:.1f}s")
     print("  ── 汇总 ──")
     print("   " + format_summary_text(summary))

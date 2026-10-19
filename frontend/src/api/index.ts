@@ -10,6 +10,8 @@ import type {
   V4ForwardDownloadKind,
   V4HistoryItem,
   V4HistoryDeleteResponse,
+  V4ModelSettings,
+  V4ModelSettingsUpdate,
 } from '../types'
 
 // ========== V4 API ==========
@@ -166,6 +168,28 @@ export async function deleteHistoryV4(jobIds: string[]): Promise<V4HistoryDelete
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ job_ids: jobIds, confirm: true }),
+  })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+// ========== 运行时模型设置 ==========
+
+/** 读取服务器当前生效的三个模型名。 */
+export async function getModelSettingsV4(): Promise<V4ModelSettings> {
+  const res = await fetch(`${API_V4_BASE}/settings`)
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+/** 保存三个模型名；后端落盘后立即生效，无需重启服务。 */
+export async function updateModelSettingsV4(
+  payload: V4ModelSettingsUpdate,
+): Promise<V4ModelSettings> {
+  const res = await fetch(`${API_V4_BASE}/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
   })
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
