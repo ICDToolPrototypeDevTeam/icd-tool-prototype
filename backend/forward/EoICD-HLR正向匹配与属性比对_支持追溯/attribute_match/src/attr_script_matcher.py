@@ -44,7 +44,7 @@ def extract_channel(full_name: str) -> str | None:
 
     优先级4: CH_A, CH_B, CHC 等（仅含下划线，无减号）
       例: po429_CH_A_300 → A通道, po429_CHC → C通道
-      ⚠️ 带字母边界检查，避免误匹配 MACHINE / EXCHANGE 中的 CH
+      [WARN] 带字母边界检查，避免误匹配 MACHINE / EXCHANGE 中的 CH
 
     返回: "A通道"/"B通道"/"C通道"/"S通道" 或 None（单通道）
     """
@@ -212,10 +212,41 @@ def get_nested_value(data: dict, path: str) -> Any:
 
 # ============================ 默认比较规则 ============================
 
+# ---------------------------------------------------------------------------
+# 方案X（Tier1 单位归一化）
+# 数值相等、且恰好一侧带单位后缀时判一致（如 EoICD '1000' vs HLR '1000ms'）。
+# 仅处理"单位只是格式后缀"的情形；跨单位换算（'1s' vs '1000ms'）属 Tier2，需属性类隐式单位
+# 标注，暂不做。此归一在脚本比对阶段生效，命中即判"一致"，不再流入 AI 冲突判定（治本）。
+# ---------------------------------------------------------------------------
+_UNIT_NUM_RE = re.compile(r'^\s*([+-]?\d+(?:\.\d+)?)\s*([a-zA-ZμΩ%°]*)\s*$')
+
+
+def _split_num_unit(s: str):
+    """拆出 (数值串, 单位后缀)。非"数值+可选单位"格式返回 None。"""
+    m = _UNIT_NUM_RE.match(s)
+    if not m:
+        return None
+    return m.group(1), m.group(2).lower()
+
+
+def _unit_normalized_equal(eoicd_str: str, hlr_str: str) -> bool:
+    a = _split_num_unit(eoicd_str)
+    b = _split_num_unit(hlr_str)
+    if a is None or b is None:
+        return False
+    num_a, unit_a = a
+    num_b, unit_b = b
+    if num_a != num_b:
+        return False
+    # 数值相等，且恰好一侧带单位后缀 → 单位差异视为格式差异（EoICD 一般省单位）
+    return (unit_a == "") != (unit_b == "")
+
+
 def default_compare(eoicd_value: Any, hlr_value: Any) -> bool:
     """
     默认比较规则：字符串相等（不区分大小写，去空格）。
-    如果任一方为 None → 不比较（由调用方处理为 not_mentioned）
+    如果任一方为 None → 不比较（由调用方处理为 not_mentioned）。
+    方案X Tier1：数值相等、仅一侧带单位后缀（'1000' vs '1000ms'）亦判一致。
     """
     if eoicd_value is None or hlr_value is None:
         return False  # 不触发 matched，由上层判定为 not_mentioned
@@ -227,7 +258,10 @@ def default_compare(eoicd_value: Any, hlr_value: Any) -> bool:
     if not eoicd_str or not hlr_str:
         return False
 
-    return eoicd_str == hlr_str
+    if eoicd_str == hlr_str:
+        return True
+    # 方案X Tier1：'1000' vs '1000ms' 类单位后缀伪分歧
+    return _unit_normalized_equal(eoicd_str, hlr_str)
 
 
 # ============================ HLR 属性聚合 ============================

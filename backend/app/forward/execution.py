@@ -31,20 +31,22 @@ class ForwardRunError(RuntimeError):
     """正向子进程非 0 退出 / 超时 / 未产出预期文件。"""
 
 
-# runner 的进度标记（文案是 backend/forward/multi_judge_runner.py 的 print 契约）
-_RE_STAGE1 = re.compile(r"▶ \[阶段1 共享\]")
-_RE_JUDGE_START = re.compile(r"# ▶ judge\[(\d+)\]\s*(\S+)")
-_RE_JUDGE_DONE = re.compile(r"✅ judge (\S+) 完成")
-_RE_REVIEW = re.compile(r"\[复核路由\]")
-_RE_AGG_DONE = re.compile(r"✅ 多 judge 聚合完成")
+# runner 的进度标记（文案是 backend/forward/multi_judge_runner.py 的 print 契约；
+# V3 起子模块统一 ASCII 标记，不再使用 emoji）
+_RE_STAGE1 = re.compile(r"> \[阶段1 共享\]")
+_RE_JUDGE_START = re.compile(r"> judge\[(\d+)\]\s*(\S+)")
+_RE_JUDGE_DONE = re.compile(r"judge (\S+) 完成（")
+_RE_REVIEW = re.compile(r"> \[复核路由\]")
+_RE_AGG_DONE = re.compile(r"> 多 judge 聚合完成")
 # 报告阶段起点：复核记账 + 汇总落盘后即进入最耗时的 Word 报告生成（generate_report）
 _RE_REPORT_START = re.compile(r"\[汇总\] 已写出")
 # judge 全挂 / 0 信号兜底：runner 此时仍 exit 0（Word/Excel 优雅跳过、manifest 占位），
 # 若放行会在产物收集阶段报出误导性的「交付物缺失」——改为提前失败并指明真实原因
-_RE_AGG_COUNT = re.compile(r"✅ 多 judge 聚合完成：(\d+)/(\d+)")
+_RE_AGG_COUNT = re.compile(r"多 judge 聚合完成：(\d+)/(\d+)")
 _RE_NO_SIGNALS = re.compile(r"跳过：无聚合结果（0 个信号）")
-# token 增量标记（contract：runner 及其子进程每次 LLM 响应后打印，父进程只做加法）
-_RE_TOKENS = re.compile(r"^\[tokens\]\s+delta=(\d+)\s*$")
+# token 增量标记（contract：runner 及其子进程每次 LLM 响应后打印，父进程只做加法）。
+# runner 会把 judge 子进程的 token 行加上 "[judge_N name] " 前缀后再回显，故用 search。
+_RE_TOKENS = re.compile(r"\[tokens\]\s+delta=(\d+)")
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -144,7 +146,7 @@ def run_multi_judge(
                     if not line.strip():
                         continue
                     print(line)
-                    mt = _RE_TOKENS.match(line.strip())
+                    mt = _RE_TOKENS.search(line)
                     if mt:
                         # 只认增量标记；累计值不参与加法，避免重复计数
                         _safe_add_tokens(job, int(mt.group(1)))

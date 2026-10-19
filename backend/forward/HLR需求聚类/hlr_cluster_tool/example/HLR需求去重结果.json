@@ -4,6 +4,8 @@
     "req_count": 16,
     "item_count": 29,
     "dedup_count": 16,
+    "dropped_req_count": 0,
+    "dropped_requirements": [],
     "purpose": "需求级去重结果：每条需求唯一，合并其全部接口身份与属性类并集，供后续身份匹配阶段使用",
     "cluster_by": "依据需求表格全部相关字段（需求中文/基本原理等）检测属性：明确提及某属性才归入该类，不从 ICD/EoICD 填充；一条需求可出现在多个类；涉及 0/1 编码定义归 OneState/ZeroState/CodedSet；多信号需求按信号 Name 拆分接口项"
   },
@@ -14,6 +16,7 @@
       "interfaces": [
         {
           "label": null,
+          "label_name": null,
           "name": "光耦传感器供电电压回采值",
           "bit": null,
           "direction": "RX"
@@ -31,12 +34,14 @@
       "interfaces": [
         {
           "label": "L30",
+          "label_name": null,
           "name": "通风BBSOV1全关微动开关反馈",
           "bit": "15",
           "direction": "RX"
         },
         {
           "label": "L30",
+          "label_name": null,
           "name": "通风BBSOV1全开微动开关反馈",
           "bit": "16",
           "direction": "RX"
@@ -60,6 +65,7 @@
       "interfaces": [
         {
           "label": "L35",
+          "label_name": null,
           "name": "AFTEFAN1不可运行/过流/过热/低转速反馈",
           "bit": "15-18",
           "direction": "RX"
@@ -83,6 +89,7 @@
       "interfaces": [
         {
           "label": "L36",
+          "label_name": null,
           "name": "AFTEFAN1速度信号",
           "bit": "13-28",
           "direction": "RX"
@@ -103,6 +110,7 @@
       "interfaces": [
         {
           "label": "L203",
+          "label_name": null,
           "name": "气压高度",
           "bit": "10-28",
           "direction": "RX"
@@ -122,6 +130,7 @@
       "interfaces": [
         {
           "label": "L126",
+          "label_name": null,
           "name": "OHMS全局终止标志",
           "bit": "10",
           "direction": "RX"
@@ -144,6 +153,7 @@
       "interfaces": [
         {
           "label": "L126",
+          "label_name": null,
           "name": "飞机架次数",
           "bit": "21-28",
           "direction": "RX"
@@ -165,6 +175,7 @@
       "interfaces": [
         {
           "label": "L121",
+          "label_name": null,
           "name": "气源APU引起温度",
           "bit": "17-28",
           "direction": "RX"
@@ -187,6 +198,7 @@
       "interfaces": [
         {
           "label": null,
+          "label_name": null,
           "name": "SDI",
           "bit": "8-9",
           "direction": "TX"
@@ -209,6 +221,7 @@
       "interfaces": [
         {
           "label": "L11",
+          "label_name": null,
           "name": null,
           "bit": null,
           "direction": "TX"
@@ -228,42 +241,49 @@
       "interfaces": [
         {
           "label": "L11",
+          "label_name": null,
           "name": "压调OFVTRV失效在关位故障有效标志",
           "bit": "22",
           "direction": "TX"
         },
         {
           "label": "L11",
+          "label_name": null,
           "name": "压调OFVTRV失效在开位故障有效标志",
           "bit": "23",
           "direction": "TX"
         },
         {
           "label": "L11",
+          "label_name": null,
           "name": "RFAN可用标志",
           "bit": "24",
           "direction": "TX"
         },
         {
           "label": "L11",
+          "label_name": null,
           "name": "通风FWDEFAN可用标志",
           "bit": "25",
           "direction": "TX"
         },
         {
           "label": "L11",
+          "label_name": null,
           "name": "通风FWDBFAN可用标志",
           "bit": "26",
           "direction": "TX"
         },
         {
           "label": "L11",
+          "label_name": null,
           "name": "通风AFTEFAN可用标志",
           "bit": "27",
           "direction": "TX"
         },
         {
           "label": "L11",
+          "label_name": null,
           "name": "通风AFTBFAN可用标志",
           "bit": "28",
           "direction": "TX"
@@ -286,6 +306,7 @@
       "interfaces": [
         {
           "label": "L214",
+          "label_name": null,
           "name": "驾驶舱温度COCKPIT_TEMP_SELECTION信号",
           "bit": "16-28",
           "direction": "TX"
@@ -305,6 +326,7 @@
       "interfaces": [
         {
           "label": null,
+          "label_name": null,
           "name": "RFAN工作模式",
           "bit": null,
           "direction": "RX"
@@ -322,42 +344,49 @@
       "interfaces": [
         {
           "label": "L126",
+          "label_name": null,
           "name": "飞行架次数",
           "bit": null,
           "direction": "RX"
         },
         {
           "label": "L134",
+          "label_name": null,
           "name": "飞机注册号",
           "bit": null,
           "direction": "RX"
         },
         {
           "label": "L135",
+          "label_name": null,
           "name": "飞机注册号",
           "bit": null,
           "direction": "RX"
         },
         {
           "label": "L136",
+          "label_name": null,
           "name": "飞机注册号",
           "bit": null,
           "direction": "RX"
         },
         {
           "label": "L137",
+          "label_name": null,
           "name": "飞机阶段",
           "bit": null,
           "direction": "RX"
         },
         {
           "label": "L150",
+          "label_name": null,
           "name": "UTC时间",
           "bit": null,
           "direction": "RX"
         },
         {
           "label": "L260",
+          "label_name": null,
           "name": "UTC日期",
           "bit": null,
           "direction": "RX"
@@ -377,6 +406,7 @@
       "interfaces": [
         {
           "label": "L50",
+          "label_name": null,
           "name": "A429通信测试信息L50",
           "bit": null,
           "direction": "TX"
@@ -395,6 +425,7 @@
       "interfaces": [
         {
           "label": null,
+          "label_name": null,
           "name": "通风RFAN速度指令",
           "bit": null,
           "direction": "TX"

@@ -877,18 +877,36 @@ def run_ai_update(args, reqs, name_st, state_st, signal_st):
 
     print("[AI] 按需求变更增量更新映射表"
           + ("（dry-run：只列计划，不调用 AI）" if args.ai_dry_run else ""))
+    # ① 修复后 update_all_maps 内部已 try/except 不再 raise——读 results 字典精细化判断
+    stats = update_all_maps(client, reqs, paths,
+                            force=args.ai_force,
+                            scan_new=not args.no_ai_scan_new,
+                            dry_run=args.ai_dry_run,
+                            source_doc=os.path.basename(args.docx))
+
+    # token 用量 sidecar：供 multi_judge_runner 汇总 AI 映射生成的 token。
+    # 路径放在映射文件同目录（即 judge 工作区根），runner 按固定文件名读取；
+    # 即使部分/全部映射失败也照常落盘——失败的调用同样消耗 token。
     try:
-        stats = update_all_maps(client, reqs, paths,
-                                force=args.ai_force,
-                                scan_new=not args.no_ai_scan_new,
-                                dry_run=args.ai_dry_run,
-                                source_doc=os.path.basename(args.docx))
-    except AIError as e:
-        print(f"警告：AI 更新失败（{e}），继续使用现有映射", file=sys.stderr)
+        _tok_path = os.path.join(
+            os.path.dirname(os.path.abspath(paths['name'])),
+            'ai_update_token_usage.json')
+        _tok_tmp = _tok_path + '.tmp'
+        with open(_tok_tmp, 'w', encoding='utf-8') as _f:
+            json.dump({'total_tokens': client.usage_tokens}, _f, ensure_ascii=False)
+        os.replace(_tok_tmp, _tok_path)
+    except Exception:  # noqa: BLE001 — 统计是旁路，绝不影响主流程
+        pass
+
+    failed = [k for k, r in (stats or {}).items() if isinstance(r, dict) and r.get("ok") is False]
+    ok_kinds = [k for k, r in (stats or {}).items() if not (isinstance(r, dict) and r.get("ok") is False)]
+    if failed and not ok_kinds:
+        # 全部失败 → fallback 用现有映射（让 caller 走默认路径）
+        print(f"警告：AI 更新全部失败（{', '.join(failed)}），继续使用现有映射", file=sys.stderr)
         return None
-    except Exception as e:
-        print(f"警告：AI 更新异常（{type(e).__name__}: {e}），继续使用现有映射", file=sys.stderr)
-        return None
+    if failed:
+        # 部分失败 → 报警但继续（部分新 map 可用）
+        print(f"警告：AI 更新部分失败（{', '.join(failed)}），已使用部分新映射", file=sys.stderr)
 
     return {'updated': True, 'dry_run': bool(args.ai_dry_run), 'stats': stats,
             'ai_calls': client.call_count, 'ai_tokens': client.usage_tokens}

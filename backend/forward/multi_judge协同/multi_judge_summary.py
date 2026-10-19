@@ -25,7 +25,11 @@ except Exception:  # pragma: no cover
 
 # 判定分组顺序：与 summary.py 的优先级「不一致 ＞ 未落实 ＞ 部分落实 ＞ 已落实」一致，
 # 末尾追加「覆盖缺口」（无 judge 给出有效结论）。Word 报告按此顺序分组出表。
-VERDICT_GROUPS: list[str] = ["不一致", "未落实", "部分落实", "已落实", "覆盖缺口"]
+# 判定分组（渲染顺序：不一致 → 未落实 → 部分落实 → 已落实 → 覆盖缺口 → 待确认）。
+# 单一来源：Word 明细分组、Excel 分页 Sheet、章节小标题顺序都由本常量驱动。
+# "待确认"必须在内 —— aggregate 在「无 judge 给出有效结论」时赋 final_verdict="待确认"，
+# 若缺此组，这类信号会从 Word 明细 / Excel 分页中**整体消失**（只在统计计数里出现）。
+VERDICT_GROUPS: list[str] = ["不一致", "未落实", "部分落实", "已落实", "覆盖缺口", "待确认"]
 
 # 判定 → 颜色（对齐反向 consensus_word_generator 的 status_colors）
 VERDICT_COLORS: dict[str, str] = {
@@ -34,6 +38,8 @@ VERDICT_COLORS: dict[str, str] = {
     "部分落实": "1F4E78",
     "已落实": "006100",
     "覆盖缺口": "808080",
+    # 与"覆盖缺口"同色：两者都属「无有效结论」类
+    "待确认": "808080",
 }
 
 # agreement → 中文（仅用于展示与注释；计数仍以原始 key 为准）
@@ -241,11 +247,16 @@ def format_review_coverage_text(summary: dict) -> str:
     if cov.get("peer_reviewed"):
         text += "；其中 {0} 条另经 Step5.5 复查".format(cov["peer_reviewed"])
     if cov.get("arb_same_as_judge"):
-        text += "（⚠ 仲裁视角与 judge 同源，第二裁决独立性受限）"
+        text += "（仲裁视角与 judge 同源，第二裁决独立性受限）"
     return text + hits_txt
 
 
-if __name__ == "__main__":  # pragma: no cover
+def _self_test() -> None:
+    """最小自测：分布统计/越界星级归桶/判定顺序/空集/AI复核覆盖。
+
+    原 inline __main__ 测试已抽到本函数（保留所有断言），便于从 tests/ 入口或外部脚本调用。
+    改这块前/后跑一次 _self_test() 即可肉眼确认高频回归点（详见 assert 行）。
+    """
     # 自测：与 aggregate 自测共用同一套合成数据形态。
     _agg = {
         "SIG_A": {"aggregation": {"star_rating": 5, "agreement": "full",
@@ -258,16 +269,19 @@ if __name__ == "__main__":  # pragma: no cover
                                   "final_verdict": "不一致"}},
         "SIG_E": {"aggregation": {"star_rating": 0, "agreement": "no_consensus",
                                   "final_verdict": "覆盖缺口"}},
+        # 「待确认」= 无 judge 给出有效结论；必须能在 status_distribution 里成组（回归护栏）
+        "SIG_F": {"aggregation": {"star_rating": 1, "agreement": "no_consensus",
+                                  "final_verdict": "待确认"}},
     }
     s = build_summary(_agg)
-    assert s["total"] == 5, s
-    # 越界星级 0 归入 1★ 桶 → 1★ 共 3 条
-    assert s["star_distribution"] == {"1": 3, "2": 1, "3": 0, "4": 0, "5": 1}, s
+    assert s["total"] == 6, s
+    # 越界星级 0 归入 1★ 桶 → 1★ 共 4 条
+    assert s["star_distribution"] == {"1": 4, "2": 1, "3": 0, "4": 0, "5": 1}, s
     assert s["agreement_distribution"] == {"full": 1, "majority": 1,
-                                           "no_consensus": 2, "split": 1}, s
+                                           "no_consensus": 3, "split": 1}, s
     assert list(s["status_distribution"].keys()) == VERDICT_GROUPS, s
-    # 平均星级按实际值：(5+1+2+1+0)/5 = 1.8
-    assert abs(s["average_star_rating"] - 1.8) < 1e-6, s
+    # 平均星级按实际值：(5+1+2+1+0+1)/6 = 1.6667 → 保留两位 1.67
+    assert abs(s["average_star_rating"] - 1.67) < 1e-6, s
 
     empty = build_summary({})
     assert empty["total"] == 0 and empty["average_star_rating"] == 0.0
@@ -295,7 +309,7 @@ if __name__ == "__main__":  # pragma: no cover
     # agg 里已记过的原因不再被 review_stats 重复累加（防计数翻倍）
     assert cov["skip_reasons"].get("超出复核预算") == 1, cov
     _txt = format_review_coverage_text(s2)
-    assert "仲裁视角与 judge 同源" in _txt and "⚠" in _txt, _txt
+    assert "仲裁视角与 judge 同源" in _txt and "" in _txt, _txt
     # #3 路由判定层：规则命中要能在文本里看出，且启用清单来自聚合层规则表
     assert cov["rules_enabled"] == [r["name"] for r in AGGREGATE_RULES], cov["rules_enabled"]
     _agg3 = {
@@ -317,5 +331,20 @@ if __name__ == "__main__":  # pragma: no cover
     assert "未经第二裁决" in format_review_coverage_text(s3)
     assert "未经第二裁决" in format_summary_text(s3)
 
-    print("✅ multi_judge_summary 自测通过（分布统计/越界星级归桶/判定顺序/空集/AI复核覆盖均符合预期）")
+    # 高频回归点：VERDICT_GROUPS 顺序与 AGREEMENT_CN / VERDICT_COLORS 一一对应
+    # （防「分组改了颜色忘改」或「分组顺序变了 AGREEMENT_CN 仍按老序」）
+    assert set(AGREEMENT_CN.keys()) == {"full", "majority", "split",
+                                         "single_source", "no_consensus"}, AGREEMENT_CN
+    assert set(VERDICT_COLORS.keys()) == set(VERDICT_GROUPS), \
+        f"VERDICT_COLORS 与 VERDICT_GROUPS 不一致：{set(VERDICT_COLORS) ^ set(VERDICT_GROUPS)}"
+    # 颜色值必须为 6 位 hex
+    for k, v in VERDICT_COLORS.items():
+        assert len(v) == 6 and all(c in "0123456789ABCDEFabcdef" for c in v), f"{k}={v}"
+
+    print("multi_judge_summary 自测通过（分布统计/越界星级归桶/判定顺序/空集/AI复核覆盖/颜色hex/"
+          "分组-颜色对应 均符合预期）")
     print("  " + format_summary_text(s))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    _self_test()

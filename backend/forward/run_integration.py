@@ -77,12 +77,28 @@ from common import get_project, project_ids, describe  # noqa: E402  统一系�
 
 # ============================ 工具函数 ============================
 
+def _cmd_for_log(cmd: list[str]) -> str:
+    """命令行日志文本：把 --ai-key 的值替换为 ***，避免密钥落进任务日志。"""
+    parts = []
+    hide_next = False
+    for item in cmd:
+        if hide_next:
+            parts.append("***")
+            hide_next = False
+            continue
+        text = str(item)
+        parts.append(text)
+        if text == "--ai-key":
+            hide_next = True
+    return " ".join(parts)
+
+
 def run_cmd(cmd: list[str], desc: str, cwd: Path | str | None = None) -> float:
     """运行命令，失败时抛出 RuntimeError。返回耗时（秒）。
     若设置了全局 LOG_FILE，会同时将子进程输出写入日志文件。"""
     print(f"\n{'=' * 60}")
-    print(f"▶ {desc}")
-    print(f"  命令: {' '.join(str(c) for c in cmd)}")
+    print(f"> {desc}")
+    print(f"  命令: {_cmd_for_log(cmd)}")
     print(f"{'=' * 60}")
 
     start = time.time()
@@ -102,6 +118,11 @@ def run_cmd(cmd: list[str], desc: str, cwd: Path | str | None = None) -> float:
             if process.stdout is not None:
                 for line in process.stdout:
                     sys.stdout.write(line)
+                    sys.stdout.flush()  # 2026-10-18: 修 Popen PIPE stdout 0 字节 + 子进程 silent exit。
+                                        # 原代码仅 write 不 flush，buffer 满之前内容驻留在子进程内
+                                        # Popen 父端 drain thread 收不到数据；PIPE 时序异常时 print 阻塞，
+                                        # 主流程无法继续到后续阶段（实测 multi_judge 子进程在 identity_match
+                                        # 摘要后 silent exit，attribute_match 阶段从未启动）。
                     logf.write(line)
             returncode = process.wait()
     else:
@@ -110,7 +131,7 @@ def run_cmd(cmd: list[str], desc: str, cwd: Path | str | None = None) -> float:
 
     elapsed = time.time() - start
 
-    status = "✅ 成功" if returncode == 0 else "❌ 失败"
+    status = "[OK] 成功" if returncode == 0 else "[FAIL] 失败"
     print(f"\n{status} | 耗时: {elapsed:.2f}s")
 
     if returncode != 0:
@@ -119,7 +140,10 @@ def run_cmd(cmd: list[str], desc: str, cwd: Path | str | None = None) -> float:
 
 
 def _is_safe_to_clean(path: Path) -> bool:
-    """只允许清理位于 BASE_DIR 下、名称符合预期的工作目录，避免误删。"""
+    """只允许清理位于 BASE_DIR 下、名称符合预期的工作目录，避免误删。
+
+    路径必须已存在（用于清理前二次把关）；启动时校验用 _validate_workspace。
+    """
     try:
         resolved = path.resolve()
         base = BASE_DIR.resolve()
@@ -127,9 +151,52 @@ def _is_safe_to_clean(path: Path) -> bool:
             return False
         if not resolved.is_dir():
             return False
-        return resolved.name.startswith(("integration_workspace", "workspace", "output", "output_"))
+        return _is_whitelisted_workspace_name(resolved.name)
     except Exception:
         return False
+
+
+def _is_whitelisted_workspace_name(name: str) -> bool:
+    """工作区目录名白名单（启动校验 + 清理校验共用）。
+
+    约定俗成的工作区名：`integration_workspace`（默认）、`workspace`、
+    `output` / `output_xxx`（runs/ 下的输出目录）。其它名字一律拒绝。
+    """
+    return name.startswith(("integration_workspace", "workspace", "output", "output_"))
+
+
+def _validate_workspace(path: str) -> tuple[bool, str]:
+    """启动时校验 --workspace（无论 --clean 还是 --no-clean 都必须过这关）。
+
+    与 _is_safe_to_clean 的差异：此处不要求路径已存在（启动时目录尚未创建），
+    也不操作文件系统；只验位置 + 名字白名单。失败时 main() 直接 return 1，
+    防止后续 mkdir/复制把用户目录污染成工作区。
+
+    接受条件（任一即可）：
+      1. 路径位于 BASE_DIR 下（防误传用户目录如 /c/Users/.../Desktop/important）
+      2. 路径或其任意祖先的目录名以白名单前缀打头（integration_workspace /
+         workspace / output / output_）
+
+    「走祖先链」是必需的：多 judge 编排器会递归 spawn 子进程传
+    `--workspace shared` / `--workspace judge_0_xxx` / `--workspace judge_0_xxx/output`
+    等子路径（其顶层根是 runs/integration_workspace）。只看路径名首段会误拒。
+    """
+    try:
+        resolved = Path(path).resolve()
+    except Exception as e:
+        return False, f"路径解析失败：{e}"
+    base = BASE_DIR.resolve()
+    if not str(resolved).startswith(str(base) + os.sep):
+        return False, (f"--workspace 必须在脚本目录下（{base}），"
+                       f"拒绝：{resolved}")
+    # 走祖先链：路径自身或任一祖先的目录名命中白名单即通过
+    cur = resolved
+    while cur != base and cur != cur.parent:
+        if _is_whitelisted_workspace_name(cur.name):
+            return True, ""
+        cur = cur.parent
+    return False, (f"--workspace 必须在白名单工作区内（integration_workspace / "
+                   f"workspace / output / output_xxx 之下），拒绝：{resolved}")
 
 
 def _copy_supporting_files(src_dirs: list[Path], dst_dir: Path, exclude_names: set[str]) -> None:
@@ -236,7 +303,7 @@ def _resolve_traced(traced_path: Path, full_path: Path, force: bool) -> tuple[Pa
     if traced_n > 0:
         return traced_path, True, traced_n
     if force:
-        print(f"⚠️  强制 --use-trace，但 {traced_path.name} 缺失或为空，回退到完整簇")
+        print(f"[WARN]  强制 --use-trace，但 {traced_path.name} 缺失或为空，回退到完整簇")
     return full_path, False, _load_cluster_count(full_path)
 
 
@@ -292,6 +359,28 @@ def run_hlr_clustering(args: argparse.Namespace, workspace: Path) -> tuple[Path,
         cmd.extend(["--state-map", str(state_map)])
     if args.signal_map:
         cmd.extend(["--signal-map", str(signal_map)])
+
+    # AI 映射生成（--ai-update）：从 env 取 per-judge 的 AI 配置（编排器已按 judge 注入
+    # AI_MODEL/BASE_URL/API_KEY），显式转成 cluster_hlr 的 --ai-* 参数，保证 per-judge 隔离
+    # （每个 judge 用自己的模型抽取信号名/状态定义/信号级拆分）。失败时 cluster_hlr 内部已
+    # try/except 降级为「继续聚类、不生成映射」，不会中断本次 judge 运行。
+    if args.ai_update:
+        cmd.append("--ai-update")
+        _ai_model = args.ai_model or os.environ.get("AI_MODEL")
+        _ai_base = args.ai_base or os.environ.get("BASE_URL") or os.environ.get("AI_BASE_URL")
+        _ai_key = args.ai_key or os.environ.get("API_KEY") or os.environ.get("AI_API_KEY")
+        if _ai_model:
+            cmd += ["--ai-model", _ai_model]
+        if _ai_base:
+            cmd += ["--ai-base", _ai_base]
+        if _ai_key:
+            cmd += ["--ai-key", _ai_key]
+        if args.ai_config:
+            cmd += ["--ai-config", args.ai_config]
+        if args.ai_force:
+            cmd.append("--ai-force")
+        if args.ai_dry_run:
+            cmd.append("--ai-dry-run")
 
     run_cmd(cmd, "HLR 需求聚类")
     return cluster_out, dedup_out
@@ -661,6 +750,14 @@ def main() -> int:
     parser.add_argument("--name-map", help="HLR 静态信号名映射文件路径（可选，需预先用 AI 或人工生成）")
     parser.add_argument("--state-map", help="HLR 静态状态定义映射文件路径（可选，需预先用 AI 或人工生成）")
     parser.add_argument("--signal-map", help="HLR 静态信号级拆分映射文件路径（可选，需预先用 AI 或人工生成）")
+    parser.add_argument("--ai-update", action="store_true",
+                        help="需求变更后调用 AI 增量重建映射表（多 judge 流水线下由编排器按各 judge 注入配置）")
+    parser.add_argument("--ai-config", default=None, help="AI 配置文件路径（可选，默认 ai_config.json）")
+    parser.add_argument("--ai-base", default=None, help="覆盖 AI base_url（OpenAI 兼容）")
+    parser.add_argument("--ai-key", default=None, help="覆盖 AI api_key")
+    parser.add_argument("--ai-model", default=None, help="覆盖 AI model 名称")
+    parser.add_argument("--ai-force", action="store_true", help="强制重建映射表（忽略一致性检查）")
+    parser.add_argument("--ai-dry-run", action="store_true", help="只列计划、不调用 AI")
     parser.add_argument("--match-step", choices=["all", "bus_label_bit", "direction", "name", "report"], default="all", help="身份匹配步骤（默认 all）")
     parser.add_argument("--step", choices=["all", "eoicd", "hlr", "identity", "attribute", "summary"], default="all", help="执行步骤（默认 all）")
     parser.add_argument("--steps", default=None,
@@ -674,16 +771,24 @@ def main() -> int:
     # run_dir 在「结果汇总」阶段生成；声明在此，便于成功/异常两条路径统一归档日志
     run_dir: Path | None = None
 
+    # 启动时校验 --workspace：无论 --clean/--no-clean 都先过这关。
+    # 防用户误传非工作区路径（如 /c/Users/.../important），被 mkdir/复制污染成工作区。
+    _ok, _reason = _validate_workspace(args.workspace)
+    if not _ok:
+        print(f"[WARN]  拒绝 --workspace：{_reason}", flush=True)
+        print("    期望：脚本目录下的 integration_workspace / workspace / output_xxx 子目录。", flush=True)
+        return 1
+
     try:
         if not args.no_clean:
             workspace_path = Path(args.workspace).resolve()
             if workspace_path.exists():
                 if _is_safe_to_clean(workspace_path):
-                    print(f"🧹 清理工作目录: {args.workspace}")
+                    print(f"[CLEAN] 清理工作目录: {args.workspace}", flush=True)
                     shutil.rmtree(workspace_path)
                 else:
-                    print(f"⚠️  拒绝清理非工作目录: {args.workspace}")
-                    print("    --clean 只允许清理位于脚本目录下、名称以 integration_workspace/workspace/output 开头的目录。")
+                    print(f"[WARN] 拒绝清理非工作目录: {args.workspace}", flush=True)
+                    print("    --clean 只允许清理位于脚本目录下、名称以 integration_workspace/workspace/output 开头的目录。", flush=True)
                     return 1
 
         global LOG_FILE
@@ -695,15 +800,15 @@ def main() -> int:
             handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8")],
         )
 
-        print("=" * 60)
-        print("🚀 EoICD → HLR 正向检查集成流程")
-        print("=" * 60)
-        print(f"   Python: {PYTHON}")
-        print(f"   项目:   {args.project}")
-        print(f"   工作区: {args.workspace}")
-        print(f"   输出:   {args.output_dir}")
-        print(f"   AI:     {'禁用' if args.skip_ai else '启用'}")
-        print(f"   追溯:   {'强制使用追溯版' if args.use_trace else '自动检测（有追溯表输入则启用，否则用完整簇）'}")
+        print("=" * 60, flush=True)
+        print("[START] EoICD → HLR 正向检查集成流程", flush=True)
+        print("=" * 60, flush=True)
+        print(f"   Python: {PYTHON}", flush=True)
+        print(f"   项目:   {args.project}", flush=True)
+        print(f"   工作区: {args.workspace}", flush=True)
+        print(f"   输出:   {args.output_dir}", flush=True)
+        print(f"   AI:     {'禁用' if args.skip_ai else '启用'}", flush=True)
+        print(f"   追溯:   {'强制使用追溯版' if args.use_trace else '自动检测（有追溯表输入则启用，否则用完整簇）'}", flush=True)
 
         workspace = prepare_workspace(args)
 
@@ -745,14 +850,14 @@ def main() -> int:
             run_dir = run_summary(args, workspace)
             final_out_dir = Path(args.output_dir).resolve() / run_dir.name
             copied = copy_final_outputs(run_dir, args.output_dir)
-            print(f"\n📁 最终输出已复制到: {final_out_dir}")
+            print(f"\n[DIR] 最终输出已复制到: {final_out_dir}", flush=True)
             for name in copied:
-                print(f"  - {name}")
+                print(f"  - {name}", flush=True)
 
         total_time = time.time() - total_start
-        print(f"\n{'=' * 60}")
-        print(f"✅ 集成流程全部完成！总耗时: {total_time:.2f}s")
-        print(f"{'=' * 60}")
+        print(f"\n{'=' * 60}", flush=True)
+        print(f"[OK] 集成流程全部完成！总耗时: {total_time:.2f}s", flush=True)
+        print(f"{'=' * 60}", flush=True)
 
         # 运行日志随本次结果一并归档到时间戳子文件夹（仅当本次生成了汇总子文件夹时）
         if LOG_FILE and LOG_FILE.exists():
@@ -762,14 +867,14 @@ def main() -> int:
                 log_dst = Path(args.output_dir).resolve() / "integration.log"
             log_dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(LOG_FILE, log_dst)
-            print(f"📄 运行日志已保存: {log_dst}")
+            print(f"[FILE] 运行日志已保存: {log_dst}", flush=True)
 
         return 0
 
     except Exception as e:
-        print(f"\n{'=' * 60}")
-        print(f"❌ 集成流程失败: {e}")
-        print(f"{'=' * 60}")
+        print(f"\n{'=' * 60}", flush=True)
+        print(f"[FAIL] 集成流程失败: {e}", flush=True)
+        print(f"{'=' * 60}", flush=True)
         import traceback
         traceback.print_exc()
         logging.error("集成流程失败: %s", e, exc_info=True)
@@ -781,7 +886,7 @@ def main() -> int:
                 dst_log = Path(args.output_dir).resolve() / "integration.log"
             dst_log.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(LOG_FILE, dst_log)
-            print(f"📄 运行日志已保存: {dst_log}")
+            print(f"[FILE] 运行日志已保存: {dst_log}", flush=True)
         return 1
 
 

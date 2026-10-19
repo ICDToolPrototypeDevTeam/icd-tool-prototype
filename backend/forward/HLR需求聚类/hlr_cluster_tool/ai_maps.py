@@ -253,16 +253,22 @@ def update_map(kind, client, reqs, path, force=False, scan_new=True, dry_run=Fal
                  避免新需求的状态定义/多信号被漏掉）
     dry_run    : 只打印计划，不调用 AI、不写文件
     source_doc : 需求文档名（写入 __meta__，便于溯源）
+
+    path       : str 或 os.PathLike（内部用 os.fspath 转为 str，避免 path + '.tmp'
+                 在 Path 对象上 TypeError）
     """
+    path = os.fspath(path)  # 接受 PathLike，函数体后续 str 操作安全
     spec = MAP_SPECS[kind]
     coverage = spec['coverage']
 
     existing = {}
     prev_covered = set()
+    prev_generation = 0
     if os.path.exists(path):
         with open(path, encoding='utf-8') as f:
             raw = json.load(f)
         prev_covered = set((raw.get(META_KEY) or {}).get('covered_reqs') or [])
+        prev_generation = int((raw.get(META_KEY) or {}).get('generation', 0) or 0)
         existing = _norm_existing(raw)
     if not prev_covered:                      # 旧格式（无 __meta__）：退回键集合
         prev_covered = set(existing)
@@ -349,10 +355,45 @@ def update_map(kind, client, reqs, path, force=False, scan_new=True, dry_run=Fal
         'generated_at': __import__('datetime').datetime.now().isoformat(timespec='seconds'),
         # 本次处理时需求文档里的全部需求 ID —— 下次据此精确识别"新增需求"
         'covered_reqs': sorted(reqs_by_id, key=_req_sort_key),
+        # 写入次数计数器：每次成功写回自增（老格式无此字段 → 从 0 开始）。
+        # 读端可据此判断「这份 map 已成功完整写回过 N 次」。注意 generation 只是写回次数
+        # 不是条目数，单独不能证明完整性——需结合 covered_reqs 长度与条目数共同判断。
+        'generation': prev_generation + 1,
     }}
     payload.update({k: new_raw[k] for k in sorted(new_raw, key=_req_sort_key)})
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    # 原子写：先写 .tmp 再 os.replace——避免进程崩溃留半文件。
+    # 写失败时清理 .tmp + reload 当前磁盘版本到本地（写诊断日志，便于排错）。
+    # 注：本次 update_map 异常时本地 existing / prev_covered / prev_generation 没机会用上，
+    # 但下次 update_map 调用从 L418 段会自己从磁盘读，reload 的核心价值是「写诊断」
+    # ——让日志说清「磁盘状态是什么」，而不是「程序现在不知道」。
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except Exception as write_err:
+        log(f"    [{kind}] 写文件失败（{type(write_err).__name__}: {write_err}）")
+        # 清理 .tmp 临时文件
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        # 写失败 reload：把磁盘当前版本（成功写入的或老版本）load 一次，仅写诊断日志
+        if os.path.exists(path):
+            try:
+                with open(path, encoding='utf-8') as f:
+                    _raw = json.load(f)
+                _existing_now = _norm_existing(_raw)
+                _gen_now = int((_raw.get(META_KEY) or {}).get('generation', 0) or 0)
+                _covered_now = set((_raw.get(META_KEY) or {}).get('covered_reqs') or [])
+                log(f"    [{kind}] reload 已写入版本（条目={len(_existing_now)}，"
+                    f"generation={_gen_now}，covered={len(_covered_now)}）——磁盘状态未污染，"
+                    f"下次 update_map 可基于此续跑")
+            except Exception as reload_err:
+                log(f"    [{kind}] reload 也失败（{type(reload_err).__name__}: {reload_err}）——"
+                    f"下次 update_map 会以磁盘文件为准（可能需重建）")
+        raise
     log(f'    [{kind}] 已写回：{path}（新增/更新 {stats["written"]} 条，'
         f'保留 {stats["kept"]} 条，删除 {len(stale)} 条）')
     return stats
@@ -360,15 +401,27 @@ def update_map(kind, client, reqs, path, force=False, scan_new=True, dry_run=Fal
 
 def update_all_maps(client, reqs, paths, force=False, scan_new=True, dry_run=False,
                     source_doc=None, log=print):
-    """依次更新三个映射表。paths: {'name': 路径, 'state': 路径, 'signal': 路径}"""
+    """依次更新三个映射表。paths: {'name': 路径, 'state': 路径, 'signal': 路径}
+
+    单 map 异常不再让调用方看不到 name/state / signal 已成功——
+    每个 update_map 包 try/except，失败时 results[kind] = {"error", "error_type", ...}
+    继续下一个；调用方（如 run_ai_update）可单独处理失败 kind。
+    """
     results = {}
     for kind in ('name', 'state', 'signal'):
         path = paths.get(kind)
         if not path:
             continue
-        results[kind] = update_map(kind, client, reqs, path,
-                                   force=force, scan_new=scan_new, dry_run=dry_run,
-                                   source_doc=source_doc, log=log)
+        try:
+            results[kind] = update_map(kind, client, reqs, path,
+                                       force=force, scan_new=scan_new, dry_run=dry_run,
+                                       source_doc=source_doc, log=log)
+        except Exception as e:
+            # 单 map 失败不影响其他 map 写入——失败标记 + 异常类型给调用方决策
+            log(f"  [{kind}] 更新失败（{type(e).__name__}: {e}），跳过继续下一个 map")
+            results[kind] = {"kind": kind, "path": path,
+                             "error": str(e), "error_type": type(e).__name__,
+                             "ok": False}
     return results
 
 

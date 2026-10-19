@@ -124,7 +124,7 @@ def dedup_signals(signals: list[dict]) -> list[dict]:
             # 同名异值：拆分，每个成员单独成簇，不合并
             split_group_count += 1
             split_member_count += len(members)
-            print(f"  ⚠️ 同名异值拆分: {sheet}/{side} {signal_name} "
+            print(f"  [WARN] 同名异值拆分: {sheet}/{side} {signal_name} "
                   f"({len(members)} 个成员属性不同，已拆分保留)")
             for i, member in enumerate(members):
                 entry = member.copy()
@@ -280,7 +280,7 @@ def main():
                     json.dump(filtered, f, ensure_ascii=False, indent=2)
                 print(f"已保存(追溯过滤后): {traced_path}")
         else:
-            print(f"\n⚠️  追溯结果文件不存在，跳过过滤: {trace_path}")
+            print(f"\n[WARN]  追溯结果文件不存在，跳过过滤: {trace_path}")
 
 
 if __name__ == "__main__":

@@ -178,14 +178,15 @@ def classify_signal(single_results):
     输入 single_results 为按信号聚合后的单属性结果列表，取值 ∈
     {属性一致, 属性不一致, 无提及, 无具体值}（当前上游仅产出这四类）。
 
-    判定（按优先级）：
+    判定（按优先级，严重度序 = 不一致 > 未落实 > 部分落实 > 已落实，
+    与聚合层 `_WORST_PRIORITY`、报告展示序 `VERDICT_GROUPS` 三处统一）：
       1. 不一致：至少有一个属性为「属性不一致」（最高优先，确定缺陷）。
-      2. 已落实：所有属性均为「属性一致」。
-      3. 未落实：所有属性均为「无提及」——信号已在信号级识别到 HLR 需求，
+      2. 未落实：所有属性均为「无提及」——信号已在信号级识别到 HLR 需求，
           但其全部属性在对应 HLR 中均未提及（"已识别、未承接"）；不等于
           "信号级身份识别失败"（id_matched_hlrs 通常非空）。
-      4. 部分落实（信号属性未落实）：至少有一个属性为「无提及」或「无具体值」，
+      3. 部分落实（信号属性未落实）：至少有一个属性为「无提及」或「无具体值」，
          但至少有一个属性通过了身份识别（即不是全部「无提及」），且无「属性不一致」。
+      4. 已落实：所有属性均为「属性一致」（兜底；上面三条均已排除）。
     """
     considered = list(single_results)
     if not considered:
@@ -195,22 +196,21 @@ def classify_signal(single_results):
     if "属性不一致" in considered:
         return "不一致"
 
-    # 2) 已落实 —— 所有属性均为「属性一致」
-    if all(s == "属性一致" for s in considered):
-        return "已落实"
-
     # 至少一条通过了身份识别（即不是全部「无提及」）
     has_carry = any(s != "无提及" for s in considered)
     # 存在未落实项（无提及 / 无具体值）
     has_gap = any(s in ("无提及", "无具体值") for s in considered)
 
-    # 3) 未落实 —— 所有属性均为「无提及」
+    # 2) 未落实 —— 所有属性均为「无提及」
     if not has_carry:
         return "未落实"
 
-    # 4) 部分落实 —— 有未落实项，且至少有一条通过了身份识别，且无不一致
+    # 3) 部分落实 —— 有未落实项，且至少有一条通过了身份识别，且无不一致
     if has_gap:
         return "部分落实"
+
+    # 4) 已落实 —— 无未落实项且至少一条通过识别 ⇒ 全部为「属性一致」
+    return "已落实"
 
 
 def _short_single_result(single_result):
@@ -958,7 +958,7 @@ def write_docx_summary(out, path):
 
     if meta.get("unexpected_result_count"):
         doc.add_paragraph(
-            "⚠ 意外取值：共 %d 条 result 不在已知 4 类，已归并为「无具体值」"
+            "[WARN] 意外取值：共 %d 条 result 不在已知 4 类，已归并为「无具体值」"
             "（对应条目标记 unexpected_result=true，见下钻 attributes）。"
             % meta["unexpected_result_count"])
 

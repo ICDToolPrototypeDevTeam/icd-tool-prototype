@@ -67,13 +67,13 @@ def print_step_header(step_key: str, direction: str, extra: str = ""):
     """打印步骤分隔线。"""
     name = STEP_NAMES.get(step_key, step_key)
     print(f"\n{'='*60}")
-    print(f"▶ {name} [{direction.upper()}]{f' — {extra}' if extra else ''}")
+    print(f"> {name} [{direction.upper()}]{f' — {extra}' if extra else ''}")
     print(f"{'='*60}")
 
 
 def print_step_result(success: bool, elapsed: float, detail: str = ""):
     """打印步骤结果。"""
-    status = "✅ 成功" if success else "❌ 失败"
+    status = "[OK] 成功" if success else "[FAIL] 失败"
     print(f"\n{status} | 耗时: {elapsed:.3f}s{f' | {detail}' if detail else ''}")
 
 
@@ -412,7 +412,7 @@ def process_direction(
 def print_summary(result_pub: dict, result_sub: dict, total_time: float, project_root: Path):
     """打印最终汇总报告。"""
     print(f"\n{'='*60}")
-    print("📊 身份匹配阶段完成摘要")
+    print("[SUM] 身份匹配阶段完成摘要")
     print(f"{'='*60}")
 
     def _get_counts(direction: str, result: dict):
@@ -443,18 +443,18 @@ def print_summary(result_pub: dict, result_sub: dict, total_time: float, project
             parts = [f"{k}={v:.2f}s" for k, v in sorted(t.items())]
             print(f"  耗时: {' | '.join(parts)}")
 
-    print(f"\n⏱️ 总耗时: {total_time:.2f}s")
+    print(f"\n[TIME] 总耗时: {total_time:.2f}s")
 
     # 输出文件列表
     output_dir = project_root / "data" / "output"
     if output_dir.exists():
-        print(f"\n📁 输出文件:")
+        print(f"\n[DIR] 输出文件:")
         for f in sorted(output_dir.rglob("*.json")):
             rel = f.relative_to(project_root)
             size_kb = f.stat().st_size / 1024
             print(f"  {str(rel):55s} {size_kb:7.1f} KB")
 
-    print(f"\n✅ 身份匹配阶段全部完成！")
+    print(f"\n[OK] 身份匹配阶段全部完成！")
     print(f"{'='*60}")
 
 
@@ -502,13 +502,13 @@ def main():
 
     # 打印启动信息
     print("=" * 60)
-    print("🚀 EoICD → HLR 正向匹配：身份匹配阶段")
+    print("[START] EoICD → HLR 正向匹配：身份匹配阶段")
     print("=" * 60)
     print(f"   配置文件: {args.config}")
     print(f"   执行步骤: {args.step}")
     print(f"   处理方向: {args.direction}")
     if args.skip_ai:
-        print(f"   ⚠️ 跳过 AI 调用（测试模式）")
+        print(f"   [WARN] 跳过 AI 调用（测试模式）")
 
     # 加载配置
     config_path = Path(args.config)
@@ -516,7 +516,7 @@ def main():
         config_path = PROJECT_ROOT / config_path
 
     if not config_path.exists():
-        print(f"\n❌ 配置文件不存在: {config_path}")
+        print(f"\n[FAIL] 配置文件不存在: {config_path}")
         sys.exit(1)
 
     # 统一使用公共包 common.safe_load_json 加载配置（支持 // 注释且字符串安全）
@@ -552,7 +552,7 @@ def main():
     if ai_enabled and not args.skip_ai and not api_key:
         api_key_env = ai_cfg.get("api_key_env", "API_KEY")
         print(f"\n{'!'*60}")
-        print(f"⚠️  API Key 未设置")
+        print(f"[WARN]  API Key 未设置")
         print(f"{'!'*60}")
         print(f"\n当前配置启用了 AI 匹配，但配置文件中未找到 api_key:")
         print(f"\n解决方案:")
@@ -594,10 +594,10 @@ def main():
             if (PROJECT_ROOT / eoicd_pub_path).exists():
                 eoicd_pub = load_json(eoicd_pub_path, PROJECT_ROOT)
             else:
-                print(f"\n⚠️  Publisher 输入不存在，跳过 pub 方向: {eoicd_pub_path}")
+                print(f"\n[WARN]  Publisher 输入不存在，跳过 pub 方向: {eoicd_pub_path}")
                 eoicd_pub = []
         else:
-            print(f"\n⚠️  配置未指定 eoicd_pub（仅 Subscriber 侧项目），跳过 pub 方向")
+            print(f"\n[WARN]  配置未指定 eoicd_pub（仅 Subscriber 侧项目），跳过 pub 方向")
             eoicd_pub = []
 
     # Subscriber 侧：仅当处理方向包含 sub 且输入文件存在时才加载；
@@ -611,10 +611,10 @@ def main():
             if (PROJECT_ROOT / eoicd_sub_path).exists():
                 eoicd_sub = load_json(eoicd_sub_path, PROJECT_ROOT)
             else:
-                print(f"\n⚠️  Subscriber 输入不存在，跳过 sub 方向: {eoicd_sub_path}")
+                print(f"\n[WARN]  Subscriber 输入不存在，跳过 sub 方向: {eoicd_sub_path}")
                 eoicd_sub = []
         else:
-            print(f"\n⚠️  配置未指定 eoicd_sub（仅 Publisher 侧项目），跳过 sub 方向")
+            print(f"\n[WARN]  配置未指定 eoicd_sub（仅 Publisher 侧项目），跳过 sub 方向")
             eoicd_sub = []
 
     # HLR 数据加载策略：优先使用去重结果，否则回退到聚类结果

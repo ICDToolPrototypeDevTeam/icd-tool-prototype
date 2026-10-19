@@ -142,7 +142,7 @@ def run_forward_job(job: Job, job_dir: Path, params: ForwardJobParams, *,
         judge_timeout=_env_int(_JUDGE_TIMEOUT_ENV, 3600),
         timeout=_total_timeout(), env_extra=child_env,
     )
-    # —— Excel 附件兜底（V2 起 runner 已自动生成；此处重跑自带脚本，同名覆盖写） ——
+    # —— Excel 附件兜底（V3 起 runner 已自动生成；此处显式调用脚本 main()，同名覆盖写） ——
     artifacts.run_excel_report(fwd)
 
     # —— 产物收集 + 汇总映射 + 快照落盘（jobs.py 重启后按快照反读） ——
