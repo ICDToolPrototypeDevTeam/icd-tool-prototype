@@ -65,6 +65,8 @@ V4 通过 `controller_profile` 字段控制输入解析规则（默认 `ams`）�
 
 profile 配置位于 `backend/app/v4/profiles/{id}/config.yaml`，覆盖 HLR 字段映射、分类关键词（analog / discrete / bus 等）、追溯表配置和 AI 标注示例四类内容。
 
+追溯表文件定位为「模式优先 + 内容兜底」：先按上表模式匹配文件名；某张表未命中模式时按内容判型自动识别（表 1 = 任一 sheet 首个非空行同时含 ERD 与 ICD 列头关键词；表 2 = 前 50 行内含 `_HLR_` 高层需求编号），以适配改名（版本后缀、落盘清洗、编码降级）后的文件；两类判定均不命中时仍报「输入文件缺失」（任务失败）。候选池按 `.xlsx` 扩展名收集、不区分大小写。
+
 不带 `controller_profile` 字段时行为与 Issue A 完全一致（AMS 默认），向后兼容。
 
 如后续需要支持上述能力，应通过新的 Issue、设计文档或 ADR 进行明确。

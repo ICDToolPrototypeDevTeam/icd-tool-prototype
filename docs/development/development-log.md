@@ -3864,3 +3864,28 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   4. RPDU refine 覆盖写盘后 `reverse_matches.json` 无 pre-refine 快照（既有遗留，见 10-14 记录）；查看接口给出的是最终态。
   5. Issue 编号待用户回填。
 - **下一步建议**：1) 用户提交本分支并重建镜像 / 覆盖前端产物；2) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）；3) 按需为遗留 2 / 3 单独开 Issue；4) 服务器实测：打开历史结果页，对一条反向任务点「匹配中间产物」，浏览器新标签页应直接渲染 JSON。
+
+## 2026-10-16 反向追溯表文件名适配：内容判型兜底定位（分支 issue-x-x，改动未提交）
+
+- **背景（用户提出）**：用户问「反向中各控制器追溯表输入现在是否按名称写死？追溯表名称有区别时无法正常使用，需更智能适配」（范围仅限反向）。
+- **定位（结论：确实按名称写死，集中在文件名定位一环）**：
+  1. `_discover_trace_files`（`backend/app/v4/traceability/trace_parser.py`）纯按 `filename_patterns` 定位两张表，未命中即抛 `FileNotFoundError`（归类 `INPUT_FILE`）→ 任务 FAILED；强度因 profile 而异——AMS 为**无通配的精确字面名**（改一个字即挂），FGMC/HSCU/RPDU 为关键词 glob（名字丢了关键词即挂）。
+  2. 历史回退：老代码曾有「主名失败 → `glob("*.xlsx")` 排序兜底」（CHANGELOG 有记录），Issue #63 / #74 profile 重构后消失，属回归。
+  3. 真实证据：`backend/output/v4/` 现存 **12 个降级命名任务目录**（编码降级 `______ICD_______FGMC_____.xlsx`、落盘清洗把全角括号变 `_` 等），用当前代码实测全部 `FileNotFoundError`（如 FGMC `37a71900` 丢 Table 1、AMS `0af61c2a` 丢 Table 2）。
+  4. 附带两处同名类缺陷：候选池用 `glob("*.xlsx")`（Linux 容器下 `.XLSX` 漏掉）；一个文件名同时命中两套模式时被两张表同时读（另一候选反被忽略）。
+- **方案（经用户确认后实施；不加配置、不动 profile）**：
+  1. 文件名模式优先路径保持逐字不变；
+  2. 某槽位未命中时**按内容判型兜底**：表 1 = 任一 sheet 首个非空行同时含 ERD（`_TABLE1_ERD_KEYWORDS`）与 ICD（`_TABLE1_ICD_KEYWORDS`）列头关键词；表 2 = 前 50 行 × 12 列内含 `_HLR_` 高层需求编号（4 控制器 13 个正常/降级文件预演全部判别正确，RPDU 桥接表与表 1 文件均不命中）；识别成功打 `[trace] Table N located by content …`，失败保持原报错；
+  3. 小修：候选池 `.xlsx` 大小写不敏感；表 2 名称匹配优先避开已被表 1 认领的文件（仅剩单文件时回退共享旧行为）；
+  4. 「单文件同时承载两表」能力保留（内容判型对「两表皆像」的文件作末位候选）。
+- **修改文件**：`backend/app/v4/traceability/trace_parser.py`（唯一代码文件；+`_HLR_ID_MARKER`/`_PROBE_*` 常量、+`_probe_table1_like`/`_probe_table2_like`/`_locate_missing_table_by_content`、重写 `_discover_trace_files` 前半段；**未提交**）；`backend/tests/test_trace_discovery_fallback.py`（新增 8 用例，本地文件不入库）。文档：本 log、`CHANGELOG.md`（`[Unreleased] - 2026-10-16` Fixed）、`docs/project/scope.md`（§8.2.1 后补定位说明）、`docs/development/debug-log.md`（BUG-20261016-001）。
+- **验证方式与结果**（离线验证；服务器 8000 未动）：
+  1. 零回归：4 个 profile 的正常任务索引摘要（HLR→Block 全量 sha1 + 计数）与改前**全部一致**（ams 265/10/364/296、fgmc 9/6/160/550、hscu 15/9/6/30、rpdu 673/1392/53669/601835）（**已验证**）。
+  2. 降级恢复：12 个降级命名真实目录**全部由 FileNotFoundError 变为成功**，且 AMS / FGMC 的计数与同名正常任务完全相同（内容判型选出的文件与按名匹配等价）（**已验证**）。
+  3. 新增单测 **8 passed**（模式优先、双改名、单改名、`.XLSX`、防双认领、单文件共享、桥接不被认领、误传仍报错）；全量回归 **214 passed / 6 failed / 1 skipped / 10 errors**——6 失败与 10 收集错误与留档基线同集，214 = 206 基线 + 新增 8（**已验证**）。
+- **遗留问题**：
+  1. 改动未提交；需**重建后端镜像**才在服务器生效（无新端口 / 无新环境变量 / 无权限变化）。
+  2. 内容判型对表 2 依赖 `_HLR_` 编号形态；出现无该形态的编号体系时兜底会退回原报错（宁失败不误配——桥接表不被误认领正依赖此特性）。
+  3. 次级相关问题未动（超出本次范围）：sheet 改名适配（`_select_sheet` 关键词未命中时按序号静默回退）；`coverage.py` 上传 `accept` 允许 `.xls` 而后端仅收 `.xlsx` 的不一致；正向流程另有独立追溯识别（`backend/forward/`）。
+  4. Issue 编号待用户回填。
+- **下一步建议**：1) 用户提交本分支并重建镜像；2) 服务器实测：上传一张改名后的追溯表（如把 AMS 表 2 的 `（）` 改成半角 `()`）跑一条反向任务，日志应出现 `Table N located by content` 且任务正常完成；3) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）。

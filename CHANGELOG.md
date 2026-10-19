@@ -8,6 +8,10 @@
 
 - **历史结果新增「匹配中间产物」（reverse_matches）浏览器内查看**：历史结果页此前只能拿到七类对外产物与运行日志，而反向匹配阶段的中间明细 `output/v4/{job_id}/output/reverse_matches.json`（Step 3 输出：每条 SWHLR 的 `match_type`、命中的 `matched_profile_keys`、匹配证据与全局统计）按 ADR-001 D7 不对任何接口暴露——排查「某条 SWHLR 为什么没匹配上」时只能登服务器看文件，而部署环境下这正是拿不到的东西。新增 `GET /api/v4/jobs/{job_id}/intermediates/reverse-matches`：**只读查看**（`Content-Type: application/json` 且不发 `Content-Disposition`，浏览器新标签页内联渲染、不落盘，需要留档时在页内另存；**响应体即磁盘原文，不重新序列化**，与同事参考文件 diff 时逐字节可比）。`GET /api/v4/history` 列表项新增 `has_reverse_matches` 字段（与 `has_log` 同理、**不属于** `outputs` 七类词汇表：只有反向任务会写该文件，正向任务恒为 `false`），前端历史结果页据此渲染「匹配中间产物」查看链接（新标签页打开、无 `download` 属性）。`job_id` 非法 → 400，文件不存在（正向任务 / Step 3 未跑完 / 目录已被删）→ 404。**ADR-001 D7 边界**：JSON 中间产物默认不暴露，本次按 D7 预留的「新开子路由」方式实施，**只开 `reverse_matches.json` 这一个例外**，其余 6 类中间产物仍不暴露（ADR-001 D7 节与「状态」节已加 2026-10-16 更新注记）。该改动需**重建后端镜像 / 覆盖前端产物**才生效。
 
+### Fixed
+
+- 修复 **反向追溯表文件改名（版本后缀 / 落盘清洗 / 编码降级）后任务直接失败的问题**：追溯表此前纯按 `filename_patterns` 定位（AMS 为精确字面名，FGMC/HSCU/RPDU 为关键词 glob），未命中即抛 `FileNotFoundError`（归 `INPUT_FILE`）→ 任务 FAILED——早前记录的「主名失败 → `trace_dir.glob("*.xlsx")` 排序兜底」在 profile 重构（Issue #63 / #74）后已不存在。现 `_discover_trace_files` 改分层定位：**文件名模式优先（行为不变）；未命中时按内容判型兜底**——表 1 = 任一 sheet 首个非空行同时含 ERD 与 ICD 列头关键词（复用既有 `_TABLE1_*_KEYWORDS`），表 2 = 前 50 行内含 `_HLR_` 高层需求编号（RPDU 桥接表与表 1 文件实测均不命中，不会被误认领，保证三表场景桥接表旁落正确）；命中打 `[trace] Table N located by content …` 日志；均识别不出保持原报错（不引入静默行为）。同名类两处小修：候选池 `.xlsx` 改为大小写不敏感收集（Linux 容器下 `.XLSX` 不再漏掉）；表 2 名称匹配优先避开已被表 1 认领的文件（一个文件名同时命中两套模式时让位另一候选；仅剩单文件时才沿用共享旧行为）。实测：4 个 profile 正常任务的索引摘要（HLR→Block 全量映射摘要 + 计数）与改前**一致（零回归）**；`backend/output/v4/` 现存 12 个降级命名任务目录**全部由失败恢复**，且 AMS / FGMC 的索引计数与同名正常任务完全相同（内容判型选出的文件与按名匹配等价）；新增单测 8 passed，全量回归与留档基线同集（214 = 206 + 8）。该改动需**重建后端镜像**才生效。
+
 ## [Unreleased] - 2026-10-15
 
 ### Fixed

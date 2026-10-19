@@ -2292,3 +2292,73 @@ for p in ams fgmc hscu rpdu; do python backend/output/gen_parse_golden.py --prof
 2. 观察（既有，未在本范围）：`LBL_X_Status` 形态的引用经 `_LBL_TOKEN` 会截成 `X_S` 而非 `X`（该正则只剥 `_SSM` 后缀）——当前样例中该形态总与普通形态（`LBL_X`）同现故无影响；若出现「只引用 `LBL_X_Status`」的正文，别名仍会缺失，后续按需评估。
 3. 原理栏扫描是「宁多勿漏」方向：若真实文档的原理栏在解释性文字中提及无关的词典内信号名，会为该需求多注入别名（扩大候选，由后续裁判环节收敛）。当前两个样例均无此形态。
 4. Issue 编号待用户回填。
+
+### BUG-20261016-001：反向追溯表按文件名写死定位，改名（含落盘清洗 / 编码降级）后任务直接失败
+
+#### 状态
+
+fixed（代码已改；零回归 + 12 个真实降级目录恢复 + 单测 / 全量回归验证通过；**改动未提交、镜像未重建**，服务器上尚未生效）
+
+#### 发现日期
+
+2026-10-16（用户提出「反向中各控制器追溯表输入现在是否按名称写死？追溯表名称有区别时无法正常使用，需更智能适配」当日完成定位与实施）
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向。Issue 编号待用户回填。
+
+#### 问题现象
+
+与 profile 预期不符的追溯表文件名（版本后缀、落盘清洗把全角括号/空格变 `_`、编码降级成下划线残骸）会导致反向任务直接 FAILED（「输入文件缺失」）。`backend/output/v4/` 中现存 12 个此类降级命名目录，例如 FGMC `37a71900`（文件 `______ICD_______FGMC_____.xlsx` / `___________________(____2____).xlsx`）与 AMS `0af61c2a`（`单模块需求矩阵分析_设备2软件高层_-裁剪.xlsx`）。
+
+#### 复现方式
+
+1. 对上述真实目录跑 `build_trace_index(dir, profile.traceability, profile=profile)`：FGMC → `FileNotFoundError: Cannot locate Table 1 (patterns ('*追溯*.xlsx', '*接口基线*.xlsx'))`；AMS → `Cannot locate Table 2 (patterns ('单模块需求矩阵分析（设备2软件高层）-裁剪.xlsx',))`。
+2. 或最小重放：任一 profile 任务上传追溯表后，把 `<job_dir>/input/traceability/` 内落盘文件改名再续跑，Step 3 同样抛错。
+
+#### 影响范围
+
+反向追溯表预筛选入口（`trace_parser._discover_trace_files`，唯一调用方 `build_trace_index` ← `pipeline._match_reverse_with_trace`）。凡上传的追溯表文件名未命中 profile 模式（含部署环境字符清洗、不同批次命名、全角/半角差异）即整任务失败。严重度依命名习惯：AMS 模式为精确字面名最脆，FGMC / HSCU / RPDU 为关键词 glob 次之。
+
+#### 原因分析
+
+（已定位）表 1 / 表 2 的区分纯靠文件名模式，内容不参与识别；模式未命中即抛 `FileNotFoundError`（归类 `INPUT_FILE`）。老代码曾有的「主名失败 → `trace_dir.glob('*.xlsx')` 排序兜底」（CHANGELOG 有记录）在 Issue #63 / #74 profile 重构后消失，属回归。附带两处同名类缺陷：候选池 `glob("*.xlsx")` 在 Linux 容器下大小写敏感（`.XLSX` 直接被漏掉）；一个文件名同时命中两套模式时会被两张表同时读、另一候选反被忽略。
+
+#### 修复方案
+
+`_discover_trace_files` 改分层定位（不加配置、不动 profile、不改选 sheet 逻辑）：
+
+1. **文件名模式优先**（原路径逐字保留）；
+2. 未命中时**按内容判型兜底**：表 1 = 任一 sheet 首个非空行同时含 ERD 与 ICD 列头关键词（复用既有 `_TABLE1_ERD_KEYWORDS` / `_TABLE1_ICD_KEYWORDS`）；表 2 = 前 50 行 × 12 列内含 `_HLR_` 高层需求编号。识别成功打 `[trace] Table N located by content …`；均识别不出保持原 `FileNotFoundError`（不引入静默行为）。判别矩阵预演（4 控制器 × 正常/降级共 13 文件 + RPDU 桥接表）全部正确：T1 文件仅命中 probe_t1、T2 文件仅命中 probe_t2、桥接表（ERD↔ERD）两者均不命中；
+3. 小修：`.xlsx` 大小写不敏感入池；表 2 名称匹配优先避开已被表 1 认领的文件（仅剩单文件时回退共享——保持旧「单文件同时承载两表」能力）。
+
+#### 修改文件
+
+1. `backend/app/v4/traceability/trace_parser.py`（新增 `_HLR_ID_MARKER` / `_PROBE_DATA_ROWS` / `_PROBE_SCAN_COLS` 常量、`_probe_table1_like` / `_probe_table2_like` / `_locate_missing_table_by_content` 函数，重写 `_discover_trace_files` 前半段）——**当前未提交**
+2. `backend/tests/test_trace_discovery_fallback.py`（新增 8 用例；本地文件不入库）
+
+未改：任何 profile `config.yaml`、`_select_sheet`、`_read_table*` 读取逻辑、`coverage.py`、正向流程。
+
+#### 验证方式
+
+```bash
+cd backend
+python -m pytest tests/test_trace_discovery_fallback.py -q
+python -m pytest tests/ -q --continue-on-collection-errors
+# 真实数据：4 个正常目录索引摘要 digest 对照（改前/改后一致）+ 12 个降级目录 build_trace_index 复跑
+```
+
+#### 验证结果
+
+**已通过（本机，2026-10-16）**：
+
+1. 零回归：ams / fgmc / hscu / rpdu 各一正常任务的索引摘要（HLR→Block 全量 sha1 + 计数）与改前**逐项一致**（ams 265/10/364/296、fgmc 9/6/160/550、hscu 15/9/6/30、rpdu 673/1392/53669/601835）。
+2. 降级恢复：12 个降级命名真实目录**全部由 FileNotFoundError 变为成功**，且 AMS / FGMC 索引计数与同名正常任务完全相同（内容判型选出的文件与按名匹配等价）。
+3. 新增单测 **8 passed**；全量回归 **214 passed / 6 failed / 1 skipped / 10 errors**——6 失败与 10 收集错误与留档基线同集（非本次引入），214 = 206 基线 + 新增 8。
+
+#### 遗留问题
+
+1. **改动未提交**；需**重建后端镜像**才在服务器生效（无新端口 / 无新环境变量 / 无权限变化）。
+2. 内容判型对表 2 依赖 `_HLR_` 编号形态；出现无该形态的编号体系时兜底退回原报错（宁失败不误配——桥接表不被误认领正依赖此特性）。
+3. sheet 改名适配（`_select_sheet` 关键词未命中按序号静默回退）未在本次范围内，后续按需评估。
+4. Issue 编号待用户回填。

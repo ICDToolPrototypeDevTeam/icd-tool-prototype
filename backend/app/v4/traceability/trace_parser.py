@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,6 +69,16 @@ _TABLE2_ERD_KEYWORDS = ("erd编号", "erd", "需求编号", "er需求编号")
 _TABLE2_HLR_KEYWORDS = ("hlr", "下级需求", "高层需求", "软件高层需求")
 _TABLE2_MODULE_KEYWORDS = ("模块名称", "模块", "module")
 _EMPTY_CELL_SENTINELS = ("none", "#n/a", "")
+
+# Content-based identification used by ``_discover_trace_files`` when the
+# profile's filename patterns miss (renamed files). Table 2's lower-demand
+# column stores SWHLR requirement IDs, which in every controller sample look
+# like ``FSF21000101_HLR_1237`` / ``FGMC_OFP_CSCI_HLR_005906`` — the
+# ``_HLR_`` marker. Table 1 files and RPDU's bridge table (ERD↔ERD) never
+# carry it near their top rows.
+_HLR_ID_MARKER = "_hlr_"
+_PROBE_DATA_ROWS = 50   # rows scanned per sheet by the Table 2 probe
+_PROBE_SCAN_COLS = 12   # columns scanned per row by the Table 2 probe
 
 
 @dataclass
@@ -447,10 +458,109 @@ def _read_table2_header_adaptive(
     return best_result
 
 
+def _probe_table1_like(path: Path) -> bool:
+    """Content probe: does the workbook look like Table 1 (ERD → ICD)?
+
+    True when any sheet's first non-empty row (same scan window as
+    ``_locate_header_row``) carries both an ERD-ish and an ICD-ish column
+    header. Only used by ``_discover_trace_files`` as a fallback when the
+    filename patterns miss.
+    """
+    import openpyxl
+
+    try:
+        wb = openpyxl.load_workbook(
+            ensure_standard_path(path), data_only=True, read_only=True,
+        )
+    except Exception:
+        return False
+    try:
+        for name in wb.sheetnames:
+            located = _locate_header_row(wb[name])
+            if located is None:
+                continue
+            headers_lower, _hdr_row = located
+            if (
+                _find_col_by_keywords(headers_lower, _TABLE1_ERD_KEYWORDS) is not None
+                and _find_col_by_keywords(headers_lower, _TABLE1_ICD_KEYWORDS) is not None
+            ):
+                return True
+        return False
+    except Exception:
+        return False
+    finally:
+        wb.close()
+
+
+def _probe_table2_like(path: Path) -> bool:
+    """Content probe: does the workbook look like Table 2 (ERD ↔ HLR)?
+
+    True when any sheet contains a cell with the ``_HLR_`` marker within
+    the first ``_PROBE_DATA_ROWS`` rows — the SWHLR requirement-ID
+    convention shared by every controller's matrix export. Only used by
+    ``_discover_trace_files`` as a fallback when the filename patterns miss.
+    """
+    import openpyxl
+
+    try:
+        wb = openpyxl.load_workbook(
+            ensure_standard_path(path), data_only=True, read_only=True,
+        )
+    except Exception:
+        return False
+    try:
+        for name in wb.sheetnames:
+            ws = wb[name]
+            for row in ws.iter_rows(
+                min_row=1, max_row=_PROBE_DATA_ROWS,
+                max_col=_PROBE_SCAN_COLS, values_only=True,
+            ):
+                for cell in row:
+                    if cell is not None and _HLR_ID_MARKER in str(cell).lower():
+                        return True
+        return False
+    except Exception:
+        return False
+    finally:
+        wb.close()
+
+
+def _locate_missing_table_by_content(
+    candidates: list[Path],
+    probe: Callable[[Path], bool],
+    other_probe: Callable[[Path], bool],
+) -> Path | None:
+    """Return the first candidate that passes ``probe``.
+
+    A candidate that also passes ``other_probe`` is ambiguous (looks like
+    both tables, e.g. one workbook carrying both) and is kept only as a last
+    resort, so explicit-only-looking files win.
+    """
+    ambiguous: Path | None = None
+    for p in candidates:
+        if not probe(p):
+            continue
+        if other_probe(p):
+            if ambiguous is None:
+                ambiguous = p
+            continue
+        return p
+    return ambiguous
+
+
 def _discover_trace_files(
     trace_dir: Path, cfg: TraceabilityConfig,
 ) -> tuple[Path, Path, Path | None]:
-    """Locate the two traceability Excel files via glob patterns (RPDU).
+    """Locate the two traceability Excel files.
+
+    Layered strategy:
+
+      1. Filename patterns from the profile config (primary; unchanged).
+      2. Content-based fallback when a pattern misses — renamed uploads
+         (revision suffixes, encoding-degraded names, sanitized spaces)
+         still work: Table 1 is the file whose first header row carries
+         ERD + ICD column keywords, Table 2 the file whose first rows
+         contain ``_HLR_`` requirement IDs.
 
     Returns (table1, table2, bridge_or_None). The bridge file is the
     optional 3rd Excel used by ``build_trace_index`` when the ERD ID
@@ -458,17 +568,64 @@ def _discover_trace_files(
     EPDSSRS_*) — discovered by filename heuristics inherited from the
     original RPDU ``适配RPDU需求格式代码`` package.
     """
-    pool = sorted(p for p in trace_dir.glob("*.xlsx") if p.is_file())
+    # *.xlsx 大小写不敏感收集：容器（Linux）下 Path.glob 大小写敏感，
+    # 上传的 .XLSX 会被直接漏掉。
+    pool = sorted(
+        p for p in trace_dir.glob("*")
+        if p.is_file() and p.suffix.lower() == ".xlsx"
+    )
 
-    def _find_one(patterns: tuple[str, ...]) -> Path | None:
+    def _find_one(
+        patterns: tuple[str, ...], exclude: set[Path] | None = None,
+    ) -> Path | None:
+        exclude = exclude or set()
         for pat in patterns:
             for p in pool:
-                if p.match(pat):
+                if p not in exclude and p.match(pat):
                     return p
         return None
 
     t1 = _find_one(cfg.table1.filename_patterns)
-    t2 = _find_one(cfg.table2.filename_patterns)
+    # Prefer a *different* file for Table 2: a single name can hit both
+    # pattern sets (e.g. "需求矩阵追溯表.xlsx"). Only fall back to sharing
+    # Table 1's file when nothing else matches at all.
+    t2 = _find_one(cfg.table2.filename_patterns, exclude={t1} if t1 else set())
+    if t2 is None:
+        t2 = _find_one(cfg.table2.filename_patterns)
+
+    # Content-based fallback (renamed files)。
+    if t1 is None or t2 is None:
+        taken = {p for p in (t1, t2) if p is not None}
+        if t1 is None:
+            rest = [p for p in pool if p not in taken]
+            t1 = _locate_missing_table_by_content(
+                rest, _probe_table1_like, _probe_table2_like,
+            )
+            if t1 is None and t2 is not None:
+                # 单工作簿同时承载两表：允许与 Table 2 同一文件（与文件名路径一致）
+                t1 = _locate_missing_table_by_content(
+                    [t2], _probe_table1_like, _probe_table2_like,
+                )
+            if t1 is not None:
+                print(
+                    f"  [trace] Table 1 located by content "
+                    f"(filename patterns missed): {t1.name}"
+                )
+                taken.add(t1)
+        if t2 is None:
+            rest = [p for p in pool if p not in taken]
+            t2 = _locate_missing_table_by_content(
+                rest, _probe_table2_like, _probe_table1_like,
+            )
+            if t2 is None and t1 is not None:
+                t2 = _locate_missing_table_by_content(
+                    [t1], _probe_table2_like, _probe_table1_like,
+                )
+            if t2 is not None:
+                print(
+                    f"  [trace] Table 2 located by content "
+                    f"(filename patterns missed): {t2.name}"
+                )
 
     if t1 is None:
         raise FileNotFoundError(
