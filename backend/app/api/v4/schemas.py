@@ -46,6 +46,17 @@ class V4ReuseStats(BaseModel):
     rerun: int = 0
 
 
+class V4TokenUsage(BaseModel):
+    """任务累计 token 用量（只对外暴露总量）。
+
+    ``None``（响应中该字段为 null）= 该任务没有统计口径（旧任务 / CLI）；
+    ``{"total_tokens": 0}`` = 已统计但确实为 0（如 MOCK 模式）。前端据此
+    区分「显示为空」与「显示 0」。
+    """
+
+    total_tokens: int = 0
+
+
 class V4JobError(BaseModel):
     """结构化失败信息。
 
@@ -102,6 +113,8 @@ class V4JobStatusResponse(BaseModel):
     mock: bool = False
     # 已请求终止、等待管线在检查点停止
     cancel_requested: bool = False
+    # 累计 token 用量；旧任务 / 尚未开始统计时为 None
+    token_usage: Optional[V4TokenUsage] = None
     # 结构化失败信息；成功 / 运行中为 None
     error: Optional[V4JobError] = None
     created_at: str
@@ -162,6 +175,8 @@ class V4JobResultResponse(BaseModel):
     outputs: V4JobOutputs
     mock_models: list[str]
     errors: list[str]
+    # 累计 token 用量；旧任务为 None
+    token_usage: Optional[V4TokenUsage] = None
 
 
 # ============================================================================
@@ -202,6 +217,8 @@ class V4ForwardJobResultResponse(BaseModel):
     summary: V4ForwardJobResultSummary
     outputs: V4ForwardJobOutputs
     errors: list[str]
+    # 累计 token 用量；旧任务为 None
+    token_usage: Optional[V4TokenUsage] = None
 
 
 # ============================================================================
@@ -251,6 +268,8 @@ class V4HistoryItem(BaseModel):
     has_reverse_matches: bool = False
     # 本次运行是否 MOCK（含义同状态接口：模拟数据不可用于验收）
     mock: bool = False
+    # 累计 token 用量；旧 manifest 无该字段时为 None
+    token_usage: Optional[V4TokenUsage] = None
 
 
 class V4HistoryDeleteRequest(BaseModel):

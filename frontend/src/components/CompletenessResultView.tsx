@@ -5,11 +5,14 @@ import {
 } from 'lucide-react'
 import { getForwardDownloadUrlV4, getForwardPreviewHtmlV4 } from '../api'
 import type { V4ForwardJobResultResponse, V4ForwardDownloadKind } from '../types'
+import TokenUsageCard from './TokenUsageCard'
 
 interface Props {
   data: V4ForwardJobResultResponse
   jobId: string
   onNewTask: () => void
+  /** MOCK 模式下 token 为 0 是正确值，用标签说明 */
+  mock?: boolean
 }
 
 // 图标用 lucide-react 内联 SVG：服务器镜像里只有 9 种西文字体，emoji 会渲染成方框
@@ -101,7 +104,7 @@ function PreviewCard({
   )
 }
 
-export default function CompletenessResultView({ data, jobId, onNewTask }: Props) {
+export default function CompletenessResultView({ data, jobId, onNewTask, mock }: Props) {
   const s = data.summary
   const covered = s.covered_direct + s.covered_aggregate
   const pending = s.possible + s.parent_referenced
@@ -126,6 +129,8 @@ export default function CompletenessResultView({ data, jobId, onNewTask }: Props
           AI 复核对象：<span className="result-summary__highlight">{s.ai_reviewed.toLocaleString()}</span>
         </span>
       </div>
+
+      <TokenUsageCard totalTokens={data.token_usage?.total_tokens ?? null} mock={mock} />
 
       {/* Stat cards row */}
       <div className="stat-cards">

@@ -46,6 +46,7 @@ from app.api.v4.schemas import (
     V4HistoryDeleteResult,
     V4HistoryItem,
     V4HistoryOutputs,
+    V4TokenUsage,
 )
 from app.job_log import LOG_FILE_NAME, job_log_store
 from app.job_manager import MANIFEST_NAME, Job, JobStatus, job_manager
@@ -123,6 +124,24 @@ def _parse_iso(value: object) -> Optional[datetime]:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+def _parse_token_usage(value: object) -> Optional[V4TokenUsage]:
+    """解析 manifest 的 ``token_usage``。
+
+    兼容 ``{"total_tokens": N}`` 与裸数字；缺失 / 非法 → None（旧任务不显示），
+    ``0`` 是有效值（MOCK 任务）。负数按 0 处理。
+    """
+    if isinstance(value, dict):
+        value = value.get('total_tokens')
+    elif isinstance(value, bool):
+        return None
+    if value is None:
+        return None
+    try:
+        return V4TokenUsage(total_tokens=max(0, int(value)))
+    except (TypeError, ValueError):
+        return None
+
+
 def _mtime(path: Path) -> datetime:
     try:
         return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
@@ -187,6 +206,7 @@ def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime]:
             has_log=has_log,
             has_reverse_matches=has_reverse_matches,
             mock=bool(data.get('mock', False)),
+            token_usage=_parse_token_usage(data.get('token_usage')),
         ),
         created,
     )

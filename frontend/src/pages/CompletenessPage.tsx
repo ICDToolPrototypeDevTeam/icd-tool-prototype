@@ -201,6 +201,8 @@ export default function CompletenessPage() {
           caseTotal={job.caseTotal}
           resumed={job.resumed}
           reuse={job.reuse}
+          tokenUsage={job.tokenUsage}
+          mock={job.mock}
           resumedHint="中断恢复执行 · 已完成的判定结果将直接复用，不重复调用模型"
           onCancel={job.jobId !== null ? job.cancel : undefined}
           cancelRequested={job.cancelRequested}
@@ -222,6 +224,7 @@ export default function CompletenessPage() {
             data={job.resultData}
             jobId={job.resultData.job_id}
             onNewTask={handleReset}
+            mock={job.mock}
           />
         </>
       )}

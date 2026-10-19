@@ -192,6 +192,12 @@ def generate_report(agg: dict, summary: dict, output_path: Path) -> bool:
     title = doc.add_heading("EoICD 至 HLR 正向一致性多模型共识分析报告", level=1)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     doc.add_paragraph(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # 任务累计 token（含续跑前的 base）；旧任务 / CLI 未提供时不写该行
+    token_usage = summary.get("token_usage")
+    if isinstance(token_usage, dict):
+        token_usage = token_usage.get("total_tokens")
+    if isinstance(token_usage, (int, float)) and not isinstance(token_usage, bool):
+        doc.add_paragraph(f"总 Token 用量: {max(0, int(token_usage)):,}")
 
     # ── 一、分析总结 ──
     doc.add_heading("一、一致性分析总结", level=2)

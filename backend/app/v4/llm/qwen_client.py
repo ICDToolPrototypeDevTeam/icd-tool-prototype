@@ -6,6 +6,8 @@ from __future__ import annotations
 import time
 import requests
 
+from app.token_usage import record_token_usage
+
 
 class QwenClient:
     """Calls Qwen (DashScope) API with timeout, basic retry, and JSON extraction."""
@@ -64,6 +66,8 @@ class QwenClient:
                     )
                     resp.raise_for_status()
                     body = resp.json()
+                    # 先计数再取 choices：截断重试的每一次响应都算真实消耗
+                    record_token_usage(body.get("usage"))
                     content = body["choices"][0]["message"]["content"]
                     usage = body.get("usage", {})
                     finish_reason = body["choices"][0].get("finish_reason", "")

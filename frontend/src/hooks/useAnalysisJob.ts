@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError, cancelJobV4, forceCancelJobV4, getJobStatusV4 } from '../api'
 import type { PageState, V4JobError, V4JobStatus } from '../types'
 
-const POLL_INTERVAL_MS = 10000
+const POLL_INTERVAL_MS = 5000
 
 /**
  * 点了「终止」多久之后放出「强制终止」。
@@ -44,6 +44,8 @@ export interface AnalysisJobState<T> {
   cancelRequested: boolean
   /** 已请求终止且迟迟没停住 —— 此时才允许「强制终止」 */
   forceCancelAvailable: boolean
+  /** 累计 token 用量；null = 该任务未统计（旧任务）或尚未拿到第一个值 */
+  tokenUsage: number | null
   start: (
     submit: () => Promise<{ job_id: string }>,
     fetchResult: (jobId: string) => Promise<T>,
@@ -75,6 +77,7 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
   const [jobStatus, setJobStatus] = useState<V4JobStatus | null>(null)
   const [cancelRequested, setCancelRequested] = useState(false)
   const [forceCancelAvailable, setForceCancelAvailable] = useState(false)
+  const [tokenUsage, setTokenUsage] = useState<number | null>(null)
 
   const timerRef = useRef<number | null>(null)
   const forceTimerRef = useRef<number | null>(null)
@@ -126,6 +129,7 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
     setJobStatus(null)
     setCancelRequested(false)
     setForceCancelAvailable(false)
+    setTokenUsage(null)
     forceSentRef.current = false
   }
 
@@ -245,6 +249,8 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
         // 否则「终止中但停不下来」的任务在前端没有任何出口
         if (requested) scheduleForceCancel()
         setReuse(status.reuse ?? null)
+        // 只有拿到值才覆盖：旧任务（null）不能把运行中已显示的数字抹掉
+        if (status.token_usage != null) setTokenUsage(status.token_usage.total_tokens)
 
         if (status.status === 'completed') {
           try {
@@ -328,6 +334,7 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
     jobStatus,
     cancelRequested,
     forceCancelAvailable,
+    tokenUsage,
     start,
     attach,
     cancel,

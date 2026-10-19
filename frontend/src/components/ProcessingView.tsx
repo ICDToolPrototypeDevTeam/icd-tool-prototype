@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { Coins } from 'lucide-react'
 
 interface Props {
   progress?: string
@@ -21,6 +22,10 @@ interface Props {
   onForceCancel?: () => void
   /** 已请求终止但迟迟没停住 —— 此时才允许「强制终止」 */
   forceCancelAvailable?: boolean
+  /** 累计 token 用量；null/undefined 不渲染（旧任务未统计） */
+  tokenUsage?: number | null
+  /** MOCK 模式下 token 数为 0 是正确值，用标签说明避免误读 */
+  mock?: boolean
   /** 日志面板等附加内容 */
   children?: ReactNode
 }
@@ -56,6 +61,8 @@ export default function ProcessingView({
   cancelRequested,
   onForceCancel,
   forceCancelAvailable,
+  tokenUsage,
+  mock,
   children,
 }: Props) {
   const stageLabel = stage ? STAGE_LABELS[stage] || stage : null
@@ -103,6 +110,14 @@ export default function ProcessingView({
       {resumed && reuse && reuse.reused > 0 && (
         <div className="processing-reuse">
           已复用中断前结果 {reuse.reused} 次 · 接续调用模型 {reuse.rerun} 次
+        </div>
+      )}
+      {tokenUsage != null && (
+        <div className="processing-tokens">
+          <Coins size={15} className="processing-tokens__icon" />
+          <span className="processing-tokens__label">已消耗 Token</span>
+          <span className="processing-tokens__value">{tokenUsage.toLocaleString()}</span>
+          {mock && <span className="processing-tokens__mock">MOCK</span>}
         </div>
       )}
       {onCancel && (

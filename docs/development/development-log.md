@@ -3946,3 +3946,29 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   3. 次级相关问题未动（超出本次范围）：sheet 改名适配（`_select_sheet` 关键词未命中时按序号静默回退）；`coverage.py` 上传 `accept` 允许 `.xls` 而后端仅收 `.xlsx` 的不一致；正向流程另有独立追溯识别（`backend/forward/`）。
   4. Issue 编号待用户回填。
 - **下一步建议**：1) 用户提交本分支并重建镜像；2) 服务器实测：上传一张改名后的追溯表（如把 AMS 表 2 的 `（）` 改成半角 `()`）跑一条反向任务，日志应出现 `Table N located by content` 且任务正常完成；3) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）。
+
+## 2026-10-19 任务 token 总用量统计与展示（分支 issue-x-x，改动未提交）
+
+- **背景（用户提出）**：任务执行完看不出消耗了多少 token。要求：运行中在前端实时显示已消耗 token；完成后在完成页与报告中显示总 token 用量；设计美观简洁。
+- **已确认口径**：任务类型 = 正确性（反向）+ 完整性（正向）；报告 = 全部 DOCX（反向 3 份单模型 + 1 份共识 + 正向 1 份）；粒度 = 仅总量；续跑 = 累计整个任务（新任务从 0 开始）；旧任务无数据 = 不显示（不伪装成 0），MOCK 显示 0 并带标签；CLI 不绑定任务，报告不写该行。
+- **完成内容**：
+  1. **Job 与持久化**：`Job.total_tokens`（int）、`token_usage_tracked`（仅内存）、`_token_lock` / `_persist_lock`；`add_token_usage`（累加、终态/force/5 秒窗口落盘、不改 updated_at）、`set_token_usage`（正向对账用绝对赋值）；`_persist` 串行化并写 `token_usage.total_tokens`；`from_manifest` 容错恢复（dict/int 合法，缺失则视为未统计）；`relaunch_from_manifest` 明确不清零。
+  2. **反向采集**：新增 `app/token_usage.py`（三种 usage 形状解析 + 线程局部 Job 累加，统计异常绝不影响模型调用）；三个 LLM 客户端在每次 `resp.json()` 后记录（截断重试逐次计数，业务调用点零改动）；Step 6 生成报告前取一次快照，3 份单模型 + 1 份共识 DOCX 共用。
+  3. **正向采集（跨进程）**：`shared/utils.py` + 仲裁器线程安全累加并打印 `[tokens] delta=N`；两个入口脚本 `atexit` 写 `<judge_ws>/data/output/{identity_match,attribute_match}/token_usage.json`；`execution._pump` 只解析增量并加入父 Job；runner 启动 judge 前清理旧 sidecar、用 `--base-tokens` 汇总「续跑前 + 本轮」写入 `summary["token_usage"]` 与正向 DOCX；adapter 在清理工作区前对账 `base + max(实时增量, 汇总增量)` 并绝对赋值。
+  4. **API**：`V4TokenUsage` 加入状态、反向结果、正向结果、历史项（列表项不加）；状态接口仅在已跟踪或有值时返回，结果接口回退 `job.result.token_usage`；历史接口容错解析，缺失 → `null`、0 → 显示 0。
+  5. **前端**：状态轮询 10s → 5s；运行中显示「已消耗 Token」pill（MOCK 标签）；完成页新增 Token 用量卡片（两页均插入在统计卡片之前）；历史项追加 `· Token N`；新增 `TokenUsageCard.tsx` 与三组样式（含 640px 紧凑规则）。null 一律隐藏。
+- **修改文件**：`backend/app/job_manager.py`、`backend/app/v4/llm/{deepseek,qwen,minimax}_client.py`、`backend/app/api/v4/{schemas,runner,jobs,history}.py`、`backend/app/v4/pipeline.py`、`backend/app/v4/doc_generators/{word,consensus_word}_generator.py`、`backend/forward/EoICD-HLR正向匹配与属性比对_支持追溯/shared/utils.py`、同树 `identity_match/src/name_ai_matcher.py`、`attribute_match/src/attr_mismatch_ai_matcher.py`、`identity_match/run_identity_match.py`、`attribute_match/run_attribute_match.py`、`backend/forward/multi_judge协同/{multi_judge_arbitrator,multi_judge_report}.py`、`backend/forward/multi_judge_runner.py`、`backend/app/forward/{execution,artifacts,adapter}.py`；前端 `frontend/src/types.ts`、`frontend/src/hooks/useAnalysisJob.ts`、`frontend/src/components/{ProcessingView,CorrectnessResultView,CompletenessResultView,HistoryList}.tsx`、`frontend/src/pages/{CorrectnessPage,CompletenessPage}.tsx`、`frontend/src/index.css`。
+- **新增文件**：`backend/app/token_usage.py`、`frontend/src/components/TokenUsageCard.tsx`；本地测试（`backend/tests/` 已 gitignore、不入库）`tests/test_token_usage.py`、`tests/test_llm_usage.py`、`tests/test_token_docx.py`、`tests/test_forward_token_plumbing.py`。
+- **文档**：`docs/architecture/api.md`（四处 `token_usage` 字段与语义）、`docs/architecture/current-architecture.md`（模块表 / 目录树 / 新增 §12.6 两条链路）、`CHANGELOG.md`、`backend/forward/使用说明.md`（新增 §6.1 跨进程 token 契约）、本 log。
+- **验证方式与结果**：
+  1. 定向后端测试（token / llm usage / docx / 正向 plumbing / job API / history / forward execution / adapter / artifacts）→ **96 passed**；新增测试覆盖三种 usage 形状、并发累加、节流落盘与 manifest 恢复、截断重试不漏计、sidecar 汇总/清理/损坏容错、delta 标记只加增量、adapter 对账、DOCX 写入与 None 不写、历史 null-vs-0（**已验证**）。
+  2. `python forward/multi_judge_runner.py --selftest` → 通过（Windows GBK 控制台下需 `PYTHONIOENCODING=utf-8`，属环境限制；应用内子进程已强制 UTF-8）（**已验证**）。
+  3. `npm run build`（tsc + vite）→ 通过（**已验证**）。
+  4. 全量回归 `python -m pytest tests -q --continue-on-collection-errors` → **269 passed / 6 failed / 1 skipped / 10 collection errors**；6 项失败（cancel 相关 2 项、job orphan 2 项、parse 复用 1 项、job_cancel 守卫 1 项）与 10 个收集错误均为分支既有漂移，与 10-16 基线同集，非本次引入（**已验证**）。
+- **遗留问题**：
+  1. 尚未做手工 MOCK 端到端验收（运行中 pill、完成页卡片、5 份 DOCX、历史项、旧任务隐藏、375px 窄屏）——**尚未验证**；真实 API key 的数值单调性、续跑累计与报告/完成页一致性同样**尚未验证**。
+  2. 升级前已中断的正向任务，其 `<job_dir>/forward/` 副本不含新采集代码：续跑不报错，但 token 可能从 0 开始且报告无该行；本次不做「resume 时覆盖代码树」。
+  3. 反向报告取生成时点快照，迟到并发调用只体现在完成页/API；报告允许略小（明确口径，非缺陷）。
+  4. 改动未提交；需**重建后端镜像 / 覆盖前端产物**才在服务器生效（无新端口 / 无新环境变量 / 无新依赖）。
+  5. Issue 编号待用户回填。
+- **下一步建议**：1) 用户提交本分支并重建镜像 / 覆盖前端产物；2) 服务器实测：跑一条反向与一条正向任务，确认运行中数字递增、完成页/报告/历史一致；3) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）；4) 后续若恢复与「正向待集成」源树同步，必须保留 §6.1 的 delta 标记、sidecar 与 `--base-tokens`。

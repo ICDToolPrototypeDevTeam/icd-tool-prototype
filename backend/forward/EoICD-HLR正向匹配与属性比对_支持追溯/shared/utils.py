@@ -5,6 +5,7 @@ utils.py — 身份匹配阶段通用工具函数
 import json
 import os
 import re
+import threading
 
 # 名称相似度抽取英文/字母段的正则（兼容"中文+英文缩写"，如 BBSOV1 → BBSOV）
 _TOKEN_RE = re.compile(r"[A-Za-z]+")
@@ -79,6 +80,102 @@ def read_stream_with_stall_guard(
         return b"".join(chunks)
     finally:
         resp.close()
+
+
+# ------------------------------------------------------------------
+# 0.1 Token 用量采集（父子进程契约）
+# ------------------------------------------------------------------
+#
+# 正向 LLM 调用发生在独立子进程里，父进程拿不到内存对象。约定：
+#   * 每次成功响应后由本模块累加，并向 stdout 打印增量标记
+#       [tokens] delta=N
+#     （必须是**增量**：identity / attribute / 仲裁是不同进程，父进程只做加法）
+#   * 进程退出时把本进程累计值写到 ``<output_dir>/token_usage.json``
+#     的 sidecar，供 multi_judge_runner 生成报告时汇总。
+# 两个契约都不得随意改名：multi_judge_runner 按固定路径读取，父进程按固定
+# 正则解析；未来与「正向待集成/」同步时必须原样保留。
+
+_TOKEN_TOTAL = 0
+_TOKEN_LOCK = threading.Lock()
+
+
+def extract_total_tokens(usage):
+    """从 OpenAI 兼容的 usage 提取总 token；无效值返回 0。
+
+    优先 total_tokens；为 0/缺失时用 prompt+completion 或 input+output 求和。
+    """
+    if not isinstance(usage, dict):
+        return 0
+
+    def _int(value):
+        if value is None or isinstance(value, bool):
+            return 0
+        try:
+            number = int(float(value)) if isinstance(value, str) else int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return max(0, number)
+
+    total = _int(usage.get("total_tokens"))
+    if total > 0:
+        return total
+    for prompt_key, completion_key in (
+        ("prompt_tokens", "completion_tokens"),
+        ("input_tokens", "output_tokens"),
+    ):
+        if prompt_key in usage or completion_key in usage:
+            summed = _int(usage.get(prompt_key)) + _int(usage.get(completion_key))
+            if summed > 0:
+                return summed
+    return total
+
+
+def record_token_usage(usage):
+    """累加一次响应的 token 并打印增量标记；返回本次增量。
+
+    只对正增量打印标记：MOCK / 无 usage 的调用不刷屏；父进程仍可从任务
+    ``token_usage_tracked`` 得知「已启用统计」，显示 0 而不是空白。
+    本函数绝不抛异常（调用方多在宽泛的 ``except Exception`` 内）。
+    """
+    try:
+        delta = extract_total_tokens(usage)
+        if delta <= 0:
+            return 0
+        global _TOKEN_TOTAL
+        with _TOKEN_LOCK:
+            _TOKEN_TOTAL += delta
+        print(f"[tokens] delta={delta}", flush=True)
+        return delta
+    except Exception:  # noqa: BLE001 — 统计是旁路，绝不影响模型调用
+        return 0
+
+
+def get_token_total():
+    """返回本进程累计 token。"""
+    with _TOKEN_LOCK:
+        return _TOKEN_TOTAL
+
+
+def reset_token_usage():
+    """复位本进程累计值（单测 / 自测用）。"""
+    global _TOKEN_TOTAL
+    with _TOKEN_LOCK:
+        _TOKEN_TOTAL = 0
+
+
+def write_token_sidecar(path):
+    """把本进程累计 token 原子写到 sidecar；任何异常都静默。"""
+    try:
+        path = os.fspath(path)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"total_tokens": get_token_total()}, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 — 报告/汇总失败不得影响任务本身
+        pass
 
 
 # ------------------------------------------------------------------

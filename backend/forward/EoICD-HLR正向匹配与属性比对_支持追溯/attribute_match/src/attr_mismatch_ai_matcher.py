@@ -24,7 +24,7 @@ import os
 import time
 
 import requests
-from utils import read_stream_with_stall_guard
+from utils import read_stream_with_stall_guard, record_token_usage
 
 
 def get_api_config(ai_cfg: dict) -> dict:
@@ -189,7 +189,10 @@ def call_ai_api(prompt: str, api_cfg: dict) -> str:
                 min_bytes=api_cfg.get("stall_min_bytes", 512),
                 overall_seconds=api_cfg.get("overall_timeout_seconds", 900.0),
             )
-            return json.loads(body)["choices"][0]["message"]["content"]
+            data = json.loads(body)
+            # 先计数再取 content：解析成功即是一次真实计费调用
+            record_token_usage(data.get("usage"))
+            return data["choices"][0]["message"]["content"]
         except Exception as e:
             if attempt < api_cfg["retry"] - 1:
                 wait = 2 ** attempt

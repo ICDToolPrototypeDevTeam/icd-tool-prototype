@@ -1270,6 +1270,14 @@ def run_reverse_pipeline(
     print(f"  Summary: {report.summary}")
 
     # ── Word reports ──
+    # 取一次快照给全部 4 份报告共用：迟到的 drain future 可能在本行之后继续累加，
+    # 若每份报告各读一次，4 份文档的数字会互不一致。未启用统计（CLI）时传 None，
+    # 报告不写该行。
+    token_snapshot = (
+        max(0, int(getattr(job, "total_tokens", 0) or 0))
+        if getattr(job, "token_usage_tracked", False)
+        else None
+    )
     model_display = {"deepseek": "DeepSeek", "minimax": "MiniMax", "qwen": "Qwen"}
     for model in ("deepseek", "minimax", "qwen"):
         display = model_display[model]
@@ -1278,6 +1286,7 @@ def run_reverse_pipeline(
             report_path,
             output_dir / f"EoICD与SWHLR单模型差异分析报告_{display}.docx",
             model=model,
+            total_tokens=token_snapshot,
         )
 
     print("  → 多模型报告")
@@ -1285,6 +1294,7 @@ def run_reverse_pipeline(
         consensus_path,
         output_dir / "reverse_matches.json",
         output_dir / "EoICD与SWHLR多模型差异分析报告.docx",
+        total_tokens=token_snapshot,
     )
 
     print()

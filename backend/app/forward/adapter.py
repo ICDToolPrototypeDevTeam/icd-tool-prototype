@@ -133,9 +133,12 @@ def run_forward_job(job: Job, job_dir: Path, params: ForwardJobParams, *,
     config_path = write_config(cfg, job_dir / "forward_config.json")
 
     # —— 子进程跑多 judge（共享阶段1 + N judge 并行 + 聚合/仲裁/复查 + Word） ——
+    # 续跑：把本任务已累计的 token 作为 base 传给 runner，报告里写「整个任务」口径
+    base_tokens = max(0, int(getattr(job, "total_tokens", 0) or 0))
     run_multi_judge(
         job, forward_dir=fwd, config_path=config_path, output_dir=fwd / "output",
         judge_total=len(cfg.get("judges") or []),
+        base_tokens=base_tokens,
         judge_timeout=_env_int(_JUDGE_TIMEOUT_ENV, 3600),
         timeout=_total_timeout(), env_extra=child_env,
     )
@@ -147,6 +150,27 @@ def run_forward_job(job: Job, job_dir: Path, params: ForwardJobParams, *,
     mapped = artifacts.map_summary(artifacts.read_forward_summary(fwd), use_trace=use_trace)
     mapped.update(outputs)
     mapped["errors"] = []
+
+    # —— token 对账（必须在 cleanup_run_workspace 删掉 runs/ 之前） ——
+    # 实时值来自父进程累加的 [tokens] delta；汇总值来自 runner 的 sidecar。
+    # 两者任一路径可能缺失（输出被截断 / 进程被强杀没来得及写 sidecar），
+    # 因此取「本轮增量」的较大值，再叠加续跑前的 base；用绝对赋值而非累加，
+    # 避免把同一次消耗算两遍。
+    summary_usage = mapped.get("token_usage") or {}
+    summary_total = max(0, int(summary_usage.get("total_tokens", 0) or 0))
+    live_total = max(0, int(getattr(job, "total_tokens", 0) or 0))
+    live_delta = max(live_total - base_tokens, 0)
+    summary_run = max(summary_total - base_tokens, 0)
+    run_total = max(live_delta, summary_run)
+    final_total = base_tokens + run_total
+    mapped["token_usage"] = {"total_tokens": final_total}
+    set_token_usage = getattr(job, "set_token_usage", None)
+    if callable(set_token_usage):
+        set_token_usage(final_total, force_flush=True)
+    if live_delta and summary_run and abs(live_delta - summary_run) > max(
+            100, int(0.1 * max(live_delta, summary_run))):
+        print(f"  [tokens] 实时增量({live_delta})与汇总增量({summary_run})不一致，取较大值")
+
     artifacts.write_summary(job_dir / "output", mapped)
     job.result = mapped
     # —— 成功收尾：清 runs 工作区（交付物已复制、汇总已读；失败/中断任务不走这里，

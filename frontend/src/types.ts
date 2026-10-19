@@ -10,6 +10,11 @@ export interface FileItem {
 
 // ========== V4 Types ==========
 
+/** 任务累计 token 用量（只对外暴露总量）。null = 该任务未统计（旧任务）。 */
+export interface V4TokenUsage {
+  total_tokens: number
+}
+
 export type V4DownloadKind =
   | 'eoicd-xlsx'
   | 'consistency/deepseek'
@@ -78,6 +83,8 @@ export interface V4JobStatusResponse {
   mock: boolean
   /** 已请求终止，等待管线在检查点停止 */
   cancel_requested: boolean
+  /** 累计 token 用量；null = 该任务未统计（旧任务） */
+  token_usage?: V4TokenUsage | null
   /** 结构化失败信息；成功 / 运行中为 null */
   error: V4JobError | null
   created_at: string
@@ -116,6 +123,8 @@ export interface V4JobResultResponse {
   }
   mock_models: string[]
   errors: string[]
+  /** 累计 token 用量；null = 该任务未统计（旧任务） */
+  token_usage?: V4TokenUsage | null
 }
 
 // ========== V4 Forward (Completeness) Types ==========
@@ -146,6 +155,8 @@ export interface V4ForwardJobResultResponse {
     forward_docx: boolean
   }
   errors: string[]
+  /** 累计 token 用量；null = 该任务未统计（旧任务） */
+  token_usage?: V4TokenUsage | null
 }
 
 // ========== V4 History（服务器上保留的历史结果）==========
@@ -184,6 +195,8 @@ export interface V4HistoryItem {
   /** 目录里是否有反向匹配中间产物（output/reverse_matches.json）；只有反向任务可能有 */
   has_reverse_matches: boolean
   mock: boolean
+  /** 累计 token 用量；null = 旧任务（升级前未统计），前端不展示 */
+  token_usage?: V4TokenUsage | null
 }
 
 export interface V4HistoryDeleteResponse {

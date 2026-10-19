@@ -43,6 +43,8 @@ _RE_REPORT_START = re.compile(r"\[汇总\] 已写出")
 # 若放行会在产物收集阶段报出误导性的「交付物缺失」——改为提前失败并指明真实原因
 _RE_AGG_COUNT = re.compile(r"✅ 多 judge 聚合完成：(\d+)/(\d+)")
 _RE_NO_SIGNALS = re.compile(r"跳过：无聚合结果（0 个信号）")
+# token 增量标记（contract：runner 及其子进程每次 LLM 响应后打印，父进程只做加法）
+_RE_TOKENS = re.compile(r"^\[tokens\]\s+delta=(\d+)\s*$")
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -76,6 +78,16 @@ def _spawn_kwargs() -> dict:
     return {"start_new_session": True}
 
 
+def _safe_add_tokens(job, delta: int) -> None:
+    """把一条 ``[tokens] delta=N`` 累加进 Job；统计异常绝不影响日志读取。"""
+    try:
+        add = getattr(job, "add_token_usage", None)
+        if callable(add):
+            add(int(delta))
+    except Exception:  # noqa: BLE001 — 统计是旁路
+        pass
+
+
 def run_multi_judge(
     job: Job,
     *,
@@ -83,6 +95,7 @@ def run_multi_judge(
     config_path: Path,
     output_dir: Path,
     judge_total: int,
+    base_tokens: int = 0,
     judge_timeout: int = 3600,
     timeout: Optional[float] = None,
     env_extra: Optional[Mapping[str, str]] = None,
@@ -96,7 +109,8 @@ def run_multi_judge(
     """
     cmd = [sys.executable, str(forward_dir / "multi_judge_runner.py"),
            "--config", str(config_path), "--output", str(output_dir),
-           "--judge-timeout", str(int(judge_timeout))]
+           "--judge-timeout", str(int(judge_timeout)),
+           "--base-tokens", str(max(0, int(base_tokens or 0)))]
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
     # 必须无缓冲：进度标记都是 runner 自身 print 的，块缓冲会把标记行压到进程退出才
@@ -130,6 +144,11 @@ def run_multi_judge(
                     if not line.strip():
                         continue
                     print(line)
+                    mt = _RE_TOKENS.match(line.strip())
+                    if mt:
+                        # 只认增量标记；累计值不参与加法，避免重复计数
+                        _safe_add_tokens(job, int(mt.group(1)))
+                        continue
                     if _RE_STAGE1.search(line):
                         job.set_progress(stage="parse", stage_index=1, stage_total=4,
                                          message="Step 1/4: 解析输入文件（阶段1 共享）")

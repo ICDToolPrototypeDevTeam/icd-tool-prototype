@@ -115,6 +115,7 @@ GET /api/v4/jobs/{job_id}
   "mock_models": ["minimax", "qwen"],
   "mock": false,
   "cancel_requested": false,
+  "token_usage": { "total_tokens": 123456 },
   "error": null,
   "created_at": "ISO-8601",
   "updated_at": "ISO-8601"
@@ -128,6 +129,14 @@ GET /api/v4/jobs/{job_id}
 `interrupted` / `abandoned` 为任务中断恢复相关状态，见第 13 节。
 
 `mock` 表示本次运行是否按 MOCK 模式执行（结果页据此提示「模拟数据不可用于验收」）；`cancel_requested` 表示已请求终止、正等待管线在检查点停止，前端据此把终止按钮显示为「正在终止…」。
+
+`token_usage` 是任务**累计**消耗的模型 token 总量（只暴露总量，不拆输入/输出、不拆模型、不提供调用次数）。口径如下：
+
+- 仅 API 任务统计：新任务从 0 开始；续跑（`resume`）在原值上继续累加，不因重跑步骤而清零。MOCK 任务的 `0` 是**有效值**（未产生真实调用），前端用 MOCK 标签说明。
+- **旧任务**（本功能上线前创建、manifest 中没有该字段）返回 `null`：前端不展示、DOCX 不写该行 —— 不把未统计伪装成 0。
+- 运行中读内存实时值；落盘按 5 秒节流，进入终态时强制落盘。完成页/结果接口读**实时值**，可能比 DOCX 报告里的数字略大（报告取生成时点的一次性快照，之后迟到的并发调用不计入报告）。
+- 反向与正向口径一致；正向跨 judge 子进程的消耗经增量标记与 sidecar 汇总后对账，见 `docs/architecture/current-architecture.md`。
+- CLI 路径不绑定 `Job`，不统计、返回体不适用。
 
 `canceled` 表示运行中的任务被用户主动终止（`POST /api/v4/jobs/{job_id}/cancel`，见第 2 节）；它与 `abandoned` 语义不同：`abandoned` 指任务被中断 / 被终止后由用户放弃，是**终态**，`canceled` 指**仍在运行**的任务被终止，**不是终态** —— 被终止的任务可 `resume` 续跑（按参数快照重跑，续跑前复位取消标志）或 `abandon` 收尾。两者都不删除任何文件；终止是协作式的，`status` 会保持 `running` / `pending` 直至管线在检查点停止，接口不返回虚构的中间状态。
 
@@ -199,9 +208,12 @@ GET /api/v4/jobs/{job_id}/result
     "total_case_timeouts": 0,
     "review_star_capped_count": 0
   },
+  "token_usage": { "total_tokens": 123456 },
   "errors": []
 }
 ```
+
+`token_usage` 口径同状态接口（累计总量；旧任务为 `null`；MOCK 的 0 为有效值）。
 
 `outputs.*` 5 个布尔为 false 时表示对应 docx/xlsx 未生成（pipeline 中途失败、文件被 GC 等）。
 
@@ -357,9 +369,12 @@ GET /api/v4/jobs/{job_id}/result
     "forward_xlsx": true,
     "forward_docx": true
   },
+  "token_usage": { "total_tokens": 123456 },
   "errors": []
 }
 ```
+
+`token_usage` 口径同状态接口（累计总量；旧任务为 `null`；MOCK 的 0 为有效值）。正向值由各 judge 的 sidecar 与父进程实时增量对账得出（取本轮较大者），再叠加续跑前的历史总量。
 
 字段口径（Issue #119 新正向管线）：
 
@@ -561,7 +576,8 @@ GET /api/v4/history
     "size_bytes": 12345678,
     "has_log": true,
     "has_reverse_matches": true,
-    "mock": false
+    "mock": false,
+    "token_usage": { "total_tokens": 123456 }
   }
 ]
 ```
@@ -572,6 +588,7 @@ GET /api/v4/history
 - `has_reverse_matches` 表示目录里有没有反向匹配中间产物（`output/reverse_matches.json`，Step 3 输出），与 `has_log` 同理**不属于** `outputs` 七类词汇表。只有反向任务会写这个文件，正向任务恒为 `false`；前端据此在该条目上渲染「匹配中间产物」查看链接（14.4）。
 - `size_bytes` 为该任务目录占用的字节数（**含 `input/` 里用户上传的原始文件**与全部中间产物），供删除前告知释放空间。
 - `mock` 含义同状态接口：模拟数据不可用于验收。
+- `token_usage` 读 manifest 的 `token_usage` 字段，口径同状态接口：累计总量；**旧任务无该键 → `null`**（前端不显示），新任务的 `0`（如 MOCK）照常显示。
 - 该接口不做鉴权（与其它接口一致），只读磁盘，不改变任何状态。
 
 ### 14.2 删除历史结果（硬删除）

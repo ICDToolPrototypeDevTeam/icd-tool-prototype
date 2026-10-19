@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Optional
 
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor
@@ -96,6 +97,7 @@ def generate_consistency_report(
     reverse_report_path: Path,
     output_path: Path,
     model: str = "deepseek",
+    total_tokens: Optional[int] = None,
 ) -> None:
     """Generate single-model consistency analysis Word report.
 
@@ -106,6 +108,7 @@ def generate_consistency_report(
         reverse_report_path: Path to reverse_report.json
         output_path: Where to write the .docx file
         model: Which model's results to extract ("deepseek", "minimax", "qwen")
+        total_tokens: 任务累计 token 总量；None 表示未统计（如 CLI），不写该行
     """
     data = json.loads(reverse_report_path.read_text(encoding="utf-8"))
     summary = data.get("summary", {})
@@ -171,6 +174,8 @@ def generate_consistency_report(
         f"生成时间: {data.get('generated_at', 'N/A')[:19]}\n"
         f"裁判模型: {model_display} (单模型)"
     )
+    if total_tokens is not None:
+        doc.add_paragraph(f"总 Token 用量: {total_tokens:,}")
 
     # ═══════════════════════════════════════════
     # Section 1: 判定结果概览表
