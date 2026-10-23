@@ -2443,3 +2443,90 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(p)))
 1. 改动未提交；需重建后端镜像才在服务器生效。
 2. 尚未执行真实端到端任务复验（MOCK E2E / 真实模型 E2E）。
 3. Issue 编号待用户回填。
+
+## BUG-20261023-001：表格式 SWHLR 的 AI LABEL 未参与显式路径路由
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-10-23
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。Issue 编号待用户回填。范围仅限反向匹配。
+
+#### 问题现象
+
+需求 `FSF21000101_HLR_4720` 的内容是 104 行的 `序号 | LABEL | 周期` 表。
+反向匹配结果把 `signal_category` 判为 `A429隐式`，走语义匹配路径，最终进入
+裁判的 20 个 block 中有 4 个（`L244`–`L247`）根本不在该需求的 LABEL 表中；
+同时 AI labeler 已正确提取的 104 个 LABEL 没有参与路由。
+
+#### 复现方式
+
+1. 使用 `test-input/AMSC` 与 `1022测试1.docx` 跑一次反向任务，或直接回放任务
+   `f372c271-43e6-408e-9f3a-a7ee700f2c9b` 的 `hlr_requirements.json` /
+   `hlr_labels.json` / `eoicd_requirements.json`。
+2. 调用 `match_reverse`，检查 HLR 4720 的 `signal_category`、`match_evidence.hlr_labels`
+   与 `matched_profile_keys`。
+
+#### 影响范围
+
+`app.v4.matching.reverse_matcher.build_hlr_profile`；所有 LABEL 单元格只有裸数字
+（无 `L<num>` 前缀）的表格式 SWHLR。
+
+#### 原因分析
+
+（已定位）`build_hlr_profile` 只使用 `extract_labels(hlr.content)`，其正则只匹配
+`L(\d+)`；表格式内容中的 LABEL 是裸数字（如 `11`、`30`），提取结果为空。
+`hlr.content` 含 "429"，`classify_hlr` 因此落到 `A429隐式`，走
+`_match_path_semantic`：该路径不做 label 约束，扫描所有总线重叠 block；大量
+block 同分后按稳定排序截断 top-20，`L244`–`L247` 恰好落入窗口。AI labeler 的
+`lbl.labels` 已包含正确的 104 个 LABEL，但 `build_hlr_profile` 未使用。
+
+#### 修复方案
+
+最小修复，仅改路由输入：
+
+1. `build_hlr_profile` 以 `lbl.labels` 为主，合并 `extract_labels(hlr.content)`，
+   统一为 `L<num>` 并去重。
+2. 若有 label 且 `classify_hlr` 原分类为 `A429隐式`/`逻辑/非通信`，改为
+   `A429显式`，走 label 前缀精确匹配路径。
+
+不修改 top-K、语义匹配、Prompt、裁判或报告结构。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/reverse_matcher.py`（`build_hlr_profile`）
+2. `backend/tests/test_reverse_label_profile.py`（新增 3 个回归用例；本地文件，
+   `backend/tests/` 已在 `.gitignore` 中，不入库）
+
+#### 验证方式
+
+1. `cd backend && python -m pytest tests/test_reverse_label_profile.py -q`
+2. 回放任务 `f372c271-43e6-408e-9f3a-a7ee700f2c9b` 的 17 条 HLR，对比修改前后
+   的 `signal_category` / `match_type` / `matched_profile_keys`。
+3. `cd backend && python -m pytest tests -q --continue-on-collection-errors`
+
+#### 验证结果
+
+**已通过（本机，2026-10-23）**：
+
+1. 新增回归用例 3 passed。
+2. 回放结果：仅 HLR 4720 变化；`signal_category` 由 `A429隐式` 变为
+   `A429显式`，`hlr_labels` 为 104 个，20 个 matched key 全部落在 HLR 的 LABEL
+   集合内，`L244`–`L247` 不再出现。
+3. 可收集测试：278 passed / 6 failed / 1 skipped / 10 collection errors。6 个
+   failed 与 10 个 collection errors 均为既有问题（job cancel/parse 及
+   `app.v4.reverse`、`app.v4.shared.parsing` 源文件缺失），与本次修改无关。
+4. 未执行完整反向 E2E（需重新跑模型与 Word 输出）。
+
+#### 遗留问题
+
+1. 问题 1（top-20 窗口只覆盖 104 个 LABEL 中的 4 个）未修复；B3 标签级比对方案
+   本次不实施。
+2. 改动未提交；Issue 编号待用户回填。
+3. 尚未跑完整反向 E2E 复验最终 `reverse_matches.json` 与 Word 报告。
