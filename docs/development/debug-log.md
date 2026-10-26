@@ -2530,3 +2530,114 @@ block 同分后按稳定排序截断 top-20，`L244`–`L247` 恰好落入窗口
    本次不实施。
 2. 改动未提交；Issue 编号待用户回填。
 3. 尚未跑完整反向 E2E 复验最终 `reverse_matches.json` 与 Word 报告。
+
+## BUG-20261023-002：反向 HLR 633 表格位号未提取、bit 证据块被过滤、状态/实例口径过严
+
+#### 发现日期
+
+2026-10-23
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线。
+
+#### 问题现象
+
+以 `test-input/AMSC` 与 `1022测试1.docx` 跑反向任务，`FSF21000101_HLR_633`
+出现三类问题：
+
+1. SWHLR 将 `OneState/ZeroState` 写成“有效/无效”“有权/无权”等词时，裁判判不一致。
+2. HLR 表格中的 `bit10`、`bit11`、`bit12`、`bit13` 未参与位匹配，其中 `bit13`
+   对应的 `L262/HPGC_ACTIVATION` 未进入裁判证据。
+3. HLR 用左右两行描述同一 bit10 的两个通道实例，裁判按“2 行对 1 个 Block”
+   判不一致。
+
+#### 复现方式
+
+1. 回放任务 `f372c271-43e6-408e-9f3a-a7ee700f2c9b` 的
+   `hlr_requirements.json` / `hlr_labels.json` / `eoicd_requirements.json`。
+2. 调用 `match_reverse`，检查 HLR 633 的 `bit_fields` 与
+   `matched_profile_keys`。
+3. 调用三家裁判，检查 `coverage_status` 与 `analysis`。
+
+#### 影响范围
+
+`app.v4.matching.hlr_classifier.extract_bit_fields`、
+`app.v4.matching.reverse_matcher._filter_sn_zero_within_label`、反向裁判与
+一星复查提示词；所有使用 `| bitN | ... |` 表格写法的 SWHLR。
+
+#### 原因分析
+
+1. `extract_bit_fields` 的英文模式要求 `bitN` 后出现“为/是/=/的”等词；
+   `| bit13 | 有效-1；无效-0 |` 只有位号单元格，四种模式都匹配不到，整张表的
+   单 bit 定义丢失（只偶然提取到 `bit15~bit16` 范围）。
+2. `_filter_sn_zero_within_label` 在同一个 Label 已有 `signal_name>0` 的块时，
+   会删除所有 `signal_name=0` 的块。`HPGC_ACTIVATION` 的 `signal_name=0`，
+   但 `bit_field=20`（HLR 明确写了 bit13），被误当作同 Label 噪声删除。
+3. `reverse_judge.md` 的“禁止为差异找借口”条款过严，且缺少“状态语义等价”
+   与“定义/实例”通用规则；`re_review` 的 EoICD 证据只列 Label/方向/类型/
+   位/范围/单位，复查模型看不到 OneState/ZeroState 与子信号状态。
+
+#### 修复方案
+
+只改反向管线，不新增实例路径字段：
+
+1. `hlr_classifier.extract_bit_fields` 增加表格位号模式
+   `| bitN |` / `| bitN~bitM |`，与既有模式按 `(offset, size)` 去重。
+2. `_filter_sn_zero_within_label` 在 `bit_field >= 12`（偏移命中或偏移+宽度
+   命中）时保留该块，因为 HLR 明确位号属于证据级准入，不是词元噪声。
+3. `reverse_judge.md` 增加“状态语义等价”和“定义与实例”规则，放宽
+   “表述不同/状态词不同”的误判，同时保留对真实技术矛盾的严格判定；
+   `re_review.md` 同步增加相同口径。
+4. `semantic_judge._build_reverse_user_prompt` 删除误导性的
+   `通道变体数` / `通道=N` 展示（L262 实际有 4 个实例却显示 1）。
+5. `re_review._build_re_review_user_prompt` 补充 OneState/ZeroState、
+   CodedSet 与字内子信号明细；label/方向改为优先读 Block 字段。
+
+A/B 实验（同一证据，仅比较是否附加接口实例路径）结果：两组三家判定与置信度
+完全一致，B 组 prompt 增大约 20% 且触发 deepseek 截断重试，故不实现实例路径。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/hlr_classifier.py`
+2. `backend/app/v4/matching/reverse_matcher.py`
+3. `backend/app/v4/comparison/semantic_judge.py`
+4. `backend/app/v4/comparison/re_review.py`
+5. `backend/app/v4/prompts/reverse_judge.md`
+6. `backend/app/v4/prompts/re_review.md`
+
+#### 验证方式
+
+1. 对 HLR 633 调用 `extract_bit_fields`，检查返回 `10/11/12/13/15(size=2)`。
+2. 回放 HLR 633，检查 `matched_profile_keys` 包含
+   `L262/HPGC_ACTIVATION`，且共 5 个 Block。
+3. 用真实匹配结果、真实 prompt 调用 deepseek/minimax/qwen；再以一星复查
+   prompt 复查。
+4. 回放全部 17 条 HLR，对比修改前后的 `match_type` 与 matched keys。
+5. 可收集测试回归：`python -m pytest tests -q --ignore=...`。
+
+#### 验证结果
+
+**已通过（本机，2026-10-23）**：
+
+1. `extract_bit_fields` 对 HLR 633 返回 5 个位声明：
+   `bit10`、`bit11`、`bit12`、`bit13`、`bit15~bit16`。
+2. HLR 633 匹配结果为 5 个 Block，`L262/HPGC_ACTIVATION` 已进入证据。
+3. 初始裁判：deepseek inconsistent（bit12 内容语义异议）、minimax covered
+   0.97、qwen covered 0.90；一星复查后三家均为 covered
+   （deepseek 0.88 / minimax 0.98 / qwen 0.95）。左右两行 bit10 均被识别为
+   同一 Block 的通道实例，状态词按语义等价处理。
+4. 17 条 HLR 回放：匹配类型数量不变（10 已匹配 / 7 待确定）；HLR 633 +1、
+   HLR 680 +3、HLR 892 +5，均为 HLR 明确位号对应的 Block；HLR 4720 的差异
+   来自既有 LABEL 路由修复，不是本次改动。
+5. 可收集测试：278 passed / 6 failed / 1 skipped；6 个 failed 与既有
+   job cancel/orphan/parse 问题一致，10 个 collection errors 仍为
+   `app.v4.reverse`、`app.v4.shared.parsing` 源文件缺失的既有问题。
+
+#### 遗留问题
+
+1. 未跑完整反向 E2E（重新解析、全量标注、全部 17 条裁判与 Word 报告）。
+2. 改动未提交，Issue 编号待用户回填。
+3. 初始裁判仍可能对个别内容语义提出异议（如 HLR 633 的 bit12
+   “过压故障标志” vs “HP high pressure condition”），由一星复查与多数共识
+   兜底；如需完全消除，应单独确认该条业务语义。

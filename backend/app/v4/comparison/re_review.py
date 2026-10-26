@@ -127,10 +127,13 @@ def _build_re_review_user_prompt(
         for i, blk in enumerate(case.matched_profiles, 1):
             parts.append(f"### EoICD Block {i}: {blk.get('signal_family', 'N/A')}")
             merged = blk.get("merged_attributes", {}) or {}
-            parts.append(f"- Label号: {merged.get('Label', 'N/A')}")
-            parts.append(
-                f"- 方向: {merged.get('方向', merged.get('Direction', 'N/A'))}"
+            label = blk.get("label") or merged.get("Label", "N/A")
+            direction = (
+                blk.get("direction")
+                or merged.get("方向", merged.get("Direction", "N/A"))
             )
+            parts.append(f"- Label号: {label}")
+            parts.append(f"- 方向: {direction}")
             parts.append(f"- 数据类型: {merged.get('DataFormatType', 'N/A')}")
             parts.append(
                 f"- Bit 偏移/宽度: {merged.get('BitOffsetWithinDS', 'N/A')}"
@@ -141,6 +144,32 @@ def _build_re_review_user_prompt(
                 f"~{merged.get('FullScaleRngMax', 'N/A')}"
             )
             parts.append(f"- 单位: {merged.get('Units', 'N/A')}")
+
+            # 状态/编码与子信号明细：初判时裁判能看到 OneState/ZeroState，
+            # 复查 prompt 原先只列 Label/方向/类型/位/范围/单位，导致复查
+            # 模型在缺少状态定义的情况下重判（如把 有效/无效 判成不一致）。
+            sub_signals = blk.get("sub_signals", []) or []
+            if sub_signals:
+                parts.append("- 字内子信号明细:")
+                for ss in sub_signals:
+                    state_suffix = ""
+                    if (
+                        ss.get("one_state") is not None
+                        or ss.get("zero_state") is not None
+                    ):
+                        state_suffix = (
+                            f"（OneState={ss.get('one_state', '—')} / "
+                            f"ZeroState={ss.get('zero_state', '—')}）"
+                        )
+                    parts.append(
+                        f"  - {ss.get('dp_name', '?')}: "
+                        f"bit{ss.get('bit_offset', '?')}, "
+                        f"{ss.get('size', '?')}bit, "
+                        f"{ss.get('dtype', '?')}{state_suffix}"
+                    )
+            for attr in ("OneState", "ZeroState", "CodedSet"):
+                if attr in merged:
+                    parts.append(f"- {attr}: {merged.get(attr)}")
             parts.append("")
     else:
         parts.append("## EoICD 信号块")

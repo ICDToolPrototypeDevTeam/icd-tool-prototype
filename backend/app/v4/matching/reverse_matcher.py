@@ -814,6 +814,13 @@ def _filter_sn_zero_within_label(
                     # 词元（6b 已给 sn=30），要么靠 ICD 位范围重叠门控——两者
                     # 都是证据级准入，不应被"同 label 已有 sn>0 数据块"误删。
                     result.append((t, d, b))
+                elif d.get("bit_field", 0) >= 12:
+                    # bit_field>=12 表示 HLR 明确写出了该块的位偏移（12=仅
+                    # 偏移命中，20=偏移+宽度命中），是与 HLR 位声明直接对齐
+                    # 的证据，不属于"同 label 词元噪声"，同样保留。若 HLR 的
+                    # 位号因表格格式未被提取，则不会走到这里（见
+                    # hlr_classifier.extract_bit_fields 的表格位号提取）。
+                    result.append((t, d, b))
         else:
             result.extend(entries)
 

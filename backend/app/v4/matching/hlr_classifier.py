@@ -64,6 +64,14 @@ _BIT_RANGE_RE = re.compile(r"bit(\d+)\s*[至~\-]\s*bit(\d+)", re.IGNORECASE)
 _BIT_SINGLE_RE = re.compile(r"bit(\d+)\s*[为是]\s*(.+?)(?:[，,;；]|$)", re.IGNORECASE)
 _BIT_ASSIGN_RE = re.compile(r"bit(\d+)\s*=", re.IGNORECASE)
 _BIT_POSSESSIVE_RE = re.compile(r"bit(\d+)\s*的", re.IGNORECASE)
+# 表格位号单元格：| bit13 | 有效-1；无效-0 |、| bit15~bit16 | ... |
+# 这类单元格只有位号本身，没有“为/是/=/的”等动词，上面的模式都匹配不到，
+# 会让整张表的位定义丢失。
+_PIPE_BIT_RE = re.compile(
+    r"\|\s*[Bb]it\s*(\d+)"
+    r"(?:\s*[~～\-–—至到]\s*(?:[Bb]it\s*)?(\d+))?"
+    r"\s*\|"
+)
 _SDI_RE = re.compile(r"SDI\s*[=为]?\s*(\d+)", re.IGNORECASE)
 
 # —— 中文位号（物理 1 基 → ICD 0 基换算）——
@@ -146,6 +154,21 @@ def extract_labels(text: str) -> list[str]:
 def extract_bit_fields(text: str) -> list[dict]:
     fields: list[dict] = []
     seen: set[tuple[int, int]] = set()
+    # 表格位号行优先提取：单 bit 单元格只有 `| bit13 |`，其余模式命中不了。
+    # 范围单元格（| bit15~bit16 |）与下面的 _BIT_RANGE_RE 重叠，靠 seen 去重。
+    for m in _PIPE_BIT_RE.finditer(text):
+        start = int(m.group(1))
+        end = int(m.group(2)) if m.group(2) else start
+        offset = min(start, end)
+        size = abs(end - start) + 1
+        key = (offset, size)
+        if key not in seen:
+            seen.add(key)
+            fields.append({
+                "offset": offset,
+                "size": size,
+                "text": m.group(0).strip().strip("|").strip(),
+            })
     for m in _BIT_RANGE_RE.finditer(text):
         start = int(m.group(1))
         end = int(m.group(2))

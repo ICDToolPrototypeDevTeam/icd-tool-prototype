@@ -233,7 +233,6 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
             parts.append(f"- Label号: {blk.get('label', 'N/A')}")
             parts.append(f"- 方向: {blk.get('direction', 'N/A')}")
             parts.append(f"- 总线类型: {', '.join(blk.get('bus_types', []))}")
-            parts.append(f"- 通道变体数: {blk.get('channel_count', 0)}")
 
             # Merged attributes (block level, common across all channels)
             merged = blk.get("merged_attributes", {})
@@ -335,8 +334,7 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
         parts.append("- 最高分匹配:")
         for ts in top_scores:
             parts.append(f"  - {ts.get('block_key', '?')}: {ts.get('total', 0)}分 "
-                         f"(信号族={ts.get('signal_family', '?')}, "
-                         f"通道={ts.get('channel_count', 0)})")
+                         f"(信号族={ts.get('signal_family', '?')})")
 
     parts.append("")
     mt = evidence.get("match_type", "")
