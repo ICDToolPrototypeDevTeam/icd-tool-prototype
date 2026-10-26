@@ -3036,3 +3036,69 @@ HLR 3898 写 `LABEL356的bit11~bit8=0000`，HLR 3958 写 `L227/L230的bit11~bit8
 1. HLR 3898/3958 的“有效标志”仍无 EoICD 定义支撑（deepseek/minimax 仍因此判 needs_review），属 SSM/有效性字段的独立问题，本次未改。
 2. 复用 `--eoicd-json` 时解析器锚点不可恢复（标准管线不受影响）。
 3. 改动未提交，Issue 编号待用户回填。
+
+## BUG-20261026-006：反向裁判看不到字内子信号自己的 CodedSet，误判“EoICD 未提供 1/0 映射”
+
+#### 发现日期
+
+2026-10-26
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线；由 HLR 4878 的判定分析引出。
+
+#### 问题现象
+
+HLR 4878 要求 `bit25=1` 时使用对应端口 LABEL 数据并置“有效标志”为有效。EoICD 中 `A429Payload_POT1_Validaty`（offset=25、1bit、COD）明确给出 `CodedSet=1=Invalid;0=Valid`，但 deepseek、qwen 判定时称“这涉及 Validity 位的值语义；EoICD 未提供该位的 1/0 与有效/无效映射”，据此判 needs_review；仅 minimax 自行推断出 `1=Invalid、0=Valid` 并判 inconsistent。
+
+#### 影响范围
+
+`app.v4.matching.reverse_case_builder._serialize_block` 的判断 case 序列化；`app.v4.comparison.semantic_judge` 与 `app.v4.comparison.re_review` 的子信号证据渲染；两份裁判 prompt。涉及所有“一个 A429 word 内多个子信号各有不同 CodedSet”的反向案例。匹配与评分不受影响。
+
+#### 原因分析
+
+1. 解析层没有问题：`CodedSet` 已进入条目化结果（该 Block 相关 36 条），`build_profiles` 的 `entries` 也按 `dp_ref_name` 保留了每个子信号自己的 `CodedSet`。
+2. `build_profiles` 合并 profile 属性时，把同一 Block 内多个子信号的 `CodedSet` 用 `/` 拼成 Block 级公共值（如 `1=OK/1=Invalid;0=Valid`），丢失了“哪个编码属于哪个子信号”的绑定。
+3. `build_blocks` 组装 `sub_signals` 时只输出 `dp_name / bit_offset / size / dtype`，子信号行没有任何状态/编码信息，裁判只能看到 `A429Payload_POT1_Validaty: bit25, 1bit, COD`。
+4. 裁判 prompt 的“字内子信号明细优先于信号级公共属性”规则使模型把 Block 级合并后的 `CodedSet` 视为非权威参考值；而子信号行又没有自己的 CodedSet，模型只能得出“该位没有 1/0 映射”的结论。
+
+#### 修复方案
+
+均在判断 case 序列化与证据渲染层处理，不针对具体 HLR 写死，不改 `build_blocks` 与匹配：
+
+1. `reverse_case_builder._field_coded_map(block)`：从 `profile.entries` 中收集 `is_dp_ref` 行的 `CodedSet`，按 `dp_ref_name` 归组；同一子信号出现多个不同值时才用 `/` 拼接（与 Block 级合并约定一致）。`_serialize_block` 复制 `sub_signals` 后，按 `dp_name` 把 `coded_set` 附到对应行，`block.sub_signals` 本身不被修改。
+2. `semantic_judge` 与 `re_review` 的子信号行渲染增加 `CodedSet=<值>`，与既有 `OneState / ZeroState` 同列展示。
+3. `reverse_judge.md` 规则 4 与 `re_review.md`“字内子信号优先”补充通用口径：子信号行自带的 `CodedSet` 是该子信号自身的编码定义，应直接用于比对其取值范围/状态断言；Block 级公共 `CodedSet` 是合并参考值，不得因公共属性是合并值而忽略子信号行自带的 `CodedSet`，也不得把拼接串整体套到单个子信号上。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/reverse_case_builder.py`
+2. `backend/app/v4/comparison/semantic_judge.py`
+3. `backend/app/v4/comparison/re_review.py`
+4. `backend/app/v4/prompts/reverse_judge.md`
+5. `backend/app/v4/prompts/re_review.md`
+6. 新增 `backend/tests/test_reverse_case_coded_set.py`
+
+#### 验证方式
+
+1. `python -m py_compile` 上述三个 Python 文件。
+2. 用 `test-input/AMSC` 重建 Block 与 HLR 4878 的判断 case，检查序列化 `sub_signals` 的 `coded_set`。
+3. 渲染该 case 的初判与复查 prompt，确认子信号行出现 `CodedSet=1=Invalid;0=Valid`。
+4. 运行定向 `pytest`。
+5. 实跑三家模型，确认均能引用该 CodedSet。
+
+#### 验证结果
+
+**已通过（本机，2026-10-26）**：
+
+1. `COMPILE_OK`。
+2. L300/L301/L302/L304/L305（各 `_1`/`_2` 共 10 个 Block）的 `A429Payload_POT1~POT5_Validaty` 子信号行均带 `coded_set=1=Invalid;0=Valid`；`SN_1` 未被误挂该值。
+3. 初判 prompt 出现 `A429Payload_POT1_Validaty: bit25, 1bit, COD（CodedSet=1=Invalid;0=Valid）`（10 个 Block 各 5 个 POT）；复查 prompt 同样出现 10 行。
+4. 定向测试 `test_reverse_case_coded_set + test_pipeline_checkpoints + test_reverse_label_profile + test_zip_entry_normalize + test_hlr_word_parser_adaptivity` → 43 passed。
+5. HLR 4878（case `REV-0016`）实跑三家模型：deepseek inconsistent 0.72、minimax inconsistent 0.97、qwen inconsistent 0.85；三家均指出 EoICD 为 `1=Invalid;0=Valid` 而 SWHLR 把 `bit25=1` 当作有效，极性矛盾。deepseek/qwen 明确引用 `CodedSet`。
+6. 匹配不受影响：`build_blocks` 未改，`reverse_matcher` 仍以 `build_blocks(eoicd_profiles)` 构建匹配用 Block；本次只改判断 case 的序列化副本。
+
+#### 遗留问题
+
+1. 完整反向管线尚未重跑，现有历史报告仍是修复前的结果；需重跑确认 HLR 4878 的最终报告结论。
+2. 改动未提交，Issue 编号待用户回填。

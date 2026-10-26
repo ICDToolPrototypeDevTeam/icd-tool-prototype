@@ -307,20 +307,23 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
             if sub_signals:
                 parts.append("- 字内子信号明细:")
                 for ss in sub_signals:
-                    state_suffix = ""
+                    details = []
+                    if ss.get("coded_set"):
+                        details.append(f"CodedSet={ss['coded_set']}")
                     if (
                         ss.get("one_state") is not None
                         or ss.get("zero_state") is not None
                     ):
-                        state_suffix = (
-                            f"（OneState={ss.get('one_state', '—')} / "
-                            f"ZeroState={ss.get('zero_state', '—')}）"
+                        details.append(
+                            f"OneState={ss.get('one_state', '—')} / "
+                            f"ZeroState={ss.get('zero_state', '—')}"
                         )
+                    detail_suffix = f"（{'；'.join(details)}）" if details else ""
                     parts.append(
                         f"  - {ss.get('dp_name', '?')}: "
                         f"bit{ss.get('bit_offset', '?')}, "
                         f"{ss.get('size', '?')}bit, "
-                        f"{ss.get('dtype', '?')}{state_suffix}"
+                        f"{ss.get('dtype', '?')}{detail_suffix}"
                     )
 
             # Same-word protocol field definitions — context only, not a
