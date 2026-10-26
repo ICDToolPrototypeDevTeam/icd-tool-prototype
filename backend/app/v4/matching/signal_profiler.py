@@ -161,7 +161,101 @@ class ICDBlock:
     word_protocol_fields: list[dict] = field(default_factory=list)
 
 
-def build_blocks(profiles: list[SignalProfile]) -> list[ICDBlock]:
+def _bit_span(attrs: dict) -> tuple[int | None, int | None]:
+    """Return (bit offset, size) parsed from anchor attribute strings."""
+
+    def _num(key: str) -> int | None:
+        m = re.search(r"-?\d+", str(attrs.get(key, "") or ""))
+        return int(m.group()) if m else None
+
+    return _num("BitOffsetWithinDS"), _num("ParameterSize")
+
+
+def _merge_external_anchors(
+    target: dict[str, list[dict]], extra: dict[str, list[dict]] | None
+) -> None:
+    """Merge parser-collected frame-structure anchors (Subscriber-table rows
+    dropped by Rule 9) into the profile-derived anchor map.
+
+    Same name + same bit span ⇒ same field: fill missing attributes and join
+    distinct CodedSet values. Different bit spans stay separate (the label may
+    be reused on several A429 words).
+    """
+    if not extra:
+        return
+    for label, anchors in extra.items():
+        if not label or not anchors:
+            continue
+        bucket = target[label]
+        for anchor in anchors:
+            name = str(anchor.get("name", "") or "").strip()
+            attrs = {
+                k: str(v) for k, v in (anchor.get("attrs") or {}).items()
+                if str(v).strip()
+            }
+            if not name or not attrs:
+                continue
+            merged = False
+            for existing in bucket:
+                if str(existing.get("name", "")).strip().upper() != name.upper():
+                    continue
+                e_attrs = existing.setdefault("attrs", {})
+                if e_attrs == attrs:
+                    merged = True
+                    break
+                e_span = _bit_span(e_attrs)
+                n_span = _bit_span(attrs)
+                if e_span[0] is None or n_span[0] is None or e_span != n_span:
+                    continue
+                for key, value in attrs.items():
+                    if key == "CodedSet":
+                        cur = str(e_attrs.get(key, "") or "")
+                        if value not in cur.split("/"):
+                            e_attrs[key] = f"{cur}/{value}" if cur else value
+                    elif not str(e_attrs.get(key, "") or "").strip():
+                        e_attrs[key] = value
+                merged = True
+                break
+            if not merged:
+                bucket.append({"name": name, "attrs": attrs})
+
+
+def _with_synthetic_sdi_anchor(
+    anchors: list[dict], merged_attrs: dict
+) -> list[dict]:
+    """Ensure a data block that declares ``SDIExpected`` exposes the SDI
+    field position even when the SDI row itself was filtered out (Rule 9) and
+    the Publisher table has no SDI leaf for this label.
+
+    ``SDIExpected`` is an assertion about the word's SDI (bits 8-9, 0-based);
+    without an anchor the judge sees only a bare value list and cannot tell
+    that bits 8-9 are defined, which flips weak models to "bit8/bit9 缺失".
+    """
+    if not merged_attrs:
+        return anchors
+    sdi_expected = str(
+        (merged_attrs.get("SDIExpected") or {}).get("value", "") or ""
+    ).strip()
+    if not sdi_expected:
+        return anchors
+    if any(str(a.get("name", "")).upper() == "SDI" for a in anchors):
+        return anchors
+    anchor = {
+        "name": "SDI",
+        "attrs": {
+            "BitOffsetWithinDS": "8 Bits",
+            "ParameterSize": "2 Bits",
+            "DataFormatType": "A429SDI",
+            "SDIExpected": sdi_expected,
+        },
+    }
+    return [*anchors, anchor]
+
+
+def build_blocks(
+    profiles: list[SignalProfile],
+    protocol_anchors: dict[str, list[dict]] | None = None,
+) -> list[ICDBlock]:
     """Group SignalProfiles into ICDBlocks by signal family.
 
     Profiles whose signal family is a protocol overhead node (LABEL, SSM,
@@ -169,6 +263,11 @@ def build_blocks(profiles: list[SignalProfile]) -> list[ICDBlock]:
     SDI is kept as a block: the SDI leaf carries business semantics
     (CodedSet, e.g. 1=System1) and HLRs assert SDI values explicitly;
     its matching eligibility is gated in reverse_matcher by HLR text.
+
+    ``protocol_anchors`` (reverse-only) carries frame-structure rows dropped
+    by parser Rule 9, keyed by Label. They enrich ``word_protocol_fields`` so
+    a data block's case still exposes the same word's LABEL/SDI/SSM/PARITY
+    bit layout and SDI CodedSet.
     """
     groups: dict[tuple[str | None, str], list[SignalProfile]] = defaultdict(list)
     for prof in profiles:
@@ -201,6 +300,10 @@ def build_blocks(profiles: list[SignalProfile]) -> list[ICDBlock]:
                 attrs[k] = str(v.get("value", "")) + (f" {v['unit']}" if v.get("unit") else "")
         if attrs:
             proto_anchor_by_label[prof.label].append({"name": family, "attrs": attrs})
+
+    # Merge frame-structure rows collected by the parser (reverse-only side
+    # channel; Rule 9 keeps them out of the itemized requirements).
+    _merge_external_anchors(proto_anchor_by_label, protocol_anchors)
 
     # Sort anchors by ICD bit offset so the layout reads naturally
     # (LABEL at 0, SDI at 8, SSM at 29, PARITY at 31 in 32-bit words).
@@ -404,6 +507,10 @@ def build_blocks(profiles: list[SignalProfile]) -> list[ICDBlock]:
                             "dtype": group_dtype,
                         })
 
+        anchors = list(proto_anchor_by_label.get(label, [])) if label else []
+        anchors = _with_synthetic_sdi_anchor(anchors, attrs)
+        anchors.sort(key=_anchor_sort_key)
+
         blocks.append(ICDBlock(
             block_key=block_key,
             label=label,
@@ -418,7 +525,7 @@ def build_blocks(profiles: list[SignalProfile]) -> list[ICDBlock]:
             direction_verbs_set=dir_verbs,
             channel_count=len(profs),
             sub_signals=sub_signals,
-            word_protocol_fields=proto_anchor_by_label.get(label, []),
+            word_protocol_fields=anchors,
         ))
 
     return blocks

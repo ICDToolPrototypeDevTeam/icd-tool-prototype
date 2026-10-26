@@ -29,6 +29,7 @@ from pathlib import Path
 from app.v4.comparison.semantic_judge import (
     _append_bit_assembly_derivation,
     _append_bit_range_derivation,
+    _append_sdi_layout_note,
     _extract_json,
 )
 from app.v4.config import JUDGE_PROVIDERS
@@ -177,9 +178,23 @@ def _build_re_review_user_prompt(
                         f"{ss.get('size', '?')}bit, "
                         f"{ss.get('dtype', '?')}{state_suffix}"
                     )
-            for attr in ("OneState", "ZeroState", "CodedSet"):
+            for attr in ("OneState", "ZeroState", "CodedSet", "SDIExpected"):
                 if attr in merged:
                     parts.append(f"- {attr}: {merged.get(attr)}")
+
+            # 同 word 协议字段（初判 prompt 已给出，复查也必须看到，否则
+            # 复查模型会因缺少 SDI/LABEL 位布局而把 SDI 位判成缺失）。
+            proto_fields = blk.get("word_protocol_fields", []) or []
+            if proto_fields:
+                parts.append("- 同 word 协议字段（EoICD 位偏移锚点，仅作比对上下文）:")
+                for pf in proto_fields:
+                    name = pf.get("name", "?")
+                    attrs = pf.get("attrs", {}) or {}
+                    parts.append(
+                        f"  - {name}: "
+                        + ", ".join(f"{k} = {v}" for k, v in attrs.items())
+                    )
+            _append_sdi_layout_note(parts, merged, proto_fields)
             parts.append("")
     else:
         parts.append("## EoICD 信号块")

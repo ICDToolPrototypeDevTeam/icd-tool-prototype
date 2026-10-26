@@ -1112,7 +1112,7 @@ def run_reverse_pipeline(
         # Build block index for case building
         eoicd_kept = [req for req in eoicd_out.requirements if should_keep(req)]
         eoicd_profiles = build_profiles(eoicd_kept)
-        blocks = build_blocks(eoicd_profiles)
+        blocks = build_blocks(eoicd_profiles, eoicd_out.protocol_anchors)
         block_index: dict[str, ICDBlock] = {b.block_key: b for b in blocks}
 
         cases = build_reverse_cases(match_result, block_index)

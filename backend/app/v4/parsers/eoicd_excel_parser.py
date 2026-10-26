@@ -46,6 +46,21 @@ _DP_REF_DEDUP_ATTRS = {
     "OneState", "ZeroState",
 }
 
+# Same-word protocol anchors collected from Subscriber-table rows that Rule 9
+# keeps out of the itemized requirements. Only these attributes are needed by
+# the reverse judge (bit layout + SDI CodedSet). SDIExpected is deliberately
+# excluded: it lives on the row's *data* signal and is per-channel, so it is
+# read from the block's merged attributes instead of a single anchor row.
+# Tuple (not set): anchor attrs are rendered into judge prompts, so iteration
+# order must be deterministic for prompt/cache stability.
+_PROTOCOL_ANCHOR_ATTRS = (
+    "BitOffsetWithinDS", "ParameterSize", "DataFormatType",
+    "CodedSet", "Label", "SSM",
+)
+
+# Label segment in a hierarchical signal path (L227_..., L356_...).
+_LABEL_IN_PATH_RE = re.compile(r"(?:^|\.)L(\d+)(?:_|$)", re.IGNORECASE)
+
 
 @dataclass
 class LayerBlock:
@@ -283,6 +298,89 @@ def _extract_layer_requirements(
     return results
 
 
+# ——— Frame-structure anchor helpers (reverse-only) ———
+
+
+def _format_anchor_value(attr_name: str, value: Any) -> str:
+    """Render one anchor attribute the same way parsed requirements do
+    (value + unit where the attribute has one)."""
+    if isinstance(value, float) and value.is_integer():
+        text = str(int(value))
+    else:
+        text = str(value).strip()
+    if not text:
+        return ""
+    unit = get_unit(attr_name)
+    return f"{text} {unit}" if unit else text
+
+
+def _extract_anchor_label(
+    dp_name: str,
+    pub_values: list[dict[str, Any]],
+    sub_values: list[dict[str, Any]],
+    sub_names: list[str],
+) -> str:
+    """Resolve the A429 Label for a frame-structure row.
+
+    Prefers an explicit ``Label`` attribute (Subscriber side first), then a
+    label segment in the hierarchical name (``L227_...``). Returns "" for
+    non-A429 rows, which have no word to anchor to.
+    """
+    for values in (sub_values, pub_values):
+        for vals in values:
+            label = vals.get("Label")
+            if not _is_empty(label):
+                return _format_anchor_value("Label", label)
+    for name in [*sub_names, dp_name]:
+        if not name:
+            continue
+        m = _LABEL_IN_PATH_RE.search(str(name))
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _anchor_bit_span(attrs: dict) -> tuple[int | None, int | None]:
+    """Return (bit offset, size) parsed from anchor attribute strings."""
+
+    def _num(key: str) -> int | None:
+        m = re.search(r"-?\d+", str(attrs.get(key, "") or ""))
+        return int(m.group()) if m else None
+
+    return _num("BitOffsetWithinDS"), _num("ParameterSize")
+
+
+def _same_protocol_anchor(a: dict, b: dict) -> bool:
+    """Two anchors describe the same field when they share name + bit span.
+
+    Per-channel duplicates of one SDI field (same offset/size) are merged;
+    same-name fields at different offsets (different words) stay separate.
+    """
+    if str(a.get("name", "")).strip().upper() != str(b.get("name", "")).strip().upper():
+        return False
+    a_attrs = a.get("attrs", {}) or {}
+    b_attrs = b.get("attrs", {}) or {}
+    if a_attrs == b_attrs:
+        return True
+    a_off, a_size = _anchor_bit_span(a_attrs)
+    b_off, b_size = _anchor_bit_span(b_attrs)
+    if a_off is None or b_off is None:
+        return False
+    return (a_off, a_size) == (b_off, b_size)
+
+
+def _merge_anchor_attrs(target: dict, extra: dict) -> None:
+    """Fill missing attributes on an existing anchor; for CodedSet, keep the
+    distinct values (one word may code different SDI values per channel)."""
+    for key, value in extra.items():
+        if key == "CodedSet":
+            cur = str(target.get(key, "") or "")
+            if value and value not in cur.split("/"):
+                target[key] = f"{cur}/{value}" if cur else value
+        elif not str(target.get(key, "") or "").strip():
+            target[key] = value
+
+
 # ——— Main parser ———
 
 
@@ -300,6 +398,12 @@ class EoICDExcelParser:
     ):
         self.publisher_path = publisher_path
         self.subscriber_path = subscriber_path
+        # Reverse-only side channel: Rule 9 drops frame-structure rows
+        # (LABEL/SDI/SSM/PARITY) from ``requirements``, but the reverse judge
+        # still needs their bit layout and SDI CodedSet. Those rows are also
+        # collected here (keyed by Label) while still being skipped; the field
+        # is in-memory only, so the itemized JSON is unchanged.
+        self.protocol_anchors: dict[str, list[dict]] = {}
 
     def parse(self) -> EoICDOutput:
         all_requirements: list[EoICDRequirement] = []
@@ -386,7 +490,61 @@ class EoICDExcelParser:
             duplicates_removed=dup_removed,
             sheet_statistics=sheet_stats,
             requirements=deduped,
+            protocol_anchors=self.protocol_anchors,
         )
+
+    # ── Reverse-only frame-structure anchors ──
+
+    def _record_protocol_anchor(
+        self,
+        dp_name: str,
+        dp_attrs: dict[str, Any],
+        pub_values: list[dict[str, Any]],
+        sub_names: list[str],
+        sub_values: list[dict[str, Any]],
+    ) -> None:
+        """Record one Rule 9 filtered row (LABEL/SDI/SSM/PARITY) as a
+        same-word protocol anchor keyed by Label.
+
+        Called from the Subscriber pass immediately before the row is
+        skipped, so the anchor carries the Subscriber-side definition
+        (notably the SDI CodedSet) that never reaches ``requirements``.
+        """
+        leaf_name = sub_names[-1].strip() if sub_names else ""
+        if not (leaf_name and is_frame_signal(leaf_name)):
+            leaf_name = dp_name.strip() if dp_name and is_frame_signal(dp_name) else ""
+        if not leaf_name:
+            return
+
+        label = _extract_anchor_label(dp_name, pub_values, sub_values, sub_names)
+        if not label:
+            return
+
+        sub_leaf = sub_values[-1] if sub_values else {}
+        attrs: dict[str, str] = {}
+        for key in _PROTOCOL_ANCHOR_ATTRS:
+            # The Publisher DP is the frame signal itself (e.g. SDI with
+            # offset=8/size=2/A429SDI); the Subscriber leaf on the same row is
+            # usually the data signal (size=32/OPAQUE), so it must not
+            # override the frame layout. Use it only as a fallback.
+            for src in (dp_attrs, sub_leaf):
+                val = src.get(key)
+                if _is_empty(val):
+                    continue
+                text = _format_anchor_value(key, val)
+                if text:
+                    attrs[key] = text
+                break
+        if not attrs:
+            return
+
+        buckets = self.protocol_anchors.setdefault(label, [])
+        anchor = {"name": leaf_name, "attrs": attrs}
+        for existing in buckets:
+            if _same_protocol_anchor(existing, anchor):
+                _merge_anchor_attrs(existing["attrs"], attrs)
+                return
+        buckets.append(anchor)
 
     def _parse_one_file(
         self,
@@ -511,6 +669,9 @@ class EoICDExcelParser:
                 if sub_layers and primary_side == "Subscriber":
                     # Rule 9: frame structure filtering on DP Name
                     if dp_name and is_frame_signal(dp_name):
+                        self._record_protocol_anchor(
+                            dp_name, dp_attrs, pub_values, sub_names, sub_values,
+                        )
                         continue
 
                     # Skip if leaf RP Name is empty

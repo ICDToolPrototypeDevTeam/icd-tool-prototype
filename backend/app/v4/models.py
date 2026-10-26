@@ -45,6 +45,13 @@ class EoICDOutput(BaseModel):
     sheet_statistics: dict[str, dict[str, int]]
     requirements: list[EoICDRequirement]
 
+    # Same-word protocol anchors (LABEL/SDI/SSM/PARITY) collected during the
+    # Subscriber-table pass. These rows are deliberately kept out of
+    # ``requirements`` (Rule 9 frame-structure filtering), but their bit
+    # layout / SDI CodedSet is needed by the reverse judge. In-memory only:
+    # excluded from serialization so the itemized JSON stays byte-identical.
+    protocol_anchors: dict = Field(default_factory=dict, exclude=True)
+
 
 # ============================================================
 # HLR Models

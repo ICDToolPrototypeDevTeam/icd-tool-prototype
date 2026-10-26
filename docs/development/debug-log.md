@@ -2960,3 +2960,79 @@ HLR 3898 明确写出 `LABEL356的bit23~bit12=空气管理系统成员系统ID`�
 1. 未重跑完整 17 条 HLR 回放与 Word 报告。
 2. 新规则依赖模型对“同一物理量/事件/对象”的判断，极端模糊描述仍可能产生 provider 分歧；后续可用真实误判样本继续收敛。
 3. 改动未提交，Issue 编号待用户回填。
+
+
+## BUG-20261026-005：反向裁判看不到 A429 字结构锚点与 SDI CodedSet，把 SDI 位（bit8/9）判成 EoICD 缺失
+
+#### 发现日期
+
+2026-10-26
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线；由 HLR 3898 / 3958 的 `needs_review` 分析引出。
+
+#### 问题现象
+
+HLR 3898 写 `LABEL356的bit11~bit8=0000`，HLR 3958 写 `L227/L230的bit11~bit8均为0`。部分模型（deepseek）判定时称“EoICD 中 bit8、bit9 未定义/缺失”，判 needs_review；其他模型则判 covered，结论不稳定。同时，EoICD 中 SDI 的取值定义（如 `0=AMS_ID`、`0=AMS_Basic_Msg`）没有出现在裁判补充信息里。
+
+#### 影响范围
+
+`app.v4.parsers.eoicd_excel_parser` 的 Rule 9 过滤；`app.v4.matching.signal_profiler.build_blocks` 的同 word 协议锚点；`app.v4.comparison.semantic_judge` 与 `app.v4.comparison.re_review` 的证据渲染；两份裁判 prompt。涉及所有 SWHLR 位声明覆盖 A429 字结构字段（LABEL/SDI/SSM/PARITY），或依赖 SDI CodedSet 判定的反向案例。
+
+#### 原因分析
+
+1. Subscriber 表每一行的 Publisher DP 若为字结构信号（Label/SDI/SSM/Parity 等），Rule 9 会跳过整行。被跳过的行里恰好带着 SDI 的 `BitOffsetWithinDS=8`、`ParameterSize=2`、`DataFormatType=A429SDI`、`CodedSet`（如 `0=AMS_ID`）、以及 LABEL/PARITY 的位布局，导致这些定义从未进入条目化结果。
+2. `build_blocks` 的 `word_protocol_fields` 只从已解析 profile 生成。L356/L227 在条目化结果中没有 SDI profile，因此 Block 证据里只有 LABEL/PARITY 锚点（甚至 L227/L230 连锚点都没有），裁判无法知道 8~9 位是 SDI。
+3. `SDIExpected`（如 `0/-1/-1/0`）在 Block 公共属性里只是一个裸值，未说明它是按通道排列的期望 SDI 值、`-1` 表示不约束；弱模型把它读成“该位未定义”。
+4. 复查 prompt 完全没有渲染 `word_protocol_fields`，复查阶段无法补上初判缺失的 SDI 证据。
+
+#### 修复方案
+
+均为反向管线内的通用处理，不针对具体 HLR 写死：
+
+1. **解析器侧通道**：Subscriber 解析遇到 Rule 9 跳过的字结构行时，额外把该行的字结构节点（DP 优先，Subscriber 叶子作为兜底）记录到 `EoICDOutput.protocol_anchors`，按 Label 分组，只保留 `BitOffsetWithinDS`、`ParameterSize`、`DataFormatType`、`CodedSet`、`Label`、`SSM`。该字段 `exclude=True`，不写入 `eoicd_requirements.json`，条目化输出逐字节不变。DP 优先是必须的：同行 Subscriber 叶子通常是数据信号（如 `ParameterSize=32 / OPAQUE`），不能覆盖 SDI 自身的 `2 bit / A429SDI`。
+2. **Block 锚点合并**：`build_blocks(profiles, protocol_anchors=None)` 把解析器锚点并入 `word_protocol_fields`（同名且同 bit 跨度视为同一字段，CodedSet 合并去重），并按 bit 偏移排序。
+3. **SDI 兜底锚点**：Block 含 `SDIExpected` 但没有 SDI 锚点时（如 L230，原始表无 SDI 行），补一个 `SDI: offset=8 Bits, size=2 Bits, DataFormatType=A429SDI, SDIExpected=<Block 合并值>` 的推导锚点。
+4. **证据与口径**：初判与复查 prompt 增加 [推导] SDI 位定义（offset 8~9 即物理第9~10位；`SDIExpected` 按通道顺序、`-1` 不约束；位声明覆盖 8~9 即包含 SDI）；复查 prompt 同步渲染 `word_protocol_fields` 与 `SDIExpected`；`reverse_judge.md` / `re_review.md` 增加通用 SDI 规则。
+5. **调用链**：`pipeline.run_reverse_pipeline` 的非 refine 分支与 `refine.runner` 构建 Block 时传入 `eoicd_out.protocol_anchors`。复用 `--eoicd-json` 时锚点无法恢复，但第 3 条兜底仍生效。
+
+#### 修改文件
+
+1. `backend/app/v4/models.py`
+2. `backend/app/v4/parsers/eoicd_excel_parser.py`
+3. `backend/app/v4/matching/signal_profiler.py`
+4. `backend/app/v4/pipeline.py`
+5. `backend/app/v4/refine/runner.py`
+6. `backend/app/v4/comparison/semantic_judge.py`
+7. `backend/app/v4/comparison/re_review.py`
+8. `backend/app/v4/prompts/reverse_judge.md`
+9. `backend/app/v4/prompts/re_review.md`
+
+#### 验证方式
+
+1. 用 `test-input/AMSC` 的 Publisher/Subscriber 表解析，确认条目化条数不变、`eoicd_requirements.json` 不含 `protocol_anchors`，并检查 L356/L227/L230 的锚点。
+2. 重建 Block，确认 `word_protocol_fields` 含 SDI（offset=8、size=2、CodedSet）与 LABEL/PARITY。
+3. 渲染 HLR 3898/3958 的初判与复查 prompt，确认出现 SDI 锚点与 [推导] 说明。
+4. 运行定向测试与全量 `tests/` 回归。
+
+#### 验证结果
+
+**已通过（本机，2026-10-26）**：
+
+1. 解析 137,758 条，与修改前一致；`protocol_anchors` 覆盖 69 个 Label，序列化结果不含该字段（`model_dump()` 校验）。
+2. 锚点实测：
+   - L356：LABEL offset=0/8bit、SDI offset=8/2bit/CodedSet=`0=AMS_Basic_Msg`、PARITY offset=31/1bit；
+   - L227：SDI offset=8/2bit/CodedSet=`0=AMS_ID`；
+   - L230：原始表无 SDI 行，Block 兜底锚点给出 SDI offset=8/2bit、SDIExpected=`-1/0/-1/0`。
+3. HLR 3898/3958 的初判 prompt 出现“同 word 协议字段”SDI 行与 [推导] SDI 位定义；复查 prompt 同样出现 SDI 锚点、`SDIExpected` 与说明。`bit11~bit8` 仍按英文 bitN 基准归一为 offset 8~11。
+4. 实跑三家模型（新 prompt，含 SDI 锚点）：
+   - HLR 3898：deepseek needs_review 0.75（仅“有效标志”无 EoICD 定义）、minimax covered 0.94、qwen covered 0.80；三家均明确把 `bit11~bit8` 中的 offset 8~9 识别为 SDI，并引用 CodedSet `0=AMS_Basic_Msg`，不再报“bit8/bit9 缺失”。
+   - HLR 3958：deepseek covered 0.85、qwen covered 0.85、minimax needs_review 0.90（仅“有效标志”）；三家均引用 `SDIExpected=-1/0/0/-1` 并说明 `-1` 为不约束通道。
+5. `pytest tests/... --ignore=<既有收集错误文件>` → 278 passed / 6 failed（与修改前基线一致，均为 job cancel / orphan / artifact reuse 等既有失败）；定向 `test_reverse_label_profile + test_pipeline_checkpoints + test_zip_entry_normalize + test_pipeline_errors` → 47 passed。
+
+#### 遗留问题
+
+1. HLR 3898/3958 的“有效标志”仍无 EoICD 定义支撑（deepseek/minimax 仍因此判 needs_review），属 SSM/有效性字段的独立问题，本次未改。
+2. 复用 `--eoicd-json` 时解析器锚点不可恢复（标准管线不受影响）。
+3. 改动未提交，Issue 编号待用户回填。

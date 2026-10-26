@@ -57,6 +57,60 @@ def _append_bnr_sign_derivation(parts: list[str], merged: dict) -> None:
     )
 
 
+def _append_sdi_layout_note(
+    parts: list[str], merged: dict, proto_fields: list[dict] | None
+) -> None:
+    """Explain the word's SDI field when the block exposes it (anchor or
+    ``SDIExpected``).
+
+    ``SDIExpected`` is a per-channel expected-value list (e.g. "0/-1/-1/0"),
+    where ``-1`` means that channel does not constrain SDI. Left as a bare
+    merged attribute, judges read it as an undefined value and report the
+    SDI bits (physical 9-10) as "EoICD 缺少 bit8/bit9". A429 defines SDI at
+    0-based offset 8, width 2 — the anchor states the same thing from the
+    ICD data, so this is a derivation, not an outside assumption.
+    """
+    sdi_expected = str(merged.get("SDIExpected", "") or "").strip()
+    sdi_anchor = next(
+        (
+            pf for pf in proto_fields or []
+            if str(pf.get("name", "")).upper() == "SDI"
+        ),
+        None,
+    )
+    if not sdi_expected and sdi_anchor is None:
+        return
+
+    attrs = (sdi_anchor or {}).get("attrs", {}) or {}
+    offset = attrs.get("BitOffsetWithinDS", "8")
+    size = attrs.get("ParameterSize", "2")
+    off_num = _to_float(offset)
+    size_num = _to_float(size)
+    if off_num is not None and size_num is not None:
+        span = (
+            f"0 基 offset={int(off_num)}、宽度 {int(size_num)} bit"
+            f"（物理第{int(off_num) + 1}~{int(off_num + size_num)}位）"
+        )
+    else:
+        span = f"offset={offset}、宽度 {size}"
+
+    line = (
+        f"- [推导] SDI 位定义：本 word 的 SDI 字段为 {span}，"
+        "是 A429 字结构字段，不是未定义的数据位。SWHLR 的位声明若覆盖"
+        " offset 8~9（如 bit8/bit9、bit8~bit11），该位段即包含 SDI，"
+        "应把 SDI 取值一并纳入比对；SWHLR 完全未写出该位段时按未提及处理。"
+    )
+    if sdi_expected:
+        line += (
+            f" SDIExpected={sdi_expected} 为各通道实例的期望 SDI 值（按通道顺序），"
+            "其中 -1 表示该通道不约束 SDI，不代表该位缺失或未定义。"
+        )
+    coded = str(attrs.get("CodedSet", "") or "").strip()
+    if coded:
+        line += f" 该 word 的 SDI 编码定义：{coded}。"
+    parts.append(line)
+
+
 def _dedupe_coded_fields(
     matched_profiles: list[dict] | None, offset: int, size: int
 ) -> list[tuple[str, str]]:
@@ -297,6 +351,8 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
                         "不得再减 1。"
                     )
                     anchor_note_added = True
+
+            _append_sdi_layout_note(parts, merged, proto_fields)
 
             parts.append("")
     else:

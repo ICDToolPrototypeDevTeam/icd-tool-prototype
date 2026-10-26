@@ -40,6 +40,7 @@ SWHLR 位号与 EoICD `BitOffsetWithinDS` 的换算按写法区分，不得把�
 1. 不同 word 上的同 Label、同位偏移是不同定义，不构成“同一个位号被定义成两个东西”的矛盾；不得仅因 Label 号和位号相同就把它们当作同一条定义。
 2. 判断 SWHLR 引用的信号时，先按 SWHLR 写出的信号名确定其所属 word，再与对应 word 的 Block 比对；SWHLR 未引用的其他 word 的 Block 不在比对范围内（见“needs_review 禁用情形”第 3 条）。
 3. “数据来源表”只说明该 Block 的定义来源，不单独作为 covered/inconsistent 的依据。Subscriber Table 的 Block 也可能是 SWHLR 实际引用的接收侧定义，须按 word 和信号名判断，不得仅因来源为 Subscriber 就排除。
+4. **SDI 字段**：A429 字的 SDI 是字结构字段，位于 0 基 offset=8、宽度 2bit（物理第9~10位）。EoICD 可能不单列 SDI 子信号，而只在数据信号上给出 `SDIExpected`；它是各通道实例的期望 SDI 值（按通道顺序），其中 `-1` 表示该通道不约束 SDI，不表示该位缺失或未定义。SWHLR 写到“第9/10位”“bit8/bit9”或 SDI 取值，或其位声明覆盖 offset 8~9（如 bit8~bit11）时，按该位段与 `SDIExpected`/SDI 的 CodedSet 比对（位段中落在 8~9 的部分即 SDI 断言）；SWHLR 完全未写出该位段时按未提及处理。不得仅因 EoICD 未单列 SDI 子信号、或某通道的 `SDIExpected=-1`，就判该位缺失或 needs_review。
 
 ## 语义等价与定义/实例判断
 
