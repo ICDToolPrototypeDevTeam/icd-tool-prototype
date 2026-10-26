@@ -281,10 +281,14 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
                 if not anchor_note_added:
                     # 基制说明由上方 ICD 锚点数据直接支撑（如 LABEL offset=0 →
                     # 物理第1~8位、SDI offset=8 → 物理第9~10位），非外部规则。
+                    # 两种写法必须分别说明：只讲中文“第N位”时，模型会把同一
+                    # 换算套到英文 bitN 上，导致整表系统性差 1 位（HLR 680）。
                     parts.append(
                         "  位偏移约定：BitOffsetWithinDS 为 0 基偏移，offset=N 对应"
-                        "物理位第 N+1 位；SWHLR 正文的“第 N 位”/“第N到M位”是物理位号，"
-                        "判定时请换算为 0 基后与 EoICD 位偏移比对。"
+                        "物理位第 N+1 位。SWHLR 正文中文“第 N 位”/“第N到M位”是"
+                        "1 基物理位号，判定时换算为 0 基（第 N 位 → offset=N-1）；"
+                        "英文 bitN/BitN 与 EoICD 同一基准，bitN 直接对应 offset=N，"
+                        "不得再减 1。"
                     )
                     anchor_note_added = True
 
@@ -302,12 +306,15 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
     if hlr_rationale:
         parts.append(f"- 基本原理: {hlr_rationale}")
 
-    # HLR 正文位声明结构化呈现（物理位号 → 0 基 offset/size），让裁判直接
-    # 比对本行与 ICD 锚点，避免各家对“第 N 位”自行换算时错位（如把第31位
-    # 误当 PARITY 的物理32位）。
+    # HLR 正文位声明结构化呈现（已归一为 0 基 offset/size），让裁判直接
+    # 比对本行与 ICD 锚点，避免各家自行换算时错位（如把第31位误当 PARITY
+    # 的物理32位；或对英文 bitN 再减 1，整表系统性差 1 位）。
     bit_decls = extract_bit_fields(hlr.get('content', ''))
     if bit_decls:
-        parts.append("- SWHLR 位声明（物理位号→0基换算，由正文提取，仅供比对）:")
+        parts.append(
+            "- SWHLR 位声明（已归一为 0 基 offset：中文“第N位”按 N-1，"
+            "英文 bitN 按 N 原值；由正文提取，仅供比对）:"
+        )
         for bf in bit_decls:
             parts.append(
                 f"  - {bf.get('text', '?')} → offset={bf.get('offset')}, size={bf.get('size')}"

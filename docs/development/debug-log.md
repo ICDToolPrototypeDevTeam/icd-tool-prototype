@@ -2641,3 +2641,88 @@ A/B 实验（同一证据，仅比较是否附加接口实例路径）结果：�
 3. 初始裁判仍可能对个别内容语义提出异议（如 HLR 633 的 bit12
    “过压故障标志” vs “HP high pressure condition”），由一星复查与多数共识
    兜底；如需完全消除，应单独确认该条业务语义。
+
+---
+
+## BUG-20261026-001：反向裁判把英文 bitN 当物理位号再减 1
+
+#### 发现日期
+
+2026-10-26
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线。
+
+#### 问题现象
+
+`FSF21000101_HLR_680` 的 SWHLR 用表格逐行写 `bit10`~`bit28`。旧运行中
+deepseek/minimax 在初判里把 `bitN` 当作“物理第 N 位”，统一换算为
+`offset=N-1`，据此把整表判为“系统性偏移 1 位”并给出 inconsistent；
+qwen 则按 1 基物理位理解。新版运行虽给出 covered，但 analysis 仍写成
+“按物理位号→0基偏移换算”，位号基准处于歧义状态，判定可能随模型/运行翻转。
+
+#### 影响范围
+
+`app.v4.comparison.semantic_judge._build_reverse_user_prompt`、
+`app.v4.prompts.reverse_judge`、`app.v4.prompts.re_review`；所有以英文
+`bitN`/`bitN~bitM` 描述 A429 位号的 SWHLR。
+
+#### 原因分析
+
+1. `reverse_judge.md` / `re_review.md` 只写了中文“第 N 位”是 1 基物理位、
+   需换算为 0 基，没有说明英文 `bitN` 与 EoICD `BitOffsetWithinDS` 同基准。
+2. `semantic_judge` 的位声明标题写成“物理位号→0基换算”，把英文 `bitN`
+   也暗示成物理位号；模型因此把中文的 -1 规则套到英文写法上。
+3. 匹配层 `extract_bit_fields` 本身是正确的（英文 `bitN`→offset=N，中文
+   “第N位”→offset=N-1）；HLR 680 最新匹配结果 20 个 Block 的
+   `bit_field` 均为 20，包括 bit18/26/27 对应的 PACK_OVHT、
+   ZONE_DUCT_OVHT、ADJ_ZONE_DUCT_OVHT。问题只在裁判/复查的基准说明。
+
+#### 修复方案
+
+只改反向管线的提示词与位声明展示，不改匹配、评分、API 与正向管线：
+
+1. `reverse_judge.md` 新增“位号基准”一节：中文“第 N 位”→offset=N-1；
+   英文 `bitN`→offset=N，不得再减 1；两种写法分别换算。
+2. `re_review.md` 的“判定口径”增加同一规则，并明确不得因 provider 对
+   位号基准的意见分歧而判 needs_review。
+3. `semantic_judge` 的 ICD 锚点位偏移约定补上英文 `bitN` 规则；位声明
+   标题改为“已归一为 0 基 offset（中文第N位按 N-1，英文 bitN 按 N 原值）”。
+
+#### 修改文件
+
+1. `backend/app/v4/comparison/semantic_judge.py`
+2. `backend/app/v4/prompts/reverse_judge.md`
+3. `backend/app/v4/prompts/re_review.md`
+
+#### 验证方式
+
+1. 用真实 HLR 680 案例重建 `ReverseCase`，渲染 reverse prompt，检查位号
+   规则与位声明标题。
+2. 用同一 prompt 调用 deepseek/minimax/qwen，检查三家对 bit10~bit28 的
+   映射与最终 coverage_status。
+3. 运行触及 `semantic_judge`/`re_review` 的已有测试。
+
+#### 验证结果
+
+**已通过（本机，2026-10-26）**：
+
+1. HLR 680 的 prompt 包含“英文 bitN/BitN 与 EoICD 同一基准，bitN 直接
+   对应 offset=N，不得再减 1”；位声明标题为“已归一为 0 基 offset…”，
+   `bit10 → offset=10`、`bit28 → offset=28`。
+2. 三模型复判均为 covered：deepseek 0.85、minimax 0.94、qwen 0.90；
+   analysis 逐项采用 bitN→offset=N，bit18/26/27 分别对齐
+   PACK_OVHT/ZONE_DUCT_OVHT/ADJ_ZONE_DUCT_OVHT。
+3. `pytest tests/test_forward_config_builder.py tests/test_job_cancel.py
+   tests/test_pipeline_errors.py`：48 passed / 1 failed；失败项为既有的
+   `job_scheduler.py:155 except BaseException` 检查，与本次改动无关。
+   4 个反向测试模块仍因 `app.v4.reverse.*` 源文件缺失而在收集阶段报错，
+   属既有问题。
+
+#### 遗留问题
+
+1. 未重跑完整反向 E2E（重新解析、全量标注、全部 17 条裁判与 Word 报告）。
+2. 改动未提交，Issue 编号待用户回填。
+3. 中文“第N位”与英文 bitN 混写的 HLR 本次无真实样例；规则已按写法分别
+   说明，但仍建议后续补一条混写用例。

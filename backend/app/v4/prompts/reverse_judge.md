@@ -24,6 +24,14 @@ EoICD 是接口定义权威来源，SWHLR 是软件对 EoICD 的实现。
      a) SWHLR 明确断言了某接口属性，但所给 EoICD 信息不足以验证该断言是否与 EoICD 矛盾（如 EoICD 画像中该属性缺失、EoICD Block 明细不全）
      b) SWHLR 引用的信号/Label 与所匹配的全部 EoICD Block 均不相关（Block 完全不相关，无法支持判定）
 
+## 位号基准
+
+SWHLR 位号与 EoICD `BitOffsetWithinDS` 的换算按写法区分，不得把一种写法的换算套到另一种上：
+
+1. 中文“第 N 位”“第 N 到 M 位”是 1 基物理位号，须换算为 0 基偏移：第 N 位 → offset=N-1；第 N 到 M 位 → offset=min(N,M)-1、size=|M-N|+1。
+2. 英文 `bitN`/`BitN`（如 bit10、bit10~bit12）与 EoICD 采用同一基准：`bitN` 直接对应 offset=N，**不得再减 1**；`bitN~bitM` 对应 offset=min(N,M)、size=|M-N|+1。
+3. 两种写法同时出现在一条 SWHLR 中时，按各自基准分别换算。若提示中已给出归一化位声明（如 `bit10 → offset=10`），直接采用该结果，不得再自行做 ±1 换算。
+
 ## 语义等价与定义/实例判断
 
 比对时须区分“技术约束是否一致”与“文字是否逐字相同”：
