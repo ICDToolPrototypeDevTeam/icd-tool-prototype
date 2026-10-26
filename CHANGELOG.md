@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-10-26
+
+### Added
+
+- **反向裁判可见 DP / RP 分侧原始定义（Block 名称、聚类方法、匹配过程与匹配结果全部不变）**：P2.4 合并以同行 DP 值覆盖 RP 条目（RP 仅保留 `Label` / `SDIExpected`），裁判只能看到合并后的 `merged_attributes`，无法判断某个名称 / offset / size 究竟来自发布侧（DP）还是接收侧（RP）——两侧写法不同（如 DP 用 `BitOffsetWithinDS`、RP 用 `BitOffsetWithinMsg`）时容易被判成不一致或漏判。本次在解析器 P2.4 覆盖**之前**按 Subscriber 行快照两侧叶子属性，存入 `EoICDOutput.side_pairs`（`Field(exclude=True)`，主 `eoicd_requirements.json` 逐字节不变），仅保留裁判可见的 `REVERSE_KEY_ATTRS` 白名单属性、沿用统一的 `值 单位` 格式；`build_blocks` 新增可选 `side_pairs` 参数聚合成 `ICDBlock.side_views`（**只挂数据**：分组键、遍历顺序、`block_key`、`attributes` 与匹配结果均未改动，无快照时为空列表），同侧属性集完全相同的多条记录合并名称展示（通道型数据不会刷出一长串重复视图）。初判与复查提示词同步渲染「分侧原始定义（DP=发布侧，RP=接收侧）」，并对两侧不一致的情形提示在分析中说明。**续跑一致性**：`side_pairs` 是内存字段，续跑走缓存的 `eoicd_requirements.json` 时会静默丢失，因此 `_parse_eoicd` 在旁边原子写 `eoicd_side_pairs.json` 旁车（空快照会清除旧旁车），续跑时加载，CLI `parse-eoicd` 同样写出。**边界**：仅同行 Publisher + Subscriber 表可建立分侧配对，只有 Subscriber 表时无 DP 侧可展示；旁车只对本次升级后的新任务生成，旧任务续跑 `side_views` 为空；提示词变更使已有裁判缓存键失效，升级后首次运行会重判。实测：HSCU 样例需求与 Block 形状哈希与改前**逐字节一致**（30,748 条 / 1,848 个），751 个 Block 带分侧视图，首跑与续跑结果完全一致；AMS 样例 137,758 条需求、2,160 个 RP 信号快照、1,707 个视图合并了通道名称；新增单测 6 个。该改动需**重建后端镜像**才生效。
+
 ## [Unreleased] - 2026-10-19
 
 ### Added

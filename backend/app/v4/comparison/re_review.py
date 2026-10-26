@@ -30,6 +30,7 @@ from app.v4.comparison.semantic_judge import (
     _append_bit_assembly_derivation,
     _append_bit_range_derivation,
     _append_sdi_layout_note,
+    _append_side_views,
     _extract_json,
 )
 from app.v4.config import JUDGE_PROVIDERS
@@ -151,6 +152,10 @@ def _build_re_review_user_prompt(
                 f"~{merged.get('FullScaleRngMax', 'N/A')}"
             )
             parts.append(f"- 单位: {merged.get('Units', 'N/A')}")
+
+            # 分侧原始定义：初判 prompt 已给出，复查必须同样可见，否则
+            # 复查模型会把合并值误当成单侧定义而翻转结论。
+            _append_side_views(parts, blk.get("side_views") or [])
 
             # 状态/编码与子信号明细：初判时裁判能看到 OneState/ZeroState，
             # 复查 prompt 原先只列 Label/方向/类型/位/范围/单位，导致复查

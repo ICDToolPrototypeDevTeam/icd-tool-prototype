@@ -266,6 +266,41 @@ def _extract_json(text: str) -> str:
 
 
 
+def _append_side_views(parts: list[str], side_views: list[dict]) -> None:
+    """Render the parser's raw DP/RP snapshots for one block.
+
+    ``merged_attributes`` is the post-P2.4 merged reference (RP only keeps
+    Label/SDIExpected; everything else is overwritten by DP). These views
+    show each side's own leaf name and whitelisted attributes so the judge
+    can attribute a value to Publisher (DP) or Subscriber (RP) instead of
+    assuming the merged value came from one side.
+    """
+    if not side_views:
+        return
+    parts.append(
+        "- 分侧原始定义（DP=发布侧，RP=接收侧）：同一信号在两侧表中的原始"
+        "名称与属性；merged_attributes 为合并后的参考值。两侧不一致时请在"
+        "分析中说明。"
+    )
+    multi = len(side_views) > 1
+    for idx, view in enumerate(side_views, 1):
+        indent = "  "
+        if multi:
+            parts.append(f"  - 记录 {idx}:")
+            indent = "    "
+        for side, names_key in (("DP", "dp_names"), ("RP", "rp_names")):
+            attrs = view.get(side.lower()) or {}
+            names = view.get(names_key) or []
+            if not attrs and not names:
+                continue
+            name_text = " / ".join(names) if names else "（未提供名称）"
+            attr_text = ", ".join(f"{k}={v}" for k, v in attrs.items())
+            line = f"{indent}- {side}: {name_text}"
+            if attr_text:
+                line += f" | {attr_text}"
+            parts.append(line)
+
+
 def _build_reverse_user_prompt(case: ReverseCase) -> str:
     """Serialize a ReverseCase as the user prompt for ICD-centric reverse judgment.
 
@@ -301,6 +336,8 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
                 for attr_name, attr_val in merged.items():
                     parts.append(f"  - {attr_name} = {attr_val}")
                 _append_bnr_sign_derivation(parts, merged)
+
+            _append_side_views(parts, blk.get("side_views") or [])
 
             # Sub-signals (bit-level layout within one A429 word)
             sub_signals = blk.get("sub_signals", [])

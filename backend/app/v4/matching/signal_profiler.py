@@ -160,6 +160,13 @@ class ICDBlock:
     # Each entry: {"name": str, "attrs": {attr: value}}
     word_protocol_fields: list[dict] = field(default_factory=list)
 
+    # Raw DP/RP leaf values per distinct side snapshot (reverse-only, judge
+    # context). Records with identical DP+RP attribute sets — e.g. A1/A2
+    # channels of one word — collapse into one view with merged names:
+    # {"dp_names": [...], "rp_names": [...], "dp": {attr: value},
+    #  "rp": {attr: value}}. Matching never reads this field.
+    side_views: list[dict] = field(default_factory=list)
+
 
 def _bit_span(attrs: dict) -> tuple[int | None, int | None]:
     """Return (bit offset, size) parsed from anchor attribute strings."""
@@ -252,9 +259,67 @@ def _with_synthetic_sdi_anchor(
     return [*anchors, anchor]
 
 
+def _collect_side_views(
+    profs: list[SignalProfile],
+    side_pairs: dict[str, list[dict]] | None,
+) -> list[dict]:
+    """Aggregate the parser's DP/RP snapshots for one block's profiles.
+
+    ``side_pairs`` is keyed by RP signal path (see
+    ``EoICDExcelParser.side_pairs``); a block may contain several channels,
+    so all distinct paths are looked up. Records whose DP and RP attribute
+    sets are exactly identical collapse into one view and their names are
+    merged for display (A1/A2/... channels share the same layout). Views are
+    sorted by names so prompt content is deterministic — the LLM cache is
+    content-addressed.
+    """
+    if not side_pairs:
+        return []
+    signal_names = sorted({
+        e.signal_name
+        for p in profs
+        for e in p.entries
+        if e.signal_name
+    })
+    views: dict[tuple, dict] = {}
+    for signal_name in signal_names:
+        for pair in side_pairs.get(signal_name, []) or []:
+            dp_attrs = dict(pair.get("dp") or {})
+            rp_attrs = dict(pair.get("rp") or {})
+            if not dp_attrs and not rp_attrs:
+                continue
+            key = (
+                tuple(sorted(dp_attrs.items())),
+                tuple(sorted(rp_attrs.items())),
+            )
+            view = views.get(key)
+            if view is None:
+                view = {
+                    "dp_names": [],
+                    "rp_names": [],
+                    "dp": dp_attrs,
+                    "rp": rp_attrs,
+                }
+                views[key] = view
+            dp_name = str(pair.get("dp_name") or "")
+            rp_name = str(pair.get("rp_name") or "")
+            if dp_name and dp_name not in view["dp_names"]:
+                view["dp_names"].append(dp_name)
+            if rp_name and rp_name not in view["rp_names"]:
+                view["rp_names"].append(rp_name)
+
+    result = list(views.values())
+    for view in result:
+        view["dp_names"].sort()
+        view["rp_names"].sort()
+    result.sort(key=lambda v: (v["rp_names"], v["dp_names"]))
+    return result
+
+
 def build_blocks(
     profiles: list[SignalProfile],
     protocol_anchors: dict[str, list[dict]] | None = None,
+    side_pairs: dict[str, list[dict]] | None = None,
 ) -> list[ICDBlock]:
     """Group SignalProfiles into ICDBlocks by signal family.
 
@@ -268,6 +333,11 @@ def build_blocks(
     by parser Rule 9, keyed by Label. They enrich ``word_protocol_fields`` so
     a data block's case still exposes the same word's LABEL/SDI/SSM/PARITY
     bit layout and SDI CodedSet.
+
+    ``side_pairs`` (reverse-only) carries the parser's raw DP/RP leaf
+    snapshots keyed by RP signal path. They are aggregated into the block's
+    ``side_views`` for judge context only — grouping, block keys, ordering
+    and matching are untouched.
     """
     groups: dict[tuple[str | None, str], list[SignalProfile]] = defaultdict(list)
     for prof in profiles:
@@ -526,6 +596,7 @@ def build_blocks(
             channel_count=len(profs),
             sub_signals=sub_signals,
             word_protocol_fields=anchors,
+            side_views=_collect_side_views(profs, side_pairs),
         ))
 
     return blocks

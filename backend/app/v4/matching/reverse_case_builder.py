@@ -135,6 +135,11 @@ def _serialize_block(block: ICDBlock, include_protocol_fields: bool = True) -> d
 
     ``include_protocol_fields`` attaches the same-word SSM bit definitions
     (``word_protocol_fields``) once per label per case — see build_reverse_cases.
+
+    ``side_views`` (when the parser captured DP/RP snapshots) exposes each
+    side's raw leaf names + whitelisted attributes, so the judge can tell
+    which value came from the Publisher (DP) and which from the Subscriber
+    (RP). Purely additive: ``merged_attributes`` is unchanged.
     """
     merged_attrs = {}
     for k, v in block.attributes.items():
@@ -172,6 +177,8 @@ def _serialize_block(block: ICDBlock, include_protocol_fields: bool = True) -> d
         "channel_count": block.channel_count,
         "merged_attributes": merged_attrs,
     }
+    if block.side_views:
+        result["side_views"] = block.side_views
     sources, words = _block_provenance(block)
     if sources:
         result["sources"] = sources
