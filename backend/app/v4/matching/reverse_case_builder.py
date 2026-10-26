@@ -7,6 +7,8 @@ structured cases for the AI judge.
 
 from __future__ import annotations
 
+import re
+
 from app.v4.config import REVERSE_KEY_ATTRS
 from app.v4.matching.signal_profiler import SignalProfile, ICDBlock
 from app.v4.models import (
@@ -17,6 +19,54 @@ from app.v4.models import (
 
 
 _STATE_ATTRS = ("OneState", "ZeroState")
+
+
+def _extract_word_name(signal_name: str, label: str | None) -> str:
+    """Return the A429 word segment carrying ``label`` from a signal path.
+
+    Two EoICD path shapes occur:
+
+    - hierarchical (mostly Publisher): ``...Msg.L272_ACS_Status_Word1.PACK_OVHT``
+      — the label-bearing segment is the word above the leaf;
+    - flat (some Subscriber rows): ``...pi429_A1_272_1.L272_1_A1_...`` —
+      the leaf carries label + optional word index + channel; the word
+      identity is the ``L272_1`` prefix (channel suffix excluded), so
+      A1/A2/B1/B2/S1/S2 instances of one word stay together.
+
+    Returns "" for non-A429 paths or paths that do not carry ``label``.
+    """
+    if not signal_name or not label:
+        return ""
+    prefix = f"L{label}"
+    segments = [s.strip() for s in signal_name.split(".") if s.strip()]
+    for idx, segment in enumerate(segments):
+        upper = segment.upper()
+        if upper != prefix.upper() and not upper.startswith(prefix.upper() + "_"):
+            continue
+        if idx < len(segments) - 1:
+            # Hierarchical path: the parent segment is the word itself.
+            return segment
+        # Flat path: strip the channel/layer suffix after the optional
+        # numeric word index (e.g. L272_1_A1_... -> L272_1).
+        m = re.match(
+            rf"^{re.escape(prefix)}(?:_\d+)?(?=_|$)", segment, re.IGNORECASE
+        )
+        return m.group(0) if m else segment
+    return ""
+
+
+def _block_provenance(block: ICDBlock) -> tuple[list[str], list[str]]:
+    """Aggregate table sources and A429 words from every entry in the block."""
+    sources: set[str] = set()
+    words: set[str] = set()
+    for prof in block.profiles:
+        for entry in prof.entries:
+            if entry.source:
+                sources.add(entry.source)
+            word = _extract_word_name(entry.signal_name, block.label)
+            if word:
+                words.add(word)
+    return sorted(sources), sorted(words)
 
 
 def _field_state_map(block: ICDBlock) -> dict[str, dict[str, str]]:
@@ -82,6 +132,11 @@ def _serialize_block(block: ICDBlock, include_protocol_fields: bool = True) -> d
         "channel_count": block.channel_count,
         "merged_attributes": merged_attrs,
     }
+    sources, words = _block_provenance(block)
+    if sources:
+        result["sources"] = sources
+    if words:
+        result["words"] = words
     if sub_signals:
         result["sub_signals"] = sub_signals
     if include_protocol_fields and block.word_protocol_fields:

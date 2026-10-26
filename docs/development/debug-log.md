@@ -2726,3 +2726,108 @@ qwen 则按 1 基物理位理解。新版运行虽给出 covered，但 analysis 
 2. 改动未提交，Issue 编号待用户回填。
 3. 中文“第N位”与英文 bitN 混写的 HLR 本次无真实样例；规则已按写法分别
    说明，但仍建议后续补一条混写用例。
+
+## BUG-20261026-002：反向裁判看不到来源表与 A429 word，同 Label 跨 word 的 Block 无法区分
+
+#### 发现日期
+
+2026-10-26
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线；与 BUG-20261026-001 同属 HLR 680 排查。
+
+#### 问题现象
+
+HLR 680 的案例共匹配 20 个 Block：16 个来自 Publisher Table、属于
+`L272_ACS_Status_Word1`；另外 4 个来自 Subscriber Table，分别属于
+`L272_APU_Status_Word_3`（Load_Control_Valve_Open_Position、
+Impending_Filter_Bypass_Switch、LOP_Switch）和
+`L272_Overheat_Detection_Failures`（FWD_CARGO_TRIM_AREA_O_D_FAIL），
+位号 11/12/13/16 与 Publisher 信号重叠。裁判 prompt 只序列化
+block_key / signal_family / 属性，AI 看不到来源表和所属 word；deepseek
+只能把 4 个 Block 猜成“另一设备实例”，minimax 只能按“未被 SWHLR 引用”
+排除，qwen 未提及。若其他 Subscriber Block 分数更高，还可能挤占 top-K 名额。
+
+#### 影响范围
+
+`app.v4.matching.reverse_case_builder._serialize_block`、
+`app.v4.comparison.semantic_judge._build_reverse_user_prompt`、
+`app.v4.comparison.re_review._build_re_review_user_prompt`、
+`app.v4.prompts.reverse_judge`、`app.v4.prompts.re_review`；所有同一
+Label 下存在多个 A429 word / Publisher-Subscriber 混合 Block 的反向案例。
+
+#### 原因分析
+
+1. `_serialize_block` 只输出 block_key、signal_family、label、方向、总线、
+   通道数和合并属性；`EoICDRequirement.source`（Publisher/Subscriber）与
+   `signal_name` 中的 word 段在序列化时被丢弃。
+2. `block_key` 形如 `L272/PACK_OVHT`，只保留 Label 和叶节点，无法表达
+   “同 Label 不同 word”；A429 的位偏移只在同一 word 内有意义，跨 word
+   的同 Label 同位号是不同定义。
+3. 提示词没有说明来源表/word 的判定口径，AI 只能从信号名推测，结论不稳定，
+   也无法解释为什么同 Label 同位号不构成矛盾。
+
+#### 修复方案
+
+只改反向裁判证据与提示词，不改匹配、评分、API 与正向管线：
+
+1. `_serialize_block` 新增 `sources`（去重排序的 Publisher Table /
+   Subscriber Table）与 `words`（该 Block 中所有条目所属 A429 word，
+   去重排序）。
+2. word 提取按路径形态：
+   - 层级路径 `...Msg.L272_ACS_Status_Word1.PACK_OVHT` 取叶节点的父段；
+   - 扁平 Subscriber 路径 `...pi429_A1_272_1.L272_1_A1_...` 取 Label +
+     可选数字 word 索引前缀（`L272_1`），剥离通道后缀，避免把
+     A1/A2/B1/B2/S1/S2 当成不同 word。
+3. 裁判与复查 prompt 渲染这两个字段；`reverse_judge.md` 新增“A429 word
+   与来源表”一节，`re_review.md` 增加同一判定口径：不同 word 同 Label
+   同位号是不同定义；先按 SWHLR 信号名确定所属 word 再比对；来源表只
+   说明定义来源，不单独作为判定依据，不得仅因 Subscriber 就排除。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/reverse_case_builder.py`
+2. `backend/app/v4/comparison/semantic_judge.py`
+3. `backend/app/v4/comparison/re_review.py`
+4. `backend/app/v4/prompts/reverse_judge.md`
+5. `backend/app/v4/prompts/re_review.md`
+
+#### 验证方式
+
+1. 用 HLR 680 最新运行的 EoICD/匹配结果重建 Block 与 ReverseCase，
+   检查 20 个 Block 的 `sources`/`words`。
+2. 渲染 reverse prompt 与 re-review prompt，确认每个 Block 都带来源表和 word。
+3. 用同一新 prompt 调用 deepseek/minimax/qwen，检查三家是否引用
+   word/来源表并保持 covered。
+4. 运行既有反向/管线的定向测试。
+
+#### 验证结果
+
+**已通过（本机，2026-10-26）**：
+
+1. HLR 680 的 16 个 Publisher Block 均输出
+   `sources=['Publisher Table']`、`words=['L272_ACS_Status_Word1']`；
+   4 个 Subscriber Block 分别输出 `L272_APU_Status_Word_3` /
+   `L272_Overheat_Detection_Failures`。
+2. 全量 1628 个 Block：946 个单 word、16 个多 word、666 个非 A429 无 word；
+   多 word 的 16 个均有真实多定义（如 L356 的 OA/OB 两个 word、L30 的
+   两套 CRC 定义），扁平 Subscriber 的 A1/A2/B1/B2/S1/S2 通道已归并为
+   同一 word。
+3. 新 prompt 三模型复判 HLR 680 均为 covered：deepseek 0.90（明确写
+   SWHLR 只引用 `L272_ACS_Status_Word1`，Block 9/15/16/17 属不同 word、
+   不在比对范围）、minimax 0.98（明确排除 `L272_APU_Status_Word_3` 与
+   `L272_Overheat_Detection_Failures` 上的 Block）、qwen 0.95（未逐字
+   引用 word，但判定 covered）。
+4. `pytest tests/test_reverse_label_profile.py tests/test_pipeline_errors.py -q`
+   → 29 passed；`compileall` 通过。4 个 `test_reverse_*` 模块仍因
+   `app.v4.reverse.*` 缺失在收集阶段报错，属既有问题。
+
+#### 遗留问题
+
+1. 未重跑完整 17 条 HLR 回放与 Word 报告；本次只验证 HLR 680。
+2. 匹配层 top-K 名额问题未改：Subscriber Block 仍可能挤占名额（本次
+   4 个 Subscriber Block 排名 9/15/16/17，真正的 bit18/26/27 Publisher
+   Block 排名 18~20，紧贴 top-20 截断线）。若后续出现更高分的
+   Subscriber Block，需要单独调整匹配层。
+3. 改动未提交，Issue 编号待用户回填。

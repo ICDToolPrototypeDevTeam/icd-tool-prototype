@@ -233,6 +233,12 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
             parts.append(f"- Label号: {blk.get('label', 'N/A')}")
             parts.append(f"- 方向: {blk.get('direction', 'N/A')}")
             parts.append(f"- 总线类型: {', '.join(blk.get('bus_types', []))}")
+            sources = blk.get("sources") or []
+            if sources:
+                parts.append(f"- 数据来源表: {', '.join(sources)}")
+            words = blk.get("words") or []
+            if words:
+                parts.append(f"- 所属 A429 word: {', '.join(words)}")
 
             # Merged attributes (block level, common across all channels)
             merged = blk.get("merged_attributes", {})

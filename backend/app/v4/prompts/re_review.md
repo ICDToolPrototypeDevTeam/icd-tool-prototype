@@ -27,6 +27,7 @@
 基于 SWHLR 和 EoICD 的以下具体属性，逐项核对：
 - Label号：{label}
 - 方向：{direction}
+- 来源表 / 所属 A429 word
 - 数据类型：{data_format}
 - Bit 偏移/宽度：{bit_info}
 - 取值范围：{range_info}
@@ -39,6 +40,7 @@
 - **位号基准**：EoICD 的 `BitOffsetWithinDS` 是 0 基偏移。SWHLR 中文“第 N 位”/“第 N 到 M 位”是 1 基物理位号，须换算为 0 基（第 N 位 → offset=N-1）；英文 `bitN`/`BitN` 与 EoICD 同一基准，`bitN` 直接对应 offset=N，不得再减 1。两种写法同时出现时按各自基准换算。复查时若其他判断使用了错误的位号基准（例如把英文 bitN 再减 1，导致整表系统性偏移），应按本规则纠正，不得因 provider 之间对基准的意见分歧而判 needs_review。
 - **状态语义等价**：OneState/ZeroState 定义的是某一位取 1/0 时信号所处的状态。SWHLR 可用不同词语表达同一状态（如 有效/无效、有权/无权、置位/复位、TRUE/FALSE、是/否、激活/未激活等）。这些状态词是对位取值的命名，只要 1/0 的极性关系一致，且没有把该位改述为另一个物理量或另一事件，状态词的差异不构成内容语义错配，不要求逐字相同；只有 1/0 对应的状态语义矛盾或该位被改述为另一事物时才判 inconsistent。
 - **定义与实例**：EoICD 的一个 Block 是同一信号的定义。SWHLR 可能分别描述该定义在多个设备、总线、通道或数据字上的实例；SWHLR 中同一信号出现多行/多处描述，而 EoICD 只有一个 Block，本身不构成不一致。逐条核对这些声明能否由该 Block 的定义解释，只有声明与该定义矛盾时才判 inconsistent。
+- **A429 word 与来源表**：同一 Label 号可以在多个 A429 word 上复用，位偏移只在同一个 word 内有意义。EoICD Block 证据中的“所属 A429 word”标明该 Block 的定义所在数据字；不同 word 上的同 Label、同位偏移是不同定义，不构成矛盾。先按 SWHLR 写出的信号名确定其所属 word，再与对应 Block 比对；“数据来源表”只说明该 Block 来自 Publisher/Subscriber 表，不单独作为判定依据，不得仅因来源为 Subscriber 就排除。
 - 只比对 SWHLR 明确写出的技术声明；SWHLR 未提及的属性不构成不一致。
 
 ## 输出要求

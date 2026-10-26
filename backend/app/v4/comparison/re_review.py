@@ -134,6 +134,12 @@ def _build_re_review_user_prompt(
             )
             parts.append(f"- Label号: {label}")
             parts.append(f"- 方向: {direction}")
+            sources = blk.get("sources") or []
+            if sources:
+                parts.append(f"- 数据来源表: {', '.join(sources)}")
+            words = blk.get("words") or []
+            if words:
+                parts.append(f"- 所属 A429 word: {', '.join(words)}")
             parts.append(f"- 数据类型: {merged.get('DataFormatType', 'N/A')}")
             parts.append(
                 f"- Bit 偏移/宽度: {merged.get('BitOffsetWithinDS', 'N/A')}"

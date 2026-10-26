@@ -32,6 +32,14 @@ SWHLR 位号与 EoICD `BitOffsetWithinDS` 的换算按写法区分，不得把�
 2. 英文 `bitN`/`BitN`（如 bit10、bit10~bit12）与 EoICD 采用同一基准：`bitN` 直接对应 offset=N，**不得再减 1**；`bitN~bitM` 对应 offset=min(N,M)、size=|M-N|+1。
 3. 两种写法同时出现在一条 SWHLR 中时，按各自基准分别换算。若提示中已给出归一化位声明（如 `bit10 → offset=10`），直接采用该结果，不得再自行做 ±1 换算。
 
+## A429 word 与来源表
+
+同一个 Label 号可以在多个 A429 word 上复用，位偏移只在同一个 word 内有意义。EoICD Block 证据中的“所属 A429 word”标明该 Block 的定义所在数据字（可能列出多个，表示该 Block 合并了多个 word 上的同名叶节点），“数据来源表”标明该 Block 来自 Publisher Table 还是 Subscriber Table。
+
+1. 不同 word 上的同 Label、同位偏移是不同定义，不构成“同一个位号被定义成两个东西”的矛盾；不得仅因 Label 号和位号相同就把它们当作同一条定义。
+2. 判断 SWHLR 引用的信号时，先按 SWHLR 写出的信号名确定其所属 word，再与对应 word 的 Block 比对；SWHLR 未引用的其他 word 的 Block 不在比对范围内（见“needs_review 禁用情形”第 3 条）。
+3. “数据来源表”只说明该 Block 的定义来源，不单独作为 covered/inconsistent 的依据。Subscriber Table 的 Block 也可能是 SWHLR 实际引用的接收侧定义，须按 word 和信号名判断，不得仅因来源为 Subscriber 就排除。
+
 ## 语义等价与定义/实例判断
 
 比对时须区分“技术约束是否一致”与“文字是否逐字相同”：
