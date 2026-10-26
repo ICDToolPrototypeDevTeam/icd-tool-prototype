@@ -2831,3 +2831,132 @@ Label 下存在多个 A429 word / Publisher-Subscriber 混合 Block 的反向案
    Block 排名 18~20，紧贴 top-20 截断线）。若后续出现更高分的
    Subscriber Block，需要单独调整匹配层。
 3. 改动未提交，Issue 编号待用户回填。
+
+
+## BUG-20261026-003：反向裁判把 ID/内容型字段的自定义内容判成不一致，并可能用信号级公共属性否定子信号明细
+
+#### 发现日期
+
+2026-10-26
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线；由 HLR 3898 / 3958 / 4060 的 MSID、Test_ID 判定排查引出。
+
+#### 问题现象
+
+HLR 3898 明确写出 `LABEL356的bit23~bit12=空气管理系统成员系统ID`，EoICD 对应子信号为 `MSID: bit12, 12bit, BNR`，位偏移/位宽一致。部分能力较弱的模型会把“MSID 这种字段名对应的详细内容描述”当作内容语义断言，认为 EoICD 未定义“空气管理系统成员系统ID”这一含义，从而判 inconsistent 或 needs_review。HLR 3958/4060 的 `Command=0001000/0000011`、`Test_ID` 内部 8 bit 测试 ID 码也有同类风险。另一方面，多子信号 Block 的“信号级公共属性”是各 profile 合并后的参考值（如 L356 显示 `PAD/2bit/offset10`，实际 HLR 比对的是 `MSID/12bit/offset12`），弱模型可能拿公共属性否定子信号明细。
+
+#### 影响范围
+
+`app.v4.prompts.reverse_judge`、`app.v4.prompts.re_review` 的判定口径；`app.v4.comparison.semantic_judge._build_reverse_user_prompt` 与 `app.v4.comparison.re_review._build_re_review_user_prompt` 的证据标注。涉及所有含 ID/Code/Name/Command/Test_ID 等标识/内容型字段，以及带 `sub_signals` 的多子信号 Block 的反向案例。
+
+#### 原因分析
+
+1. `reverse_judge.md` 的“内容语义是否与 EoICD 信号定义矛盾”没有任何标识/内容型字段的例外，模型只能按“信号名逐字对应”判断；ID 类字段的具体取值/业务名称由使用方自定义，EoICD 通常只定义位宽/格式/范围，不枚举内容。
+2. 证据中“信号级公共属性”与“字内子信号明细”并列，未说明优先级；`merged_attributes` 的多子信号合并值可能取自其中一个子信号。
+3. 初判与复查 prompt 缺少同一口径，复查阶段可能重新引入同类误判。
+4. EoICD 对 OPAQUE 字段未给出内部子位布局时，SWHLR 对内部内容的细化（如 23 bit Test_ID 中的 8 bit 测试 ID 码）被误当成位宽矛盾。
+
+#### 修复方案
+
+在初判与复查 prompt 中增加通用规则（不针对具体 HLR 写死）：
+
+1. **标识/内容型字段自定义内容**：ID、MSID、Code、Name、Command、Test_ID、Number、标识、编号、代码、名称、命令等字段，具体取值/业务名称属于使用方自定义内容；只要与字段类别相容，不因措辞不同或 EoICD 未枚举该值而判 inconsistent 或 needs_review。
+2. **唯一保留的 inconsistent 情形**：改述为另一物理量、与字段类别不相容、取值/编码与 EoICD 明确的范围/CodedSet/格式矛盾、位偏移/位宽与 EoICD 已定义的内部布局矛盾。
+3. **OPAQUE 内部细化**：EoICD 只给整体位偏移/位宽、未细分内部子信号时，SWHLR 对字段内部子段的内容说明属于自定义内容细化，不构成位宽矛盾；EoICD 已给出内部子信号明细时仍按明细比对。
+4. **子信号明细优先**：Block 的“信号级公共属性”仅为合并参考值，存在“字内子信号明细”时，SWHLR 对子信号的位声明优先与子信号自身比对。
+5. 证据渲染同步标注：初判 prompt 的“信号级公共属性”改为“Block 内合并参考值；下方有字内子信号明细时以子信号明细为准”；复查 prompt 在子信号明细前加同义说明。
+
+#### 修改文件
+
+1. `backend/app/v4/prompts/reverse_judge.md`
+2. `backend/app/v4/prompts/re_review.md`
+3. `backend/app/v4/comparison/semantic_judge.py`
+4. `backend/app/v4/comparison/re_review.py`
+
+#### 验证方式
+
+1. 用最新运行的 EoICD/匹配结果重建 HLR 3898/3958/4060 的 ReverseCase，渲染初判 prompt，确认公共属性标注与子信号明细。
+2. 用新 prompt 调用 deepseek/minimax/qwen，检查 MSID/Test_ID 不再被判 inconsistent，且仍能识别真实的位偏移/位宽矛盾。
+3. 运行反向/管线定向测试与全量 `tests/` 回归。
+
+#### 验证结果
+
+**已通过（本机，2026-10-26）**：
+
+1. HLR 3898 的 prompt 显示“信号级公共属性（Block 内合并参考值…）”，子信号 `MSID: bit12, 12bit, BNR`、`Command: bit24, 7bit, ISO-5`、`Pad: bit10, 2bit, PAD` 完整可见。
+2. 实跑三家模型：
+   - HLR 3898：deepseek covered 0.65、qwen needs_review 0.6、minimax needs_review 0.76；三家均明确把 MSID 的详细描述判为标识型字段的合法自定义内容，未再判 inconsistent。minimax/qwen 的 needs_review 仅因 `bit8~9` 未定义与“有效标志”无 EoICD 定义，与本次规则无关。
+   - HLR 3958：deepseek covered 0.78、qwen covered 0.9、minimax needs_review 0.9（仅“有效标志”缺失）；MSID/Command 内容均未判 inconsistent。
+   - HLR 4060：deepseek 0.85、minimax 0.94、qwen 0.85 全部 covered；minimax 在规则补充前曾因 L230 `Test_ID` 内部 8 bit 与整体 23 bit OPAQUE 判 inconsistent，补充“OPAQUE 内部细化”规则后改为 covered，并明确引用“EoICD 未给出内部子位布局，8 bit 细化属自定义内容”。
+3. 反例校验（确认规则只放行自定义内容、不放行真实矛盾）：把 HLR 4060 的 MSID 说明改为“空气温度（单位：摄氏度）”→ deepseek inconsistent 0.9（明确引用“标识字段被改述为有量纲物理量”）；把 MSID 改为 `bit23~bit10`（14 bit）→ deepseek inconsistent 0.85（明确引用“与已给出的子信号明细偏移/宽度矛盾”）。
+4. 复查链路：用 HLR 4060 构造 minimax 误判 inconsistent（理由为 EoICD 未定义“空气管理系统成员系统ID”），新复查 prompt 下 minimax 改为 covered 0.99，并明确引用标识/内容型字段规则。
+5. `pytest tests/test_reverse_label_profile.py tests/test_pipeline_errors.py -q` → 29 passed；`pytest tests -q --continue-on-collection-errors` → 278 passed / 6 failed / 10 errors，失败与收集错误均为既有问题（`app.v4.reverse.*`/controller 模块缺失、job cancel/BaseException 检查），与本次改动无关。
+
+#### 遗留问题
+
+1. 未重跑完整 17 条 HLR 回放与 Word 报告。
+2. HLR 3898/3958 的 `needs_review` 仍可能由“有效标志”无 EoICD 定义、`bit8~9` 未定义触发，属独立问题，本次未改。
+3. 改动未提交，Issue 编号待用户回填。
+
+
+## BUG-20261026-004：反向裁判对 HLR 描述与信号名“咬文嚼字”，同义/缩写/详略差异被判不一致
+
+#### 发现日期
+
+2026-10-26
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线；与 BUG-20261026-003 同属裁判语义判定过严问题，但本条针对非 ID 类信号的通用措辞差异。
+
+#### 问题现象
+
+能力较弱的模型会把 SWHLR 的中文描述与 EoICD 英文信号名逐词比对：只要不是字面相同，就可能判“内容语义不一致”。例如 EoICD 为 `PACK_OVHT`（Overheat），SWHLR 写“组件超温告警”或“组件温度过高”，本属同一事件的不同表述，却可能被当成两个不同含义；缩写与全称（MSID ↔ Member System ID）、中英文、同义词、词序、通用类别词（信号/标志/状态/告警）的有无也存在同类风险。
+
+#### 影响范围
+
+`app.v4.prompts.reverse_judge`、`app.v4.prompts.re_review` 的判定口径；所有 SWHLR 使用中文业务叫法、缩写展开、同义表述或不同详略程度描述 EoICD 信号的反向案例。
+
+#### 原因分析
+
+1. `reverse_judge.md` 的“内容语义”规则要求 SWHLR 说明与 EoICD 信号名/子信号名所表达的定义一致，但没有说明“一致”是语义层面而非字面层面。
+2. 已有“状态语义等价”只覆盖 1/0 状态词，“标识/内容型字段”只覆盖 ID 类字段；普通信号名的同义/缩写/详略差异没有通用规则。
+3. 复查 prompt 同样缺少该口径。
+
+#### 修复方案
+
+在初判与复查 prompt 中新增“信号名/描述语义近似等价”通用规则（不针对具体 HLR 写死）：
+
+1. 判断两者是否指向同一个物理量、事件、状态或对象，不要求逐词对应。
+2. 以下属于表述差异，不构成内容语义错配：缩写与全称、中英文对应、同义词/近义词、词序、单复数、连接符/下划线、通用类别词（信号/标志/状态/指令/告警/数据/值）的有无、同一概念的不同详略程度。
+3. 保留真实矛盾的判定：描述指向另一物理量（温度 vs 压力）、另一事件/状态（过热 vs 过压）、另一对象（APU vs 发动机）、或相反动作/极性（打开 vs 关闭、有效 vs 无效）时，仍判 inconsistent。
+4. 描述能合理落到该信号名所指的对象上时判 covered，不得仅因表述不够精确或不能逐字对应而判 needs_review；避免把过于笼统的描述当作同义。
+
+#### 修改文件
+
+1. `backend/app/v4/prompts/reverse_judge.md`
+2. `backend/app/v4/prompts/re_review.md`
+
+#### 验证方式
+
+1. 用合成 `L272/PACK_OVHT`（offset18、1bit、DIS、OneState=Overheat）案例测试同义改写与另一事件改写。
+2. 用真实且已确认存在矛盾的 REV-0001（L40 被说成座舱高度）和 REV-0010（电源可用 vs Power_Supply_Fail）回归，确认不会被新规则放过。
+3. 运行反向/管线定向测试。
+
+#### 验证结果
+
+**已通过（本机，2026-10-26）**：
+
+1. 同义改写“bit18=1 判定为组件超温告警” → minimax covered 0.96；详略改写“bit18=1 表示组件温度过高” → minimax covered 0.98。
+2. 另一事件“bit18=1 判定为组件过压告警” → minimax inconsistent 0.99、deepseek inconsistent 0.95，均明确说明“过压与过热是不同故障类型”。
+3. 真实矛盾回归：REV-0001 minimax inconsistent 0.78（L40 的 1bit 硬件故障被说成 17bit 座舱高度）；REV-0010 minimax inconsistent 0.99（电源可用与 Power_Supply_Fail 极性相反）；均未被新规则放过。
+4. 复查链路：构造 minimax 误判“PACK_OVHT 与组件温度过高字面不同 → inconsistent”，新复查 prompt 下改为 covered 0.98，并明确引用“同一事件的不同表述”规则。
+5. `pytest tests/test_reverse_label_profile.py tests/test_pipeline_errors.py -q` → 29 passed。
+
+#### 遗留问题
+
+1. 未重跑完整 17 条 HLR 回放与 Word 报告。
+2. 新规则依赖模型对“同一物理量/事件/对象”的判断，极端模糊描述仍可能产生 provider 分歧；后续可用真实误判样本继续收敛。
+3. 改动未提交，Issue 编号待用户回填。

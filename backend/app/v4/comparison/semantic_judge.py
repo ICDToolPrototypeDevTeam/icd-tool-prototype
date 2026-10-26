@@ -243,7 +243,7 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
             # Merged attributes (block level, common across all channels)
             merged = blk.get("merged_attributes", {})
             if merged:
-                parts.append("- 信号级公共属性:")
+                parts.append("- 信号级公共属性（Block 内合并参考值；下方有字内子信号明细时以子信号明细为准）:")
                 for attr_name, attr_val in merged.items():
                     parts.append(f"  - {attr_name} = {attr_val}")
                 _append_bnr_sign_derivation(parts, merged)

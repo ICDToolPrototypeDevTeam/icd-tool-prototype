@@ -156,6 +156,10 @@ def _build_re_review_user_prompt(
             # 模型在缺少状态定义的情况下重判（如把 有效/无效 判成不一致）。
             sub_signals = blk.get("sub_signals", []) or []
             if sub_signals:
+                parts.append(
+                    "- 上述数据类型/位偏移/宽度/取值范围/单位为信号级公共属性"
+                    "（Block 内合并参考值），针对某个子信号的声明以子信号明细为准。"
+                )
                 parts.append("- 字内子信号明细:")
                 for ss in sub_signals:
                     state_suffix = ""
