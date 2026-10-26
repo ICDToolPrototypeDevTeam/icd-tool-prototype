@@ -51,6 +51,56 @@
 
 ## 3. 开发记录
 
+### 2026-10-26 反向裁判可见 DP/RP 分侧原始定义（Block 聚类与匹配不变）
+
+#### 任务目标
+
+反向裁判此前只能看到 Block 合并后的属性：P2.4 用同行 DP 值覆盖 RP 条目（RP 仅保留 Label/SDIExpected），裁判无法判断某个名称/offset/size 来自发布侧还是接收侧。目标是在 Block 名称、聚类方法、匹配过程与匹配结果均不变的前提下，让裁判同时看到 DP 与 RP 两侧的原始叶子名称与属性，并明确标注侧别。
+
+#### 完成内容
+
+1. 解析器在 P2.4 覆盖前按 Subscriber 行快照两侧叶子属性（仅 `REVERSE_KEY_ATTRS` 白名单），存入 `EoICDOutput.side_pairs`（`exclude=True`，主 JSON 不含该字段）；`write_side_pairs` 原子写 `eoicd_side_pairs.json` 旁车，空快照会清除旧旁车。
+2. `build_blocks` 新增可选 `side_pairs` 参数，聚合为 `ICDBlock.side_views`；DP+RP 属性集完全相同的多条记录合并名称展示。分组键、遍历顺序、block_key、`attributes` 均未改动。
+3. `_serialize_block` 输出 `side_views`；初判与复查 prompt 都渲染“分侧原始定义（DP=发布侧，RP=接收侧）”。
+4. `pipeline.run_reverse_pipeline` 首跑写旁车、续跑读旁车；refine runner 与非 refine 分支同步传入；CLI 解析也写旁车。
+
+#### 修改文件
+
+1. `backend/app/v4/parsers/eoicd_excel_parser.py`
+2. `backend/app/v4/models.py`
+3. `backend/app/v4/matching/signal_profiler.py`
+4. `backend/app/v4/matching/reverse_case_builder.py`
+5. `backend/app/v4/comparison/semantic_judge.py`
+6. `backend/app/v4/comparison/re_review.py`
+7. `backend/app/v4/pipeline.py`
+8. `backend/app/v4/refine/runner.py`
+9. `backend/app/v4/cli.py`
+10. `backend/tests/test_reverse_side_views.py`（新增；位于 `.gitignore` 的 `backend/tests/` 下）
+
+#### 验证方式
+
+1. `python -m pytest tests/test_reverse_side_views.py tests/test_reverse_case_coded_set.py -q`
+2. HSCU 样例：与 `HEAD` 基线逐条比对需求与 Block 形状哈希；`_parse_eoicd` 首跑/续跑一致性探针。
+3. AMS 样例：解析规模、分侧聚合与通道名称合并统计。
+
+#### 验证结果
+
+1. 新增 6 个用例 + 既有 coded_set 用例共 7 passed。
+2. HSCU：需求哈希与 `HEAD` 一致（30,748 条，`cc8adde6…`）；Block 形状哈希与 `HEAD` 一致（1,848 个，`ed02458e…`）；855 个 RP 信号 / 892 条快照；751 个 Block 带 `side_views`；旁车 568,033 字节；首跑与续跑 `side_views` 完全一致；主 JSON 不含 `side_pairs`。
+3. AMS：137,758 条需求；2,160 个 RP 信号 / 10,082 条快照；299 个 Block 带 `side_views`，1,707 个视图合并了通道名称。
+4. 全量回归（排除 10 个既有收集错误）：285 passed / 6 failed；6 个失败为既有漂移，与本次改动无关（5 个 job/runner 用例 + `test_parse_artifact_reuse` 的 HLR skip 断言）。
+
+#### 遗留问题
+
+1. 仅同行 Publisher+Subscriber 表可建立 DP/RP 配对；只有 Subscriber 表（无 Publisher 块）时没有 DP 侧可展示。
+2. 旁车只对本次改动之后的新任务生成；旧任务续跑时 `side_views` 为空。
+3. Prompt 变更使已有裁判缓存键失效，升级后首次运行会重判。
+
+#### 下一步建议
+
+1. 用真实反向 E2E（MOCK 或真实模型）抽查若干含 DP/RP 不一致的案例，确认分侧信息能减少误判。
+2. 服务器部署需重建后端镜像。
+
 ### 2026-10-19 正向管线升级并集成「发送工具集成版 V3」
 
 #### 任务目标

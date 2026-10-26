@@ -49,7 +49,11 @@ from app.v4.models import (
     ReverseJudgmentOutput,
     ReverseMatchOutput,
 )
-from app.v4.parsers.eoicd_excel_parser import EoICDExcelParser
+from app.v4.parsers.eoicd_excel_parser import (
+    EoICDExcelParser,
+    load_side_pairs,
+    write_side_pairs,
+)
 from app.v4.parsers import create_hlr_parser
 from app.v4.parsers.zip_entry_normalize import ensure_standard_zip
 from app.v4.profiles.base import ControllerProfile, TraceabilityConfig
@@ -171,6 +175,9 @@ def _parse_eoicd(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     # 分块写：12 万条时整份序列化会额外占 ~254MB 堆（BUG-20260923-008）
     _write_json_streaming(output_path, result)
+    # 反向分侧快照旁车：side_pairs 是内存字段，续跑只读主 JSON 会静默丢失
+    # （P2.4 已把 RP 原值覆盖成 DP 值，无法事后反推）。
+    write_side_pairs(output_path, result.side_pairs)
 
     print(f"  Output: {output_path}")
     print(f"  Generated (before any dedup): {result.total_generated}")
@@ -992,6 +999,9 @@ def run_reverse_pipeline(
         print(f"  [skip] Using cached EoICD JSON: {eoicd_json}")
         eoicd_data = json.loads(eoicd_json.read_text(encoding="utf-8"))
         eoicd_out = EoICDOutput(**eoicd_data)
+        # 分侧快照不在主 JSON 里（exclude=True），从同名旁车恢复，保证续跑
+        # 与首跑的裁判输入一致；旧任务没有旁车时退化为空。
+        eoicd_out.side_pairs = load_side_pairs(eoicd_json)
     else:
         eoicd_out = _parse_eoicd(
             publisher, subscriber,
@@ -1112,7 +1122,11 @@ def run_reverse_pipeline(
         # Build block index for case building
         eoicd_kept = [req for req in eoicd_out.requirements if should_keep(req)]
         eoicd_profiles = build_profiles(eoicd_kept)
-        blocks = build_blocks(eoicd_profiles)
+        blocks = build_blocks(
+            eoicd_profiles,
+            eoicd_out.protocol_anchors,
+            eoicd_out.side_pairs,
+        )
         block_index: dict[str, ICDBlock] = {b.block_key: b for b in blocks}
 
         cases = build_reverse_cases(match_result, block_index)

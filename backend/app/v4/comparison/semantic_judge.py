@@ -57,6 +57,60 @@ def _append_bnr_sign_derivation(parts: list[str], merged: dict) -> None:
     )
 
 
+def _append_sdi_layout_note(
+    parts: list[str], merged: dict, proto_fields: list[dict] | None
+) -> None:
+    """Explain the word's SDI field when the block exposes it (anchor or
+    ``SDIExpected``).
+
+    ``SDIExpected`` is a per-channel expected-value list (e.g. "0/-1/-1/0"),
+    where ``-1`` means that channel does not constrain SDI. Left as a bare
+    merged attribute, judges read it as an undefined value and report the
+    SDI bits (physical 9-10) as "EoICD 缺少 bit8/bit9". A429 defines SDI at
+    0-based offset 8, width 2 — the anchor states the same thing from the
+    ICD data, so this is a derivation, not an outside assumption.
+    """
+    sdi_expected = str(merged.get("SDIExpected", "") or "").strip()
+    sdi_anchor = next(
+        (
+            pf for pf in proto_fields or []
+            if str(pf.get("name", "")).upper() == "SDI"
+        ),
+        None,
+    )
+    if not sdi_expected and sdi_anchor is None:
+        return
+
+    attrs = (sdi_anchor or {}).get("attrs", {}) or {}
+    offset = attrs.get("BitOffsetWithinDS", "8")
+    size = attrs.get("ParameterSize", "2")
+    off_num = _to_float(offset)
+    size_num = _to_float(size)
+    if off_num is not None and size_num is not None:
+        span = (
+            f"0 基 offset={int(off_num)}、宽度 {int(size_num)} bit"
+            f"（物理第{int(off_num) + 1}~{int(off_num + size_num)}位）"
+        )
+    else:
+        span = f"offset={offset}、宽度 {size}"
+
+    line = (
+        f"- [推导] SDI 位定义：本 word 的 SDI 字段为 {span}，"
+        "是 A429 字结构字段，不是未定义的数据位。SWHLR 的位声明若覆盖"
+        " offset 8~9（如 bit8/bit9、bit8~bit11），该位段即包含 SDI，"
+        "应把 SDI 取值一并纳入比对；SWHLR 完全未写出该位段时按未提及处理。"
+    )
+    if sdi_expected:
+        line += (
+            f" SDIExpected={sdi_expected} 为各通道实例的期望 SDI 值（按通道顺序），"
+            "其中 -1 表示该通道不约束 SDI，不代表该位缺失或未定义。"
+        )
+    coded = str(attrs.get("CodedSet", "") or "").strip()
+    if coded:
+        line += f" 该 word 的 SDI 编码定义：{coded}。"
+    parts.append(line)
+
+
 def _dedupe_coded_fields(
     matched_profiles: list[dict] | None, offset: int, size: int
 ) -> list[tuple[str, str]]:
@@ -212,6 +266,41 @@ def _extract_json(text: str) -> str:
 
 
 
+def _append_side_views(parts: list[str], side_views: list[dict]) -> None:
+    """Render the parser's raw DP/RP snapshots for one block.
+
+    ``merged_attributes`` is the post-P2.4 merged reference (RP only keeps
+    Label/SDIExpected; everything else is overwritten by DP). These views
+    show each side's own leaf name and whitelisted attributes so the judge
+    can attribute a value to Publisher (DP) or Subscriber (RP) instead of
+    assuming the merged value came from one side.
+    """
+    if not side_views:
+        return
+    parts.append(
+        "- 分侧原始定义（DP=发布侧，RP=接收侧）：同一信号在两侧表中的原始"
+        "名称与属性；merged_attributes 为合并后的参考值。两侧不一致时请在"
+        "分析中说明。"
+    )
+    multi = len(side_views) > 1
+    for idx, view in enumerate(side_views, 1):
+        indent = "  "
+        if multi:
+            parts.append(f"  - 记录 {idx}:")
+            indent = "    "
+        for side, names_key in (("DP", "dp_names"), ("RP", "rp_names")):
+            attrs = view.get(side.lower()) or {}
+            names = view.get(names_key) or []
+            if not attrs and not names:
+                continue
+            name_text = " / ".join(names) if names else "（未提供名称）"
+            attr_text = ", ".join(f"{k}={v}" for k, v in attrs.items())
+            line = f"{indent}- {side}: {name_text}"
+            if attr_text:
+                line += f" | {attr_text}"
+            parts.append(line)
+
+
 def _build_reverse_user_prompt(case: ReverseCase) -> str:
     """Serialize a ReverseCase as the user prompt for ICD-centric reverse judgment.
 
@@ -233,35 +322,45 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
             parts.append(f"- Label号: {blk.get('label', 'N/A')}")
             parts.append(f"- 方向: {blk.get('direction', 'N/A')}")
             parts.append(f"- 总线类型: {', '.join(blk.get('bus_types', []))}")
-            parts.append(f"- 通道变体数: {blk.get('channel_count', 0)}")
+            sources = blk.get("sources") or []
+            if sources:
+                parts.append(f"- 数据来源表: {', '.join(sources)}")
+            words = blk.get("words") or []
+            if words:
+                parts.append(f"- 所属 A429 word: {', '.join(words)}")
 
             # Merged attributes (block level, common across all channels)
             merged = blk.get("merged_attributes", {})
             if merged:
-                parts.append("- 信号级公共属性:")
+                parts.append("- 信号级公共属性（Block 内合并参考值；下方有字内子信号明细时以子信号明细为准）:")
                 for attr_name, attr_val in merged.items():
                     parts.append(f"  - {attr_name} = {attr_val}")
                 _append_bnr_sign_derivation(parts, merged)
+
+            _append_side_views(parts, blk.get("side_views") or [])
 
             # Sub-signals (bit-level layout within one A429 word)
             sub_signals = blk.get("sub_signals", [])
             if sub_signals:
                 parts.append("- 字内子信号明细:")
                 for ss in sub_signals:
-                    state_suffix = ""
+                    details = []
+                    if ss.get("coded_set"):
+                        details.append(f"CodedSet={ss['coded_set']}")
                     if (
                         ss.get("one_state") is not None
                         or ss.get("zero_state") is not None
                     ):
-                        state_suffix = (
-                            f"（OneState={ss.get('one_state', '—')} / "
-                            f"ZeroState={ss.get('zero_state', '—')}）"
+                        details.append(
+                            f"OneState={ss.get('one_state', '—')} / "
+                            f"ZeroState={ss.get('zero_state', '—')}"
                         )
+                    detail_suffix = f"（{'；'.join(details)}）" if details else ""
                     parts.append(
                         f"  - {ss.get('dp_name', '?')}: "
                         f"bit{ss.get('bit_offset', '?')}, "
                         f"{ss.get('size', '?')}bit, "
-                        f"{ss.get('dtype', '?')}{state_suffix}"
+                        f"{ss.get('dtype', '?')}{detail_suffix}"
                     )
 
             # Same-word protocol field definitions — context only, not a
@@ -282,12 +381,18 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
                 if not anchor_note_added:
                     # 基制说明由上方 ICD 锚点数据直接支撑（如 LABEL offset=0 →
                     # 物理第1~8位、SDI offset=8 → 物理第9~10位），非外部规则。
+                    # 两种写法必须分别说明：只讲中文“第N位”时，模型会把同一
+                    # 换算套到英文 bitN 上，导致整表系统性差 1 位（HLR 680）。
                     parts.append(
                         "  位偏移约定：BitOffsetWithinDS 为 0 基偏移，offset=N 对应"
-                        "物理位第 N+1 位；SWHLR 正文的“第 N 位”/“第N到M位”是物理位号，"
-                        "判定时请换算为 0 基后与 EoICD 位偏移比对。"
+                        "物理位第 N+1 位。SWHLR 正文中文“第 N 位”/“第N到M位”是"
+                        "1 基物理位号，判定时换算为 0 基（第 N 位 → offset=N-1）；"
+                        "英文 bitN/BitN 与 EoICD 同一基准，bitN 直接对应 offset=N，"
+                        "不得再减 1。"
                     )
                     anchor_note_added = True
+
+            _append_sdi_layout_note(parts, merged, proto_fields)
 
             parts.append("")
     else:
@@ -303,12 +408,15 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
     if hlr_rationale:
         parts.append(f"- 基本原理: {hlr_rationale}")
 
-    # HLR 正文位声明结构化呈现（物理位号 → 0 基 offset/size），让裁判直接
-    # 比对本行与 ICD 锚点，避免各家对“第 N 位”自行换算时错位（如把第31位
-    # 误当 PARITY 的物理32位）。
+    # HLR 正文位声明结构化呈现（已归一为 0 基 offset/size），让裁判直接
+    # 比对本行与 ICD 锚点，避免各家自行换算时错位（如把第31位误当 PARITY
+    # 的物理32位；或对英文 bitN 再减 1，整表系统性差 1 位）。
     bit_decls = extract_bit_fields(hlr.get('content', ''))
     if bit_decls:
-        parts.append("- SWHLR 位声明（物理位号→0基换算，由正文提取，仅供比对）:")
+        parts.append(
+            "- SWHLR 位声明（已归一为 0 基 offset：中文“第N位”按 N-1，"
+            "英文 bitN 按 N 原值；由正文提取，仅供比对）:"
+        )
         for bf in bit_decls:
             parts.append(
                 f"  - {bf.get('text', '?')} → offset={bf.get('offset')}, size={bf.get('size')}"
@@ -335,8 +443,7 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
         parts.append("- 最高分匹配:")
         for ts in top_scores:
             parts.append(f"  - {ts.get('block_key', '?')}: {ts.get('total', 0)}分 "
-                         f"(信号族={ts.get('signal_family', '?')}, "
-                         f"通道={ts.get('channel_count', 0)})")
+                         f"(信号族={ts.get('signal_family', '?')})")
 
     parts.append("")
     mt = evidence.get("match_type", "")

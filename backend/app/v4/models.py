@@ -45,6 +45,20 @@ class EoICDOutput(BaseModel):
     sheet_statistics: dict[str, dict[str, int]]
     requirements: list[EoICDRequirement]
 
+    # Same-word protocol anchors (LABEL/SDI/SSM/PARITY) collected during the
+    # Subscriber-table pass. These rows are deliberately kept out of
+    # ``requirements`` (Rule 9 frame-structure filtering), but their bit
+    # layout / SDI CodedSet is needed by the reverse judge. In-memory only:
+    # excluded from serialization so the itemized JSON stays byte-identical.
+    protocol_anchors: dict = Field(default_factory=dict, exclude=True)
+
+    # Reverse-only DP/RP snapshot: {RP signal path: [{dp_name, rp_name,
+    # dp: {attr: value}, rp: {attr: value}}, ...]}, captured by the parser
+    # before P2.4 overwrites RP attributes with DP values. In-memory only;
+    # persisted to ``eoicd_side_pairs.json`` (see ``write_side_pairs``) so a
+    # resumed run rebuilds identical judge input.
+    side_pairs: dict = Field(default_factory=dict, exclude=True)
+
 
 # ============================================================
 # HLR Models

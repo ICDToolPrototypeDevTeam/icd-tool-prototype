@@ -29,6 +29,8 @@ from pathlib import Path
 from app.v4.comparison.semantic_judge import (
     _append_bit_assembly_derivation,
     _append_bit_range_derivation,
+    _append_sdi_layout_note,
+    _append_side_views,
     _extract_json,
 )
 from app.v4.config import JUDGE_PROVIDERS
@@ -127,10 +129,19 @@ def _build_re_review_user_prompt(
         for i, blk in enumerate(case.matched_profiles, 1):
             parts.append(f"### EoICD Block {i}: {blk.get('signal_family', 'N/A')}")
             merged = blk.get("merged_attributes", {}) or {}
-            parts.append(f"- Label号: {merged.get('Label', 'N/A')}")
-            parts.append(
-                f"- 方向: {merged.get('方向', merged.get('Direction', 'N/A'))}"
+            label = blk.get("label") or merged.get("Label", "N/A")
+            direction = (
+                blk.get("direction")
+                or merged.get("方向", merged.get("Direction", "N/A"))
             )
+            parts.append(f"- Label号: {label}")
+            parts.append(f"- 方向: {direction}")
+            sources = blk.get("sources") or []
+            if sources:
+                parts.append(f"- 数据来源表: {', '.join(sources)}")
+            words = blk.get("words") or []
+            if words:
+                parts.append(f"- 所属 A429 word: {', '.join(words)}")
             parts.append(f"- 数据类型: {merged.get('DataFormatType', 'N/A')}")
             parts.append(
                 f"- Bit 偏移/宽度: {merged.get('BitOffsetWithinDS', 'N/A')}"
@@ -141,6 +152,57 @@ def _build_re_review_user_prompt(
                 f"~{merged.get('FullScaleRngMax', 'N/A')}"
             )
             parts.append(f"- 单位: {merged.get('Units', 'N/A')}")
+
+            # 分侧原始定义：初判 prompt 已给出，复查必须同样可见，否则
+            # 复查模型会把合并值误当成单侧定义而翻转结论。
+            _append_side_views(parts, blk.get("side_views") or [])
+
+            # 状态/编码与子信号明细：初判时裁判能看到 OneState/ZeroState，
+            # 复查 prompt 原先只列 Label/方向/类型/位/范围/单位，导致复查
+            # 模型在缺少状态定义的情况下重判（如把 有效/无效 判成不一致）。
+            sub_signals = blk.get("sub_signals", []) or []
+            if sub_signals:
+                parts.append(
+                    "- 上述数据类型/位偏移/宽度/取值范围/单位为信号级公共属性"
+                    "（Block 内合并参考值），针对某个子信号的声明以子信号明细为准。"
+                )
+                parts.append("- 字内子信号明细:")
+                for ss in sub_signals:
+                    details = []
+                    if ss.get("coded_set"):
+                        details.append(f"CodedSet={ss['coded_set']}")
+                    if (
+                        ss.get("one_state") is not None
+                        or ss.get("zero_state") is not None
+                    ):
+                        details.append(
+                            f"OneState={ss.get('one_state', '—')} / "
+                            f"ZeroState={ss.get('zero_state', '—')}"
+                        )
+                    detail_suffix = f"（{'；'.join(details)}）" if details else ""
+                    parts.append(
+                        f"  - {ss.get('dp_name', '?')}: "
+                        f"bit{ss.get('bit_offset', '?')}, "
+                        f"{ss.get('size', '?')}bit, "
+                        f"{ss.get('dtype', '?')}{detail_suffix}"
+                    )
+            for attr in ("OneState", "ZeroState", "CodedSet", "SDIExpected"):
+                if attr in merged:
+                    parts.append(f"- {attr}: {merged.get(attr)}")
+
+            # 同 word 协议字段（初判 prompt 已给出，复查也必须看到，否则
+            # 复查模型会因缺少 SDI/LABEL 位布局而把 SDI 位判成缺失）。
+            proto_fields = blk.get("word_protocol_fields", []) or []
+            if proto_fields:
+                parts.append("- 同 word 协议字段（EoICD 位偏移锚点，仅作比对上下文）:")
+                for pf in proto_fields:
+                    name = pf.get("name", "?")
+                    attrs = pf.get("attrs", {}) or {}
+                    parts.append(
+                        f"  - {name}: "
+                        + ", ".join(f"{k} = {v}" for k, v in attrs.items())
+                    )
+            _append_sdi_layout_note(parts, merged, proto_fields)
             parts.append("")
     else:
         parts.append("## EoICD 信号块")
