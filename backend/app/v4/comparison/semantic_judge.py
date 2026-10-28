@@ -7,6 +7,7 @@ import json
 import re
 import time
 
+from app.v4.matching.glossary_index import append_glossary_section
 from app.v4.matching.hlr_classifier import (
     extract_bit_fields,
     extract_bit_range_assertions,
@@ -425,6 +426,7 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
         parts, hlr.get('content', ''), case.matched_profiles
     )
     _append_bit_range_derivation(parts, hlr.get('content', ''))
+    append_glossary_section(parts, case.glossary_hits)
     parts.append("")
 
     # ── Match evidence ──

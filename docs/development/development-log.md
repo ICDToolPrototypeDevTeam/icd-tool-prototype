@@ -4080,3 +4080,35 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   4. 改动未提交；需**重建后端镜像 / 覆盖前端产物**才在服务器生效（无新端口 / 无新环境变量 / 无新依赖）。
   5. Issue 编号待用户回填。
 - **下一步建议**：1) 用户提交本分支并重建镜像 / 覆盖前端产物；2) 服务器实测：跑一条反向与一条正向任务，确认运行中数字递增、完成页/报告/历史一致；3) 出包时在《更新说明》注明本变更的部署层变化（无新端口 / 无新环境变量 / 无权限变化）；4) 后续若恢复与「正向待集成」源树同步，必须保留 §6.1 的 delta 标记、sidecar 与 `--base-tokens`。
+
+## 2026-10-28 反向管线：文档缩略语/术语智能识别 + 裁判/低星复查按 case 注入（分支 issue-x-x，改动未提交）
+
+- **背景（用户提出）**：仅针对反向管线，确认缩略语和术语目前未作为前置知识进入裁判等环节；用户在 `test-input/AMSC/1022测试1.docx` 中新增了术语表与缩略语表，要求识别方式智能（不得写死表序号/表头/列顺序），并评估对匹配或裁判的帮助。经确认范围取「解析 + 裁判注入」：先智能识别两类表并注入每条 case 命中的条目；**匹配层本阶段不动**，便于单独验证裁判收益。
+- **定位（改动前）**：
+  1. `HLRWordParser` 只按 `glossary_table_index`（AMS=0）或 `keyword_scan` 定位一张 ≥3 列的缩写表，表头关键字仅「缩略语/缩写」，列固定 0/1/2；术语表无法识别。
+  2. `glossary` 仅写入 `hlr_requirements.json`；`hlr_labeler` / `reverse_matcher` / `semantic_judge` / `review_agent` / `re_review` 均未读取（`synonyms.yaml` 与文档词表无关）。
+  3. 新样例实际结构：表 0 = 12 行「术语 | 定义」，表 1 = 68 行「缩略语 | 英文全称 | 中文全称」，表 2 起为 17 张需求表；旧解析结果 `requirements=17, glossary=0`。
+- **完成内容**：
+  1. 新增 `backend/app/v4/parsers/glossary_tables.py`：表头语义识别（中英文别名、括号/空格/标点归一）、列角色解析（按表头文本优先、位置兜底、英/中列内容互换）、标题行跳过、重复表头行跳过、按小写去重；先识别需求表（`_id_row_info`）并从候选中排除；修订记录/文档信息/目录等结构表不按形状误判。形状兜底只允许在首张需求表之前，并登记 `glossary_shape_fallback`（仅 `register_skipped` 时写盘）。表头已明确是术语/缩略语时只要求至少 1 条数据（保留小词表）；形状兜底仍要求 ≥2 条且有实质定义。
+  2. `backend/app/v4/parsers/hlr_word_parser.py`：解析流程接入检测器；保留 profile 配置索引/关键字扫描作为旧文档兜底（命中检测器已识别的表则不重复解析）；需求扫描起始点沿用原逻辑（`all_tables`=0；否则 `glossary_idx+1` / `glossary_table_index+1`），已识别的词表不再参与需求表扫描/弱告警；写入 `HLROutput.terms`。
+  3. `backend/app/v4/models.py`：新增 `HLRTermEntry`、`HLROutput.terms`（默认空）、`ReverseCase.glossary_hits`（默认空，旧 JSON 反序列化兼容）。
+  4. `backend/app/v4/pipeline.py`：`_parse_hlr` 在 `terms` 为空时不写该字段；解析/恢复 `HLROutput` 后构建 `GlossaryIndex`；在普通与 RPDU refine 两个分支的 cases 构建完成后调用 `attach_glossary_hits`，再进入 Step 4；日志输出命中 case 数。
+  5. 新增 `backend/app/v4/matching/glossary_index.py`：每条 case 扫描 SWHLR 正文/基本原理 + 匹配 Block 的 signal_family/block_key/子信号名/分侧名称；缩略语用缩写、英文全称、中文全称作键，术语用术语名/英文名作键；拉丁键按 token 边界匹配，中文键按子串匹配，通用单词/通用中文词不作为检索键；每词条取最早命中位置、同位置取最长键；默认最多 20 条、约 1500 字符。`append_glossary_section` 渲染统一说明 + 命中条目；空列表不追加任何内容。
+  6. `backend/app/v4/comparison/semantic_judge.py` / `re_review.py`：在 SWHLR 位声明/位范围推导之后、匹配证据/ICD Block 之前追加同一段术语；复查不会丢失初判时可见的用词解释。
+- **修改文件**：`backend/app/v4/models.py`、`backend/app/v4/parsers/hlr_word_parser.py`、`backend/app/v4/pipeline.py`、`backend/app/v4/comparison/semantic_judge.py`、`backend/app/v4/comparison/re_review.py`；新增 `backend/app/v4/parsers/glossary_tables.py`、`backend/app/v4/matching/glossary_index.py`；本地测试（`backend/tests/` 已 gitignore、不入库）`tests/test_hlr_word_parser_glossary.py`（8 例）、`tests/test_glossary_prompt_injection.py`（8 例）。
+- **文档**：`docs/project/workflow.md`（Step 1 / 3.6 / Step 4 / 5.5）、`docs/architecture/current-architecture.md`（模块表 / 两处主流程 / 目录树）、`CHANGELOG.md`、本 log。
+- **验证方式与结果**：
+  1. 新样例 `1022测试1.docx`：`requirements=17, glossary=68, terms=12, parse_warnings=[]`；`HLRWordParser` 与 `_parse_hlr` 落盘 JSON 均一致，`terms[0]=同侧`（**已验证**）。
+  2. 旧样例 `1019测试1.docx`：`requirements=10, glossary=2`，落盘 JSON **无 `terms` 键**（**已验证**）。
+  3. HSCU 金样 `tests/test_hlr_word_parser_adaptivity.py`（含 T13 逐字节比对）→ **21 passed**（**已验证**）。
+  4. 定向测试 `test_hlr_word_parser_glossary.py + test_glossary_prompt_injection.py + test_hlr_word_parser_adaptivity.py` → **38 passed**（**已验证**）。
+  5. 全量可收集回归（10 个既有收集错误模块 `--ignore`）：**302 passed / 6 failed / 1 skipped**；6 项失败（`test_job_api_ext` / `test_job_cancel` / `test_job_orphan`×2 / `test_runner_cancel` / `test_parse_artifact_reuse` 的 `HLR JSON` vs `SWHLR JSON` 陈旧断言）与既有漂移同集，非本次引入（**已验证**）。
+  6. 真实数据命中抽查（仅按 SWHLR 正文/基本原理、未附 Block 名称）：17 条需求中 13 条命中（REV-0004/0012/0013/0015 未命中），单条最多 11 条；未命中 case 的初判 prompt 与注入前逐字节相同（**已验证**）。
+- **遗留问题**：
+  1. 改动未提交；需**重建后端镜像**才在服务器生效（无新端口 / 新环境变量 / 新依赖 / 权限变化）。
+  2. 升级前已落盘的 `hlr_requirements.json` 不含 `terms`；续跑走缓存不会重新解析，需重跑 Step 1（或新任务）才有术语注入。
+  3. 本阶段**未改匹配层**：文档词表未进入 `hlr_labeler` / `reverse_matcher` 的评分；匹配收益需 Phase 2 以 A/B（同一样例开启/关闭词表扩展）单独验证。
+  4. 真实模型 A/B（6–12 条命中 case，对比裁判结论/星级）**尚未运行**，需用户确认 API 成本后执行。
+  5. 形状兜底对无表头词表的识别仍有限（2/3 列、首张需求表之前）；无表头且列数更多的词表按「宁缺不误」不识别。
+  6. Issue 编号待用户回填。
+- **下一步建议**：1) 用户提交分支并重建镜像；2) 用 `1022测试1.docx` 跑一条真实反向任务，确认 `hlr_requirements.json` 含 `terms`、日志出现 `Glossary hits: N/17 case(s)`、Word 报告中命中 case 的分析能正确展开 FCV/对侧/邻通道等术语；3) 若裁判收益明显，再单开 Issue 评估 Phase 2 匹配层别名扩展（先做离线 A/B，不直接改评分）。
