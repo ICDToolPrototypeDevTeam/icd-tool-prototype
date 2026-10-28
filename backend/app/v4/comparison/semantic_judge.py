@@ -207,11 +207,13 @@ def _append_bit_range_derivation(parts: list[str], hlr_content: str) -> None:
     for a in extract_bit_range_assertions(hlr_content):
         lo, hi = a["lo"], a["hi"]
         parts.append(
-            f"- [推导] 位段声明：{a['text']} ⇒ 英文 bitN 与 EoICD "
-            f"BitOffsetWithinDS 同一基准（bitN 即 0 基 offset N，对应物理第 N+1 位）"
+            f"- [推导] 位段声明：{a['text']} ⇒ 英文 bitN 与 EoICD 位偏移"
+            f"同一基准（bitN 即 0 基 offset N，对应物理第 N+1 位）"
             f"⇒ 归一化位段 = offset {lo}~{hi}"
             f"（物理第{lo + 1}~{hi + 1}位，共{hi - lo + 1}位）；"
-            f"比对时请直接采用该归一化位段，勿再自行做 ±1 换算。"
+            f"EoICD 可能同时提供 BitOffsetWithinMsg / BitOffsetWithinDS 两套基准，"
+            f"该位段与其中任一可用基准吻合即判一致，与全部基准均不吻合才判不一致；"
+            f"勿再自行做 ±1 换算。"
         )
 
 
@@ -267,6 +269,47 @@ def _extract_json(text: str) -> str:
 
 
 
+_OFFSET_FRAME_ATTRS = ("BitOffsetWithinMsg", "BitOffsetWithinDS")
+
+
+def _collect_offset_frames(
+    side_views: list[dict],
+) -> list[tuple[str, float, float | None, list[str]]]:
+    """Collect every bit-offset frame the parser captured for one block.
+
+    The same signal can carry a message-relative offset
+    (``BitOffsetWithinMsg``, normally the Subscriber/RP row) and a
+    data-set-relative offset (``BitOffsetWithinDS``, normally the
+    Publisher/DP row). They are two coordinate frames of one definition,
+    not two competing values: a receiver may well describe its parsing with
+    the publisher's data-set offsets, so the judge must compare against
+    both instead of picking one by direction/side. Deduped by
+    (attribute, offset, size); provenance is kept for traceability.
+    """
+    frames: dict[tuple[str, float, float | None], list[str]] = {}
+    for view in side_views:
+        for side in ("dp", "rp"):
+            attrs = view.get(side) or {}
+            size = _to_float(attrs.get("ParameterSize"))
+            for attr in _OFFSET_FRAME_ATTRS:
+                off = _to_float(attrs.get(attr))
+                if off is None:
+                    continue
+                sides = frames.setdefault((attr, off, size), [])
+                label = side.upper()
+                if label not in sides:
+                    sides.append(label)
+    return [
+        (attr, off, size, sorted(sides))
+        for (attr, off, size), sides in sorted(
+            frames.items(),
+            key=lambda kv: (
+                kv[0][0], kv[0][1], -1.0 if kv[0][2] is None else kv[0][2]
+            ),
+        )
+    ]
+
+
 def _append_side_views(parts: list[str], side_views: list[dict]) -> None:
     """Render the parser's raw DP/RP snapshots for one block.
 
@@ -274,7 +317,9 @@ def _append_side_views(parts: list[str], side_views: list[dict]) -> None:
     Label/SDIExpected; everything else is overwritten by DP). These views
     show each side's own leaf name and whitelisted attributes so the judge
     can attribute a value to Publisher (DP) or Subscriber (RP) instead of
-    assuming the merged value came from one side.
+    assuming the merged value came from one side. When both offset frames
+    exist, their spans are spelled out as data so neither frame is silently
+    treated as the only coordinate system.
     """
     if not side_views:
         return
@@ -300,6 +345,22 @@ def _append_side_views(parts: list[str], side_views: list[dict]) -> None:
             if attr_text:
                 line += f" | {attr_text}"
             parts.append(line)
+
+    frames = _collect_offset_frames(side_views)
+    if frames:
+        parts.append(
+            "  - [推导] 可用位偏移基准（同一信号在不同坐标系下的定义；"
+            "数值不同本身不是差异，SWHLR 位段与任一基准吻合即判一致）："
+        )
+        for attr, off, size, sides in frames:
+            span = (
+                f"，位宽 {int(size)} bit ⇒ {int(off)}~{int(off + size - 1)}"
+                if size is not None else ""
+            )
+            parts.append(
+                f"    - {attr} = {int(off)} Bits{span}"
+                f"（来源：{'/'.join(sides)}）"
+            )
 
 
 def _build_reverse_user_prompt(case: ReverseCase) -> str:
@@ -385,11 +446,12 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
                     # 两种写法必须分别说明：只讲中文“第N位”时，模型会把同一
                     # 换算套到英文 bitN 上，导致整表系统性差 1 位（HLR 680）。
                     parts.append(
-                        "  位偏移约定：BitOffsetWithinDS 为 0 基偏移，offset=N 对应"
-                        "物理位第 N+1 位。SWHLR 正文中文“第 N 位”/“第N到M位”是"
-                        "1 基物理位号，判定时换算为 0 基（第 N 位 → offset=N-1）；"
-                        "英文 bitN/BitN 与 EoICD 同一基准，bitN 直接对应 offset=N，"
-                        "不得再减 1。"
+                        "  位偏移约定：BitOffsetWithinDS 与 BitOffsetWithinMsg 均为"
+                        "0 基偏移，offset=N 对应物理位第 N+1 位；二者是同一信号的"
+                        "不同坐标基准，数值差本身不是差异。SWHLR 正文中文“第 N 位”/"
+                        "“第N到M位”是 1 基物理位号，判定时换算为 0 基（第 N 位 → "
+                        "offset=N-1）；英文 bitN/BitN 与 EoICD 同一基准，bitN 直接"
+                        "对应 offset=N，不得再减 1。"
                     )
                     anchor_note_added = True
 

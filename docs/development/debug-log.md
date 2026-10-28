@@ -3103,6 +3103,82 @@ HLR 4878 要求 `bit25=1` 时使用对应端口 LABEL 数据并置“有效标�
 1. 完整反向管线尚未重跑，现有历史报告仍是修复前的结果；需重跑确认 HLR 4878 的最终报告结论。
 2. 改动未提交，Issue 编号待用户回填。
 
+---
+
+## BUG-20261028-001：反向裁判因范围端点被拆成独立单 bit、且位偏移只认 DS 基准而误判 HLR 511
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-10-28
+
+#### 关联 Issue / PR
+
+当前本地分支（改动未提交）；Issue 编号待回填。
+
+#### 问题现象
+
+以 `test-input/AMSC/1028测试.docx` + `EoICD_Publisher_Table.xlsx` + `EoICD_Subscriber_Table.xlsx` 运行反向管线，`FSF21000101_HLR_511`（“其中 bit13 至 bit28 为 N2 速度的实际值”）被 deepseek / minimax / qwen 三家一致判 `inconsistent`（5★ full）。该信号的 RP 原始行为 `BitOffsetWithinMsg=13`、`ParameterSize=16`（消息内 13~28），与 HLR 完全吻合；DP 原始行为 `BitOffsetWithinDS=16`（数据集内 16~31）。同一 HLR 的 `FSF21000101_HLR_288` 属真实的 bit17/bit18 对调，应保持 `inconsistent`。
+
+#### 复现方式
+
+1. 用上述三个输入文件运行反向管线。
+2. 查看 `FSF21000101_HLR_511` 的初判 prompt 与三家 judgment。
+3. 旧 prompt 中 SWHLR 位声明出现两条：
+   - `bit13至bit28 → offset=13, size=16`
+   - `bit28为N2速度的实际值。 → offset=28, size=1`
+4. 旧 prompt 的“位号基准”与 `[推导] 位段声明` 都把英文 `bitN` 绑定到 `BitOffsetWithinDS`，三家据此把 13~28 与 DS 的 16~31 比对后判不一致。
+
+#### 影响范围
+
+反向判断阶段的 SWHLR 位声明提取、初判/复查 prompt 与确定性推导注入。匹配、聚类、评分与 Block 组成均未改动。
+
+#### 原因分析
+
+1. **范围端点断句**：`hlr_classifier.extract_bit_fields` 的中文路径会把落在已提取范围内的单 bit 跳过，但英文路径的 `_BIT_SINGLE_RE` 没有同等保护。`bit13至bit28为…` 中的后一个 `bit28` 同时命中 `_BIT_SINGLE_RE`，被追加成 `(28,1)` 的独立断言。该断言进入裁判 prompt，minimax 还把它列为不一致理由之一。此外 `_BIT_RANGE_RE` 的分隔符集合比 `_EN_BIT_RANGE_ASSERT_RE` 窄（缺“到/～/—”），同类写法会连范围本身都丢失。
+2. **位偏移基准被写死为 DS**：EoICD 对同一信号可同时给出 `BitOffsetWithinMsg`（消息内）与 `BitOffsetWithinDS`（数据集内）两套坐标；二者数值不同不是差异，接收侧也完全可能按发布侧的 DS 位偏移解析。旧 `reverse_judge.md` / `re_review.md` 只把 `BitOffsetWithinDS` 定为基准，`_append_bit_range_derivation` 也把英文 `bitN` 绑定 DS，导致模型即使看到 `BitOffsetWithinMsg=13` 也不敢采用。正确口径是：**与任一可用基准吻合即一致，与全部基准都不吻合才判不一致**，不得按发送/接收侧预先指定基准。
+
+#### 修复方案
+
+1. `extract_bit_fields`：英文单 bit 的三个提取器（`_BIT_SINGLE_RE` / `_BIT_ASSIGN_RE` / `_BIT_POSSESSIVE_RE`）命中位置若紧邻范围分隔符（`至/到/~/～/-/—` + 可选空白）则跳过；把 `_BIT_RANGE_RE` 的分隔符集合扩到与 `_EN_BIT_RANGE_ASSERT_RE` 一致，保证“到/～/—”写法仍能提取到完整范围。逗号后真正独立的 `bit28=1` 不受影响。
+2. 裁判规则：`reverse_judge.md` 与 `re_review.md` 增加“两套位偏移基准必须同时考虑、任一吻合即一致”的通用口径，删除“英文 bitN 只与 DS 同一基准”的暗示。
+3. Prompt 推导：`_append_bit_range_derivation` 改为“与任一可用基准吻合即一致”；`_build_reverse_user_prompt` 的位偏移约定说明两套基准均为 0 基、数值差本身不是差异；`_append_side_views` 新增数据驱动的“可用位偏移基准”清单，逐条列出属性名、offset、ParameterSize 推出的位段及来源侧（如 `BitOffsetWithinMsg = 13 Bits，位宽 16 bit ⇒ 13~28（来源：RP）`）。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/hlr_classifier.py`
+2. `backend/app/v4/comparison/semantic_judge.py`
+3. `backend/app/v4/prompts/reverse_judge.md`
+4. `backend/app/v4/prompts/re_review.md`
+
+#### 验证方式
+
+1. 直接调用 `extract_bit_fields` 覆盖 `至/到/～`、范围+范围内单 bit、逗号后独立断言、`bit8=0，bit9=0` 等写法。
+2. 用 `1028测试.docx` 的真实 HLR_511 与已保存的 DP/RP 快照重建裁判 prompt，检查位声明、两套基准清单与推导文字。
+3. 用修改后的代码在一次性容器中重跑真实反向管线（复用已解析 EoICD JSON 与 sidecar），检查 HLR_511 / HLR_288 的三家判定与最终共识。
+4. 运行后端测试。
+
+#### 验证结果
+
+**已通过（本机，2026-10-28）**：
+
+1. 提取检查：`bit13至bit28为N2速度的实际值` → 仅 `offset=13, size=16`（旧行为多出 `offset=28, size=1`）；`bit13到bit28`、`bit13～bit28` 同样只得到 `(13,16)`；`bit13至bit28为数据，其中bit20为符号位` 保留 `(20,1)`；`bit13至bit28为数据，bit28=1` 保留逗号后的 `(28,1)`；中文路径结果不变。
+2. 重建 prompt：SWHLR 位声明只剩 `bit13至bit28 → offset=13, size=16`；每个 Block 的“可用位偏移基准”同时列出 `BitOffsetWithinDS = 16 ⇒ 16~31（来源：DP）` 与 `BitOffsetWithinMsg = 13 ⇒ 13~28（来源：RP）`；位段推导明确“任一可用基准吻合即判一致”。
+3. 真实管线重跑（输出 `backend/output/v4/verify-20261028`）：
+   - `REV-0002 / FSF21000101_HLR_511`：deepseek / minimax / qwen 全部 `covered`（0.72 / 0.84 / 0.90），三家均明确按 `BitOffsetWithinMsg=13` 的 13~28 吻合判定，并说明 DS 的 16~31 不同不构成差异；共识 5★ full → 已覆盖。
+   - `REV-0001 / FSF21000101_HLR_288`：三家仍全部 `inconsistent`，理由仍是 EoICD 的 OVERHEAT_FAULT=17、UNDER_SPEED=18 与 SWHLR 的 bit18/bit17 对调；说明“任一基准”规则没有把真实不一致放过。
+4. 测试：`pytest tests -q --ignore=<10 个既有收集错误文件>` → **302 passed / 6 failed / 1 skipped**；6 个失败均为 job cancel / orphan / `BaseException` 兜底 / artifact reuse 等既有漂移，与本次 4 个文件无关。另 10 个测试文件在本分支无法收集（引用当前 `app` 中不存在的 `app.v4.reverse.pipeline`、`app.v4.shared.parsing.hlr_parser_config` 等），属既有测试与分支代码不一致，非本次改动引入。定向 `test_reverse_side_views + test_glossary_prompt_injection + test_reverse_case_coded_set` → 16 passed。
+
+#### 遗留问题
+
+1. 匹配层 `reverse_matcher` 仍只用 `BitOffsetWithinDS` 计算位段重叠，本 case 的 `match_type` 仍为“待确定”（38 分）；本次按“匹配过程与匹配结果不变”的约束未改匹配。裁判已能正常判 covered，但若 SWHLR 使用 Msg 偏移且 Block 未在候选集内，仍可能出现匹配层漏召回，需另立 Issue 评估。
+2. `extract_bit_value_assertions` 的英文单 bit 值断言（如 `bit13至bit28为1`）未加同样的端点保护；该路径只在凑成相邻位对时才注入推导，本例不触发，本次按最小修改未扩大范围。
+3. 提示词与代码改动需**重建后端镜像**才在部署环境生效；现有历史任务的结果不会自动重算。
+4. 改动未提交，Issue 编号待用户回填。
+
 ## BUG-20261020-001：SWHLR「SDI=0或1」枚举只解析首个值，兄弟 Block 被门控剔除致裁判误报
 
 #### 状态
