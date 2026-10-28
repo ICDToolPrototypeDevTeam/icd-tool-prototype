@@ -2443,3 +2443,86 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(p)))
 1. 改动未提交；需重建后端镜像才在服务器生效。
 2. 尚未执行真实端到端任务复验（MOCK E2E / 真实模型 E2E）。
 3. Issue 编号待用户回填。
+
+## BUG-20261020-001：SWHLR「SDI=0或1」枚举只解析首个值，兄弟 Block 被门控剔除致裁判误报
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-10-20
+
+#### 关联 Issue / PR
+
+- Issue 待补
+- 关联 job：`e114c550-3ee1-4c4b-971a-ecc2cc0eb566`
+
+#### 问题现象
+
+反向差异报告中，SWHLR 写「SDI=0或1」时，裁判结论为「EoICD 的 SDIExpected=0，SWHLR 覆盖范围更宽」；写「SDI=2或3」时，裁判结论为「SDI=3 超出 EoICD SDIExpected=2 的契约范围」。REV-0003 / REV-0004 的 consensus 均将 SDIExpected 列为不一致属性（4 星，三家 provider 全票）。
+
+#### 复现方式
+
+1. 使用 job `e114c550` 的输入（`1019测试3.docx` + AMS Pub/Sub 表）重跑反向管线；
+2. 查看 `reverse_matches.json`：HLR_512 / HLR_513 均只匹配 1 个 L172 Block；
+3. 查看 consensus：两条 HLR 的 SDIExpected 被判不一致。
+
+#### 影响范围
+
+所有以行内枚举写法声明多个 SDI 值的 SWHLR 需求；单 SDI、以及用多个独立 `SDI=` 分开声明的需求不受影响。扫描 246 个历史 job（2371 条 SWHLR），仅本 job 的 HLR_512 / HLR_513 使用枚举写法。
+
+#### 原因分析
+
+（已定位）`_SDI_RE = SDI\s*[=为]?\s*(\d+)` 只捕获每个 `SDI` 关键字后的一个数字：
+
+- `SDI=0或1` → `{'0'}`（「或1」前无 SDI 前缀）
+- `SDI=2或3` → `{'2'}`
+
+`_score_block` 的 SDI 维度与 `_apply_hard_gates` 的 Gate 2（SDI 矛盾门控）都使用该集合。L172 实际有 4 个 Block（EEC1A/EEC1B/EEC2A/EEC2B，SDIExpected 分别为 0/1/2/3）；HLR_512 的集合只有 `{'0'}`，Gate 2 把 SDI=1/2/3 的 Block 全部删除，裁判只收到 EEC1A。裁判的「ICD 只有 SDI=0」是对被裁剪输入的忠实判断，根因在匹配层的数据丢失，不在裁判。
+
+#### 修复方案
+
+新增 `extract_sdi_values()` 解析行内枚举，SDI 打分与 Gate 2 统一改用该集合；`_SDI_RE` 与 `extract_sdi()` 保持原样，避免影响 `sdi_value` 字段和其他调用方。
+
+```python
+_SDI_ENUM_RE = re.compile(
+    r"SDI\s*[=为]?\s*(\d+(?:\s*(?:或|、|/|和|及|,|，)\s*\d+)*)",
+    re.IGNORECASE,
+)
+
+def extract_sdi_values(text: str) -> set[str]:
+    values: set[str] = set()
+    for m in _SDI_ENUM_RE.finditer(text):
+        values.update(re.findall(r"\d+", m.group(1)))
+    return values
+```
+
+#### 修改文件
+
+1. `backend/app/v4/matching/hlr_classifier.py`（新增 `_SDI_ENUM_RE` / `extract_sdi_values`）
+2. `backend/app/v4/matching/reverse_matcher.py`（两处 `hlr_sdis` 改用新函数，移除 `_SDI_RE` 导入）
+
+#### 验证方式
+
+1. 单测断言：`SDI=0或1` → `{'0','1'}`；`SDI=1` → `{'1'}`；多处独立 `SDI=1 … SDI=2` → `{'1','2'}`；无 SDI → 空集。
+2. 历史回归：246 个 job、2371 条 SWHLR，比较新旧提取集合。
+3. job `e114c550` 匹配复算：比较新旧 `matched_profile_keys`。
+4. Case/prompt 复算：确认 HLR_512 的裁判输入包含 EEC1A+EEC1B，HLR_513 包含 EEC2A+EEC2B。
+
+#### 验证结果
+
+**已通过（本机，2026-10-20）**：
+
+1. 单测断言全部通过；`extract_sdi('SDI=0或1')` 仍返回 `'0'`（旧字段语义不变）。
+2. 2371 条历史 SWHLR 中仅 `FSF21000101_HLR_512` / `_513` 两条集合变化，其余 0 差异。
+3. 全量匹配复算：仅 HLR_512 / HLR_513 的 `matched_profile_keys` 变化（分别变为 EEC1A+EEC1B、EEC2A+EEC2B），其余 6 条逐条相同。
+4. 裁判 user prompt 复算：两条 case 均包含两个 SDI 变体 Block。
+5. **尚未调用真实模型复验最终裁判结论**；BitOffset（DS/Msg 混用）误报未在本次修复范围内。
+
+#### 遗留问题
+
+1. 需重建后端镜像才在服务器生效。
+2. 真实模型端到端结论待复验。
+3. BitOffsetWithinDS / BitOffsetWithinMsg 的接收侧基准问题另案处理。

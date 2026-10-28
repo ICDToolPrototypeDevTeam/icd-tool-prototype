@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-10-20
+
+### Fixed
+
+- 修复 **反向匹配把「SDI=0或1」这类行内枚举只取第一个值，导致 SDI 兄弟 Block 被硬门控剔除、裁判误报「EoICD 的 SDI 只有 0」**：`_SDI_RE` 只捕获每个 `SDI` 关键字后的单个数字，`SDI=0或1` / `SDI=2或3` 分别只得 `{'0'}` / `{'2'}`；`_apply_hard_gates` 的 SDI 矛盾门控据此把 SDI=1（EEC1B）/ SDI=3（EEC2B）等合法 Block 直接删除，裁判只看到一个 SDI 变体。新增 `extract_sdi_values()`（`hlr_classifier.py`）解析用 `或`、`、`、`/`、`和`、`及`、`,`、`，` 连接的枚举，`_score_block` 的 SDI 打分与 Gate 2 统一改用该集合；`_SDI_RE` / `extract_sdi()` 保持原样。单 SDI（`SDI=1`）与多段独立 `SDI=1 … SDI=2` 的提取结果与旧实现完全一致——2371 条历史 SWHLR 回归仅 `HLR_512`/`HLR_513` 两条枚举写法发生变化，其余 0 差异；job `e114c550` 复算后 HLR_512 保留 EEC1A+EEC1B、HLR_513 保留 EEC2A+EEC2B，其余 6 条 SWHLR 匹配结果逐条不变。该改动需**重建后端镜像**才生效。
+
 ## [Unreleased] - 2026-10-19
 
 ### Added
