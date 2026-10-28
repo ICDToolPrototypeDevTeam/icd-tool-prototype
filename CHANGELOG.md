@@ -18,6 +18,12 @@
 
 - **反向裁判可见 DP / RP 分侧原始定义（Block 名称、聚类方法、匹配过程与匹配结果全部不变）**：P2.4 合并以同行 DP 值覆盖 RP 条目（RP 仅保留 `Label` / `SDIExpected`），裁判只能看到合并后的 `merged_attributes`，无法判断某个名称 / offset / size 究竟来自发布侧（DP）还是接收侧（RP）——两侧写法不同（如 DP 用 `BitOffsetWithinDS`、RP 用 `BitOffsetWithinMsg`）时容易被判成不一致或漏判。本次在解析器 P2.4 覆盖**之前**按 Subscriber 行快照两侧叶子属性，存入 `EoICDOutput.side_pairs`（`Field(exclude=True)`，主 `eoicd_requirements.json` 逐字节不变），仅保留裁判可见的 `REVERSE_KEY_ATTRS` 白名单属性、沿用统一的 `值 单位` 格式；`build_blocks` 新增可选 `side_pairs` 参数聚合成 `ICDBlock.side_views`（**只挂数据**：分组键、遍历顺序、`block_key`、`attributes` 与匹配结果均未改动，无快照时为空列表），同侧属性集完全相同的多条记录合并名称展示（通道型数据不会刷出一长串重复视图）。初判与复查提示词同步渲染「分侧原始定义（DP=发布侧，RP=接收侧）」，并对两侧不一致的情形提示在分析中说明。**续跑一致性**：`side_pairs` 是内存字段，续跑走缓存的 `eoicd_requirements.json` 时会静默丢失，因此 `_parse_eoicd` 在旁边原子写 `eoicd_side_pairs.json` 旁车（空快照会清除旧旁车），续跑时加载，CLI `parse-eoicd` 同样写出。**边界**：仅同行 Publisher + Subscriber 表可建立分侧配对，只有 Subscriber 表时无 DP 侧可展示；旁车只对本次升级后的新任务生成，旧任务续跑 `side_views` 为空；提示词变更使已有裁判缓存键失效，升级后首次运行会重判。实测：HSCU 样例需求与 Block 形状哈希与改前**逐字节一致**（30,748 条 / 1,848 个），751 个 Block 带分侧视图，首跑与续跑结果完全一致；AMS 样例 137,758 条需求、2,160 个 RP 信号快照、1,707 个视图合并了通道名称；新增单测 6 个。该改动需**重建后端镜像**才生效。
 
+## [Unreleased] - 2026-10-20
+
+### Fixed
+
+- 修复 **反向匹配把「SDI=0或1」这类行内枚举只取第一个值，导致 SDI 兄弟 Block 被硬门控剔除、裁判误报「EoICD 的 SDI 只有 0」**：`_SDI_RE` 只捕获每个 `SDI` 关键字后的单个数字，`SDI=0或1` / `SDI=2或3` 分别只得 `{'0'}` / `{'2'}`；`_apply_hard_gates` 的 SDI 矛盾门控据此把 SDI=1（EEC1B）/ SDI=3（EEC2B）等合法 Block 直接删除，裁判只看到一个 SDI 变体。新增 `extract_sdi_values()`（`hlr_classifier.py`）解析用 `或`、`、`、`/`、`和`、`及`、`,`、`，` 连接的枚举，`_score_block` 的 SDI 打分与 Gate 2 统一改用该集合；`_SDI_RE` / `extract_sdi()` 保持原样。单 SDI（`SDI=1`）与多段独立 `SDI=1 … SDI=2` 的提取结果与旧实现完全一致——2371 条历史 SWHLR 回归仅 `HLR_512`/`HLR_513` 两条枚举写法发生变化，其余 0 差异；job `e114c550` 复算后 HLR_512 保留 EEC1A+EEC1B、HLR_513 保留 EEC2A+EEC2B，其余 6 条 SWHLR 匹配结果逐条不变。该改动需**重建后端镜像**才生效。
+
 ## [Unreleased] - 2026-10-19
 
 ### Added

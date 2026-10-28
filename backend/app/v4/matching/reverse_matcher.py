@@ -27,8 +27,8 @@ from app.v4.matching.hlr_classifier import (
     extract_labels,
     extract_bit_fields,
     extract_sdi,
+    extract_sdi_values,
     extract_direction,
-    _SDI_RE,
 )
 from app.v4.matching.signal_profiler import build_profiles, build_blocks, SignalProfile, ICDBlock
 from app.v4.models import (
@@ -549,7 +549,7 @@ def _score_block(
     # 引用多个 LBL），任一与 block 的 SDIExpected 一致即得分。
     # 先于 direction 计算：SDI 值级命中（如 SDI=1 vs SDIExpected=1）是
     # 身份级命中证据，方向矛盾时用于 direction-soft 救援判定。
-    hlr_sdis = {m for m in _SDI_RE.findall(hlr_prof.content)}
+    hlr_sdis = extract_sdi_values(hlr_prof.content)
     dims["sdi"] = 0
     if hlr_sdis:
         for prof in block.profiles:
@@ -708,7 +708,7 @@ def _apply_hard_gates(
     # Only apply direction gate when direction extraction is unambiguous
     # AND not bidirectional (发送/接收 means both are plausible).
     dir_gate_active = hlr_dir in ("发送", "接收")
-    hlr_sdis = {m for m in _SDI_RE.findall(hlr_prof.content)}
+    hlr_sdis = extract_sdi_values(hlr_prof.content)
 
     filtered: list[tuple[int, dict[str, int], ICDBlock]] = []
     for total, dims, block in scored:

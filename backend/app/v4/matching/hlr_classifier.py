@@ -80,6 +80,12 @@ _PIPE_BIT_RE = re.compile(
     r"\s*\|"
 )
 _SDI_RE = re.compile(r"SDI\s*[=为]?\s*(\d+)", re.IGNORECASE)
+# 行内枚举（"SDI=0或1"）需取全部值；单个 SDI 与多段独立 "SDI=" 的
+# 捕获结果与 _SDI_RE 完全一致。
+_SDI_ENUM_RE = re.compile(
+    r"SDI\s*[=为]?\s*(\d+(?:\s*(?:或|、|/|和|及|,|，)\s*\d+)*)",
+    re.IGNORECASE,
+)
 
 # —— 中文位号（物理 1 基 → ICD 0 基换算）——
 # HLR 常以"第N位"描述 A429 字内位布局（"第9和10位" = SDI 字段、
@@ -392,6 +398,14 @@ def extract_bit_range_assertions(text: str) -> list[dict]:
 def extract_sdi(text: str) -> str:
     m = _SDI_RE.search(text)
     return m.group(1) if m else ""
+
+
+def extract_sdi_values(text: str) -> set[str]:
+    """提取全部 SDI 值，展开行内枚举（SDI=0或1 → {'0', '1'}）。"""
+    values: set[str] = set()
+    for m in _SDI_ENUM_RE.finditer(text):
+        values.update(re.findall(r"\d+", m.group(1)))
+    return values
 
 
 def extract_direction(
