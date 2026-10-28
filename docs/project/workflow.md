@@ -19,7 +19,10 @@ Step 0: Profile 加载
     ↓
 Step 1: 解析输入
     HLR Word + EoICD PubSub Excel → 结构化需求列表
-    模块: parsers/{eoicd_excel_parser,hlr_word_parser}.py
+    HLR Word 同时按表头语义识别「缩略语表」（缩写/英文全称/中文全称）与
+    「术语表」（术语/定义），不依赖固定表序号、列数或列顺序；识别结果写入
+    hlr_requirements.json 的 glossary / terms（terms 为空时不写该字段）
+    模块: parsers/{eoicd_excel_parser,hlr_word_parser,glossary_tables}.py
 
 Step 2: HLR AI 标注
     DeepSeek 对每条 HLR 标注 bus_types / labels / devices / signal_keywords
@@ -38,6 +41,12 @@ Step 3.5: RPDU refine 后处理（仅 RPDU profile，由 pipeline `refine=True` 
     模块: refine/runner.py（run_pipeline_refined_stage）+ refine/block_filter.py（filter_matched_blocks）
     触发判定: `profile.profile_id == "rpdu" and not no_refine`（CLI `--no-refine` / API `no_refine=true` 可关闭做 A-B 对照）
 
+Step 3.6: 文档术语索引（不新增 LLM 调用）
+    按每条 case 的 SWHLR 正文/基本原理（及匹配 Block 的信号名）检索文档术语表/
+    缩略语表，只把命中的条目写入 ReverseCase.glossary_hits；未命中的 case 该字段
+    保持为空。匹配层（标注/聚类/评分/匹配结果）不使用该索引
+    模块: matching/glossary_index.py
+
 Step 4: 多智能体裁判（含降级保护）
     DeepSeek / MiniMax / Qwen 三模型并行独立判定（线程池 + concurrent.futures 执行模型）
     任务提交限流：信号量（DEGRADATION_MAX_INFLIGHT，默认 6）控制同时提交到线程池的任务数，超限任务在 submit 前阻塞等待
@@ -46,6 +55,9 @@ Step 4: 多智能体裁判（含降级保护）
     Provider 熔断器：连续失败达阈值后自动跳过，TTL 到期自动恢复
     模块: comparison/{multi_judge,semantic_judge}.py + degradation/{config,context,fallback}.py
     LLM 抽象: llm/factory.py → get_llm(provider)
+    术语注入: 初判 user prompt 在 SWHLR 位声明之后追加「文档术语与缩略语（仅本
+    case 命中项）」；条目只用于理解 SWHLR 用词，不是 EoICD 依据，与 EoICD 冲突时
+    以 EoICD 为准。未命中 case 的 prompt 与缓存 key 逐字节不变
 
 Step 4.5: 超时任务后台收尾（drain）
     统一 join Step 4 中超时的裁判任务，总预算默认 300s（DEGRADATION_DRAIN_BUDGET）
@@ -72,6 +84,8 @@ Step 5.5: 低星复查（peer-aware 反思，5 星体系）
     error provider 跳过：不重新查询 coverage_status="error" 的 provider，保留其 error 状态
     并发模型：per-case 内并行 3 个 provider——每个 case 一次性 submit 到 Step 4 共享的 drain executor（`_get_drain_executor()` + `_submit_with_gate()`），用 `concurrent.futures.wait` + `FIRST_COMPLETED` 在 `case_total_timeout` ceiling 内 gather；case 维度仍串行。单 case wall time = `max(providers)`（非 `sum(providers)`）。复用 Step 4 的 `_get_drain_executor` / `_get_inflight_sema` / `_submit_with_gate` / `make_error_judgment` / `classify_exception` 基础设施，无新引入组件。
     模块: comparison/re_review.py
+    术语注入: 复查 prompt 与初判使用同一段 case 命中术语，避免复查模型失去
+    初判时已看到的用词解释
 
 Step 5.6: 部分共识重跑（含降级后处理）
     仅对被复查过的 case（re_reviewed_ids）重跑共识，更新对应条目

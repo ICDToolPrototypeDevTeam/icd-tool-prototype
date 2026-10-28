@@ -92,8 +92,8 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | `v4/config.py` | V4 env 加载（DEEPSEEK_* / USE_MOCK_LLM / JUDGE_PROVIDERS）+ 业务常量 |
 | `v4/errors.py` | 管线异常 → 面向用户的错误分类与建议；复用 `degradation.fallback.classify_exception` |
 | `v4/models.py` | V4 Pydantic 模型（EoICDRequirement / HLRLabel / ReverseCase / ConsensusResult 等） |
-| `v4/parsers/`  | EoICD PubSub Excel + HLR Word 解析 |
-| `v4/matching/` | HLR 标注、条目过滤、信号画像、Block 聚合、HLR 分类、反向匹配、追溯预筛选 |
+| `v4/parsers/`  | EoICD PubSub Excel + HLR Word 解析；`glossary_tables.py` 按表头语义识别缩略语表/术语表（不依赖固定表序号、列数或列顺序） |
+| `v4/matching/` | HLR 标注、条目过滤、信号画像、Block 聚合、HLR 分类、反向匹配、追溯预筛选；`glossary_index.py` 为每条 case 选取命中的文档术语（只供裁判/复查 prompt，不参与匹配评分） |
 | `v4/comparison/` | 多模型裁判、Review Agent 共识、一星复查、报告生成 |
 | `v4/degradation/` | Provider 健康跟踪、Case 超时、熔断、星级降级 |
 | `v4/doc_generators/` | xlsx + 单模型 docx + 共识 docx 生成（反向） |
@@ -125,7 +125,8 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
     ↓
 Step 1 解析输入
    HLR Word + EoICD PubSub Excel → hlr_requirements.json + eoicd_requirements.json
-   模块: v4/parsers/{eoicd_excel_parser,hlr_word_parser}.py
+   HLR Word 按表头语义识别缩略语表/术语表 → glossary / terms（terms 为空不写字段）
+   模块: v4/parsers/{eoicd_excel_parser,hlr_word_parser,glossary_tables}.py
     ↓
 Step 2 HLR AI 标注
    DeepSeek 标注 bus_types / labels / devices / signal_keywords → hlr_labels.json
@@ -139,12 +140,19 @@ Step 3.5 RPDU refine 后处理（仅 RPDU profile 启用，由 pipeline `refine=
    matched ICD Block 无关过滤 + 精确补采 + 同义词补采 → 重建 cases
    模块: v4/refine/{block_filter,runner}.py
     ↓
+Step 3.6 文档术语索引（不新增 LLM 调用）
+   每条 case 只保留 SWHLR 正文/基本原理命中的术语与缩略语 → ReverseCase.glossary_hits
+   未命中 case 保持空列表；匹配评分不使用该索引
+   模块: v4/matching/glossary_index.py
+    ↓
 Step 4 多智能体裁判（含降级保护）
    DeepSeek / MiniMax / Qwen 并行判定 → multi_judge_results.json
+   初判 prompt 追加 case 命中的「文档术语与缩略语」段（非 EoICD 依据）
    模块: v4/comparison/{multi_judge,semantic_judge}.py + v4/degradation/*
     ↓
 Step 5 Review Agent 共识
    综合复核 + 星级评分 → consensus_results.json（含一星复查 + 部分共识重跑）
+   低星复查 prompt 复用同一段 case 命中术语
    模块: v4/comparison/{review_agent,re_review}.py + v4/degradation/context.py
     ↓
 Step 6 报告生成
@@ -303,7 +311,7 @@ backend/app/
     ├── errors.py           # 管线异常 → 用户可读的错误分类与建议
     ├── models.py           # V4 Pydantic 模型
     ├── pipeline.py         # V4 反向管线编排（run_reverse_pipeline）
-    ├── parsers/            # EoICD Excel + HLR Word 解析
+    ├── parsers/            # EoICD Excel + HLR Word 解析（含 glossary_tables 表头语义识别）
     ├── profiles/           # Controller profile registry（Issue #63 引入）
     │   ├── __init__.py     # ProfileRegistry 单例 + init_registry / get_registry
     │   ├── base.py         # ControllerProfile + 4 个 Config dataclass
@@ -331,7 +339,7 @@ backend/app/
     │       ├── __init__.py
     │       ├── hooks.py
     │       └── config.yaml
-    ├── matching/           # 反向匹配、信号画像、HLR 分类、entry filter
+    ├── matching/           # 反向匹配、信号画像、HLR 分类、entry filter、case 术语索引
     ├── comparison/         # multi_judge + review_agent + 报告生成
     ├── doc_generators/     # xlsx + 3 类 docx 生成
     ├── prompts/            # reverse_judge / consensus / re_review .md
@@ -352,7 +360,8 @@ backend/forward/            # 正向管线原样代码树（唯一事实源；�
 1. 解析输入
    EoICD PubSub Excel + HLR Word → 结构化需求列表
    说明: EoICD 解析生成多层级属性（HL 高层 / DP 数据点 / RP 接收参数，带 layer_type / side）
-   模块: parsers/{eoicd_excel_parser,hlr_word_parser}.py
+   说明: HLR Word 按表头语义识别缩略语表/术语表 → glossary / terms（不依赖表序号/列数/列顺序）
+   模块: parsers/{eoicd_excel_parser,hlr_word_parser,glossary_tables}.py
 
 2. HLR AI 标注
    DeepSeek 对每条 HLR 标注 bus_types / labels / devices / signal_keywords
@@ -371,14 +380,20 @@ backend/forward/            # 正向管线原样代码树（唯一事实源；�
    模块: refine/runner.py（run_pipeline_refined_stage）+ refine/block_filter.py（filter_matched_blocks）
    关闭 refine（refine=False / no_refine=True）→ 字节走原 3f 之后链路，行为与原 RPDU 完全相同
 
+3.6 文档术语索引（不新增 LLM 调用）
+   每条 case 只保留 SWHLR 正文/基本原理命中的术语与缩略语 → ReverseCase.glossary_hits
+   未命中 case 保持空列表；匹配评分不使用该索引
+   模块: matching/glossary_index.py
+
 4. 多智能体裁判
    3 Agent 平行裁判（DeepSeek/MiniMax/Qwen）
+   初判 prompt 追加 case 命中的「文档术语与缩略语」段（非 EoICD 依据）
    模块: comparison/{multi_judge,semantic_judge}.py
    LLM 抽象: llm/factory.py → get_llm(provider)
 
 5. Review Agent 共识
-   综合复核 + 星级评价（1-3★）
-   模块: comparison/review_agent.py
+   综合复核 + 星级评价（1-3★）；低星复查 prompt 复用同一段 case 命中术语
+   模块: comparison/{review_agent,re_review}.py
 
 6. 报告生成
    1 份 xlsx + 3 份单模型 docx + 1 份共识 docx

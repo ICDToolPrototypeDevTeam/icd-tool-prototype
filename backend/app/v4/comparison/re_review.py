@@ -33,6 +33,7 @@ from app.v4.comparison.semantic_judge import (
     _append_side_views,
     _extract_json,
 )
+from app.v4.matching.glossary_index import append_glossary_section
 from app.v4.config import JUDGE_PROVIDERS
 from app.v4.degradation.config import DegradationConfig
 from app.v4.degradation.concurrency import (
@@ -121,6 +122,7 @@ def _build_re_review_user_prompt(
         parts, hlr.get('content', ''), case.matched_profiles
     )
     _append_bit_range_derivation(parts, hlr.get('content', ''))
+    append_glossary_section(parts, case.glossary_hits)
     parts.append("")
 
     # ── ICD Block (benchmark) ──

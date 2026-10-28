@@ -32,6 +32,10 @@ from app.v4.doc_generators.excel_generator import generate_eoicd_excel
 from app.v4.doc_generators.word_generator import generate_consistency_report
 from app.v4.doc_generators.consensus_word_generator import generate_consensus_report as gen_consensus_word
 from app.job_manager import Job, JobStatus, raise_if_cancelled, report_progress
+from app.v4.matching.glossary_index import (
+    attach_glossary_hits,
+    build_glossary_index,
+)
 from app.v4.matching.hlr_classifier import enrich_all_labels
 from app.v4.matching.hlr_labeler import label_hlrs
 from app.v4.matching.reverse_case_builder import build_reverse_cases
@@ -229,19 +233,23 @@ def _parse_hlr(
     result.source_file = _saved_source_file
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    # 解析登记（parse_warnings）仅在非空时写入 JSON：未启用登记维度或本次
-    # 无登记的 profile，产物与改动前逐字节一致。
-    if result.parse_warnings:
-        text = result.model_dump_json(indent=2, ensure_ascii=False)
-    else:
-        text = result.model_dump_json(
-            indent=2, ensure_ascii=False, exclude={"parse_warnings"}
-        )
+    # 解析登记（parse_warnings）与术语表（terms）仅在非空时写入 JSON：没有
+    # 对应维度的文档，产物与改动前逐字节一致。
+    exclude: set[str] = set()
+    if not result.parse_warnings:
+        exclude.add("parse_warnings")
+    if not result.terms:
+        exclude.add("terms")
+    text = result.model_dump_json(
+        indent=2, ensure_ascii=False, exclude=exclude or None
+    )
     _write_text_atomic(output_path, text)
 
     print(f"  Output: {output_path}")
     print(f"  Requirements: {result.total_count}")
     print(f"  Glossary entries: {len(result.glossary)}")
+    if result.terms:
+        print(f"  Terminology entries: {len(result.terms)}")
     if result.parse_warnings:
         kinds: dict[str, int] = {}
         for w in result.parse_warnings:
@@ -1025,6 +1033,10 @@ def run_reverse_pipeline(
 
     raise_if_cancelled()
 
+    # Document glossary/terminology index: case-scoped hits are attached to
+    # the judge cases below.  An empty index leaves every prompt unchanged.
+    glossary_index = build_glossary_index(hlr_out)
+
     # Step 1: EoICD itemization Excel
     # 传 eoicd_out 复用刚解析好的对象：12 万条时重读 JSON 峰值 +410MB（BUG-20260923-007）
     eoicd_json_path = output_dir / "eoicd_requirements.json"
@@ -1130,6 +1142,14 @@ def run_reverse_pipeline(
         block_index: dict[str, ICDBlock] = {b.block_key: b for b in blocks}
 
         cases = build_reverse_cases(match_result, block_index)
+
+    attach_glossary_hits(cases, glossary_index)
+    glossary_case_count = sum(1 for case in cases if case.glossary_hits)
+    if glossary_case_count:
+        print(
+            f"  Glossary hits: {glossary_case_count}/{len(cases)} case(s) "
+            "carry document terminology"
+        )
 
     clock.mark("Step 3/6: Reverse matching")
     raise_if_cancelled()
