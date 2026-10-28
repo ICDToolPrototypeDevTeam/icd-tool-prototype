@@ -27,11 +27,12 @@ EoICD 是接口定义权威来源，SWHLR 是软件对 EoICD 的实现。
 
 ## 位号基准
 
-SWHLR 位号与 EoICD `BitOffsetWithinDS` 的换算按写法区分，不得把一种写法的换算套到另一种上：
+SWHLR 位号与 EoICD 位偏移的换算按写法区分，不得把一种写法的换算套到另一种上：
 
 1. 中文“第 N 位”“第 N 到 M 位”是 1 基物理位号，须换算为 0 基偏移：第 N 位 → offset=N-1；第 N 到 M 位 → offset=min(N,M)-1、size=|M-N|+1。
-2. 英文 `bitN`/`BitN`（如 bit10、bit10~bit12）与 EoICD 采用同一基准：`bitN` 直接对应 offset=N，**不得再减 1**；`bitN~bitM` 对应 offset=min(N,M)、size=|M-N|+1。
+2. 英文 `bitN`/`BitN`（如 bit10、bit10~bit12）与 EoICD 位偏移采用同一基准：`bitN` 直接对应 offset=N，**不得再减 1**；`bitN~bitM` 对应 offset=min(N,M)、size=|M-N|+1。
 3. 两种写法同时出现在一条 SWHLR 中时，按各自基准分别换算。若提示中已给出归一化位声明（如 `bit10 → offset=10`），直接采用该结果，不得再自行做 ±1 换算。
+4. **两套位偏移基准（必须同时考虑）**：同一个信号在 EoICD 中可能同时给出 `BitOffsetWithinMsg`（消息内位偏移）与 `BitOffsetWithinDS`（数据集内位偏移）。二者是同一信号在不同坐标系下的位偏移，数值不同本身**不是**不一致，也不得按“发送侧/接收侧”或“Publisher/Subscriber”预先指定只用其中一套——接收侧软件也可能按发布侧的数据集位偏移解析，发布侧也可能引用消息内位偏移。判定时把 SWHLR 的位段分别与 Block 中所有可用基准（各基准的 offset + ParameterSize）比对：**与其中任一套吻合，位偏移/位宽即判一致**；只有与所有可用基准都不吻合时，才判 inconsistent。吻合某一套基准后，后续位宽/取值范围等按该套基准的上下文比对。
 
 ## A429 word 与来源表
 

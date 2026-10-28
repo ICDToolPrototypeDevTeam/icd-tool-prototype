@@ -8,6 +8,10 @@
 
 - **反向管线：SWHLR 文档缩略语/术语作为前置知识注入裁判与低星复查（匹配层不变）**：此前 `hlr_requirements.json` 虽可能解析出 `glossary`，但标注、匹配、裁判、共识、复查均未消费；同时旧解析只认 `glossary_table_index` 指向的 3 列缩写表，表头改为「术语」、列顺序变化或表序号变化即失效。本次新增 `parsers/glossary_tables.py`：按**表头语义**识别缩略语表（缩写/缩略语/简称/英文缩写/代号/abbreviation/acronym 等别名）与术语表（术语/名词/词汇/用语/term 等别名），列角色（缩写/英文全称/中文全称/定义）按表头文本解析、再按位置兜底，不依赖固定表序号、列数或列顺序；需求表先由 `id` 行头识别并排除，修订记录/文档信息等结构表不按形状误判。仅对**首张需求表之前**的前置表启用形状兜底（左列短词 / 右列长定义），并登记 `glossary_shape_fallback`（仅 `register_skipped` 开启时写盘）。新增 `HLROutput.terms`（术语表）与 `ReverseCase.glossary_hits`；`terms` 为空时不写入 `hlr_requirements.json`，无术语表的文档产物与改动前**逐字节一致**，HSCU 金样通过。新增 `matching/glossary_index.py`：按每条 case 的 SWHLR 正文/基本原理（及匹配 Block 的信号名）检索缩略语/术语，只把命中项写入 `glossary_hits`（拉丁键按 token 边界、中文键按子串，通用词不作为检索键，默认上限 20 条 / 1500 字符）；初判与低星复查 prompt 在 SWHLR 位声明之后追加「文档术语与缩略语（仅本 case 命中项）」，明确其仅用于理解 SWHLR 用词、不是 EoICD 定义、冲突时以 EoICD 为准。未命中 case 的 prompt 与 LLM 缓存 key **逐字节不变**；匹配评分/聚类/匹配结果未改动。实测新样例 `1022测试1.docx`：17 条需求、68 条缩略语、12 条术语、0 解析告警；旧样例 `1019测试1.docx` 仍为 10 条需求 / 2 条缩略语 / 无 `terms` 字段。**边界**：升级前已落盘的 `hlr_requirements.json` 不含 `terms`，续跑不会重新解析，需重跑 Step 1 才有术语注入；该改动需**重建后端镜像**才生效。
 
+### Fixed
+
+- **反向裁判：修正英文范围端点被拆成独立单 bit、以及位偏移只认 `BitOffsetWithinDS` 导致的误判**：SWHLR `bit13至bit28为…` 的端点 `bit28` 此前被 `extract_bit_fields` 追加为独立的 `offset=28,size=1` 断言，裁判 prompt 同时出现“范围 13~28”与“单 bit 28”两条互相矛盾的声明；现英文单 bit 的三个提取器在命中位置紧邻范围分隔符（至/到/~/～/-/—）时跳过，`_BIT_RANGE_RE` 的分隔符同步扩到与范围推导正则一致，逗号后真正独立的断言不受影响。同时，EoICD 对同一信号可同时提供 `BitOffsetWithinMsg`（消息内）与 `BitOffsetWithinDS`（数据集内）两套坐标，旧规则把英文 `bitN` 绑定 DS，三家裁判因此把与 RP `BitOffsetWithinMsg=13` 完全吻合的 HLR 511 判成不一致；现初判/复查规则改为“与任一可用基准吻合即一致，与全部基准都不吻合才判不一致”，不按发送/接收侧预先指定基准，并在 prompt 中按数据列出两套基准的 offset / 位宽 / 来源侧。实测 `1028测试.docx`：HLR 511 由三家一致 inconsistent 转为全部 covered（5★ full），真实位号对调的 HLR 288 仍保持三家一致 inconsistent。匹配/聚类/评分/Block 组成未改动；提示词变更使旧裁判缓存失效。该改动需**重建后端镜像**才生效。
+
 ## [Unreleased] - 2026-10-26
 
 ### Added
