@@ -60,10 +60,17 @@ def _resolve_keywords(keywords: "ClassifierKeywords | None") -> tuple:
 
 
 _LABEL_RE = re.compile(r"L(\d+)", re.IGNORECASE)
-_BIT_RANGE_RE = re.compile(r"bit(\d+)\s*[至~\-]\s*bit(\d+)", re.IGNORECASE)
+# 范围分隔符与下方 _EN_BIT_RANGE_ASSERT_RE 保持一致（至/到/~/～/-/—），
+# 否则 "bit13到bit28" 这类写法只剩端点单 bit，整段范围丢失。
+_BIT_RANGE_RE = re.compile(r"bit(\d+)\s*[至到~～\-—]\s*bit(\d+)", re.IGNORECASE)
 _BIT_SINGLE_RE = re.compile(r"bit(\d+)\s*[为是]\s*(.+?)(?:[，,;；]|$)", re.IGNORECASE)
 _BIT_ASSIGN_RE = re.compile(r"bit(\d+)\s*=", re.IGNORECASE)
 _BIT_POSSESSIVE_RE = re.compile(r"bit(\d+)\s*的", re.IGNORECASE)
+# 范围端点（"bit13至bit28为…" 中的后一个 bit28）不是独立单 bit 断言。
+# 单 bit 提取器命中前若紧邻范围分隔符，一律跳过，与中文路径"单 bit 落在
+# 已提取范围内则跳过"同一口径；否则一条范围声明会被断成范围 + 端点两条
+# 互相矛盾的声明，裁判据此误判。
+_RANGE_SEP_BEFORE_RE = re.compile(r"[至到~～\-—]\s*$")
 # 表格位号单元格：| bit13 | 有效-1；无效-0 |、| bit15~bit16 | ... |
 # 这类单元格只有位号本身，没有“为/是/=/的”等动词，上面的模式都匹配不到，
 # 会让整张表的位定义丢失。
@@ -103,8 +110,9 @@ _EN_BIT_VALUE_SINGLE_RE = re.compile(
     r"(?<![A-Za-z])[Bb]it\s*(\d+)[^。；\n]{0,10}?(?:设置为|设为|置为|为|=|＝)\s*[“\"‘']?([01])[”\"’']?"
 )
 # 英文范围式（"bit17至bit28"）：与英文位号同基准（bitN 即 0 基 offset N）。
-# 此正则只服务裁判 prompt 的范围式推导注入，不参与匹配——extract_bit_fields 的
-# _BIT_RANGE_RE 保持原样（复制锚定风格，分隔符额外兼容"到/～/—"）。
+# 此正则只服务裁判 prompt 的范围式推导注入，不参与匹配；它与
+# extract_bit_fields 的 _BIT_RANGE_RE 使用同一组分隔符，保证"提取到的位段"
+# 与"注入给裁判的推导"不会因分隔符写法不同而分叉（如 "bit13到bit28"）。
 _EN_BIT_RANGE_ASSERT_RE = re.compile(
     r"[Bb]it\s*(\d+)\s*[至到~～\-—]\s*[Bb]it\s*(\d+)"
 )
@@ -151,6 +159,17 @@ def extract_labels(text: str) -> list[str]:
     return out
 
 
+def _is_range_endpoint(text: str, start: int) -> bool:
+    """True when the bit matched at ``start`` is a range's closing endpoint
+    (``bit13至bit28``), not an independent single-bit assertion.
+
+    Looks back a few characters only; the pattern anchors the separator at
+    the end, so a separator from an earlier clause (``bit13至bit28，bit28``)
+    does not suppress a genuinely separate assertion.
+    """
+    return bool(_RANGE_SEP_BEFORE_RE.search(text[max(0, start - 6):start]))
+
+
 def extract_bit_fields(text: str) -> list[dict]:
     fields: list[dict] = []
     seen: set[tuple[int, int]] = set()
@@ -179,18 +198,24 @@ def extract_bit_fields(text: str) -> list[dict]:
             seen.add(key)
             fields.append({"offset": offset, "size": size, "text": m.group(0)})
     for m in _BIT_SINGLE_RE.finditer(text):
+        if _is_range_endpoint(text, m.start()):
+            continue
         offset = int(m.group(1))
         key = (offset, 1)
         if key not in seen:
             seen.add(key)
             fields.append({"offset": offset, "size": 1, "text": m.group(0)})
     for m in _BIT_ASSIGN_RE.finditer(text):
+        if _is_range_endpoint(text, m.start()):
+            continue
         offset = int(m.group(1))
         key = (offset, 1)
         if key not in seen:
             seen.add(key)
             fields.append({"offset": offset, "size": 1, "text": m.group(0)})
     for m in _BIT_POSSESSIVE_RE.finditer(text):
+        if _is_range_endpoint(text, m.start()):
+            continue
         offset = int(m.group(1))
         key = (offset, 1)
         if key not in seen:
