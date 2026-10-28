@@ -45,6 +45,20 @@ class EoICDOutput(BaseModel):
     sheet_statistics: dict[str, dict[str, int]]
     requirements: list[EoICDRequirement]
 
+    # Same-word protocol anchors (LABEL/SDI/SSM/PARITY) collected during the
+    # Subscriber-table pass. These rows are deliberately kept out of
+    # ``requirements`` (Rule 9 frame-structure filtering), but their bit
+    # layout / SDI CodedSet is needed by the reverse judge. In-memory only:
+    # excluded from serialization so the itemized JSON stays byte-identical.
+    protocol_anchors: dict = Field(default_factory=dict, exclude=True)
+
+    # Reverse-only DP/RP snapshot: {RP signal path: [{dp_name, rp_name,
+    # dp: {attr: value}, rp: {attr: value}}, ...]}, captured by the parser
+    # before P2.4 overwrites RP attributes with DP values. In-memory only;
+    # persisted to ``eoicd_side_pairs.json`` (see ``write_side_pairs``) so a
+    # resumed run rebuilds identical judge input.
+    side_pairs: dict = Field(default_factory=dict, exclude=True)
+
 
 # ============================================================
 # HLR Models
@@ -77,6 +91,19 @@ class HLRGlossaryEntry(BaseModel):
     abbreviation: str
     english_name: str
     chinese_description: str
+
+
+class HLRTermEntry(BaseModel):
+    """A domain term from the HLR document's terminology table.
+
+    Kept separate from :class:`HLRGlossaryEntry` so abbreviation-only
+    profiles keep their existing artifact shape: ``terms`` is omitted from
+    ``hlr_requirements.json`` when the document has no terminology table.
+    """
+
+    term: str
+    definition: str = ""
+    english_name: str = ""
 
 
 class HLRLabel(BaseModel):
@@ -137,6 +164,9 @@ class HLROutput(BaseModel):
     total_count: int
     requirements: list[HLRRequirement]
     glossary: list[HLRGlossaryEntry]
+    # 术语表（「术语 | 定义」）。仅当文档确有术语表且被识别时非空；
+    # 写盘方（pipeline._parse_hlr）在为空时不写入 JSON，保证旧产物字节不变。
+    terms: list[HLRTermEntry] = Field(default_factory=list)
     # 解析登记（仅当 profile 打开 requirement_scan.register_skipped 或
     # hook 侧解析降级时才可能非空；默认 []）。写盘方（pipeline._parse_hlr）
     # 只在非空时写入 JSON，保证未启用登记的 profile 产物逐字节不变。
@@ -221,6 +251,9 @@ class ReverseCase(BaseModel):
     hlr_requirement: dict              # {hlr_id, content, signal_category, labels, ...}
     matched_profiles: list[dict]       # serialized SignalProfile summaries
     match_evidence: dict = Field(default_factory=dict)
+    # 本 case 命中的文档术语/缩略语（仅用于理解 SWHLR 用词，非 EoICD 依据）。
+    # 为空时裁判/复查 prompt 不新增任何内容，保证未命中 case 的缓存 key 不变。
+    glossary_hits: list[dict] = Field(default_factory=list)
 
 
 # ============================================================

@@ -2444,6 +2444,665 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(p)))
 2. 尚未执行真实端到端任务复验（MOCK E2E / 真实模型 E2E）。
 3. Issue 编号待用户回填。
 
+## BUG-20261023-001：表格式 SWHLR 的 AI LABEL 未参与显式路径路由
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-10-23
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。Issue 编号待用户回填。范围仅限反向匹配。
+
+#### 问题现象
+
+需求 `FSF21000101_HLR_4720` 的内容是 104 行的 `序号 | LABEL | 周期` 表。
+反向匹配结果把 `signal_category` 判为 `A429隐式`，走语义匹配路径，最终进入
+裁判的 20 个 block 中有 4 个（`L244`–`L247`）根本不在该需求的 LABEL 表中；
+同时 AI labeler 已正确提取的 104 个 LABEL 没有参与路由。
+
+#### 复现方式
+
+1. 使用 `test-input/AMSC` 与 `1022测试1.docx` 跑一次反向任务，或直接回放任务
+   `f372c271-43e6-408e-9f3a-a7ee700f2c9b` 的 `hlr_requirements.json` /
+   `hlr_labels.json` / `eoicd_requirements.json`。
+2. 调用 `match_reverse`，检查 HLR 4720 的 `signal_category`、`match_evidence.hlr_labels`
+   与 `matched_profile_keys`。
+
+#### 影响范围
+
+`app.v4.matching.reverse_matcher.build_hlr_profile`；所有 LABEL 单元格只有裸数字
+（无 `L<num>` 前缀）的表格式 SWHLR。
+
+#### 原因分析
+
+（已定位）`build_hlr_profile` 只使用 `extract_labels(hlr.content)`，其正则只匹配
+`L(\d+)`；表格式内容中的 LABEL 是裸数字（如 `11`、`30`），提取结果为空。
+`hlr.content` 含 "429"，`classify_hlr` 因此落到 `A429隐式`，走
+`_match_path_semantic`：该路径不做 label 约束，扫描所有总线重叠 block；大量
+block 同分后按稳定排序截断 top-20，`L244`–`L247` 恰好落入窗口。AI labeler 的
+`lbl.labels` 已包含正确的 104 个 LABEL，但 `build_hlr_profile` 未使用。
+
+#### 修复方案
+
+最小修复，仅改路由输入：
+
+1. `build_hlr_profile` 以 `lbl.labels` 为主，合并 `extract_labels(hlr.content)`，
+   统一为 `L<num>` 并去重。
+2. 若有 label 且 `classify_hlr` 原分类为 `A429隐式`/`逻辑/非通信`，改为
+   `A429显式`，走 label 前缀精确匹配路径。
+
+不修改 top-K、语义匹配、Prompt、裁判或报告结构。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/reverse_matcher.py`（`build_hlr_profile`）
+2. `backend/tests/test_reverse_label_profile.py`（新增 3 个回归用例；本地文件，
+   `backend/tests/` 已在 `.gitignore` 中，不入库）
+
+#### 验证方式
+
+1. `cd backend && python -m pytest tests/test_reverse_label_profile.py -q`
+2. 回放任务 `f372c271-43e6-408e-9f3a-a7ee700f2c9b` 的 17 条 HLR，对比修改前后
+   的 `signal_category` / `match_type` / `matched_profile_keys`。
+3. `cd backend && python -m pytest tests -q --continue-on-collection-errors`
+
+#### 验证结果
+
+**已通过（本机，2026-10-23）**：
+
+1. 新增回归用例 3 passed。
+2. 回放结果：仅 HLR 4720 变化；`signal_category` 由 `A429隐式` 变为
+   `A429显式`，`hlr_labels` 为 104 个，20 个 matched key 全部落在 HLR 的 LABEL
+   集合内，`L244`–`L247` 不再出现。
+3. 可收集测试：278 passed / 6 failed / 1 skipped / 10 collection errors。6 个
+   failed 与 10 个 collection errors 均为既有问题（job cancel/parse 及
+   `app.v4.reverse`、`app.v4.shared.parsing` 源文件缺失），与本次修改无关。
+4. 未执行完整反向 E2E（需重新跑模型与 Word 输出）。
+
+#### 遗留问题
+
+1. 问题 1（top-20 窗口只覆盖 104 个 LABEL 中的 4 个）未修复；B3 标签级比对方案
+   本次不实施。
+2. 改动未提交；Issue 编号待用户回填。
+3. 尚未跑完整反向 E2E 复验最终 `reverse_matches.json` 与 Word 报告。
+
+## BUG-20261023-002：反向 HLR 633 表格位号未提取、bit 证据块被过滤、状态/实例口径过严
+
+#### 发现日期
+
+2026-10-23
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线。
+
+#### 问题现象
+
+以 `test-input/AMSC` 与 `1022测试1.docx` 跑反向任务，`FSF21000101_HLR_633`
+出现三类问题：
+
+1. SWHLR 将 `OneState/ZeroState` 写成“有效/无效”“有权/无权”等词时，裁判判不一致。
+2. HLR 表格中的 `bit10`、`bit11`、`bit12`、`bit13` 未参与位匹配，其中 `bit13`
+   对应的 `L262/HPGC_ACTIVATION` 未进入裁判证据。
+3. HLR 用左右两行描述同一 bit10 的两个通道实例，裁判按“2 行对 1 个 Block”
+   判不一致。
+
+#### 复现方式
+
+1. 回放任务 `f372c271-43e6-408e-9f3a-a7ee700f2c9b` 的
+   `hlr_requirements.json` / `hlr_labels.json` / `eoicd_requirements.json`。
+2. 调用 `match_reverse`，检查 HLR 633 的 `bit_fields` 与
+   `matched_profile_keys`。
+3. 调用三家裁判，检查 `coverage_status` 与 `analysis`。
+
+#### 影响范围
+
+`app.v4.matching.hlr_classifier.extract_bit_fields`、
+`app.v4.matching.reverse_matcher._filter_sn_zero_within_label`、反向裁判与
+一星复查提示词；所有使用 `| bitN | ... |` 表格写法的 SWHLR。
+
+#### 原因分析
+
+1. `extract_bit_fields` 的英文模式要求 `bitN` 后出现“为/是/=/的”等词；
+   `| bit13 | 有效-1；无效-0 |` 只有位号单元格，四种模式都匹配不到，整张表的
+   单 bit 定义丢失（只偶然提取到 `bit15~bit16` 范围）。
+2. `_filter_sn_zero_within_label` 在同一个 Label 已有 `signal_name>0` 的块时，
+   会删除所有 `signal_name=0` 的块。`HPGC_ACTIVATION` 的 `signal_name=0`，
+   但 `bit_field=20`（HLR 明确写了 bit13），被误当作同 Label 噪声删除。
+3. `reverse_judge.md` 的“禁止为差异找借口”条款过严，且缺少“状态语义等价”
+   与“定义/实例”通用规则；`re_review` 的 EoICD 证据只列 Label/方向/类型/
+   位/范围/单位，复查模型看不到 OneState/ZeroState 与子信号状态。
+
+#### 修复方案
+
+只改反向管线，不新增实例路径字段：
+
+1. `hlr_classifier.extract_bit_fields` 增加表格位号模式
+   `| bitN |` / `| bitN~bitM |`，与既有模式按 `(offset, size)` 去重。
+2. `_filter_sn_zero_within_label` 在 `bit_field >= 12`（偏移命中或偏移+宽度
+   命中）时保留该块，因为 HLR 明确位号属于证据级准入，不是词元噪声。
+3. `reverse_judge.md` 增加“状态语义等价”和“定义与实例”规则，放宽
+   “表述不同/状态词不同”的误判，同时保留对真实技术矛盾的严格判定；
+   `re_review.md` 同步增加相同口径。
+4. `semantic_judge._build_reverse_user_prompt` 删除误导性的
+   `通道变体数` / `通道=N` 展示（L262 实际有 4 个实例却显示 1）。
+5. `re_review._build_re_review_user_prompt` 补充 OneState/ZeroState、
+   CodedSet 与字内子信号明细；label/方向改为优先读 Block 字段。
+
+A/B 实验（同一证据，仅比较是否附加接口实例路径）结果：两组三家判定与置信度
+完全一致，B 组 prompt 增大约 20% 且触发 deepseek 截断重试，故不实现实例路径。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/hlr_classifier.py`
+2. `backend/app/v4/matching/reverse_matcher.py`
+3. `backend/app/v4/comparison/semantic_judge.py`
+4. `backend/app/v4/comparison/re_review.py`
+5. `backend/app/v4/prompts/reverse_judge.md`
+6. `backend/app/v4/prompts/re_review.md`
+
+#### 验证方式
+
+1. 对 HLR 633 调用 `extract_bit_fields`，检查返回 `10/11/12/13/15(size=2)`。
+2. 回放 HLR 633，检查 `matched_profile_keys` 包含
+   `L262/HPGC_ACTIVATION`，且共 5 个 Block。
+3. 用真实匹配结果、真实 prompt 调用 deepseek/minimax/qwen；再以一星复查
+   prompt 复查。
+4. 回放全部 17 条 HLR，对比修改前后的 `match_type` 与 matched keys。
+5. 可收集测试回归：`python -m pytest tests -q --ignore=...`。
+
+#### 验证结果
+
+**已通过（本机，2026-10-23）**：
+
+1. `extract_bit_fields` 对 HLR 633 返回 5 个位声明：
+   `bit10`、`bit11`、`bit12`、`bit13`、`bit15~bit16`。
+2. HLR 633 匹配结果为 5 个 Block，`L262/HPGC_ACTIVATION` 已进入证据。
+3. 初始裁判：deepseek inconsistent（bit12 内容语义异议）、minimax covered
+   0.97、qwen covered 0.90；一星复查后三家均为 covered
+   （deepseek 0.88 / minimax 0.98 / qwen 0.95）。左右两行 bit10 均被识别为
+   同一 Block 的通道实例，状态词按语义等价处理。
+4. 17 条 HLR 回放：匹配类型数量不变（10 已匹配 / 7 待确定）；HLR 633 +1、
+   HLR 680 +3、HLR 892 +5，均为 HLR 明确位号对应的 Block；HLR 4720 的差异
+   来自既有 LABEL 路由修复，不是本次改动。
+5. 可收集测试：278 passed / 6 failed / 1 skipped；6 个 failed 与既有
+   job cancel/orphan/parse 问题一致，10 个 collection errors 仍为
+   `app.v4.reverse`、`app.v4.shared.parsing` 源文件缺失的既有问题。
+
+#### 遗留问题
+
+1. 未跑完整反向 E2E（重新解析、全量标注、全部 17 条裁判与 Word 报告）。
+2. 改动未提交，Issue 编号待用户回填。
+3. 初始裁判仍可能对个别内容语义提出异议（如 HLR 633 的 bit12
+   “过压故障标志” vs “HP high pressure condition”），由一星复查与多数共识
+   兜底；如需完全消除，应单独确认该条业务语义。
+
+---
+
+## BUG-20261026-001：反向裁判把英文 bitN 当物理位号再减 1
+
+#### 发现日期
+
+2026-10-26
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线。
+
+#### 问题现象
+
+`FSF21000101_HLR_680` 的 SWHLR 用表格逐行写 `bit10`~`bit28`。旧运行中
+deepseek/minimax 在初判里把 `bitN` 当作“物理第 N 位”，统一换算为
+`offset=N-1`，据此把整表判为“系统性偏移 1 位”并给出 inconsistent；
+qwen 则按 1 基物理位理解。新版运行虽给出 covered，但 analysis 仍写成
+“按物理位号→0基偏移换算”，位号基准处于歧义状态，判定可能随模型/运行翻转。
+
+#### 影响范围
+
+`app.v4.comparison.semantic_judge._build_reverse_user_prompt`、
+`app.v4.prompts.reverse_judge`、`app.v4.prompts.re_review`；所有以英文
+`bitN`/`bitN~bitM` 描述 A429 位号的 SWHLR。
+
+#### 原因分析
+
+1. `reverse_judge.md` / `re_review.md` 只写了中文“第 N 位”是 1 基物理位、
+   需换算为 0 基，没有说明英文 `bitN` 与 EoICD `BitOffsetWithinDS` 同基准。
+2. `semantic_judge` 的位声明标题写成“物理位号→0基换算”，把英文 `bitN`
+   也暗示成物理位号；模型因此把中文的 -1 规则套到英文写法上。
+3. 匹配层 `extract_bit_fields` 本身是正确的（英文 `bitN`→offset=N，中文
+   “第N位”→offset=N-1）；HLR 680 最新匹配结果 20 个 Block 的
+   `bit_field` 均为 20，包括 bit18/26/27 对应的 PACK_OVHT、
+   ZONE_DUCT_OVHT、ADJ_ZONE_DUCT_OVHT。问题只在裁判/复查的基准说明。
+
+#### 修复方案
+
+只改反向管线的提示词与位声明展示，不改匹配、评分、API 与正向管线：
+
+1. `reverse_judge.md` 新增“位号基准”一节：中文“第 N 位”→offset=N-1；
+   英文 `bitN`→offset=N，不得再减 1；两种写法分别换算。
+2. `re_review.md` 的“判定口径”增加同一规则，并明确不得因 provider 对
+   位号基准的意见分歧而判 needs_review。
+3. `semantic_judge` 的 ICD 锚点位偏移约定补上英文 `bitN` 规则；位声明
+   标题改为“已归一为 0 基 offset（中文第N位按 N-1，英文 bitN 按 N 原值）”。
+
+#### 修改文件
+
+1. `backend/app/v4/comparison/semantic_judge.py`
+2. `backend/app/v4/prompts/reverse_judge.md`
+3. `backend/app/v4/prompts/re_review.md`
+
+#### 验证方式
+
+1. 用真实 HLR 680 案例重建 `ReverseCase`，渲染 reverse prompt，检查位号
+   规则与位声明标题。
+2. 用同一 prompt 调用 deepseek/minimax/qwen，检查三家对 bit10~bit28 的
+   映射与最终 coverage_status。
+3. 运行触及 `semantic_judge`/`re_review` 的已有测试。
+
+#### 验证结果
+
+**已通过（本机，2026-10-26）**：
+
+1. HLR 680 的 prompt 包含“英文 bitN/BitN 与 EoICD 同一基准，bitN 直接
+   对应 offset=N，不得再减 1”；位声明标题为“已归一为 0 基 offset…”，
+   `bit10 → offset=10`、`bit28 → offset=28`。
+2. 三模型复判均为 covered：deepseek 0.85、minimax 0.94、qwen 0.90；
+   analysis 逐项采用 bitN→offset=N，bit18/26/27 分别对齐
+   PACK_OVHT/ZONE_DUCT_OVHT/ADJ_ZONE_DUCT_OVHT。
+3. `pytest tests/test_forward_config_builder.py tests/test_job_cancel.py
+   tests/test_pipeline_errors.py`：48 passed / 1 failed；失败项为既有的
+   `job_scheduler.py:155 except BaseException` 检查，与本次改动无关。
+   4 个反向测试模块仍因 `app.v4.reverse.*` 源文件缺失而在收集阶段报错，
+   属既有问题。
+
+#### 遗留问题
+
+1. 未重跑完整反向 E2E（重新解析、全量标注、全部 17 条裁判与 Word 报告）。
+2. 改动未提交，Issue 编号待用户回填。
+3. 中文“第N位”与英文 bitN 混写的 HLR 本次无真实样例；规则已按写法分别
+   说明，但仍建议后续补一条混写用例。
+
+## BUG-20261026-002：反向裁判看不到来源表与 A429 word，同 Label 跨 word 的 Block 无法区分
+
+#### 发现日期
+
+2026-10-26
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线；与 BUG-20261026-001 同属 HLR 680 排查。
+
+#### 问题现象
+
+HLR 680 的案例共匹配 20 个 Block：16 个来自 Publisher Table、属于
+`L272_ACS_Status_Word1`；另外 4 个来自 Subscriber Table，分别属于
+`L272_APU_Status_Word_3`（Load_Control_Valve_Open_Position、
+Impending_Filter_Bypass_Switch、LOP_Switch）和
+`L272_Overheat_Detection_Failures`（FWD_CARGO_TRIM_AREA_O_D_FAIL），
+位号 11/12/13/16 与 Publisher 信号重叠。裁判 prompt 只序列化
+block_key / signal_family / 属性，AI 看不到来源表和所属 word；deepseek
+只能把 4 个 Block 猜成“另一设备实例”，minimax 只能按“未被 SWHLR 引用”
+排除，qwen 未提及。若其他 Subscriber Block 分数更高，还可能挤占 top-K 名额。
+
+#### 影响范围
+
+`app.v4.matching.reverse_case_builder._serialize_block`、
+`app.v4.comparison.semantic_judge._build_reverse_user_prompt`、
+`app.v4.comparison.re_review._build_re_review_user_prompt`、
+`app.v4.prompts.reverse_judge`、`app.v4.prompts.re_review`；所有同一
+Label 下存在多个 A429 word / Publisher-Subscriber 混合 Block 的反向案例。
+
+#### 原因分析
+
+1. `_serialize_block` 只输出 block_key、signal_family、label、方向、总线、
+   通道数和合并属性；`EoICDRequirement.source`（Publisher/Subscriber）与
+   `signal_name` 中的 word 段在序列化时被丢弃。
+2. `block_key` 形如 `L272/PACK_OVHT`，只保留 Label 和叶节点，无法表达
+   “同 Label 不同 word”；A429 的位偏移只在同一 word 内有意义，跨 word
+   的同 Label 同位号是不同定义。
+3. 提示词没有说明来源表/word 的判定口径，AI 只能从信号名推测，结论不稳定，
+   也无法解释为什么同 Label 同位号不构成矛盾。
+
+#### 修复方案
+
+只改反向裁判证据与提示词，不改匹配、评分、API 与正向管线：
+
+1. `_serialize_block` 新增 `sources`（去重排序的 Publisher Table /
+   Subscriber Table）与 `words`（该 Block 中所有条目所属 A429 word，
+   去重排序）。
+2. word 提取按路径形态：
+   - 层级路径 `...Msg.L272_ACS_Status_Word1.PACK_OVHT` 取叶节点的父段；
+   - 扁平 Subscriber 路径 `...pi429_A1_272_1.L272_1_A1_...` 取 Label +
+     可选数字 word 索引前缀（`L272_1`），剥离通道后缀，避免把
+     A1/A2/B1/B2/S1/S2 当成不同 word。
+3. 裁判与复查 prompt 渲染这两个字段；`reverse_judge.md` 新增“A429 word
+   与来源表”一节，`re_review.md` 增加同一判定口径：不同 word 同 Label
+   同位号是不同定义；先按 SWHLR 信号名确定所属 word 再比对；来源表只
+   说明定义来源，不单独作为判定依据，不得仅因 Subscriber 就排除。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/reverse_case_builder.py`
+2. `backend/app/v4/comparison/semantic_judge.py`
+3. `backend/app/v4/comparison/re_review.py`
+4. `backend/app/v4/prompts/reverse_judge.md`
+5. `backend/app/v4/prompts/re_review.md`
+
+#### 验证方式
+
+1. 用 HLR 680 最新运行的 EoICD/匹配结果重建 Block 与 ReverseCase，
+   检查 20 个 Block 的 `sources`/`words`。
+2. 渲染 reverse prompt 与 re-review prompt，确认每个 Block 都带来源表和 word。
+3. 用同一新 prompt 调用 deepseek/minimax/qwen，检查三家是否引用
+   word/来源表并保持 covered。
+4. 运行既有反向/管线的定向测试。
+
+#### 验证结果
+
+**已通过（本机，2026-10-26）**：
+
+1. HLR 680 的 16 个 Publisher Block 均输出
+   `sources=['Publisher Table']`、`words=['L272_ACS_Status_Word1']`；
+   4 个 Subscriber Block 分别输出 `L272_APU_Status_Word_3` /
+   `L272_Overheat_Detection_Failures`。
+2. 全量 1628 个 Block：946 个单 word、16 个多 word、666 个非 A429 无 word；
+   多 word 的 16 个均有真实多定义（如 L356 的 OA/OB 两个 word、L30 的
+   两套 CRC 定义），扁平 Subscriber 的 A1/A2/B1/B2/S1/S2 通道已归并为
+   同一 word。
+3. 新 prompt 三模型复判 HLR 680 均为 covered：deepseek 0.90（明确写
+   SWHLR 只引用 `L272_ACS_Status_Word1`，Block 9/15/16/17 属不同 word、
+   不在比对范围）、minimax 0.98（明确排除 `L272_APU_Status_Word_3` 与
+   `L272_Overheat_Detection_Failures` 上的 Block）、qwen 0.95（未逐字
+   引用 word，但判定 covered）。
+4. `pytest tests/test_reverse_label_profile.py tests/test_pipeline_errors.py -q`
+   → 29 passed；`compileall` 通过。4 个 `test_reverse_*` 模块仍因
+   `app.v4.reverse.*` 缺失在收集阶段报错，属既有问题。
+
+#### 遗留问题
+
+1. 未重跑完整 17 条 HLR 回放与 Word 报告；本次只验证 HLR 680。
+2. 匹配层 top-K 名额问题未改：Subscriber Block 仍可能挤占名额（本次
+   4 个 Subscriber Block 排名 9/15/16/17，真正的 bit18/26/27 Publisher
+   Block 排名 18~20，紧贴 top-20 截断线）。若后续出现更高分的
+   Subscriber Block，需要单独调整匹配层。
+3. 改动未提交，Issue 编号待用户回填。
+
+
+## BUG-20261026-003：反向裁判把 ID/内容型字段的自定义内容判成不一致，并可能用信号级公共属性否定子信号明细
+
+#### 发现日期
+
+2026-10-26
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线；由 HLR 3898 / 3958 / 4060 的 MSID、Test_ID 判定排查引出。
+
+#### 问题现象
+
+HLR 3898 明确写出 `LABEL356的bit23~bit12=空气管理系统成员系统ID`，EoICD 对应子信号为 `MSID: bit12, 12bit, BNR`，位偏移/位宽一致。部分能力较弱的模型会把“MSID 这种字段名对应的详细内容描述”当作内容语义断言，认为 EoICD 未定义“空气管理系统成员系统ID”这一含义，从而判 inconsistent 或 needs_review。HLR 3958/4060 的 `Command=0001000/0000011`、`Test_ID` 内部 8 bit 测试 ID 码也有同类风险。另一方面，多子信号 Block 的“信号级公共属性”是各 profile 合并后的参考值（如 L356 显示 `PAD/2bit/offset10`，实际 HLR 比对的是 `MSID/12bit/offset12`），弱模型可能拿公共属性否定子信号明细。
+
+#### 影响范围
+
+`app.v4.prompts.reverse_judge`、`app.v4.prompts.re_review` 的判定口径；`app.v4.comparison.semantic_judge._build_reverse_user_prompt` 与 `app.v4.comparison.re_review._build_re_review_user_prompt` 的证据标注。涉及所有含 ID/Code/Name/Command/Test_ID 等标识/内容型字段，以及带 `sub_signals` 的多子信号 Block 的反向案例。
+
+#### 原因分析
+
+1. `reverse_judge.md` 的“内容语义是否与 EoICD 信号定义矛盾”没有任何标识/内容型字段的例外，模型只能按“信号名逐字对应”判断；ID 类字段的具体取值/业务名称由使用方自定义，EoICD 通常只定义位宽/格式/范围，不枚举内容。
+2. 证据中“信号级公共属性”与“字内子信号明细”并列，未说明优先级；`merged_attributes` 的多子信号合并值可能取自其中一个子信号。
+3. 初判与复查 prompt 缺少同一口径，复查阶段可能重新引入同类误判。
+4. EoICD 对 OPAQUE 字段未给出内部子位布局时，SWHLR 对内部内容的细化（如 23 bit Test_ID 中的 8 bit 测试 ID 码）被误当成位宽矛盾。
+
+#### 修复方案
+
+在初判与复查 prompt 中增加通用规则（不针对具体 HLR 写死）：
+
+1. **标识/内容型字段自定义内容**：ID、MSID、Code、Name、Command、Test_ID、Number、标识、编号、代码、名称、命令等字段，具体取值/业务名称属于使用方自定义内容；只要与字段类别相容，不因措辞不同或 EoICD 未枚举该值而判 inconsistent 或 needs_review。
+2. **唯一保留的 inconsistent 情形**：改述为另一物理量、与字段类别不相容、取值/编码与 EoICD 明确的范围/CodedSet/格式矛盾、位偏移/位宽与 EoICD 已定义的内部布局矛盾。
+3. **OPAQUE 内部细化**：EoICD 只给整体位偏移/位宽、未细分内部子信号时，SWHLR 对字段内部子段的内容说明属于自定义内容细化，不构成位宽矛盾；EoICD 已给出内部子信号明细时仍按明细比对。
+4. **子信号明细优先**：Block 的“信号级公共属性”仅为合并参考值，存在“字内子信号明细”时，SWHLR 对子信号的位声明优先与子信号自身比对。
+5. 证据渲染同步标注：初判 prompt 的“信号级公共属性”改为“Block 内合并参考值；下方有字内子信号明细时以子信号明细为准”；复查 prompt 在子信号明细前加同义说明。
+
+#### 修改文件
+
+1. `backend/app/v4/prompts/reverse_judge.md`
+2. `backend/app/v4/prompts/re_review.md`
+3. `backend/app/v4/comparison/semantic_judge.py`
+4. `backend/app/v4/comparison/re_review.py`
+
+#### 验证方式
+
+1. 用最新运行的 EoICD/匹配结果重建 HLR 3898/3958/4060 的 ReverseCase，渲染初判 prompt，确认公共属性标注与子信号明细。
+2. 用新 prompt 调用 deepseek/minimax/qwen，检查 MSID/Test_ID 不再被判 inconsistent，且仍能识别真实的位偏移/位宽矛盾。
+3. 运行反向/管线定向测试与全量 `tests/` 回归。
+
+#### 验证结果
+
+**已通过（本机，2026-10-26）**：
+
+1. HLR 3898 的 prompt 显示“信号级公共属性（Block 内合并参考值…）”，子信号 `MSID: bit12, 12bit, BNR`、`Command: bit24, 7bit, ISO-5`、`Pad: bit10, 2bit, PAD` 完整可见。
+2. 实跑三家模型：
+   - HLR 3898：deepseek covered 0.65、qwen needs_review 0.6、minimax needs_review 0.76；三家均明确把 MSID 的详细描述判为标识型字段的合法自定义内容，未再判 inconsistent。minimax/qwen 的 needs_review 仅因 `bit8~9` 未定义与“有效标志”无 EoICD 定义，与本次规则无关。
+   - HLR 3958：deepseek covered 0.78、qwen covered 0.9、minimax needs_review 0.9（仅“有效标志”缺失）；MSID/Command 内容均未判 inconsistent。
+   - HLR 4060：deepseek 0.85、minimax 0.94、qwen 0.85 全部 covered；minimax 在规则补充前曾因 L230 `Test_ID` 内部 8 bit 与整体 23 bit OPAQUE 判 inconsistent，补充“OPAQUE 内部细化”规则后改为 covered，并明确引用“EoICD 未给出内部子位布局，8 bit 细化属自定义内容”。
+3. 反例校验（确认规则只放行自定义内容、不放行真实矛盾）：把 HLR 4060 的 MSID 说明改为“空气温度（单位：摄氏度）”→ deepseek inconsistent 0.9（明确引用“标识字段被改述为有量纲物理量”）；把 MSID 改为 `bit23~bit10`（14 bit）→ deepseek inconsistent 0.85（明确引用“与已给出的子信号明细偏移/宽度矛盾”）。
+4. 复查链路：用 HLR 4060 构造 minimax 误判 inconsistent（理由为 EoICD 未定义“空气管理系统成员系统ID”），新复查 prompt 下 minimax 改为 covered 0.99，并明确引用标识/内容型字段规则。
+5. `pytest tests/test_reverse_label_profile.py tests/test_pipeline_errors.py -q` → 29 passed；`pytest tests -q --continue-on-collection-errors` → 278 passed / 6 failed / 10 errors，失败与收集错误均为既有问题（`app.v4.reverse.*`/controller 模块缺失、job cancel/BaseException 检查），与本次改动无关。
+
+#### 遗留问题
+
+1. 未重跑完整 17 条 HLR 回放与 Word 报告。
+2. HLR 3898/3958 的 `needs_review` 仍可能由“有效标志”无 EoICD 定义、`bit8~9` 未定义触发，属独立问题，本次未改。
+3. 改动未提交，Issue 编号待用户回填。
+
+
+## BUG-20261026-004：反向裁判对 HLR 描述与信号名“咬文嚼字”，同义/缩写/详略差异被判不一致
+
+#### 发现日期
+
+2026-10-26
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线；与 BUG-20261026-003 同属裁判语义判定过严问题，但本条针对非 ID 类信号的通用措辞差异。
+
+#### 问题现象
+
+能力较弱的模型会把 SWHLR 的中文描述与 EoICD 英文信号名逐词比对：只要不是字面相同，就可能判“内容语义不一致”。例如 EoICD 为 `PACK_OVHT`（Overheat），SWHLR 写“组件超温告警”或“组件温度过高”，本属同一事件的不同表述，却可能被当成两个不同含义；缩写与全称（MSID ↔ Member System ID）、中英文、同义词、词序、通用类别词（信号/标志/状态/告警）的有无也存在同类风险。
+
+#### 影响范围
+
+`app.v4.prompts.reverse_judge`、`app.v4.prompts.re_review` 的判定口径；所有 SWHLR 使用中文业务叫法、缩写展开、同义表述或不同详略程度描述 EoICD 信号的反向案例。
+
+#### 原因分析
+
+1. `reverse_judge.md` 的“内容语义”规则要求 SWHLR 说明与 EoICD 信号名/子信号名所表达的定义一致，但没有说明“一致”是语义层面而非字面层面。
+2. 已有“状态语义等价”只覆盖 1/0 状态词，“标识/内容型字段”只覆盖 ID 类字段；普通信号名的同义/缩写/详略差异没有通用规则。
+3. 复查 prompt 同样缺少该口径。
+
+#### 修复方案
+
+在初判与复查 prompt 中新增“信号名/描述语义近似等价”通用规则（不针对具体 HLR 写死）：
+
+1. 判断两者是否指向同一个物理量、事件、状态或对象，不要求逐词对应。
+2. 以下属于表述差异，不构成内容语义错配：缩写与全称、中英文对应、同义词/近义词、词序、单复数、连接符/下划线、通用类别词（信号/标志/状态/指令/告警/数据/值）的有无、同一概念的不同详略程度。
+3. 保留真实矛盾的判定：描述指向另一物理量（温度 vs 压力）、另一事件/状态（过热 vs 过压）、另一对象（APU vs 发动机）、或相反动作/极性（打开 vs 关闭、有效 vs 无效）时，仍判 inconsistent。
+4. 描述能合理落到该信号名所指的对象上时判 covered，不得仅因表述不够精确或不能逐字对应而判 needs_review；避免把过于笼统的描述当作同义。
+
+#### 修改文件
+
+1. `backend/app/v4/prompts/reverse_judge.md`
+2. `backend/app/v4/prompts/re_review.md`
+
+#### 验证方式
+
+1. 用合成 `L272/PACK_OVHT`（offset18、1bit、DIS、OneState=Overheat）案例测试同义改写与另一事件改写。
+2. 用真实且已确认存在矛盾的 REV-0001（L40 被说成座舱高度）和 REV-0010（电源可用 vs Power_Supply_Fail）回归，确认不会被新规则放过。
+3. 运行反向/管线定向测试。
+
+#### 验证结果
+
+**已通过（本机，2026-10-26）**：
+
+1. 同义改写“bit18=1 判定为组件超温告警” → minimax covered 0.96；详略改写“bit18=1 表示组件温度过高” → minimax covered 0.98。
+2. 另一事件“bit18=1 判定为组件过压告警” → minimax inconsistent 0.99、deepseek inconsistent 0.95，均明确说明“过压与过热是不同故障类型”。
+3. 真实矛盾回归：REV-0001 minimax inconsistent 0.78（L40 的 1bit 硬件故障被说成 17bit 座舱高度）；REV-0010 minimax inconsistent 0.99（电源可用与 Power_Supply_Fail 极性相反）；均未被新规则放过。
+4. 复查链路：构造 minimax 误判“PACK_OVHT 与组件温度过高字面不同 → inconsistent”，新复查 prompt 下改为 covered 0.98，并明确引用“同一事件的不同表述”规则。
+5. `pytest tests/test_reverse_label_profile.py tests/test_pipeline_errors.py -q` → 29 passed。
+
+#### 遗留问题
+
+1. 未重跑完整 17 条 HLR 回放与 Word 报告。
+2. 新规则依赖模型对“同一物理量/事件/对象”的判断，极端模糊描述仍可能产生 provider 分歧；后续可用真实误判样本继续收敛。
+3. 改动未提交，Issue 编号待用户回填。
+
+
+## BUG-20261026-005：反向裁判看不到 A429 字结构锚点与 SDI CodedSet，把 SDI 位（bit8/9）判成 EoICD 缺失
+
+#### 发现日期
+
+2026-10-26
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线；由 HLR 3898 / 3958 的 `needs_review` 分析引出。
+
+#### 问题现象
+
+HLR 3898 写 `LABEL356的bit11~bit8=0000`，HLR 3958 写 `L227/L230的bit11~bit8均为0`。部分模型（deepseek）判定时称“EoICD 中 bit8、bit9 未定义/缺失”，判 needs_review；其他模型则判 covered，结论不稳定。同时，EoICD 中 SDI 的取值定义（如 `0=AMS_ID`、`0=AMS_Basic_Msg`）没有出现在裁判补充信息里。
+
+#### 影响范围
+
+`app.v4.parsers.eoicd_excel_parser` 的 Rule 9 过滤；`app.v4.matching.signal_profiler.build_blocks` 的同 word 协议锚点；`app.v4.comparison.semantic_judge` 与 `app.v4.comparison.re_review` 的证据渲染；两份裁判 prompt。涉及所有 SWHLR 位声明覆盖 A429 字结构字段（LABEL/SDI/SSM/PARITY），或依赖 SDI CodedSet 判定的反向案例。
+
+#### 原因分析
+
+1. Subscriber 表每一行的 Publisher DP 若为字结构信号（Label/SDI/SSM/Parity 等），Rule 9 会跳过整行。被跳过的行里恰好带着 SDI 的 `BitOffsetWithinDS=8`、`ParameterSize=2`、`DataFormatType=A429SDI`、`CodedSet`（如 `0=AMS_ID`）、以及 LABEL/PARITY 的位布局，导致这些定义从未进入条目化结果。
+2. `build_blocks` 的 `word_protocol_fields` 只从已解析 profile 生成。L356/L227 在条目化结果中没有 SDI profile，因此 Block 证据里只有 LABEL/PARITY 锚点（甚至 L227/L230 连锚点都没有），裁判无法知道 8~9 位是 SDI。
+3. `SDIExpected`（如 `0/-1/-1/0`）在 Block 公共属性里只是一个裸值，未说明它是按通道排列的期望 SDI 值、`-1` 表示不约束；弱模型把它读成“该位未定义”。
+4. 复查 prompt 完全没有渲染 `word_protocol_fields`，复查阶段无法补上初判缺失的 SDI 证据。
+
+#### 修复方案
+
+均为反向管线内的通用处理，不针对具体 HLR 写死：
+
+1. **解析器侧通道**：Subscriber 解析遇到 Rule 9 跳过的字结构行时，额外把该行的字结构节点（DP 优先，Subscriber 叶子作为兜底）记录到 `EoICDOutput.protocol_anchors`，按 Label 分组，只保留 `BitOffsetWithinDS`、`ParameterSize`、`DataFormatType`、`CodedSet`、`Label`、`SSM`。该字段 `exclude=True`，不写入 `eoicd_requirements.json`，条目化输出逐字节不变。DP 优先是必须的：同行 Subscriber 叶子通常是数据信号（如 `ParameterSize=32 / OPAQUE`），不能覆盖 SDI 自身的 `2 bit / A429SDI`。
+2. **Block 锚点合并**：`build_blocks(profiles, protocol_anchors=None)` 把解析器锚点并入 `word_protocol_fields`（同名且同 bit 跨度视为同一字段，CodedSet 合并去重），并按 bit 偏移排序。
+3. **SDI 兜底锚点**：Block 含 `SDIExpected` 但没有 SDI 锚点时（如 L230，原始表无 SDI 行），补一个 `SDI: offset=8 Bits, size=2 Bits, DataFormatType=A429SDI, SDIExpected=<Block 合并值>` 的推导锚点。
+4. **证据与口径**：初判与复查 prompt 增加 [推导] SDI 位定义（offset 8~9 即物理第9~10位；`SDIExpected` 按通道顺序、`-1` 不约束；位声明覆盖 8~9 即包含 SDI）；复查 prompt 同步渲染 `word_protocol_fields` 与 `SDIExpected`；`reverse_judge.md` / `re_review.md` 增加通用 SDI 规则。
+5. **调用链**：`pipeline.run_reverse_pipeline` 的非 refine 分支与 `refine.runner` 构建 Block 时传入 `eoicd_out.protocol_anchors`。复用 `--eoicd-json` 时锚点无法恢复，但第 3 条兜底仍生效。
+
+#### 修改文件
+
+1. `backend/app/v4/models.py`
+2. `backend/app/v4/parsers/eoicd_excel_parser.py`
+3. `backend/app/v4/matching/signal_profiler.py`
+4. `backend/app/v4/pipeline.py`
+5. `backend/app/v4/refine/runner.py`
+6. `backend/app/v4/comparison/semantic_judge.py`
+7. `backend/app/v4/comparison/re_review.py`
+8. `backend/app/v4/prompts/reverse_judge.md`
+9. `backend/app/v4/prompts/re_review.md`
+
+#### 验证方式
+
+1. 用 `test-input/AMSC` 的 Publisher/Subscriber 表解析，确认条目化条数不变、`eoicd_requirements.json` 不含 `protocol_anchors`，并检查 L356/L227/L230 的锚点。
+2. 重建 Block，确认 `word_protocol_fields` 含 SDI（offset=8、size=2、CodedSet）与 LABEL/PARITY。
+3. 渲染 HLR 3898/3958 的初判与复查 prompt，确认出现 SDI 锚点与 [推导] 说明。
+4. 运行定向测试与全量 `tests/` 回归。
+
+#### 验证结果
+
+**已通过（本机，2026-10-26）**：
+
+1. 解析 137,758 条，与修改前一致；`protocol_anchors` 覆盖 69 个 Label，序列化结果不含该字段（`model_dump()` 校验）。
+2. 锚点实测：
+   - L356：LABEL offset=0/8bit、SDI offset=8/2bit/CodedSet=`0=AMS_Basic_Msg`、PARITY offset=31/1bit；
+   - L227：SDI offset=8/2bit/CodedSet=`0=AMS_ID`；
+   - L230：原始表无 SDI 行，Block 兜底锚点给出 SDI offset=8/2bit、SDIExpected=`-1/0/-1/0`。
+3. HLR 3898/3958 的初判 prompt 出现“同 word 协议字段”SDI 行与 [推导] SDI 位定义；复查 prompt 同样出现 SDI 锚点、`SDIExpected` 与说明。`bit11~bit8` 仍按英文 bitN 基准归一为 offset 8~11。
+4. 实跑三家模型（新 prompt，含 SDI 锚点）：
+   - HLR 3898：deepseek needs_review 0.75（仅“有效标志”无 EoICD 定义）、minimax covered 0.94、qwen covered 0.80；三家均明确把 `bit11~bit8` 中的 offset 8~9 识别为 SDI，并引用 CodedSet `0=AMS_Basic_Msg`，不再报“bit8/bit9 缺失”。
+   - HLR 3958：deepseek covered 0.85、qwen covered 0.85、minimax needs_review 0.90（仅“有效标志”）；三家均引用 `SDIExpected=-1/0/0/-1` 并说明 `-1` 为不约束通道。
+5. `pytest tests/... --ignore=<既有收集错误文件>` → 278 passed / 6 failed（与修改前基线一致，均为 job cancel / orphan / artifact reuse 等既有失败）；定向 `test_reverse_label_profile + test_pipeline_checkpoints + test_zip_entry_normalize + test_pipeline_errors` → 47 passed。
+
+#### 遗留问题
+
+1. HLR 3898/3958 的“有效标志”仍无 EoICD 定义支撑（deepseek/minimax 仍因此判 needs_review），属 SSM/有效性字段的独立问题，本次未改。
+2. 复用 `--eoicd-json` 时解析器锚点不可恢复（标准管线不受影响）。
+3. 改动未提交，Issue 编号待用户回填。
+
+## BUG-20261026-006：反向裁判看不到字内子信号自己的 CodedSet，误判“EoICD 未提供 1/0 映射”
+
+#### 发现日期
+
+2026-10-26
+
+#### 关联 Issue / PR
+
+分支 `issue-x-x`（改动未提交）。范围仅限反向管线；由 HLR 4878 的判定分析引出。
+
+#### 问题现象
+
+HLR 4878 要求 `bit25=1` 时使用对应端口 LABEL 数据并置“有效标志”为有效。EoICD 中 `A429Payload_POT1_Validaty`（offset=25、1bit、COD）明确给出 `CodedSet=1=Invalid;0=Valid`，但 deepseek、qwen 判定时称“这涉及 Validity 位的值语义；EoICD 未提供该位的 1/0 与有效/无效映射”，据此判 needs_review；仅 minimax 自行推断出 `1=Invalid、0=Valid` 并判 inconsistent。
+
+#### 影响范围
+
+`app.v4.matching.reverse_case_builder._serialize_block` 的判断 case 序列化；`app.v4.comparison.semantic_judge` 与 `app.v4.comparison.re_review` 的子信号证据渲染；两份裁判 prompt。涉及所有“一个 A429 word 内多个子信号各有不同 CodedSet”的反向案例。匹配与评分不受影响。
+
+#### 原因分析
+
+1. 解析层没有问题：`CodedSet` 已进入条目化结果（该 Block 相关 36 条），`build_profiles` 的 `entries` 也按 `dp_ref_name` 保留了每个子信号自己的 `CodedSet`。
+2. `build_profiles` 合并 profile 属性时，把同一 Block 内多个子信号的 `CodedSet` 用 `/` 拼成 Block 级公共值（如 `1=OK/1=Invalid;0=Valid`），丢失了“哪个编码属于哪个子信号”的绑定。
+3. `build_blocks` 组装 `sub_signals` 时只输出 `dp_name / bit_offset / size / dtype`，子信号行没有任何状态/编码信息，裁判只能看到 `A429Payload_POT1_Validaty: bit25, 1bit, COD`。
+4. 裁判 prompt 的“字内子信号明细优先于信号级公共属性”规则使模型把 Block 级合并后的 `CodedSet` 视为非权威参考值；而子信号行又没有自己的 CodedSet，模型只能得出“该位没有 1/0 映射”的结论。
+
+#### 修复方案
+
+均在判断 case 序列化与证据渲染层处理，不针对具体 HLR 写死，不改 `build_blocks` 与匹配：
+
+1. `reverse_case_builder._field_coded_map(block)`：从 `profile.entries` 中收集 `is_dp_ref` 行的 `CodedSet`，按 `dp_ref_name` 归组；同一子信号出现多个不同值时才用 `/` 拼接（与 Block 级合并约定一致）。`_serialize_block` 复制 `sub_signals` 后，按 `dp_name` 把 `coded_set` 附到对应行，`block.sub_signals` 本身不被修改。
+2. `semantic_judge` 与 `re_review` 的子信号行渲染增加 `CodedSet=<值>`，与既有 `OneState / ZeroState` 同列展示。
+3. `reverse_judge.md` 规则 4 与 `re_review.md`“字内子信号优先”补充通用口径：子信号行自带的 `CodedSet` 是该子信号自身的编码定义，应直接用于比对其取值范围/状态断言；Block 级公共 `CodedSet` 是合并参考值，不得因公共属性是合并值而忽略子信号行自带的 `CodedSet`，也不得把拼接串整体套到单个子信号上。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/reverse_case_builder.py`
+2. `backend/app/v4/comparison/semantic_judge.py`
+3. `backend/app/v4/comparison/re_review.py`
+4. `backend/app/v4/prompts/reverse_judge.md`
+5. `backend/app/v4/prompts/re_review.md`
+6. 新增 `backend/tests/test_reverse_case_coded_set.py`
+
+#### 验证方式
+
+1. `python -m py_compile` 上述三个 Python 文件。
+2. 用 `test-input/AMSC` 重建 Block 与 HLR 4878 的判断 case，检查序列化 `sub_signals` 的 `coded_set`。
+3. 渲染该 case 的初判与复查 prompt，确认子信号行出现 `CodedSet=1=Invalid;0=Valid`。
+4. 运行定向 `pytest`。
+5. 实跑三家模型，确认均能引用该 CodedSet。
+
+#### 验证结果
+
+**已通过（本机，2026-10-26）**：
+
+1. `COMPILE_OK`。
+2. L300/L301/L302/L304/L305（各 `_1`/`_2` 共 10 个 Block）的 `A429Payload_POT1~POT5_Validaty` 子信号行均带 `coded_set=1=Invalid;0=Valid`；`SN_1` 未被误挂该值。
+3. 初判 prompt 出现 `A429Payload_POT1_Validaty: bit25, 1bit, COD（CodedSet=1=Invalid;0=Valid）`（10 个 Block 各 5 个 POT）；复查 prompt 同样出现 10 行。
+4. 定向测试 `test_reverse_case_coded_set + test_pipeline_checkpoints + test_reverse_label_profile + test_zip_entry_normalize + test_hlr_word_parser_adaptivity` → 43 passed。
+5. HLR 4878（case `REV-0016`）实跑三家模型：deepseek inconsistent 0.72、minimax inconsistent 0.97、qwen inconsistent 0.85；三家均指出 EoICD 为 `1=Invalid;0=Valid` 而 SWHLR 把 `bit25=1` 当作有效，极性矛盾。deepseek/qwen 明确引用 `CodedSet`。
+6. 匹配不受影响：`build_blocks` 未改，`reverse_matcher` 仍以 `build_blocks(eoicd_profiles)` 构建匹配用 Block；本次只改判断 case 的序列化副本。
+
+#### 遗留问题
+
+1. 完整反向管线尚未重跑，现有历史报告仍是修复前的结果；需重跑确认 HLR 4878 的最终报告结论。
+2. 改动未提交，Issue 编号待用户回填。
+
 ## BUG-20261020-001：SWHLR「SDI=0或1」枚举只解析首个值，兄弟 Block 被门控剔除致裁判误报
 
 #### 状态

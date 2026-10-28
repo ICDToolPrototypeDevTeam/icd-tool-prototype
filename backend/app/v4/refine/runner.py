@@ -38,7 +38,11 @@ def run_pipeline_refined_stage(
     # Step A: 重建完整 ICD Block 索引（供过滤与补采使用）
     eoicd_kept = [req for req in eoicd_out.requirements if should_keep(req)]
     profiles = build_profiles(eoicd_kept)
-    blocks = build_blocks(profiles)
+    blocks = build_blocks(
+        profiles,
+        eoicd_out.protocol_anchors,
+        eoicd_out.side_pairs,
+    )
     block_index = {b.block_key: b for b in blocks}
 
     # Step B: 过滤无关 + 精确补采 + 同义词补采

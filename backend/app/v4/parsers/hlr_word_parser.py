@@ -14,7 +14,17 @@ from pathlib import Path
 from docx import Document  # type: ignore
 from docx.text.paragraph import Paragraph  # type: ignore
 
-from app.v4.models import HLRGlossaryEntry, HLROutput, HLRRequirement
+from app.v4.models import (
+    HLRGlossaryEntry,
+    HLROutput,
+    HLRRequirement,
+    HLRTermEntry,
+)
+from app.v4.parsers.glossary_tables import (
+    detect_glossary_tables,
+    parse_abbreviation_table,
+    parse_term_table,
+)
 from app.v4.profiles.base import ControllerProfile
 
 
@@ -175,6 +185,7 @@ class HLRWordParser:
         tables = doc.tables
 
         glossary: list[HLRGlossaryEntry] = []
+        terms: list[HLRTermEntry] = []
         requirements: list[HLRRequirement] = []
         parse_warnings: list[dict] = []
 
@@ -182,12 +193,63 @@ class HLRWordParser:
         scan_cfg = self.cfg.requirement_scan
         id_re = re.compile(scan_cfg.id_pattern) if scan_cfg.id_pattern else None
 
-        # Glossary (D1): located by config mode — ``index`` = legacy gate on
-        # ``glossary_table_index``; ``keyword_scan`` = first table (document
-        # order) whose first row hits ``glossary_header_keywords``.
+        # Identify requirement tables before glossary detection so a
+        # requirement table can never be mistaken for a glossary merely
+        # because one of its field labels contains a glossary-like word.
+        requirement_indices: set[int] = set()
+        id_info: dict[int, tuple[bool, str]] = {}
+        for idx in range(len(tables)):
+            table = tables[idx]
+            if len(table.columns) < 2:
+                continue
+            info = _id_row_info(table, field_index)
+            id_info[idx] = info
+            if info[0]:
+                requirement_indices.add(idx)
+        first_requirement_index = (
+            min(requirement_indices) if requirement_indices else None
+        )
+
+        # Glossary (D1) + terminology tables: header-semantic detection, not
+        # a fixed table index.  A profile-configured index remains as a
+        # fallback so documents supported before this change keep parsing.
+        specs, detect_warnings = detect_glossary_tables(
+            tables,
+            _cell_text,
+            first_requirement_index=first_requirement_index,
+            requirement_indices=requirement_indices,
+        )
+        detected_indices = {spec.table_index for spec in specs}
+
         glossary_idx = self._locate_glossary_table(tables)
-        if glossary_idx is not None:
+        if (
+            glossary_idx is not None
+            and glossary_idx not in requirement_indices
+            and glossary_idx not in detected_indices
+        ):
+            # Keep the pre-change parse path for the configured table.
             glossary = self._parse_glossary(tables[glossary_idx])
+            detected_indices.add(glossary_idx)
+
+        if scan_cfg.register_skipped:
+            parse_warnings.extend(detect_warnings)
+
+        seen_abbr = {entry.abbreviation.lower() for entry in glossary}
+        seen_terms: set[str] = set()
+        for spec in specs:
+            table = tables[spec.table_index]
+            if spec.kind == "abbreviation":
+                for entry in parse_abbreviation_table(table, spec, _cell_text):
+                    key = entry.abbreviation.lower()
+                    if key not in seen_abbr:
+                        seen_abbr.add(key)
+                        glossary.append(entry)
+            else:
+                for entry in parse_term_table(table, spec, _cell_text):
+                    key = entry.term.lower()
+                    if key not in seen_terms:
+                        seen_terms.add(key)
+                        terms.append(entry)
 
         # Requirement tables (D2): scan range depends on mode.
         #  - all_tables: whole document (positions fully decoupled);
@@ -204,12 +266,14 @@ class HLRWordParser:
 
         for idx in range(start, len(tables)):
             table = tables[idx]
+            if idx in detected_indices:
+                continue
             # No row-count gate: a requirement table may be missing field rows
             # (e.g. no "实现方法" row).  _extract_requirement decides by the
             # semantic criterion instead (field_map "id" row, value non-empty).
             if len(table.columns) < 2:
                 continue
-            has_id_row, id_value = _id_row_info(table, field_index)
+            has_id_row, id_value = id_info[idx]
             if id_re is not None and id_value and not id_re.match(id_value):
                 # 强信号：有 id 行头行、值非空但不匹配 → 拒收（D2 登记）。
                 if scan_cfg.register_skipped:
@@ -259,6 +323,7 @@ class HLRWordParser:
             total_count=len(requirements),
             requirements=requirements,
             glossary=glossary,
+            terms=terms,
             parse_warnings=parse_warnings,
         )
 

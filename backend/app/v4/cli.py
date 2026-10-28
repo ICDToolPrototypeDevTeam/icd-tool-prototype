@@ -16,7 +16,7 @@ from app.v4.models import (
     HLROutput,
     HLRLabelOutput,
 )
-from app.v4.parsers.eoicd_excel_parser import EoICDExcelParser
+from app.v4.parsers.eoicd_excel_parser import EoICDExcelParser, write_side_pairs
 from app.v4.parsers.hlr_word_parser import HLRWordParser
 from app.v4.doc_generators.excel_generator import generate_eoicd_excel
 from app.v4.doc_generators.word_generator import generate_consistency_report
@@ -51,6 +51,8 @@ def _parse_eoicd(
         result.model_dump_json(indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    # 与 pipeline._parse_eoicd 一致：分侧快照写旁车，供 --eoicd 续跑时恢复
+    write_side_pairs(output_path, result.side_pairs)
 
     print(f"  Output: {output_path}")
     print(f"  Generated (before any dedup): {result.total_generated}")

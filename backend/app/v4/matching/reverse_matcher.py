@@ -202,12 +202,33 @@ def build_hlr_profile(hlr: HLRRequirement, lbl: HLRLabel) -> HLRMatchProfile:
             if cn_word in content_text:
                 cn_english_tokens.update(t.lower() for t in en_tokens)
 
+    # AI labeler 从表格单元格提取的 LABEL（如 "序号 | LABEL | 周期" 中的
+    # 裸数字）不会出现在 content 的 "L<num>" 正则里；以 AI labels 为主，
+    # 再合并正则提取结果，统一成 L<num> 并去重。
+    labels: list[str] = []
+    seen_labels: set[str] = set()
+    for raw_label in [*lbl.labels, *extract_labels(hlr.content)]:
+        label = raw_label.strip().upper()
+        if not label:
+            continue
+        if not label.startswith("L"):
+            label = f"L{label}"
+        if label not in seen_labels:
+            seen_labels.add(label)
+            labels.append(label)
+
+    signal_category = classify_hlr(hlr.content)
+    # 表格式 SWHLR 的 LABEL 列只有裸数字时，classify_hlr 会落到
+    # A429隐式/逻辑非通信；既然 labeler 已给出 label，应走 A429 显式路径。
+    if labels and signal_category in ("A429隐式", "逻辑/非通信"):
+        signal_category = "A429显式"
+
     return HLRMatchProfile(
         hlr_id=hlr.requirement_id,
         content=hlr.content,
 
-        signal_category=classify_hlr(hlr.content),
-        labels=extract_labels(hlr.content),
+        signal_category=signal_category,
+        labels=labels,
         bit_fields=extract_bit_fields(hlr.content),
         sdi_value=extract_sdi(hlr.content),
         extracted_direction=extract_direction(hlr.content),
@@ -792,6 +813,13 @@ def _filter_sn_zero_within_label(
                     # 协议族块（SDI）即使 sn=0 也保留：其入围要么靠 HLR 显式
                     # 词元（6b 已给 sn=30），要么靠 ICD 位范围重叠门控——两者
                     # 都是证据级准入，不应被"同 label 已有 sn>0 数据块"误删。
+                    result.append((t, d, b))
+                elif d.get("bit_field", 0) >= 12:
+                    # bit_field>=12 表示 HLR 明确写出了该块的位偏移（12=仅
+                    # 偏移命中，20=偏移+宽度命中），是与 HLR 位声明直接对齐
+                    # 的证据，不属于"同 label 词元噪声"，同样保留。若 HLR 的
+                    # 位号因表格格式未被提取，则不会走到这里（见
+                    # hlr_classifier.extract_bit_fields 的表格位号提取）。
                     result.append((t, d, b))
         else:
             result.extend(entries)

@@ -11,6 +11,7 @@ Follows generation_skill_v4.md rules:
 
 from __future__ import annotations
 
+import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ import openpyxl
 from app.job_manager import raise_if_cancelled
 from app.v4.config import (
     DP_ATTRIBUTES_FOR_RP,
+    REVERSE_KEY_ATTRS,
     get_display_name,
     get_unit,
     is_excluded,
@@ -45,6 +47,63 @@ _DP_REF_DEDUP_ATTRS = {
     "BitOffsetWithinDS", "ParameterSize", "DataFormatType",
     "OneState", "ZeroState",
 }
+
+# Same-word protocol anchors collected from Subscriber-table rows that Rule 9
+# keeps out of the itemized requirements. Only these attributes are needed by
+# the reverse judge (bit layout + SDI CodedSet). SDIExpected is deliberately
+# excluded: it lives on the row's *data* signal and is per-channel, so it is
+# read from the block's merged attributes instead of a single anchor row.
+# Tuple (not set): anchor attrs are rendered into judge prompts, so iteration
+# order must be deterministic for prompt/cache stability.
+_PROTOCOL_ANCHOR_ATTRS = (
+    "BitOffsetWithinDS", "ParameterSize", "DataFormatType",
+    "CodedSet", "Label", "SSM",
+)
+
+# Label segment in a hierarchical signal path (L227_..., L356_...).
+_LABEL_IN_PATH_RE = re.compile(r"(?:^|\.)L(\d+)(?:_|$)", re.IGNORECASE)
+
+# Reverse-only sidecar. ``side_pairs`` is in-memory (excluded from the itemized
+# JSON, which stays byte-identical), and P2.4 overwrites RP values with DP
+# values before requirements are emitted, so a resumed run cannot recover the
+# raw RP side from ``eoicd_requirements.json``. Persist the snapshot beside it.
+SIDE_PAIRS_FILENAME = "eoicd_side_pairs.json"
+
+
+def side_pairs_path(eoicd_json_path: Path) -> Path:
+    """Path of the DP/RP side-pair sidecar next to the itemized JSON."""
+    return Path(eoicd_json_path).with_name(SIDE_PAIRS_FILENAME)
+
+
+def write_side_pairs(eoicd_json_path: Path, side_pairs: dict) -> None:
+    """Atomically persist the side-pair snapshot.
+
+    An empty snapshot removes a stale sidecar, so the sidecar can never carry
+    pairs from a previous parse of a different input.
+    """
+    path = side_pairs_path(eoicd_json_path)
+    if not side_pairs:
+        path.unlink(missing_ok=True)
+        return
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        # json.dump 流式写入，不会像 dumps 那样在堆上再复制一份大字符串
+        json.dump(side_pairs, fh, ensure_ascii=False, indent=2)
+    tmp.replace(path)
+
+
+def load_side_pairs(eoicd_json_path: Path) -> dict:
+    """Load the sidecar; missing or unreadable sidecar degrades to ``{}``."""
+    path = side_pairs_path(eoicd_json_path)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # 旁车只是裁判增强信息，损坏不应中断续跑
+        print(f"  [warn] ignoring unreadable side-pair sidecar {path.name}: {exc}")
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 @dataclass
@@ -283,6 +342,110 @@ def _extract_layer_requirements(
     return results
 
 
+def _format_side_attrs(values: dict[str, Any]) -> dict[str, str]:
+    """Whitelist-filtered ``value + unit`` snapshot of one side's leaf attrs.
+
+    Only ``REVERSE_KEY_ATTRS`` reach the judge (same scope as the block's
+    merged attributes); infrastructure columns (Guid/Tag/Notes/...) never do.
+    Unit formatting matches ``ICDBlock.attributes`` so the two render alike.
+    """
+    out: dict[str, str] = {}
+    for name, value in values.items():
+        if name not in REVERSE_KEY_ATTRS:
+            continue
+        if _is_empty(value):
+            continue
+        text = str(value)
+        if not text.strip():
+            continue
+        unit = get_unit(name)
+        out[name] = f"{text} {unit}" if unit else text
+    return out
+
+
+# ——— Frame-structure anchor helpers (reverse-only) ———
+
+
+def _format_anchor_value(attr_name: str, value: Any) -> str:
+    """Render one anchor attribute the same way parsed requirements do
+    (value + unit where the attribute has one)."""
+    if isinstance(value, float) and value.is_integer():
+        text = str(int(value))
+    else:
+        text = str(value).strip()
+    if not text:
+        return ""
+    unit = get_unit(attr_name)
+    return f"{text} {unit}" if unit else text
+
+
+def _extract_anchor_label(
+    dp_name: str,
+    pub_values: list[dict[str, Any]],
+    sub_values: list[dict[str, Any]],
+    sub_names: list[str],
+) -> str:
+    """Resolve the A429 Label for a frame-structure row.
+
+    Prefers an explicit ``Label`` attribute (Subscriber side first), then a
+    label segment in the hierarchical name (``L227_...``). Returns "" for
+    non-A429 rows, which have no word to anchor to.
+    """
+    for values in (sub_values, pub_values):
+        for vals in values:
+            label = vals.get("Label")
+            if not _is_empty(label):
+                return _format_anchor_value("Label", label)
+    for name in [*sub_names, dp_name]:
+        if not name:
+            continue
+        m = _LABEL_IN_PATH_RE.search(str(name))
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _anchor_bit_span(attrs: dict) -> tuple[int | None, int | None]:
+    """Return (bit offset, size) parsed from anchor attribute strings."""
+
+    def _num(key: str) -> int | None:
+        m = re.search(r"-?\d+", str(attrs.get(key, "") or ""))
+        return int(m.group()) if m else None
+
+    return _num("BitOffsetWithinDS"), _num("ParameterSize")
+
+
+def _same_protocol_anchor(a: dict, b: dict) -> bool:
+    """Two anchors describe the same field when they share name + bit span.
+
+    Per-channel duplicates of one SDI field (same offset/size) are merged;
+    same-name fields at different offsets (different words) stay separate.
+    """
+    if str(a.get("name", "")).strip().upper() != str(b.get("name", "")).strip().upper():
+        return False
+    a_attrs = a.get("attrs", {}) or {}
+    b_attrs = b.get("attrs", {}) or {}
+    if a_attrs == b_attrs:
+        return True
+    a_off, a_size = _anchor_bit_span(a_attrs)
+    b_off, b_size = _anchor_bit_span(b_attrs)
+    if a_off is None or b_off is None:
+        return False
+    return (a_off, a_size) == (b_off, b_size)
+
+
+def _merge_anchor_attrs(target: dict, extra: dict) -> None:
+    """Fill missing attributes on an existing anchor; for CodedSet, keep the
+    distinct values (one word may code different SDI values per channel)."""
+    for key, value in extra.items():
+        if key == "CodedSet":
+            cur = str(target.get(key, "") or "")
+            if value and value not in cur.split("/"):
+                target[key] = f"{cur}/{value}" if cur else value
+        elif not str(target.get(key, "") or "").strip():
+            target[key] = value
+
+
 # ——— Main parser ———
 
 
@@ -300,6 +463,18 @@ class EoICDExcelParser:
     ):
         self.publisher_path = publisher_path
         self.subscriber_path = subscriber_path
+        # Reverse-only side channel: Rule 9 drops frame-structure rows
+        # (LABEL/SDI/SSM/PARITY) from ``requirements``, but the reverse judge
+        # still needs their bit layout and SDI CodedSet. Those rows are also
+        # collected here (keyed by Label) while still being skipped; the field
+        # is in-memory only, so the itemized JSON is unchanged.
+        self.protocol_anchors: dict[str, list[dict]] = {}
+        # Reverse-only side channel: raw DP/RP leaf attributes of every
+        # Subscriber row, keyed by the RP signal path. Captured *before* P2.4
+        # overwrites RP values with DP values; the reverse judge uses it to
+        # tell which value belongs to which side. In-memory only — persisted
+        # to the sidecar (see ``write_side_pairs``) for resumed runs.
+        self.side_pairs: dict[str, list[dict]] = {}
 
     def parse(self) -> EoICDOutput:
         all_requirements: list[EoICDRequirement] = []
@@ -386,7 +561,62 @@ class EoICDExcelParser:
             duplicates_removed=dup_removed,
             sheet_statistics=sheet_stats,
             requirements=deduped,
+            protocol_anchors=self.protocol_anchors,
+            side_pairs=self.side_pairs,
         )
+
+    # ── Reverse-only frame-structure anchors ──
+
+    def _record_protocol_anchor(
+        self,
+        dp_name: str,
+        dp_attrs: dict[str, Any],
+        pub_values: list[dict[str, Any]],
+        sub_names: list[str],
+        sub_values: list[dict[str, Any]],
+    ) -> None:
+        """Record one Rule 9 filtered row (LABEL/SDI/SSM/PARITY) as a
+        same-word protocol anchor keyed by Label.
+
+        Called from the Subscriber pass immediately before the row is
+        skipped, so the anchor carries the Subscriber-side definition
+        (notably the SDI CodedSet) that never reaches ``requirements``.
+        """
+        leaf_name = sub_names[-1].strip() if sub_names else ""
+        if not (leaf_name and is_frame_signal(leaf_name)):
+            leaf_name = dp_name.strip() if dp_name and is_frame_signal(dp_name) else ""
+        if not leaf_name:
+            return
+
+        label = _extract_anchor_label(dp_name, pub_values, sub_values, sub_names)
+        if not label:
+            return
+
+        sub_leaf = sub_values[-1] if sub_values else {}
+        attrs: dict[str, str] = {}
+        for key in _PROTOCOL_ANCHOR_ATTRS:
+            # The Publisher DP is the frame signal itself (e.g. SDI with
+            # offset=8/size=2/A429SDI); the Subscriber leaf on the same row is
+            # usually the data signal (size=32/OPAQUE), so it must not
+            # override the frame layout. Use it only as a fallback.
+            for src in (dp_attrs, sub_leaf):
+                val = src.get(key)
+                if _is_empty(val):
+                    continue
+                text = _format_anchor_value(key, val)
+                if text:
+                    attrs[key] = text
+                break
+        if not attrs:
+            return
+
+        buckets = self.protocol_anchors.setdefault(label, [])
+        anchor = {"name": leaf_name, "attrs": attrs}
+        for existing in buckets:
+            if _same_protocol_anchor(existing, anchor):
+                _merge_anchor_attrs(existing["attrs"], attrs)
+                return
+        buckets.append(anchor)
 
     def _parse_one_file(
         self,
@@ -511,6 +741,9 @@ class EoICDExcelParser:
                 if sub_layers and primary_side == "Subscriber":
                     # Rule 9: frame structure filtering on DP Name
                     if dp_name and is_frame_signal(dp_name):
+                        self._record_protocol_anchor(
+                            dp_name, dp_attrs, pub_values, sub_names, sub_values,
+                        )
                         continue
 
                     # Skip if leaf RP Name is empty
@@ -580,6 +813,28 @@ class EoICDExcelParser:
                         if not dp_attr_map:
                             reqs = [r for r in reqs
                                     if r.attribute_name in ("Label", "SDIExpected")]
+
+                        # ── Reverse side snapshot (judge context only) ──
+                        # Both sides' leaf values, captured *before* step (a)
+                        # overwrites RP entries with DP values. Keyed by the RP
+                        # signal path; one entry per Subscriber row, so a word
+                        # bound to several DP sub-fields keeps one snapshot per
+                        # sub-field. Never touches clustering or matching.
+                        if rp_signal_name:
+                            rp_side = _format_side_attrs({
+                                req.attribute_name: req.attribute_value
+                                for req in reqs if req.layer_type == "RP"
+                            })
+                            dp_side = _format_side_attrs(dp_attr_map)
+                            if rp_side or dp_side:
+                                self.side_pairs.setdefault(
+                                    rp_signal_name, []
+                                ).append({
+                                    "dp_name": dp_name,
+                                    "rp_name": rp_name,
+                                    "dp": dp_side,
+                                    "rp": rp_side,
+                                })
 
                         rp_has_attr = {req.attribute_name for req in reqs}
 
