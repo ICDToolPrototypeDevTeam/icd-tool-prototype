@@ -5,6 +5,9 @@ attr_script_matcher.py — 属性匹配：脚本预匹配
   1. HLR 属性按 req_id 聚合
   2. 遍历 attribute_mapping，逐一比对 EoICD 与 HLR 属性值
   3. 统一规则：字符串比较（不区分大小写，去空格）
+  3.1 编码表述归一（2026-10-28）：字符串不等时，若属"同一套编码的两种写法"
+      （EoICD 数字枚举 ↔ HLR bit 规则表），先用 attr_value_normalizer 做确定性归一，
+      归一判等价 → matched；判不了 → 保持 mismatch 交 AI 复核。
   4. 结果四分：matched / not_mentioned / mismatch / null_value
   5. SDI 信号通道信息注入 CodedSet（在匹配前预处理）
 
@@ -23,6 +26,13 @@ import copy
 import json
 import re
 from typing import Any
+
+from attr_value_normalizer import codeset_equivalent
+
+# 需求原文送进 AI prompt 时的最大字符数（2026-10-28）。
+# 实测需求原文长度中位 138 / 最长 535；截断到 400 可覆盖绝大多数接口清单与规则，
+# 同时把 prompt 体积控制在可接受范围。
+REQ_TEXT_MAX = 400
 
 
 # ============================ SDI 通道信息提取 ============================
@@ -270,7 +280,17 @@ def load_hlr_clustered_attrs(hlr_clustered_path: str) -> dict[str, dict]:
     """
     从 hlr_clustered.json 的 attribute_classes 数组中加载每个 req_id 的完整属性。
 
-    返回: {req_id: {attr_class: attr_value, ...}, ...}
+    返回: {req_id: {attr_class: [记录, ...]}, ...}
+    记录结构: {"bit": bit号或None, "name": 接口名或None, "value": 属性值}
+
+    ★2026-10-28 修复（原实现按 req_id 覆盖）：
+      原实现是 `req_attrs[req_id][cls_name] = req.get("attr_value")`，
+      而 hlr_clustered.json 中**同一 req_id 下同一属性类可能有多条记录**——
+      一条需求描述整条报文的多个接口时，每个接口一条（如 HLR_547 的 CodedSet
+      有 bit22~bit28 共 7 条，各含自己那个 bit 的规则）。
+      覆盖导致**只留最后一条**，于是 EoICD 的 bit22 信号去跟 bit28 的属性值比，
+      属性比对层把信号和错误的接口属性值配对了（judge_0 实测 88 条属性值被丢弃）。
+      现改为保留全部记录，由 aggregate_hlr_by_req 按 name→bit 选出对应那条。
     """
     with open(hlr_clustered_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -286,18 +306,94 @@ def load_hlr_clustered_attrs(hlr_clustered_path: str) -> dict[str, dict]:
                 continue
             if req_id not in req_attrs:
                 req_attrs[req_id] = {}
-            req_attrs[req_id][cls_name] = req.get("attr_value")
+            req_attrs[req_id].setdefault(cls_name, []).append({
+                "bit": req.get("bit"),
+                "name": req.get("name"),
+                "value": req.get("attr_value"),
+            })
 
     return req_attrs
 
 
-def aggregate_hlr_by_req(matched_hlrs: list[dict], hlr_attr_map: dict[str, dict]) -> dict[str, dict]:
+def _load_req_texts(hlr_clustered_path: str) -> dict[str, str]:
+    """从 hlr_clustered.json 顶层 requirements 取 {req_id: req_text}。
+
+    ★2026-10-28：需求原文原先拿不到（attribute_classes.requirements 里没有
+    req_text，只有顶层 requirements 有）。原文是 AI 判"语义等价"的必要上下文
+    （如"当…故障有效标志为'有效'时，bit22=1" 才能说明 CodedSet 的极性）。
+
+    req_text 可能很长（实测中位 138、最长 535 字符），此处按 REQ_TEXT_MAX 截断，
+    避免 prompt 体积失控。截断在 AI 侧仍能拿到前半部分的接口清单与规则。
+    """
+    try:
+        with open(hlr_clustered_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, str] = {}
+    for req in data.get("requirements", []) or []:
+        rid = req.get("req_id")
+        if not rid:
+            continue
+        text = (req.get("req_text") or "").strip()
+        if not text:
+            continue
+        out[rid] = text if len(text) <= REQ_TEXT_MAX else text[:REQ_TEXT_MAX] + "…"
+    return out
+
+
+def _select_attr_record(records: list[dict], hlr_identity: dict) -> tuple[dict | None, str]:
+    """从同一 (req_id, 属性类) 的多条记录中选出与该 HLR 接口对应的那条。
+
+    选值优先级（依据实测，3 judge × pub/sub 全量）：
+      1. **name 精确匹配**（最精确，能区分同 req 下不同接口）
+      2. **bit 匹配**（name 为空时的次选）
+      3. **首条兜底**（name/bit 都定位不到时）
+
+    返回 (选中的记录, 命中方式)。命中方式用于告警统计：
+      'single' 单记录无歧义 / 'name' / 'name+bit' / 'bit' / 'fallback_first'（定位不到）
+    """
+    if not records:
+        return None, "none"
+    if len(records) == 1:
+        return records[0], "single"
+
+    name = (hlr_identity or {}).get("name")
+    if name:
+        by_name = [r for r in records if r.get("name") == name]
+        if len(by_name) == 1:
+            return by_name[0], "name"
+        if len(by_name) > 1:
+            # name 多命中 → 再用 bit 细分
+            bit = (hlr_identity or {}).get("bit")
+            if bit not in (None, ""):
+                nb = [r for r in by_name if str(r.get("bit")) == str(bit)]
+                if len(nb) == 1:
+                    return nb[0], "name+bit"
+            return by_name[0], "name_ambiguous"
+
+    bit = (hlr_identity or {}).get("bit")
+    if bit not in (None, ""):
+        by_bit = [r for r in records if str(r.get("bit")) == str(bit)]
+        if len(by_bit) == 1:
+            return by_bit[0], "bit"
+        if len(by_bit) > 1:
+            return by_bit[0], "bit_ambiguous"
+
+    # 定位不到 → 退回首条并记告警（绝不能因此丢掉该属性：
+    # 丢属性会让它从比对中消失变成 not_mentioned，比取值错更糟）
+    return records[0], "fallback_first"
+
+
+def aggregate_hlr_by_req(matched_hlrs: list[dict], hlr_attr_map: dict[str, dict],
+                         select_stats: dict | None = None) -> dict[str, dict]:
     """
     将 matched_hlrs 按 req_id 聚合，属性值从 hlr_clustered.json 的完整属性中读取。
 
     输入:
       - matched_hlrs: 身份匹配输出的 matched_hlrs 列表
-      - hlr_attr_map: load_hlr_clustered_attrs() 加载的 {req_id: {attr_class: attr_value}}
+      - hlr_attr_map: load_hlr_clustered_attrs() 加载的 {req_id: {attr_class: [记录,...]}}
+      - select_stats: 可选，用于回填选值命中方式统计（'name'/'bit'/'single'/'fallback_first'…）
 
     输出: {
       "req_id": {
@@ -307,8 +403,13 @@ def aggregate_hlr_by_req(matched_hlrs: list[dict], hlr_attr_map: dict[str, dict]
       },
       ...
     }
+
+    ★2026-10-28 修复：原实现直接 `hlr_attr_map[req_id].copy()` 取值，
+    而该 map 原按 req_id 覆盖（同一 req 的多接口只留最后一条）→ 属性比对层
+    把信号和错误的接口属性值配对。现按 hlr_identity 的 name→bit 精确选出对应那条。
     """
     hlr_by_req: dict[str, dict] = {}
+    stats = select_stats if select_stats is not None else {}
 
     for hlr in matched_hlrs:
         req_id = hlr.get("req_id")
@@ -321,10 +422,16 @@ def aggregate_hlr_by_req(matched_hlrs: list[dict], hlr_attr_map: dict[str, dict]
                 "hlr_identity": hlr.get("hlr_identity", {}),
                 "attributes": {},
             }
+        hlr_identity = hlr_by_req[req_id]["hlr_identity"]
 
         # 从 hlr_clustered.json 的完整属性中读取（优先于 matched_hlr 中的回填属性）
         if req_id in hlr_attr_map:
-            hlr_by_req[req_id]["attributes"] = hlr_attr_map[req_id].copy()
+            for attr_cls, records in hlr_attr_map[req_id].items():
+                rec, how = _select_attr_record(records, hlr_identity)
+                if rec is None:
+                    continue
+                hlr_by_req[req_id]["attributes"][attr_cls] = rec.get("value")
+                stats[how] = stats.get(how, 0) + 1
         else:
             # 回退：使用 matched_hlr 中的回填属性
             # 兼容新格式 attribute_classes(列表) 和旧格式 attribute_class(字符串)
@@ -338,6 +445,7 @@ def aggregate_hlr_by_req(matched_hlrs: list[dict], hlr_attr_map: dict[str, dict]
             for attr_cls in attr_classes:
                 if attr_cls:
                     hlr_by_req[req_id]["attributes"][attr_cls] = attr_value
+            stats["fallback_matched_hlr"] = stats.get("fallback_matched_hlr", 0) + 1
 
     return hlr_by_req
 
@@ -371,6 +479,8 @@ def run_script_matching(match_report: dict, config: dict) -> dict:
     if not os.path.isabs(hlr_clustered_path):
         hlr_clustered_path = os.path.join(project_root, hlr_clustered_path)
     hlr_attr_map = load_hlr_clustered_attrs(hlr_clustered_path)
+    # 需求原文（供 AI 判语义等价时用；见 _load_req_texts 说明）
+    req_texts = _load_req_texts(hlr_clustered_path)
 
     matched_pairs = []
     not_mentioned_pairs = []
@@ -378,6 +488,12 @@ def run_script_matching(match_report: dict, config: dict) -> dict:
     mismatch_pairs = []
 
     stats = {"matched": 0, "not_mentioned": 0, "null_value": 0, "mismatch": 0, "total_checks": 0}
+    # 属性值选值命中方式统计（2026-10-28）：用于观测"多接口需求选值"是否正常。
+    # fallback_first / *_ambiguous > 0 说明有记录定位不到，需人工看一眼。
+    select_stats: dict[str, int] = {}
+    # 编码表述归一统计（2026-10-28）：normalized_matched=归一后判一致（省了 AI 调用）
+    # / structural_conflict=结构矛盾 / needs_ai=归一判不了、仍交 AI
+    check_norm_stats: dict[str, int] = {}
 
     matches = match_report.get("matches", [])
 
@@ -395,7 +511,7 @@ def run_script_matching(match_report: dict, config: dict) -> dict:
         )
 
         # HLR 按 req_id 聚合（从 hlr_clustered.json 读取完整属性）
-        hlr_by_req = aggregate_hlr_by_req(matched_hlrs, hlr_attr_map)
+        hlr_by_req = aggregate_hlr_by_req(matched_hlrs, hlr_attr_map, select_stats)
 
         # 遍历每个映射的属性
         for eoicd_attr_path, hlr_attr_name in attr_mapping.items():
@@ -470,6 +586,29 @@ def run_script_matching(match_report: dict, config: dict) -> dict:
                 # HLR 有具体值 → 走比较规则（统一字符串比较）
                 is_match = default_compare(eoicd_value, hlr_value)
 
+                # ── 编码表述归一（2026-10-28）────────────────────────────
+                # 字符串不等不一定是真不一致：同一套编码的两种写法（如 EoICD 侧
+                # "0=Not Failed;1=Failed" 与 HLR 侧 "…→bit22=1" 规则表）会被
+                # default_compare 判不等。此时用确定性归一再判一次：
+                #   True  → 结构等价，判 matched（省一次 AI 调用，且修正假不一致）
+                #   None  → 语义等价与否无法确定 → 保持 mismatch，交 AI 复核
+                #   False → 结构矛盾（如该 bit 取值在 EoICD 枚举里没有对应项）
+                #           → 保持 mismatch（不改变结论，避免误伤）
+                norm_verdict = None
+                if not is_match:
+                    norm_verdict = codeset_equivalent(
+                        eoicd_value, hlr_value,
+                        eoicd_bit=eoicd_identity.get("bit_range") or eoicd_identity.get("bit"),
+                        hlr_bit=hlr_identity.get("bit"),
+                    )
+                    if norm_verdict is True:
+                        is_match = True
+                        check_norm_stats["normalized_matched"] = check_norm_stats.get("normalized_matched", 0) + 1
+                    elif norm_verdict is False:
+                        check_norm_stats["structural_conflict"] = check_norm_stats.get("structural_conflict", 0) + 1
+                    else:
+                        check_norm_stats["needs_ai"] = check_norm_stats.get("needs_ai", 0) + 1
+
                 # 判定结果
                 check_item = {
                     "eoicd_cluster_id": eoicd_cluster_id,
@@ -481,7 +620,14 @@ def run_script_matching(match_report: dict, config: dict) -> dict:
                     "hlr_attr_name": hlr_attr_name,
                     "eoicd_value": eoicd_value,
                     "hlr_value": hlr_value,
+                    # ── 送 AI 复核所需的上下文（2026-10-28）──
+                    # eoicd_bit：EoICD 信号的 bit 区间（"22-22"）
+                    # req_text：需求原文，AI 判"语义等价"的必要上下文
+                    "eoicd_bit": eoicd_identity.get("bit_range") or eoicd_identity.get("bit"),
+                    "req_text": req_texts.get(req_id, ""),
                 }
+                if norm_verdict is not None:
+                    check_item["norm_verdict"] = norm_verdict
 
                 if is_match:
                     check_item["result"] = "matched"
@@ -498,4 +644,130 @@ def run_script_matching(match_report: dict, config: dict) -> dict:
         "not_mentioned_pairs": not_mentioned_pairs,
         "null_value_pairs": null_value_pairs,   # 新增
         "mismatch_pairs": mismatch_pairs,
+        # 属性值选值命中方式（2026-10-28）：观测多接口需求的选值是否正常
+        "select_stats": select_stats,
+        # 编码表述归一统计（2026-10-28）
+        "norm_stats": check_norm_stats,
     }
+
+
+# ============================ 自测 ============================
+
+def _self_test() -> None:
+    """自测：多接口需求的属性值选值（name→bit→首条兜底）。
+
+    覆盖的高频回归点：
+      - 同一 req_id 下同一属性类有多条记录时，必须按 name/bit 选对那条（原实现按
+        req_id 覆盖 → 只留最后一条 → 信号与错误接口的属性值配对）。
+      - 单记录场景行为不变。
+      - 选不中时退回首条（不丢属性）。
+    """
+    # --- 构造一份 hlr_clustered.json：一 req 多接口（bit22/bit23），同名属性类 ---
+    import json as _json
+    import os as _os
+    import tempfile as _tf
+    d = _tf.mkdtemp()
+    p = _os.path.join(d, "hlr_clustered.json")
+    _json.dump({
+        "attribute_classes": [
+            {"attribute": "CodedSet", "requirements": [
+                {"req_id": "R1", "bus": "A429", "label": "L11", "name": "信号甲", "bit": "22",
+                 "attr_value": "甲有效→bit22=1"},
+                {"req_id": "R1", "bus": "A429", "label": "L11", "name": "信号乙", "bit": "23",
+                 "attr_value": "乙有效→bit23=1"},
+            ]},
+            {"attribute": "RefreshPeriod", "requirements": [
+                {"req_id": "R1", "name": None, "bit": None, "attr_value": "1000ms"},
+            ]},
+        ],
+    }, open(p, "w", encoding="utf-8"), ensure_ascii=False)
+
+    m = load_hlr_clustered_attrs(p)
+    # ① 多值被保留（不再覆盖）
+    assert isinstance(m["R1"]["CodedSet"], list), type(m["R1"]["CodedSet"])
+    assert len(m["R1"]["CodedSet"]) == 2, m["R1"]["CodedSet"]
+    assert len(m["R1"]["RefreshPeriod"]) == 1
+
+    # ② 按 name 选中 bit22 那条
+    rec, how = _select_attr_record(m["R1"]["CodedSet"], {"name": "信号甲", "bit": "22"})
+    assert rec["value"] == "甲有效→bit22=1", rec
+    assert how == "name", how
+
+    # ③ name 为空 → 按 bit 选
+    rec, how = _select_attr_record(m["R1"]["CodedSet"], {"name": None, "bit": "23"})
+    assert rec["value"] == "乙有效→bit23=1", rec
+    assert how == "bit", how
+
+    # ④ name 与 bit 都定位不到 → 退回首条（不丢属性）
+    rec, how = _select_attr_record(m["R1"]["CodedSet"], {"name": "不存在", "bit": "99"})
+    assert rec is not None and how == "fallback_first", (rec, how)
+
+    # ⑤ 单记录 → single
+    rec, how = _select_attr_record(m["R1"]["RefreshPeriod"], {"name": None, "bit": None})
+    assert rec["value"] == "1000ms" and how == "single", (rec, how)
+
+    # ⑥ 端到端：aggregate_hlr_by_req 用 name 选对值
+    mh = [{"req_id": "R1", "hlr_identity": {"name": "信号甲", "bit": "22"},
+           "attribute_classes": ["CodedSet"], "attr_value": "回填值"}]
+    st = {}
+    out = aggregate_hlr_by_req(mh, m, st)
+    assert out["R1"]["attributes"]["CodedSet"] == "甲有效→bit22=1", out
+    assert out["R1"]["attributes"]["RefreshPeriod"] == "1000ms", out
+    assert st.get("name") == 1, st
+
+    # ⑦ 命中方式统计里有 fallback_first 时可被观测
+    mh2 = [{"req_id": "R1", "hlr_identity": {"name": "不存在", "bit": "99"},
+            "attribute_classes": ["CodedSet"], "attr_value": "x"}]
+    st2 = {}
+    aggregate_hlr_by_req(mh2, m, st2)
+    assert st2.get("fallback_first", 0) >= 1, st2
+
+    # ── ⑧ 编码表述归一接入比对主循环（端到端）────────────────────
+    # 场景：EoICD 枚举 "0=Not Failed;1=Failed" 与 HLR 规则表 "…→bit22=1" 语义同源，
+    # default_compare 判不等 → 归一后判 True → 应升级为 matched。
+    d2 = _tf.mkdtemp()
+    p2 = _os.path.join(d2, "hlr_clustered.json")
+    _json.dump({
+        "attribute_classes": [
+            {"attribute": "CodedSet", "requirements": [
+                {"req_id": "R2", "name": "信号甲", "bit": "22",
+                 "attr_value": "Failed→bit22=1"},
+            ]},
+        ],
+    }, open(p2, "w", encoding="utf-8"), ensure_ascii=False)
+    mr = {"matches": [{
+        "eoicd_cluster_id": "C1",
+        "eoicd_signal_name": "SIG.X",
+        "eoicd_signal_short_name": "X",
+        "eoicd_identity": {"bus": "A429", "label": "11", "bit_range": "22-22"},
+        "eoicd_attributes": {"DP": {"CodedSet": "0=Not Failed;1=Failed"}},
+        "matched_hlrs": [{"req_id": "R2", "hlr_identity": {"name": "信号甲", "bit": "22"},
+                          "attribute_classes": ["CodedSet"], "attr_value": "回填值"}],
+    }]}
+    cfg = {"attribute_mapping": {"DP.CodedSet": "CodedSet"}, "paths": {"input_hlr": p2}}
+    res = run_script_matching(mr, cfg)
+    # 归一判 True → matched（原本 default_compare 会判不等）
+    assert res["stats"]["matched"] == 1, res["stats"]
+    assert res["stats"]["mismatch"] == 0, res["stats"]
+    assert res["norm_stats"].get("normalized_matched") == 1, res["norm_stats"]
+
+    # 归一判不了（语义无法确定）→ 保持 mismatch 交 AI
+    d3 = _tf.mkdtemp()
+    p3 = _os.path.join(d3, "hlr_clustered.json")
+    _json.dump({"attribute_classes": [
+        {"attribute": "CodedSet", "requirements": [
+            {"req_id": "R2", "name": "信号甲", "bit": "22",
+             "attr_value": "压调故障有效标志有效→bit22=1"}]},
+    ]}, open(p3, "w", encoding="utf-8"), ensure_ascii=False)
+    cfg3 = {"attribute_mapping": {"DP.CodedSet": "CodedSet"}, "paths": {"input_hlr": p3}}
+    res2 = run_script_matching(mr, cfg3)
+    assert res2["stats"]["mismatch"] == 1, res2["stats"]
+    assert res2["stats"]["matched"] == 0, res2["stats"]
+    assert res2["norm_stats"].get("needs_ai") == 1, res2["norm_stats"]
+
+    print("attr_script_matcher 自测通过（多接口需求按 name/bit 选值/单记录不变/"
+          "选不中退回首条不丢属性/命中方式统计/编码表述归一接入 均符合预期）")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    _self_test()

@@ -321,7 +321,7 @@ Content-Type: multipart/form-data
 
 | 字段 | 类型 | 必填 | 含义 |
 | --- | --- | --- | --- |
-| `hlr_word_file` | UploadFile (.docx) | 是 | HLR Word 文档 |
+| `hlr_word_file` | UploadFile (.docx / .xlsx) | 是 | HLR 需求文件（V4.1 起支持 .xlsx 扁平需求清单；字段名沿用 `hlr_word_file`） |
 | `eoicd_publisher_file` | UploadFile (.xlsx) | 二选一 | EoICD Publisher PubSub Excel |
 | `eoicd_subscriber_file` | UploadFile (.xlsx) | 二选一 | EoICD Subscriber PubSub Excel |
 | `controller_profile` | str (form) | 否（空 = 自动识别） | 系统类型：`ams` / `eps` / `fgmc` / `hscu`；为空时按上传文件名自动识别；取值不在项目表 → 422 |
@@ -415,7 +415,7 @@ GET /api/v4/jobs/{job_id}/outputs/forward-docx
 
 | 场景 | HTTP |
 | --- | --- |
-| `hlr_word_file` 缺失或非 .docx | 422 |
+| `hlr_word_file` 缺失或非 .docx / .xlsx | 422 |
 | pub/sub Excel 都没传 | 422 |
 | 任意 Excel / 追溯表非 .xlsx | 422 |
 | `controller_profile` 非空且不在项目表 | 422 |

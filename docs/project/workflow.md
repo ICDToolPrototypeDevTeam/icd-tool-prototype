@@ -103,27 +103,32 @@ Step 6: 报告生成
 
 ### 1.2 正向完整性分析（EoICD → HLR，多 judge 一致性管线）
 
-正向完整性分析回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析互补。管线为「正向检查集成-发送工具集成版 V3」工程的整体原样集成（唯一事实源：`backend/forward/` 代码树；每任务整体复制到 `<job_dir>/forward/` 运行），前端进度为 4 步：
+正向完整性分析回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析互补。管线为「正向检查集成-发送工具集成版 V4.1」工程的整体原样集成（唯一事实源：`backend/forward/` 代码树；每任务整体复制到 `<job_dir>/forward/` 运行），前端进度为 4 步：
 
 ```text
-用户上传 HLR Word + EoICD PubSub Excel (Publisher 或 Subscriber 至少一个) + 可选追溯表（0-N 张，单槽多文件；
+用户上传 HLR 需求文件（.docx / .xlsx）+ EoICD PubSub Excel (Publisher 或 Subscriber 至少一个) + 可选追溯表（0-N 张，单槽多文件；
     未上传 = 全量分析 `full`，上传任意张 = 追溯范围分析 `trace`；几张、各是什么表由正向树按表头自动识别，接口不做配对约束）
     ↓
 Step 1/4: 解析输入文件（阶段1 共享）
     系统类型（controller_profile：ams/eps/fgmc/hscu，空 = 按文件名自动识别）确定项目配置；
     集成层将原始输入映射为正向代码树要求的配置与数据布局；
+    V4.1 起 HLR 需求文件支持 .docx 与 .xlsx（.xlsx 为扁平需求清单，按表头定位字段）；
+    中文名称信号进入身份匹配前先做术语翻译预扫（结果落盘缓存，进程内只翻一次）；
     阶段1 的 EoICD 数据处理（确定性、无 AI）在全管线只执行一次，产物 copy 给各 judge 复用 ——
     这就是「输入只解析一次」原则在正向管线中的落点
     ↓
 Step 2/4: 多模型裁判判定（judge 数 = 配置的 judge 总数，MOCK 为 3）
     每个 judge 一次完整正向检查运行（阶段2/3/4，均调 AI），在独立子进程 + 独立 env +
-    独立工作区 + 独立 map 缓存中并行执行，互不干扰；超时 judge 不 kill，由后台线程补收。
+    独立工作区 + 独立 map 缓存中并行执行，互不干扰；软超时 judge 不立即 kill，
+    由后台线程补收，超过硬上限再由 watchdog 终止并记入 judge 有效性。
     V3 起每个 judge 默认在 HLR 聚类阶段调用 AI 增量生成该 judge 专属的
     name / state / signal 映射（--ai-update）；MOCK 配置由适配层显式关闭，保证免密钥可跑
     ↓
 Step 3/4: 共识复核
     各 judge 的阶段5 结果（report_{pub,sub}.json）按 signal_full_name 对齐聚合 →
-    Step5 仲裁（仲裁固定 DeepSeek）+ Step5.5 peer-aware 复查
+    Step5 仲裁（仲裁固定 DeepSeek）+ Step5.5 peer-aware 复查；
+    V4.1 起额外记录每个 judge 的有效性（正常完成 / 超时 / 被硬上限 watchdog 终止）
+    与复核失败次数，供报告展示与排障
     ↓
 Step 4/4: 生成报告
     Word 报告 + Excel 明细（明细表由集成层脚本生成），整理复制为两个固定交付名：

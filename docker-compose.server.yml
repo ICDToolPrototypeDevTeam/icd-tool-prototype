@@ -2,7 +2,8 @@
 #
 # 与本地开发用的 docker-compose.yml 的区别：
 #   - 无 build 段：镜像在外部构建后 docker load 进来，服务器无需联网构建；
-#   - 无前端容器：前端构建产物由后端同源托管（ICD_STATIC_DIR），只暴露 8000 一个端口。
+#   - 无前端容器：前端构建产物由后端同源托管（ICD_STATIC_DIR），对外只暴露 8182
+#     一个端口（映射到容器内 8000；容器内服务端口不变）。
 #
 # 使用前提（与仓库目录结构保持一致，交付时请原样带过去）：
 #   frontend/dist/     前端构建产物（npm run build 生成）
@@ -20,7 +21,8 @@ services:
     # 内网服务器无外网出口：镜像缺失时直接报错，而不是尝试联网拉取
     pull_policy: never
     ports:
-      - '8000:8000'
+      # 宿主机 8182 → 容器内 8000（容器内 uvicorn 仍监听 8000）
+      - '8182:8000'
     volumes:
       # 前端产物只读挂载，后端按 ICD_STATIC_DIR 同源托管
       - ./frontend/dist:/app/static:ro
@@ -34,8 +36,8 @@ services:
       - ICD_STATIC_DIR=/app/static
     restart: unless-stopped
     # 容器内存上限：取值按 部署说明.md §5.4 算好后写进本目录的 .env
-    # （ICD_MEM_LIMIT / ICD_MEMSWAP_LIMIT）；下面 ${...:-640m} 只是「未写本目录
-    # .env 直接 compose up」时的保守兜底。
+    # （ICD_MEM_LIMIT / ICD_MEMSWAP_LIMIT）；下面 ${...:-10g} 是「未执行 §5.4、
+    # 未写本目录 .env 直接 compose up」时的默认上限（10 GB）。
     #
     # 为什么必须设：不设上限时容器与宿主共享内存，十万条级 EoICD 输入会把整机拖进
     # swap 抖动 —— SSH 与页面全部无响应，连「终止」都点不动，只能从容器外面杀进程。
@@ -43,5 +45,8 @@ services:
     # 任务变为「已中断」，用户在页面上「放弃」即可。
     # memswap_limit 与 mem_limit 相等 = 该容器不允许用 swap：宁可干脆失败，
     # 也不要「慢慢假死」。
-    mem_limit: ${ICD_MEM_LIMIT:-640m}
-    memswap_limit: ${ICD_MEMSWAP_LIMIT:-640m}
+    #
+    # 注意：10 GB 默认值面向内存 ≥ 10 GB 的机器；物理内存更小时必须执行 §5.4
+    # 按实际内存重算，否则上限形同虚设（把上限调到超过物理内存等于回到整机假死）。
+    mem_limit: ${ICD_MEM_LIMIT:-10g}
+    memswap_limit: ${ICD_MEMSWAP_LIMIT:-10g}

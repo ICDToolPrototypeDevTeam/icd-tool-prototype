@@ -79,6 +79,11 @@ def build_review_coverage(agg: dict, review_stats: dict | None = None,
         "budget": 0,
         "rules_enabled": [r["name"] for r in (rules or [])],
         "rule_hits": {},
+        # 2026-10-29：复核失败与复核状态（用于把「模型判待确认」与「没拿到第二裁决」分开）
+        "failed_signals": 0,
+        "failed_calls": 0,
+        "failed_stages": {},
+        "review_status": {},
     }
     for _full, item in (agg or {}).items():
         a = (item or {}).get("aggregation") or {}
@@ -89,7 +94,25 @@ def build_review_coverage(agg: dict, review_stats: dict | None = None,
         for rn in (a.get("need_review_rules") or []):
             cov["rule_hits"][rn] = cov["rule_hits"].get(rn, 0) + 1
         trace = a.get("review_trace") or {}
-        if trace.get("applied"):
+        # 「是否拿到第二裁决」优先看 review_applied_stages（真正产出过结论的阶段）；
+        # 老数据无该字段时才回退 trace.applied。**不能只看 trace.applied**——
+        # 多阶段复核（step5 → step5.5 → step5.6）时后一阶段成功会整体覆盖 trace，
+        # 把前一阶段的失败抹掉（2026-10-29 实测：executed==needed，而
+        # logs/arb_fail.jsonl 里有 11 次调用失败）。
+        _applied_stages = a.get("review_applied_stages")
+        _got = (bool(_applied_stages) if _applied_stages is not None
+                else bool(trace.get("applied")))
+        _fails = a.get("review_failures") or []
+        if _fails:
+            cov["failed_signals"] += 1
+            cov["failed_calls"] += len(_fails)
+            for _f in _fails:
+                _st = _f.get("stage") or "unknown"
+                cov["failed_stages"][_st] = cov["failed_stages"].get(_st, 0) + 1
+        _rs = a.get("review_status")
+        if _rs:
+            cov["review_status"][_rs] = cov["review_status"].get(_rs, 0) + 1
+        if _got:
             cov["reviewed"] += 1
         elif trace:
             reason = trace.get("reason") or "未记录原因（review_trace.reason 缺失）"
@@ -118,6 +141,11 @@ def build_review_coverage(agg: dict, review_stats: dict | None = None,
         agg_reasons = set(cov["skip_reasons"])
         for reason, cnt in (review_stats.get("reasons") or {}).items():
             if reason in agg_reasons:
+                continue
+            # 同义去重：runner 侧的文案是「复核未获第二裁决（调用失败）：<stage> <原因>」，
+            # agg 侧同批信号记的是 trace.reason（纯原因）。二者指向同一批信号，只是文字不同；
+            # 同时呈现会让读者看到两条重复的「未获裁决」原因（2026-10-29 实测）。
+            if any(reason.startswith(r) or r in reason for r in agg_reasons):
                 continue
             cov["skip_reasons"][reason] = cov["skip_reasons"].get(reason, 0) + cnt
         for reason, cnt in (review_stats.get("review_gaps") or {}).items():
@@ -173,8 +201,28 @@ def build_summary(agg: dict, review_stats: dict | None = None) -> dict:
 
     ordered_status = {k: status_dist[k] for k in status_keys_ordered if status_dist.get(k)}
 
+    # judge 级有效性（2026-10-29）：本轮实际参与判定的 judge 数 / 失效 judge 及原因。
+    # 必须显式披露——「多模型共识」在只有 2 个 judge 存活时，读者需要一眼看见。
+    judge_eff: dict[str, dict] = {}
+    for _full, _item in (agg or {}).items():
+        _jm = (_item or {}).get("judge_meta") or {}
+        for _j, _m in _jm.items():
+            judge_eff[_j] = {
+                "model": _m.get("model"),
+                "valid": bool(_m.get("valid", True)),
+                "error": _m.get("error") or "",
+                "n_signals": _m.get("n_signals", 0),
+            }
+        if judge_eff:
+            break  # judge_meta 是全局的，取一条即可
+
     return {
         "total": total,
+        "judge_effectiveness": {
+            "configured": len(judge_eff),
+            "valid": sum(1 for v in judge_eff.values() if v["valid"]),
+            "judges": judge_eff,
+        },
         "star_distribution": star_dist,
         "agreement_distribution": dict(sorted(agreement_dist.items())),
         "status_distribution": ordered_status,
@@ -208,6 +256,16 @@ def format_summary_text(summary: dict, include_review_coverage: bool = True) -> 
     if _detail and any(_detail.values()):
         lines.append("未落实子类：" + "，".join(
             f"{k} {v} 条" for k, v in _detail.items() if v))
+    # judge 级有效性（2026-10-29）：有 judge 失效时必须显式说明本轮实际由几个模型判定，
+    # 否则「多模型共识报告」在只有 2 个 judge 存活时会被当成 3 模型结论。
+    _je = summary.get("judge_effectiveness") or {}
+    if _je.get("configured"):
+        _bad = [(n, v.get("error") or "未知原因")
+                for n, v in (_je.get("judges") or {}).items() if not v.get("valid")]
+        _line = "有效 judge：{0}/{1}".format(_je.get("valid", 0), _je.get("configured", 0))
+        if _bad:
+            _line += "（失效：" + "，".join("{0}={1}".format(n, r) for n, r in _bad) + "）"
+        lines.append(_line)
     lines += [
         "星级分布：" + "，".join(
             f"{k}★ {v} 条" for k, v in summary.get("star_distribution", {}).items()
@@ -246,6 +304,17 @@ def format_review_coverage_text(summary: dict) -> str:
                     skip=cov.get("skipped", 0)))
     if cov.get("peer_reviewed"):
         text += "；其中 {0} 条另经 Step5.5 复查".format(cov["peer_reviewed"])
+    # 2026-10-29：复核调用失败必须如实呈现——「获第二裁决 N 条」不能掩盖
+    # 其中存在调用失败（2026-10-29 实测：38 条全部计入已生效，而日志里有 11 次失败）。
+    if cov.get("failed_signals"):
+        _fs = cov.get("failed_stages") or {}
+        _ftxt = "，" + "，".join("{0} {1} 次".format(k, v) for k, v in sorted(_fs.items())) if _fs else ""
+        text += "；复核调用失败 {0} 条信号（{1} 次调用{2}）".format(
+            cov["failed_signals"], cov.get("failed_calls", 0), _ftxt)
+    _rs = cov.get("review_status") or {}
+    if _rs:
+        text += "；复核状态：" + "，".join(
+            "{0} {1} 条".format(k, v) for k, v in sorted(_rs.items()))
     if cov.get("arb_same_as_judge"):
         text += "（仲裁视角与 judge 同源，第二裁决独立性受限）"
     return text + hits_txt

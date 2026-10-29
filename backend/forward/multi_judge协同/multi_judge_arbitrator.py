@@ -34,8 +34,9 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from multi_judge_aggregate import (KEY_FIELDS_IDENTITY, _display_matched_full,
-                                 build_analysis_summary, derive_sub_classification)
+from multi_judge_aggregate import (KEY_FIELDS_IDENTITY, _consensus_label,
+                                 _display_matched_full, build_analysis_summary,
+                                 derive_sub_classification, needs_review)
 
 # 关键字段白名单（KEY_FIELDS，身份层 judge 结论骨架）—— 分歧即真分歧。
 # 单一来源：直接复用 multi_judge_aggregate.KEY_FIELDS_IDENTITY（身份层 7 元组，
@@ -124,6 +125,7 @@ class _CircuitBreaker:
         self.threshold = max(1, int(threshold))
         self._failures = 0
         self._tripped = False
+        self._trip_reason = ""
         self._lock = threading.Lock()
 
     def record_failure(self) -> None:
@@ -131,14 +133,33 @@ class _CircuitBreaker:
             self._failures += 1
             if self._failures >= self.threshold:
                 self._tripped = True
+                if not self._trip_reason:
+                    self._trip_reason = "累计 LLM 失败达阈值 {0} 次".format(self.threshold)
 
     def record_success(self) -> None:
         with self._lock:
             self._failures = 0
 
+    def trip(self, reason: str) -> None:
+        """立即跳闸（永久性全局错误：欠费 / 鉴权失效 / 模型不存在）。
+
+        与「累计失败达阈值」不同：这类错误**重试无意义**（请求本身不合法，或账户
+        根本不可用），再撞下去只会白白发请求、把整批拖到超时。2026-10-29 实测：
+        仲裁 key 欠费导致服务端对每条请求瞬时返回 HTTP 400（Arrearage），原逻辑
+        仍按「可重试」处理，372 条信号各撞 3 次，直到最后两分钟才凑够熔断阈值。
+        """
+        with self._lock:
+            self._tripped = True
+            self._trip_reason = reason or "永久性错误"
+
     @property
     def tripped(self) -> bool:
         return self._tripped
+
+    @property
+    def trip_reason(self) -> str:
+        with self._lock:
+            return self._trip_reason
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +194,66 @@ def _snip(s, n: int = _FAIL_LOG_SNIP):
     if len(s) <= 2 * n:
         return s
     return s[:n] + " ……<snip>…… " + s[-n:]
+
+
+# ---------------------------------------------------------------------------
+# HTTP 错误分类（2026-10-29）
+# ---------------------------------------------------------------------------
+# 为什么要有分类：原实现把 400 与 5xx 一视同仁地退避重试，实测暴露两个问题——
+#   ① 400(Arrearage 欠费) 是**全局性永久错误**：重试无意义（请求不合法/账户不可用），
+#      且后续每一条信号都会撞同样的墙 → 应立即止损，而不是 372 条各撞 3 次；
+#   ② HTTPError 的响应体不被读取，原因被丢进黑洞（只剩 "HTTP Error 400: Bad Request"），
+#      导致「欠费」这个关键原因排查了很久才定位。
+
+# 判为「全局性永久错误」的响应体特征（大小写不敏感）
+_FATAL_BODY_PATTERNS = (
+    "arrearage",          # 阿里云百炼：账户欠费 / 账户状态异常
+    "overdue",
+    "insufficient",
+    "access denied",
+    "model_not_found",
+    "model not exist",
+    "invalid_api_key",
+    "unauthorized",
+)
+
+
+def _classify_http_error(code, body: str | None) -> str:
+    """把 HTTP 错误分成三类，决定「是否重试」与「是否立即止损」。
+
+    - "fatal"    全局性永久错误：欠费 / 鉴权失效 / 模型不存在。重试无意义，且后续
+                 每条信号都会撞同样的墙 → 不重试，并立即跳闸止损。
+    - "request"  单条请求本身的问题（其余 400）：只影响这一条 → 不重试（省下无效
+                 请求），但不跳闸，其余信号照常处理。
+    - "transient" 瞬时 / 服务端问题（5xx 等）：维持原有退避重试。
+    """
+    try:
+        c = int(code or 0)
+    except (TypeError, ValueError):
+        c = 0
+    low = (body or "").lower()
+    if c in (401, 403, 404):
+        return "fatal"
+    if any(p in low for p in _FATAL_BODY_PATTERNS):
+        return "fatal"
+    if c == 400:
+        return "request"
+    return "transient"
+
+
+def _err_brief(body: str | None, limit: int = 160) -> str:
+    """从错误响应体里挤出一句人能读的短原因（优先取 error.message，其次 error.type）。"""
+    if not body:
+        return ""
+    try:
+        data = json.loads(body)
+        err = (data or {}).get("error") or {}
+        msg = err.get("message") or err.get("type") or ""
+        if msg:
+            return str(msg)[:limit]
+    except Exception:
+        pass
+    return str(body)[:limit]
 
 
 def _record_llm_failure(record: dict) -> None:
@@ -274,26 +355,53 @@ def call_llm(model: str, base_url: str, api_key: str, system: str, user: str,
             raw_content = data["choices"][0]["message"]["content"]
             return json.loads(raw_content)
         except urllib.error.HTTPError as e:
-            # 401/403 = 鉴权/额度，永久错误，不重试
-            if getattr(e, "code", 0) in (401, 403):
-                print(f"  [仲裁] LLM 调用失败（HTTP {getattr(e, 'code', '?')}：{e}），"
-                      f"鉴权/额度错误，跳过智能层，保留后端聚合")
-                _fail("HTTPError", e, attempt + 1, http_code=getattr(e, "code", None),
-                      raw_body=raw_body)
+            code = getattr(e, "code", None)
+            # HTTPError 的响应体要单独读（urllib 不会自动读它）——不读就只剩
+            # "HTTP Error 400: Bad Request"，把「欠费 / 模型不存在」这类真因丢掉
+            # （2026-10-29 实测：因未记录响应体，欠费这一关键原因排查了很久）。
+            err_body = None
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            kind = _classify_http_error(code, err_body)
+            if kind == "fatal":
+                # 全局性永久错误：重试无意义，且后续每条信号都会撞同样的墙
+                # → 立即止损（跳闸），不再白白发请求把整批拖到超时。
+                brief = _err_brief(err_body)
+                reason = "永久性错误（HTTP {0}）：{1}".format(code, brief or "服务不可用")
+                _fail("HTTPError", e, attempt + 1, http_code=code, raw_body=err_body)
+                _bre = ctx.get("_breaker")
+                if _bre is not None:
+                    try:
+                        _bre.trip(reason)
+                    except Exception:
+                        pass
+                ctx["_perm_error"] = reason
+                print(f"  [仲裁] LLM 调用失败（HTTP {code}，永久性错误）：{brief or '服务不可用'}")
+                print("  [仲裁] 立即停止本轮智能层调用（后续信号不再重复发送请求），保留后端聚合结论")
                 return None
+            if kind == "request":
+                # 单条请求本身的问题（其余 400）：重试纯属浪费 → 不重试；但不跳闸，
+                # 其余信号照常处理。
+                brief = _err_brief(err_body)
+                _fail("HTTPError", e, attempt + 1, http_code=code, raw_body=err_body)
+                print(f"  [仲裁] LLM 调用失败（HTTP {code}，请求被拒，不重试）"
+                      + ("：{0}".format(brief) if brief else ""))
+                return None
+            # transient（5xx 等）：维持原有退避重试
             if attempt < max_retries:
                 wait = 2 ** attempt
                 print(f"  [仲裁] LLM 调用失败（HTTP {getattr(e, 'code', '?')}），"
                       f"{wait}s 后重试（{attempt + 1}/{max_retries}）")
                 # 中间失败也落盘（final=False）：即便随后重试成功，也要能统计失败率与时间分布
-                _fail("HTTPError", e, attempt + 1, http_code=getattr(e, "code", None),
-                      raw_body=raw_body, final=False)
+                _fail("HTTPError", e, attempt + 1, http_code=code,
+                      raw_body=err_body, final=False)
                 time.sleep(wait)
                 continue
             print(f"  [仲裁] LLM 调用失败（HTTP {getattr(e, 'code', '?')}），"
                   f"重试耗尽，跳过智能层，保留后端聚合")
-            _fail("HTTPError", e, attempt + 1, http_code=getattr(e, "code", None),
-                  raw_body=raw_body)
+            _fail("HTTPError", e, attempt + 1, http_code=code, raw_body=err_body)
             return None
         except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError) as e:
             # 连接重置 / 远程断开 / DNS 失败 / 超时 / 解析失败 → 退避重试
@@ -589,6 +697,33 @@ def _merge_inconsistent_attributes(backend_ia, llm_ia, valid_classes=None, dropp
     return base
 
 
+def _record_review_failure(a: dict, stage: str, reason: str) -> None:
+    """记录「某一阶段的复核调用失败」（累积，不覆盖 review_trace）。
+
+    为什么不用 review_trace 表达失败：复核是多阶段的（step5 仲裁 → step5.5 复查 →
+    step5.6 重仲裁），每个阶段成功都会**整体覆盖** review_trace，于是
+    「step5 失败、step5.5 成功」的历史会被抹掉——统计上就出现
+    「executed == needed」但实际存在调用失败的情况（2026-10-29 实测：38 条需复核
+    全部计入 executed，而 logs/arb_fail.jsonl 里有 11 次调用失败）。
+    这里用累积列表留住每一次失败，与 review_trace（只反映最后一次阶段）分工：
+      review_failures      —— 发生过失败（无论后续是否成功）
+      review_applied_stages —— 真正产出过裁决结论的阶段
+    """
+    fails = a.setdefault("review_failures", [])
+    fails.append({
+        "stage": stage,
+        "reason": reason,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    })
+
+
+def _mark_review_applied(a: dict, stage: str) -> None:
+    """记录「某一阶段真正产出了裁决结论」（累积）。"""
+    stages = a.setdefault("review_applied_stages", [])
+    if stage not in stages:
+        stages.append(stage)
+
+
 def _reconcile_and_recompute(a: dict, out: dict) -> None:
     """方案Y（配套）：仲裁 LLM 判为「属性一致」的属性，回写清除后端不一致标记，并一次性重算
     派生字段，保证一行（a 字典）自洽。JSON/CSV/Word 报告均现读 a，故只要这里改对整行即同步。
@@ -634,6 +769,53 @@ def _reconcile_and_recompute(a: dict, out: dict) -> None:
         or bool(a.get("inconsistent_attributes"))
         or persistent
     )
+
+    # ---- 同步派生的标签与审计痕迹（2026-10-29）----
+    # ① consensus_label：星级被改写后标签必须跟着变。原标签由聚合层按**改写前**的
+    #    星级算出（aggregate.py 里 `_consensus_label(star, agreement)`），仲裁改写
+    #    star_rating 后未同步 → 同一行会出现「star_rating=3★ + consensus_label=完全
+    #    共识 + agreement=majority」的自相矛盾（2026-10-29 实测 334 条）。
+    #    此处用与聚合层**同一个函数**重算，保证标签与星级恒同源。
+    a["consensus_label"] = _consensus_label(a["star_rating"], agreement)
+
+    # ② need_review 的审计链：仲裁层重算了 need_review，但聚合层写的
+    #    need_review_rules/details 仍对应重算前的状态 → 出现「need_review=True 而
+    #    审计记录全空」，读者无法解释为何要复核（2026-10-29 实测 372/372 全 True
+    #    而两个数组全空）。此处用**同一张规则表**重算命中：输入取聚合层落盘的
+    #    路由上下文快照（need_review_disabled_rules / need_review_on_split），
+    #    以免把用户在 config 里逐条关闭的规则又加回来。
+    _ctx = {
+        # 缺字段时按「有 1 个有效源 / 配置 1 个 judge」兜底：若按 0 处理会误命中
+        # no_valid_source 规则，把「字段缺失」说成「无有效源」。
+        "n_valid": a.get("n_valid_sources", 1),
+        "star": a["star_rating"],
+        "n_configured": a.get("n_judges_configured", 1),
+        "need_review_on_split": a.get("need_review_on_split", True),
+    }
+    _overrides = {k: False for k in (a.get("need_review_disabled_rules") or [])}
+    _rules: list = []
+    _details: list = []
+    try:
+        _, _hits = needs_review(_ctx, _overrides)
+        for _h in _hits:
+            _rules.append(_h["name"])
+            _details.append(_h["detail"])
+    except Exception:
+        _rules, _details = [], []
+    # 规则表之外的硬事实触发原因（不可配置关闭），补记以便解释 need_review=True
+    _facts = []
+    if a.get("coverage_gap"):
+        _facts.append(("coverage_gap", "存在覆盖缺口（部分 judge 未产出有效结论）"))
+    if has_key:
+        _facts.append(("arbitration_key_disagreement", "仲裁后关键字段仍有分歧"))
+    if a.get("inconsistent_attributes"):
+        _facts.append(("inconsistent_attributes", "存在事实不一致属性"))
+    for _n, _d in _facts:
+        if _n not in _rules:
+            _rules.append(_n)
+            _details.append(_d)
+    a["need_review_rules"] = _rules
+    a["need_review_details"] = _details
 
 
 # ---------------------------------------------------------------------------
@@ -744,8 +926,11 @@ def arbitrate(agg: dict, shards: dict, arb_cfg: dict, only: set[str] | None = No
         a = item["aggregation"]
         # 熔断器已跳闸 → 跳过剩余（第2点）
         if breaker is not None and breaker.tripped:
+            # 跳闸原因要写进 trace：区分「累计失败达阈值」与「永久性错误（欠费/鉴权/
+            # 模型不存在）」——两者的处置完全不同（前者等端点恢复，后者要换 key/模型）。
+            _br = (getattr(breaker, "trip_reason", "") or "累计 LLM 失败达阈值")
             a["review_trace"] = {"stage": stage, "applied": False,
-                                 "reason": "复核熔断器已跳闸（累计 LLM 失败达阈值），跳过本次仲裁"}
+                                 "reason": "复核熔断器已跳闸（{0}），跳过本次仲裁".format(_br)}
             a["arbitrated"] = True
             return
         shard = {j: shards[j][full] for j in shards if full in shards[j]}
@@ -787,17 +972,21 @@ def arbitrate(agg: dict, shards: dict, arb_cfg: dict, only: set[str] | None = No
                 budget["left"] -= 1
 
         user = _build_consensus_user(full, shard, a.get("note", ""))
+        # _breaker 传给 call_llm：遇「全局性永久错误」（欠费/鉴权/模型不存在）时
+        # 由它立即跳闸止损，而不是让 372 条信号各撞 3 次。
+        _ctx = {"full": full, "stage": stage, "_breaker": breaker}
         try:
-            out = call_llm(model, base_url, api_key, CONSENSUS_SYSTEM, user,
-                           ctx={"full": full, "stage": stage})
+            out = call_llm(model, base_url, api_key, CONSENSUS_SYSTEM, user, ctx=_ctx)
         except Exception:
             out = None
         if not isinstance(out, dict):
             # 第2点：降级 + 记录失败（触发熔断）
-            if breaker is not None:
+            _perm = _ctx.get("_perm_error")
+            if not _perm and breaker is not None:
                 breaker.record_failure()
-            a["review_trace"] = {"stage": stage, "applied": False,
-                                 "reason": "Step5 仲裁 LLM 调用失败或返回非 JSON"}
+            _reason = _perm or "Step5 仲裁 LLM 调用失败或返回非 JSON"
+            _record_review_failure(a, stage, _reason)
+            a["review_trace"] = {"stage": stage, "applied": False, "reason": _reason}
             a["arbitrated"] = True
             return
         # 第2点：成功复位熔断计数
@@ -830,6 +1019,7 @@ def arbitrate(agg: dict, shards: dict, arb_cfg: dict, only: set[str] | None = No
         _reconcile_and_recompute(a, out)
         # 保留已写入的 peer_review 子字段：重仲裁(stage=step5.6)生效不代表复查也生效，
         # 直接整体赋值会把「复查因独立视角不足被跳过」这条事实抹掉。
+        _mark_review_applied(a, stage)
         a["review_trace"] = {
             "stage": stage, "applied": True,
             "reason": "仲裁已生效（对全部 judge 结论做第二次裁决，stage={0}）".format(stage),
@@ -906,7 +1096,8 @@ def peer_aware_review(agg: dict, shards: dict, arb_cfg: dict,
         try:
             # 熔断已跳闸 → 跳过（第2点）
             if breaker is not None and breaker.tripped:
-                _mark_skipped(a, "复核熔断器已跳闸（累计 LLM 失败达阈值），跳过 peer 复查", 0, [])
+                _br = (getattr(breaker, "trip_reason", "") or "累计 LLM 失败达阈值")
+                _mark_skipped(a, "复核熔断器已跳闸（{0}），跳过 peer 复查".format(_br), 0, [])
                 return
             shard = {j: shards[j][full] for j in shards if full in shards[j]}
             names = list(shard.keys())
@@ -926,18 +1117,21 @@ def peer_aware_review(agg: dict, shards: dict, arb_cfg: dict,
                         return
                     budget["left"] -= 1
             user = _build_review_user(full, groups, shard)
+            _ctx = {"full": full, "stage": "step5.5", "_breaker": breaker}
             try:
                 # 本函数无 stage 变量（阶段名硬编码为 "step5.5"，同 _mark_skipped），
                 # 诊断上下文用字面量，勿引用不存在的 stage。
-                out = call_llm(model, base_url, api_key, REVIEW_SYSTEM, user,
-                               ctx={"full": full, "stage": "step5.5"})
+                out = call_llm(model, base_url, api_key, REVIEW_SYSTEM, user, ctx=_ctx)
             except Exception:
                 out = None
             if not isinstance(out, dict):
                 # 第2点：降级 + 触发熔断
-                if breaker is not None:
+                _perm = _ctx.get("_perm_error")
+                if not _perm and breaker is not None:
                     breaker.record_failure()
-                _mark_skipped(a, "复查 LLM 调用失败或返回非 JSON", n_view, groups)
+                _reason = _perm or "复查 LLM 调用失败或返回非 JSON"
+                _record_review_failure(a, "step5.5", _reason)
+                _mark_skipped(a, _reason, n_view, groups)
                 return
             if breaker is not None:
                 breaker.record_success()
@@ -966,6 +1160,7 @@ def peer_aware_review(agg: dict, shards: dict, arb_cfg: dict,
             # 移除，并重算 has_key / star_rating / need_review（零新增输出 schema，token 中性）。
             _reconcile_and_recompute(a, out)
             a["peer_reviewed"] = True
+            _mark_review_applied(a, "step5.5")
             a["review_trace"] = {
                 "stage": "step5.5", "applied": True,
                 "reason": "对 {0} 个独立视角做匿名化复查".format(n_view),
@@ -979,6 +1174,8 @@ def peer_aware_review(agg: dict, shards: dict, arb_cfg: dict,
             }
         except Exception as exc:  # 第C点：任何意外异常（含 LLM 返回畸形 final_matched_hlr）局部降级，
             # 不连坐整次运行——保留 Step5 结论，标记 peer 复查跳过，由 review_trace 诚实记账。
+            _record_review_failure(a, "step5.5",
+                                   "复查过程异常（{0}），已跳过 peer 复查，保留 Step5 结论".format(type(exc).__name__))
             _mark_skipped(a, "复查过程异常（{0}），已跳过 peer 复查，保留 Step5 结论".format(type(exc).__name__),
                           n_view, groups)
 
@@ -1067,6 +1264,20 @@ def run_arbitration(agg: dict, shards: dict, judge_meta: dict, arb_cfg: dict) ->
         a["sub_classification"] = derive_sub_classification(
             a.get("final_verdict"), item.get("judges", {})
         )
+        # 复核状态（2026-10-29）：把「没拿到第二裁决」与「模型判待确认」彻底分开。
+        #   已裁决   —— 有阶段真正产出了裁决结论，且全程无失败
+        #   部分裁决 —— 有阶段产出了结论，但过程中发生过调用失败（结论仍有效，但必须留痕）
+        #   未获裁决 —— 没有阶段成功（LLM 调用失败 / 熔断 / 超预算 / 无独立视角）
+        # 未进入复核路由的信号不写该字段（"无此状态"即表示未进入复核）。
+        _applied = a.get("review_applied_stages") or []
+        _failed = a.get("review_failures") or []
+        _entered = bool(a.get("arbitrated")) or bool(a.get("review_trace"))
+        if _applied and _failed:
+            a["review_status"] = "部分裁决"
+        elif _applied:
+            a["review_status"] = "已裁决"
+        elif _failed or _entered:
+            a["review_status"] = "未获裁决"
         sc = _scan_self_contradiction(a)
         if sc:
             a["self_contradiction"] = sc

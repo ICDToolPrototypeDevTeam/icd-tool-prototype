@@ -25,12 +25,12 @@ ICD工具原型Ver4.1是一个面向EoICD源文件和软件高层需求（HLR）
 
 | 文件 | 格式 | 说明 |
 |------|------|------|
-| HLR Word 文件 | .docx | **必填**，从"软件需求"章节提取需求条目 |
+| HLR 需求文件 | .docx / .xlsx | **必填**；反向管线仅支持 .docx，正向管线 V4.1 起额外支持 .xlsx 扁平需求清单 |
 | EoICD Publisher Excel | .xlsx | 与 Subscriber 二选一，发送侧接口定义 |
 | EoICD Subscriber Excel | .xlsx | 与 Publisher 二选一，接收侧接口定义 |
 | 追溯 Excel | .xlsx | 选填（0-N 个），设备需求（ERD）→HLR / 设备需求（ERD）→ICD 追溯表 |
 
-> 正向完整性分析复用上述 HLR Word + EoICD Pub/Sub 作为输入；启用"追溯范围分析"时需成对上传两张追溯表（设备需求→系统ICD 追溯表、单模块需求矩阵分析表），仅传一张会报错。
+> 正向完整性分析复用上述 HLR 需求文件 + EoICD Pub/Sub 作为输入；启用"追溯范围分析"时上传 0-N 张追溯表即可（AMS 约 2 张 / EPS 4 层链约 3 张），张数与类型由正向树按表头自动识别，接口不做成对约束。
 
 ### 输出
 
@@ -67,8 +67,8 @@ ICD工具原型Ver4.1是一个面向EoICD源文件和软件高层需求（HLR）
 上传文件 → 解析输入（阶段1 共享） → 多 judge 并行判定 → 共识复核（仲裁 + 复查） → 生成报告
 ```
 
-1. **解析输入**：读取 HLR Word 与 EoICD PubSub Excel；按系统类型（`controller_profile`：ams/eps/fgmc/hscu，空 = 按文件名自动识别）确定项目配置；阶段1 的 EoICD 数据处理（确定性、无 AI）在整轮只执行一次，产物复制给各 judge 复用。
-2. **多 judge 并行判定**：每个 judge 一次完整正向检查运行（阶段2/3/4），在独立子进程与独立工作区中并行执行、互不干扰；超时 judge 不 kill，由后台线程补收。
+1. **解析输入**：读取 HLR 需求文件（.docx / .xlsx）与 EoICD PubSub Excel；按系统类型（`controller_profile`：ams/eps/fgmc/hscu，空 = 按文件名自动识别）确定项目配置；阶段1 的 EoICD 数据处理（确定性、无 AI）在整轮只执行一次，产物复制给各 judge 复用。
+2. **多 judge 并行判定**：每个 judge 一次完整正向检查运行（阶段2/3/4），在独立子进程与独立工作区中并行执行、互不干扰；软超时 judge 不立即 kill（后台线程补收），超过硬上限由 watchdog 终止并记入 judge 有效性。
 3. **共识复核**：各 judge 结果按信号对齐聚合（多数投票 + 共识 + 星级），分歧处由仲裁模型（固定 DeepSeek）做第二裁决，再做 peer-aware 复查。
 4. **生成报告**：输出 Word 报告与 Excel 明细，整理为两个固定交付名。
 
@@ -146,7 +146,7 @@ docker compose up -d --build
 
 | 文件 | 必填性 | 说明 |
 |------|------|------|
-| HLR Word 文件 | 必填 | 软件高层需求 Word（.docx） |
+| HLR 需求文件 | 必填 | 软件高层需求文件（反向 .docx；正向 V4.1 起支持 .docx / .xlsx） |
 | EoICD Publisher Excel | 与 Subscriber 至少填一 | 发送侧接口定义（.xlsx/.xls） |
 | EoICD Subscriber Excel | 与 Publisher 至少填一 | 接收侧接口定义（.xlsx/.xls） |
 | 追溯表 | 选填（0-N 个） | 设备需求（ERD）→HLR / 设备需求（ERD）→ICD 追溯表，可多选 |
@@ -156,7 +156,7 @@ docker compose up -d --build
 
 #### 步骤 3：开始处理
 
-点击底部"开始处理"按钮。若未上传 HLR Word 文件，或 Publisher/Subscriber 均未填写，前端会弹窗提示。进入"文件处理"页面，显示六步进度（解析文件 → HLR标注 → 反向匹配 → 多模型裁判 → 共识复核 → 报告生成）及当前处理的 Case 计数。
+点击底部"开始处理"按钮。若未上传 HLR 需求文件，或 Publisher/Subscriber 均未填写，前端会弹窗提示。进入"文件处理"页面，显示六步进度（解析文件 → HLR标注 → 反向匹配 → 多模型裁判 → 共识复核 → 报告生成）及当前处理的 Case 计数。
 ![alt text](docs/images/image-3.png)
 
 #### 步骤 5：查看结果与下载

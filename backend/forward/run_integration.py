@@ -42,6 +42,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -95,13 +96,22 @@ def _cmd_for_log(cmd: list[str]) -> str:
 
 def run_cmd(cmd: list[str], desc: str, cwd: Path | str | None = None) -> float:
     """运行命令，失败时抛出 RuntimeError。返回耗时（秒）。
-    若设置了全局 LOG_FILE，会同时将子进程输出写入日志文件。"""
+    若设置了全局 LOG_FILE，会同时将子进程输出写入日志文件。
+
+    单步超时（2026-10-29）：默认 0 = 不限制（既有行为完全不变）。设置环境变量
+    INTEGRATION_STEP_TIMEOUT（秒）后，单步超时会终止子进程并抛出明确的「超时」错误，
+    与「自身异常退出」区分开——2026-10-29 实测 judge_C 在身份匹配阶段挂死约 12 小时，
+    子进程既不退出也不输出，父进程卡在 drain 循环里，直到被 runner 看门狗强杀。
+    """
     print(f"\n{'=' * 60}")
     print(f"> {desc}")
     print(f"  命令: {_cmd_for_log(cmd)}")
     print(f"{'=' * 60}")
 
     start = time.time()
+
+    # 单步超时（秒）。0 = 不限制，保持既有行为不变。
+    _step_timeout = int(os.environ.get("INTEGRATION_STEP_TIMEOUT", "0") or 0)
 
     if LOG_FILE is not None:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -115,18 +125,43 @@ def run_cmd(cmd: list[str], desc: str, cwd: Path | str | None = None) -> float:
                 encoding="utf-8",
                 errors="replace",
             )
-            if process.stdout is not None:
-                for line in process.stdout:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()  # 2026-10-18: 修 Popen PIPE stdout 0 字节 + 子进程 silent exit。
-                                        # 原代码仅 write 不 flush，buffer 满之前内容驻留在子进程内
-                                        # Popen 父端 drain thread 收不到数据；PIPE 时序异常时 print 阻塞，
-                                        # 主流程无法继续到后续阶段（实测 multi_judge 子进程在 identity_match
-                                        # 摘要后 silent exit，attribute_match 阶段从未启动）。
-                    logf.write(line)
-            returncode = process.wait()
+            if _step_timeout > 0:
+                # 带超时的分支：输出 drain 放后台线程，主线程 wait(timeout)。
+                # 这样「子进程既不退出也不输出」的挂死能被及时发现并终止——
+                # 2026-10-29 实测 judge_C 在身份匹配阶段挂死约 12 小时，父进程卡在
+                # 同步 drain 循环里，直到被 runner 看门狗强杀（报告里只剩 returncode=1）。
+                def _drain_stream():
+                    if process.stdout is not None:
+                        for line in process.stdout:
+                            sys.stdout.write(line)
+                            sys.stdout.flush()
+                            logf.write(line)
+                _drainer = threading.Thread(target=_drain_stream, daemon=True)
+                _drainer.start()
+                try:
+                    returncode = process.wait(timeout=_step_timeout)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                    raise RuntimeError("{0} 超时（超过 {1} 秒），已终止子进程".format(
+                        desc, _step_timeout))
+                _drainer.join(timeout=10)
+            else:
+                if process.stdout is not None:
+                    for line in process.stdout:
+                        sys.stdout.write(line)
+                        sys.stdout.flush()  # 2026-10-18: 修 Popen PIPE stdout 0 字节 + 子进程 silent exit。
+                                            # 原代码仅 write 不 flush，buffer 满之前内容驻留在子进程内
+                                            # Popen 父端 drain thread 收不到数据；PIPE 时序异常时 print 阻塞，
+                                            # 主流程无法继续到后续阶段（实测 multi_judge 子进程在 identity_match
+                                            # 摘要后 silent exit，attribute_match 阶段从未启动）。
+                        logf.write(line)
+                returncode = process.wait()
     else:
-        result = subprocess.run(cmd, cwd=cwd, capture_output=False, text=True)
+        result = subprocess.run(cmd, cwd=cwd, capture_output=False, text=True,
+                                timeout=_step_timeout if _step_timeout > 0 else None)
         returncode = result.returncode
 
     elapsed = time.time() - start
@@ -236,19 +271,15 @@ def prepare_workspace(args: argparse.Namespace) -> Path:
     for d in (raw_dir, eoicd_out, hlr_out, match_input, match_output, summary_out):
         d.mkdir(parents=True, exist_ok=True)
 
-    # 根据项目类型重命名 EoICD 输入文件，以符合 run_data_processing.py 的硬编码期望
+    # 纯输入驱动：用户给了哪个侧的输入文件，就复制哪个侧 —— 不再用 projects.py 的 sides 硬开关。
+    # 目标文件名优先用项目登记的 pub/sub 键（如 FGMC_EoICD_Subscriber_Table.xlsx），
+    # 缺省时回退通用名；这样 run_data_processing.py 能按名找到文件。
     expected = get_project(args.project)
-    pub_key = expected.get("pub")
-    # 仅当项目登记了 pub 侧且用户提供了 pub 文件时才复制 Publisher 表
-    # （subscriber-only 项目无 pub，跳过）
-    if pub_key and args.eoicd_pub:
-        pub_dst = raw_dir / pub_key
+    if args.eoicd_pub:
+        pub_dst = raw_dir / expected.get("pub", "EoICD_Publisher_Table.xlsx")
         shutil.copyfile(Path(args.eoicd_pub).resolve(), pub_dst)
-    # 仅当项目登记了 sub 侧且用户提供了 sub 文件时才复制 Subscriber 表
-    # （fgmc 等仅 Publisher 侧的项目无 sub，跳过）
-    sub_key = expected.get("sub")
-    if sub_key and args.eoicd_sub:
-        sub_dst = raw_dir / sub_key
+    if args.eoicd_sub:
+        sub_dst = raw_dir / expected.get("sub", "EoICD_Subscriber_Table.xlsx")
         shutil.copyfile(Path(args.eoicd_sub).resolve(), sub_dst)
 
     # HLR 需求文档同时放在 raw_dir（EoICD 追溯步骤会扫描）和 hlr_out
@@ -273,6 +304,33 @@ def prepare_workspace(args: argparse.Namespace) -> Path:
     _copy_supporting_files(src_dirs, raw_dir, exclude_names)
 
     return workspace
+
+
+def resolve_active_sides(args: argparse.Namespace, proj: dict) -> list[str]:
+    """纯输入驱动：根据「用户是否真的提供了有效的 pub/sub 输入文件」决定处理哪些侧。
+
+    这是处理门控的**唯一**来源——不再依赖 projects.py 的 sides 配置来硬开/硬关某一侧。
+      - 用户给了 --eoicd-pub 且文件存在 → 处理 publisher 侧
+      - 用户给了 --eoicd-sub 且文件存在 → 处理 subscriber 侧
+      - 都没给 → 回退 projects.py 的 sides 声明作为兜底（防止无输入时静默全跳过）
+    对所有项目（ams/eps/fgmc/hscu/...）统一适用，自动识别是否有 pub 表或 sub 表。
+    """
+    sides: list[str] = []
+    if args.eoicd_pub and Path(args.eoicd_pub).resolve().is_file():
+        sides.append("publisher")
+    elif args.eoicd_pub:
+        print(f"[WARN]  --eoicd-pub 指向的文件不存在，跳过 publisher 侧: {args.eoicd_pub}")
+    if args.eoicd_sub and Path(args.eoicd_sub).resolve().is_file():
+        sides.append("subscriber")
+    elif args.eoicd_sub:
+        print(f"[WARN]  --eoicd-sub 指向的文件不存在，跳过 subscriber 侧: {args.eoicd_sub}")
+
+    if not sides:
+        # 兜底：没有有效输入时沿用项目声明（通常仍为 pub/sub，但下游会因无文件而报错，
+        # 保留原行为以便排查「完全没传 EoICD 输入」的配置问题）
+        sides = list(proj.get("sides", ["publisher", "subscriber"]))
+        print(f"[INFO]  未检测到有效 EoICD 输入文件，回退项目声明 sides={sides}（下游可能因缺文件失败）")
+    return sides
 
 
 # ============================ 各阶段调用 ============================
@@ -321,6 +379,12 @@ def run_eoicd_processing(args: argparse.Namespace, workspace: Path) -> Path:
         "--config-dir", str(config_dir),
         "--step", "all",
     ]
+    # 纯输入驱动：把「用户实际提供了哪些侧」透传给 EoICD 处理（--sides），
+    # 使其只处理有输入的侧（未给的 side 不处理），而非按 projects.py 的 sides 声明。
+    proj = get_project(args.project)
+    active_sides = resolve_active_sides(args, proj)
+    if active_sides:
+        cmd += ["--sides", ",".join(active_sides)]
     run_cmd(cmd, "EoICD 数据处理")
     return output_dir
 
@@ -338,7 +402,7 @@ def run_hlr_clustering(args: argparse.Namespace, workspace: Path) -> tuple[Path,
 
     cmd = [
         PYTHON, str(HLR_CLUSTER_DIR / "cluster_hlr.py"),
-        "--docx", str(hlr_src),
+        "--hlr", str(hlr_src),
         "--yaml", str(yaml_path),
         "--out", str(cluster_out),
         "--dedup-out", str(dedup_out),
@@ -562,7 +626,7 @@ def generate_attr_config(workspace: Path, skip_ai: bool, sides: list[str] | None
 def run_identity_match(args: argparse.Namespace, workspace: Path) -> None:
     """运行身份匹配模块。"""
     proj = get_project(args.project)
-    sides = proj.get("sides", ["publisher", "subscriber"])
+    sides = resolve_active_sides(args, proj)
     config_path = generate_match_config(workspace, args.skip_ai, sides)
 
     cmd = [
@@ -582,7 +646,7 @@ def run_identity_match(args: argparse.Namespace, workspace: Path) -> None:
 def run_attribute_match(args: argparse.Namespace, workspace: Path) -> None:
     """运行属性匹配模块。"""
     proj = get_project(args.project)
-    sides = proj.get("sides", ["publisher", "subscriber"])
+    sides = resolve_active_sides(args, proj)
     config_path = generate_attr_config(workspace, args.skip_ai, sides)
 
     cmd = [
@@ -731,7 +795,7 @@ def main() -> int:
                         help="EoICD Publisher Excel 文件路径（仅 Publisher 侧项目可不传）")
     parser.add_argument("--eoicd-sub", required=False, default=None,
                         help="EoICD Subscriber Excel 文件路径（仅 Publisher 侧的项目如 fgmc 可不传）")
-    parser.add_argument("--hlr", required=True, help="软件高层需求 .docx 文件路径")
+    parser.add_argument("--hlr", required=True, help="软件高层需求文件（.docx 或 .xlsx）路径")
     parser.add_argument("--project", choices=project_ids(), default="ams",
                         help="系统/项目标识（默认 ams）。可选：" + describe())
     parser.add_argument("--device", default=None,

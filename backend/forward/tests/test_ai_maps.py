@@ -296,7 +296,7 @@ def test_run_ai_update_all_fail_returns_none() -> None:
             ai_base="http://dummy",
             ai_model="dummy",
             ai_config=None,  # run_ai_update 会取默认路径，但 from_config 被 mock 不读
-            docx="dummy.docx",
+            hlr="dummy.docx",  # 2026-10-28：cluster_hlr 的 --docx 已改名 --hlr（dest='hlr'）
             no_ai_scan_new=False,
             name_map=str(name_map),
             state_map=str(state_map),
@@ -379,7 +379,7 @@ def test_run_ai_update_partial_fail_continues_with_warn() -> None:
             ai_base="http://dummy",
             ai_model="dummy",
             ai_config=None,
-            docx="dummy.docx",
+            hlr="dummy.docx",  # 2026-10-28：cluster_hlr 的 --docx 已改名 --hlr（dest='hlr'）
             no_ai_scan_new=False,
             name_map=str(name_map),
             state_map=str(state_map),

@@ -56,7 +56,7 @@ export default function CompletenessPage() {
 
   function handleStart() {
     if (!hlrWordFile) {
-      alert('请上传 HLR Word 文件')
+      alert('请上传 HLR 需求文件（Word/Excel）')
       return
     }
     if (!publisherFile && !subscriberFile) {
@@ -174,7 +174,7 @@ export default function CompletenessPage() {
             >
               <option value="">自动识别</option>
               <option value="ams">空气管理系统 (AMS)</option>
-              <option value="eps">配电装置 (EPS / ATA24EPS)</option>
+              <option value="eps">配电系统（EPS）</option>
               <option value="fgmc">燃油系统 (FGMC)</option>
               <option value="hscu">液压系统 (HSCU)</option>
             </select>

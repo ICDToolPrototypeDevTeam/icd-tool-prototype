@@ -138,7 +138,7 @@ def _clear_token_sidecars(judge_ws: Path) -> None:
             path.unlink()
         except FileNotFoundError:
             pass
-        except Exception:  # noqa: BLE001 — 清不掉也不影响运行
+        except Exception:  # noqa: BLE001 — 清理失败不影响主流程
             pass
 
 
@@ -360,7 +360,7 @@ def _check_map_health(judge_ws: Path, label: str) -> None:
 # 子进程输出过滤式 tee（关键步骤回显 console，全量进日志）
 # ---------------------------------------------------------------------------
 # 2026-10-15：用户要查看每个 judge 的过程，但子模块逐信号 print 仍只进日志；
-# 用正则匹配 7 类关键行（阶段开始 / 阶段成功失败 / 流程启动 / 流程完成 / 告警 / 清理 / token），
+# 用正则匹配 6 类关键行（阶段开始 / 阶段成功失败 / 流程启动 / 流程完成 / 告警 / 清理），
 # 写日志时同时 echo 到 console。子模块逐信号 print 仍只进日志，不刷屏。
 # 注意：子进程模块的 emoji 已统一换成 ASCII 标记（> / [OK] / [FAIL] / [START] / [WARN] / [CLEAN]），
 # 故此处正则同步改为匹配 ASCII 标记（否则关键行匹配不上、不再回显）。
@@ -500,6 +500,11 @@ class JudgeRunContext:
     timeout: int                      # per-judge 预算（秒）
     procs: dict                       # 全局 Popen 登记表（idx -> Popen）
     procs_lock: threading.Lock        # 保护 procs 的写锁
+    # 被硬上限 watchdog 强制终止的 judge 下标集合（2026-10-29）。
+    # 用途：把「超时被杀」与「自身异常退出」区分开——Windows 上 terminate() 的退出码
+    # 就是 1，不记这一笔的话，报告里只剩「returncode=1」，读者无法判断发生了什么
+    # （2026-10-29 实测：judge_C 失效原因不明，note 只写「覆盖缺口：judge_C(returncode=1)」）。
+    killed_by_watchdog: set | None = None
 
 
 def run_single_judge(ctx: JudgeRunContext) -> dict:
@@ -621,8 +626,13 @@ def run_single_judge(ctx: JudgeRunContext) -> dict:
 
     if rc != 0:
         print(f"  judge {name} 运行返回非0（{rc}），详细日志见 {log_path}，该 judge 标记为 error")
+        # 区分「被看门狗强杀（运行超时）」与「自身异常退出」——Windows 上 terminate()
+        # 的退出码就是 1，不区分的话报告里只剩 returncode=1，读者无法判断发生了什么。
+        _killed = bool(ctx.killed_by_watchdog is not None and idx in ctx.killed_by_watchdog)
+        _err = ("被看门狗强制终止（运行超时，rc={0}）".format(rc) if _killed
+                else "returncode={0}".format(rc))
         return {"name": name, "ws": str(judge_ws), "shard": {}, "coverage": "error",
-                "error": f"returncode={rc}", "elapsed": elapsed,
+                "error": _err, "elapsed": elapsed,
                 "token_usage": _read_token_sidecars(judge_ws)}
 
     # 收集 stage-5 report → 分片
@@ -673,6 +683,9 @@ def orchestrate(cfg: dict, timeout: int) -> dict[str, dict]:
     # 子进程句柄登记表（idx -> Popen），供硬上限 watchdog 终止卡死的 judge
     procs: dict[int, "subprocess.Popen"] = {}
     procs_lock = threading.Lock()
+    # 被硬上限 watchdog 强制终止的 judge 下标（2026-10-29）：用于在 judge 的失败原因里
+    # 明确写「超时被杀」而不是笼统的 returncode=1。
+    killed_by_watchdog: set[int] = set()
 
     def _worker(idx, judge):
         ws = root / f"judge_{idx}_{judge['name']}"
@@ -686,6 +699,7 @@ def orchestrate(cfg: dict, timeout: int) -> dict[str, dict]:
         ctx = JudgeRunContext(
             judge=judge, idx=idx, cfg=cfg, shared_ws=shared_ws, judge_ws=ws,
             out_dir=out_dir, timeout=timeout, procs=procs, procs_lock=procs_lock,
+            killed_by_watchdog=killed_by_watchdog,
         )
         res = run_single_judge(ctx)
         with lock:
@@ -715,6 +729,10 @@ def orchestrate(cfg: dict, timeout: int) -> dict[str, dict]:
         for idx, proc in stuck:
             if proc.poll() is None:
                 print(f"  [HARD-LIMIT] 强制终止挂起的 judge[{idx}] 子进程 (pid={proc.pid})")
+                # 记账：这个 judge 是被看门狗强杀的（运行超时），不是自身异常退出。
+                # 报告的「运行有效性」小节要能说清原因（2026-10-29：judge_C 只报
+                # returncode=1，读者无法判断是超时还是崩溃）。
+                killed_by_watchdog.add(idx)
                 try:
                     proc.terminate()
                 except Exception:
@@ -845,6 +863,10 @@ def run_review_route(agg: dict, shards: dict, judge_meta: dict, cfg: dict) -> di
         "needed": 0, "executed": 0, "skipped": 0, "reasons": {},
         "arb_source": "", "arb_model": "", "arb_same_as_judge": False,
         "concurrency": 1, "budget": 0,
+        # 2026-10-29：失败记账。此前失败被计入 executed，报告宣称「获第二裁决」
+        # 而实际存在调用失败（2026-10-29 实测：38 条全部计入 executed，
+        # 而 logs/arb_fail.jsonl 里有 11 次调用失败）。
+        "failed": 0, "partially_failed": 0, "failed_stages": {},
     }
     needed = [f for f, it in agg.items() if it["aggregation"].get("need_review")]
     stats["needed"] = len(needed)
@@ -881,8 +903,17 @@ def run_review_route(agg: dict, shards: dict, judge_meta: dict, cfg: dict) -> di
     conc = int(os.environ.get("MULTI_JUDGE_REVIEW_CONCURRENCY", "8"))
     conc = max(1, min(conc, 16))
     stats["concurrency"] = conc
+    # 打印生效的超时/重试/熔断参数：它们决定「一条信号最坏要等多久」与「什么情况下
+    # 整批止损」。2026-10-29 排查欠费问题时，这三个生效值无法从产物反推，只能回头翻
+    # 源码与 .env——故在此显式打印。
+    _rt = int(os.environ.get("MULTI_JUDGE_REVIEW_TIMEOUT", "60") or 60)
+    _rr = int(os.environ.get("MULTI_JUDGE_REVIEW_RETRIES", "2") or 2)
+    _fs = int(os.environ.get("MULTI_JUDGE_REVIEW_FAILSTOP", "15") or 15)
+    _worst = _rt * (_rr + 1) + _rr * (_rr + 1) // 2   # 每次等满 + 退避合计
     print(f"\n> [复核路由] Step5 仲裁 + Step5.5 peer-aware 复查"
           f"（{len(needed)} 条需复核信号；并发度={conc}，不占 judge 并发额度；预算={budget or '不限'}）")
+    print(f"  [复核参数] 单次超时={_rt}s；每条最多尝试 {_rr + 1} 次（单条最坏约 {_worst}s）；"
+          f"熔断阈值={_fs} 次；欠费/鉴权/模型不存在等永久错误会立即止损")
     arb_cfg = dict(arb_cfg)
     arb_cfg["re_review"] = cfg.get("re_review") or {}
     agg = run_arbitration(agg, shards, judge_meta, arb_cfg)
@@ -895,8 +926,25 @@ def run_review_route(agg: dict, shards: dict, judge_meta: dict, cfg: dict) -> di
         a = item["aggregation"]
         trace = a.get("review_trace") or {}
         info = a.get("peer_review_info") or {}
-        if trace.get("applied"):
+        applied_stages = a.get("review_applied_stages")
+        failures = a.get("review_failures") or []
+        # 「是否获得第二裁决」的判据：优先用 review_applied_stages（真正产出过结论的阶段）；
+        # 老数据没有该字段时才回退 review_trace.applied。
+        # **不能只看 trace.applied**：复核是多阶段的（step5 → step5.5 → step5.6），
+        # 后一阶段成功会整体覆盖 trace，把前一阶段的失败抹掉——统计上就出现
+        # 「executed == needed」而实际有调用失败（2026-10-29 实测）。
+        got_second_opinion = (bool(applied_stages) if applied_stages is not None
+                              else bool(trace.get("applied")))
+        if failures:
+            stats["failed"] += 1
+            for f in failures:
+                _st = f.get("stage") or "unknown"
+                stats["failed_stages"][_st] = stats["failed_stages"].get(_st, 0) + 1
+        if got_second_opinion:
             stats["executed"] += 1
+            if failures:
+                # 部分阶段失败但结论已拿到：计入 executed，同时单列，避免与"全程成功"混为一谈
+                stats["partially_failed"] += 1
             # #9 留痕：Step5.6 会刷新 trace，但复查是否真的发生要单独记，
             # 否则「复查因独立视角不足被跳过」会被算成「复核已生效」。
             pr = trace.get("peer_review") or {}
@@ -906,6 +954,9 @@ def run_review_route(agg: dict, shards: dict, judge_meta: dict, cfg: dict) -> di
         else:
             reason = (trace.get("reason") or info.get("reason")
                       or "复核未生效（未写 review_trace）")
+            if failures:
+                reason = "复核未获第二裁决（调用失败）：" + "；".join(
+                    "{0} {1}".format(f.get("stage"), f.get("reason")) for f in failures)
             _record_skip(stats, reason)
     return stats
 

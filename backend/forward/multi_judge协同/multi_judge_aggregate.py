@@ -821,6 +821,21 @@ def aggregate(shards: dict[str, dict], judge_meta: dict, rule: dict | None = Non
     if n_configured is None:
         n_configured = n_judges
 
+    # judge 级有效性（2026-10-29）：把「哪些 judge 真正参与了判定、谁没参与、为什么」
+    # 预先算好并随每条记录落盘（judge_meta）。原先这些信息只藏在 note 的
+    # 「覆盖缺口：judge_X(returncode=1)」里，读者无法一眼看出「本轮实际只有 2 个
+    # judge 参与了共识」（2026-10-29 实测 372/372 条都带覆盖缺口，而报告正文对此
+    # 只字未提）。judge_errors 是**进程级**失败（与逐信号 coverage 不同），
+    # 故 judge 级可用性以 judge_errors 为准；n_signals 为该 judge 实际产出的信号数。
+    _judge_meta_map: dict[str, dict] = {}
+    for _j in judge_names:
+        _src = dict(judge_meta.get(_j) or {})
+        _err = judge_errors.get(_j)
+        _src["valid"] = not bool(_err)
+        _src["error"] = _err or ""
+        _src["n_signals"] = len(shards.get(_j) or {})
+        _judge_meta_map[_j] = _src
+
     result: dict[str, dict] = {}
     for full in sorted(all_signals):
         judges_with = {j: shards[j][full] for j in judge_names if full in shards[j]}
@@ -871,7 +886,14 @@ def aggregate(shards: dict[str, dict], judge_meta: dict, rule: dict | None = Non
             tied = [k for k, c in top if c == top_count]
             if len(tied) > 1:
                 agreement = "split"
-            elif identity_unanimous and attr_unanimous:
+            elif identity_unanimous and attr_unanimous and n_valid == n_configured:
+                # 必须同时满足「有效源数 == 配置 judge 数」：否则某个 judge 失效
+                # （崩溃 / 超时被杀）时，剩下的 2 个 judge 一致也会被判成 full →
+                # 星级 5★、consensus_label「完全共识」，而实际只有 2/3 有效源参与，
+                # 读者会误读为「三方一致」。2026-10-29 实测：judge_C 失效时 372 条里
+                # 334 条被标成「完全共识」。此处降级为 majority。
+                # 正常场景不变：3 judge 全有效时 n_valid == n_configured == 3；
+                # 单 judge 配置 n_valid == n_configured == 1，同样不变。
                 agreement = "full"
             else:
                 agreement = "majority"
@@ -1120,6 +1142,15 @@ def aggregate(shards: dict[str, dict], judge_meta: dict, rule: dict | None = Non
                 # #3 路由审计：命中的规则（供报告/复核者判断复核是否必要、能否被单条关掉）
                 "need_review_rules": [h["name"] for h in nr_hits],
                 "need_review_details": [h["detail"] for h in nr_hits],
+                # 路由上下文快照：仲裁层会重算 need_review，若没有同样的输入（用户
+                # 逐条关掉的规则、路由开关），仲裁层要么算不出命中规则、要么把用户
+                # 已关闭的规则又加回来。落盘这两项后，仲裁层可忠实重算审计链，
+                # 消除「need_review=True 但 need_review_rules/details 为空」
+                # （2026-10-29 实测 372/372 全 True 而两个数组全空）。
+                "need_review_disabled_rules": [
+                    k for k, v in (rule.get("need_review_rules") or {}).items() if v is False
+                ],
+                "need_review_on_split": need_review_on_split,
                 # #11 单源去歧义：有效结论源数 vs 配置数，避免「1/1」两种含义混为一谈
                 "n_valid_sources": n_valid,
                 "n_judges_participating": n_judges,
@@ -1128,7 +1159,7 @@ def aggregate(shards: dict[str, dict], judge_meta: dict, rule: dict | None = Non
                 "signal_direction": signal_direction,  # 发送/接收（仅匹配到 HLR 的信号有值），供报告拆分
                 "note": note,
             },
-            "judge_meta": judge_meta,
+            "judge_meta": _judge_meta_map,
         }
 
     return result

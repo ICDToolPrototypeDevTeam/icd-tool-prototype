@@ -66,8 +66,9 @@ def is_meta_field(name):
 def parse_args():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description='HLR 软件高层需求聚类工具')
-    ap.add_argument('--docx', default=os.path.join(here, 'example', 'HLR_完整未故障注入.docx'),
-                    help='需求文档 .docx 路径')
+    ap.add_argument('--hlr', '--docx', dest='hlr',
+                    default=os.path.join(here, 'example', 'HLR_完整未故障注入.docx'),
+                    help='软件高层需求文件（.docx 或 .xlsx）路径')
     ap.add_argument('--yaml', default=os.path.join(here, 'eoicd_crop.yaml'),
                     help='属性清单 .yaml 路径')
     ap.add_argument('--out', default=os.path.join(here, 'example', 'HLR聚类结果.json'),
@@ -98,6 +99,9 @@ def parse_args():
     ap.add_argument('--ai-base', default=None, help='覆盖 AI base_url（OpenAI 兼容）')
     ap.add_argument('--ai-key', default=None, help='覆盖 AI api_key')
     ap.add_argument('--ai-model', default=None, help='覆盖 AI model 名称')
+    ap.add_argument('--no-blank-triage', action='store_true',
+                    help='关闭"全空需求接口相关性分诊"：身份信息（bus/label/name/bit）全空的需求一律归档到 '
+                         'dropped_requirements，不做接口相关性判定（旧行为）')
     return ap.parse_args()
 
 
@@ -191,11 +195,25 @@ _NOT_REQ_VALUES = {'否', 'n', 'no', 'false', '0'}
 
 
 def normalize_fields(raw_kv):
-    """把各系统的表头写法统一为标准字段名，并把 N/A 之类占位符归一为空串"""
+    """把各系统的表头写法统一为标准字段名，并把 N/A 之类占位符归一为空串
+
+    单元格值归一（2026-10-28 修）：openpyxl 读出的单元格可能是 int/float（需求编号写纯数字、
+    属性列填数字等），原实现 `(v or '').strip()` 遇到非 str 会抛
+    `AttributeError: 'int' object has no attribute 'strip'`，导致整个 xlsx 解析失败。
+
+    修法保持「falsy 一律空串」的原语义不变（None / '' / 0 / 0.0 / False → ''，
+    这一点不能改：`'0'` 在 _NOT_REQ_VALUES 里代表"不是需求"，与空串语义不同），
+    仅对**truthy 的非字符串**做 str 化；float 的整数值去掉无意义的 '.0' 尾巴。
+    """
     out = {}
     for k, v in raw_kv.items():
         key = _ALIAS_LOOKUP.get(k.strip(), k.strip())
-        val = (v or '').strip()
+        if not v:                              # None / '' / 0 / 0.0 / False → 空串（同原语义）
+            val = ''
+        elif isinstance(v, float) and v.is_integer():
+            val = str(int(v))                 # 1001.0 → '1001'（避免出现无意义的 '.0'）
+        else:
+            val = str(v).strip()
         if val.lower() in _NULL_VALUES:
             val = ''
         out[key] = val
@@ -262,6 +280,86 @@ def parse_docx(path):
                 continue
             reqs.append({'id': rid, **kv})
     return reqs, skipped
+
+
+def parse_xlsx(path):
+    """从 .xlsx / .xlsm 需求清单解析需求，返回 (reqs, skipped)。
+
+    兼容 parse_docx 的 req 字典结构：{'id': 需求编号, '需求ID':..., '需求中文':...}，
+    下游身份匹配 / 属性比对 / 汇总全部零改动。
+
+    设计要点（基于真实样本 RPDU软高需求_未注入故障v1.xlsx）：
+      - 自动定位表头行：扫描首个含 ≥2 个已知字段别名的行（兼容“标题行 + 表头行”布局）。
+      - 支持双段布局（如“当前需求文档 / 下层需求文档”并排）：
+        以每个“需求编号/需求ID”列作为一段的起点，段范围到下一个“需求编号”列或行尾。
+      - 仅保留标准需求字段（需求ID/需求中文/基本原理/验证方法/实现方法/对象类型/是否衍生/安全相关/是否为需求），
+        其余列（模块名称、链接类型等）一律剔除，避免作为噪声参与属性检测。
+      - xlsx 是扁平需求清单，行即需求，不做“是否为需求=否”过滤；空需求编号行跳过。
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        raise SystemExit("解析 .xlsx 需要 openpyxl，请先执行: pip install openpyxl")
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    reqs, skipped = [], []
+    header_tokens = set(_ALIAS_LOOKUP.keys())  # 已含 需求编号/需求ID/需求内容/需求中文/模块名称 等别名
+
+    def looks_like_header(row):
+        return sum(1 for c in row
+                   if c is not None and str(c).strip() in header_tokens) >= 2
+
+    # 仅保留对下游有意义的字段，其它列（模块名称、链接类型…）剔除
+    _KEEP_KEYS = {'需求ID', '需求中文', '基本原理', '验证方法', '实现方法',
+                  '对象类型', '是否衍生', '安全相关', '是否为需求'}
+
+    for ws in wb.worksheets:
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            continue
+        hdr_idx = next((i for i, row in enumerate(rows) if looks_like_header(row)), None)
+        if hdr_idx is None:
+            skipped.append({'reason': '未找到需求表头行', 'sheet': ws.title})
+            continue
+        header = rows[hdr_idx]
+        # 每个“需求编号/需求ID”列作为一段起点
+        seg_starts = [i for i, c in enumerate(header)
+                      if c is not None and str(c).strip() in ('需求编号', '需求ID')]
+        if not seg_starts:
+            skipped.append({'reason': '表头无“需求编号”列', 'sheet': ws.title})
+            continue
+        for s_i, seg0 in enumerate(seg_starts):
+            seg1 = seg_starts[s_i + 1] if s_i + 1 < len(seg_starts) else len(header)
+            col_headers = {}
+            for ci in range(seg0, seg1):
+                name = header[ci]
+                if name is not None and str(name).strip():
+                    col_headers[ci] = str(name).strip()
+            if not col_headers:
+                continue
+            for row in rows[hdr_idx + 1:]:
+                raw = {hname: (row[ci] if ci < len(row) else None)
+                       for ci, hname in col_headers.items()}
+                kv = normalize_fields(raw)
+                kv = {k: v for k, v in kv.items() if k in _KEEP_KEYS}
+                rid = kv.get('需求ID', '').strip()
+                if not rid:
+                    continue  # 空行 / 说明行
+                reqs.append({'id': rid, **kv})
+    wb.close()  # 释放 read_only 模式下的文件句柄
+    return reqs, skipped
+
+
+def parse_requirements(path):
+    """按扩展名分发到 docx / xlsx 解析器。
+
+    命名沿用“需求文档”语义（--hlr / --docx 同义），但不再限定格式。
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext in ('.docx', '.docm'):
+        return parse_docx(path)
+    if ext in ('.xlsx', '.xlsm'):
+        return parse_xlsx(path)
+    raise SystemExit(f"不支持的需求文件格式: {ext}（仅支持 .docx / .xlsx）")
 
 
 def detect_segments(r):
@@ -882,7 +980,7 @@ def run_ai_update(args, reqs, name_st, state_st, signal_st):
                             force=args.ai_force,
                             scan_new=not args.no_ai_scan_new,
                             dry_run=args.ai_dry_run,
-                            source_doc=os.path.basename(args.docx))
+                            source_doc=os.path.basename(args.hlr))
 
     # token 用量 sidecar：供 multi_judge_runner 汇总 AI 映射生成的 token。
     # 路径放在映射文件同目录（即 judge 工作区根），runner 按固定文件名读取；
@@ -933,18 +1031,163 @@ def _ai_update_summary(ai_info):
             'maps': maps}
 
 
+# ---------------- 5b. 全空需求接口相关性分诊 ----------------
+# 目的：身份信息（bus/label/name/bit）全空的需求里，多数是系统级/整体指标（如“50ms 内响应”），
+#       与具体接口无关，不应送匹配；少数虽无身份标识但确与接口相关（如“信号 X 刷新周期 100ms”，
+#       仅未抽出 name/bit），应保留并按原流程（无名 unit 直接送属性比对）处理。
+# 设计：
+#   - 只判“是/否”，prompt 不塞信号列表 → 成本低（按 AI 配置的 batch_size 批量调用）。
+#   - AI 不可用/失败时降级为正则关键词兜底（含接口相关词→相关，否则→不相关，保守丢）。
+#   - 失败不中断主流程：返回 (flags, method, stats)，flags 长度与 items 对齐。
+_INTERFACE_RELATED_RE = re.compile(
+    r'信号|接口|总线|报文|帧|刷新周期|发送间隔|周期|刷新|发送|接收|'
+    r'取值|状态|编码|离散|物理|模拟|量纲|量程|分辨率|位[置]?|bit|'
+    r'协议|命令|指令|遥测|遥控|采样|通道|端口|引脚|电平'
+)
+
+
+def _blank_regex_related(text):
+    """正则兜底：需求原文含接口相关关键词 → 判为接口相关"""
+    return bool(_INTERFACE_RELATED_RE.search(text or ''))
+
+
+def _build_blank_triage_prompt(items):
+    lines = []
+    for i, x in enumerate(items):
+        rid = x.get('req_id', '?')
+        txt = (x.get('req_text') or '').strip().replace('\n', ' ')
+        lines.append(f"{i}. [req_id={rid}] {txt}")
+    return "请逐条判断以下软件高层需求是否与具体接口/信号相关：\n" + "\n".join(lines)
+
+
+def run_blank_triage(args, items):
+    """对“身份信息全空”的需求做“是否接口相关”二元分诊。
+
+    返回 (flags: list[bool], method: str, stats: dict)；flags 与 items 顺序对齐。
+    调用方据此把判为相关的放回主流程、不相关的归档。
+    """
+    if not items:
+        return [], 'none', {'blank_count': 0, 'related_count': 0, 'unrelated_count': 0,
+                            'method': 'none', 'ai_calls': 0}
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        from ai_client import AIClient, AIError
+    except ImportError as e:
+        print(f"警告：AI 模块不可用（{e}），全空项分诊退为正则兜底", file=sys.stderr)
+        client = None
+    else:
+        client = AIClient.from_config(
+            args.ai_config or os.path.join(here, 'ai_config.json'),
+            {'base_url': args.ai_base, 'api_key': args.ai_key, 'model': args.ai_model})
+
+    system = (
+        "你是航空软件需求分析助手。给定若干条软件高层需求原文，逐条判断每条需求"
+        "是否“与具体接口/信号相关”。\n"
+        "【接口相关】明确指向某个信号、总线、报文、接口，或描述某信号的刷新周期/发送间隔/"
+        "取值/状态/编码/分辨率等接口属性。\n"
+        "【非接口相关】纯系统级/整体指标（如整体上电时间、故障恢复时间、系统响应时间、"
+        "环境适应性、安全性目标、维修性要求等），不指向任何具体信号或接口。\n"
+        "只输出 JSON，格式：{\"results\":[{\"req_id\":\"...\",\"interface_related\":true}]}"
+    )
+
+    flags = []
+    method = 'regex'
+    call_count = 0
+
+    if client is not None and client.enabled:
+        method = 'ai'
+        batch = max(int(client.cfg.get('batch_size', 20)), 1)
+        for s in range(0, len(items), batch):
+            chunk = items[s:s + batch]
+            user = _build_blank_triage_prompt(chunk)
+            try:
+                resp = client.chat_json(system, user)
+                call_count += 1
+                by_id = {r.get('req_id'): bool(r.get('interface_related'))
+                         for r in (resp.get('results') or [])}
+                for x in chunk:
+                    fl = by_id.get(x.get('req_id'))
+                    if fl is None:   # 模型漏判 → 单条正则兜底
+                        fl = _blank_regex_related(x.get('req_text'))
+                    flags.append(fl)
+            except Exception as e:
+                print(f"警告：全空项分诊 AI 调用失败（{e}），本批退为正则兜底", file=sys.stderr)
+                for x in chunk:
+                    flags.append(_blank_regex_related(x.get('req_text')))
+    else:
+        if client is not None:
+            print("警告：AI 未配置（base_url/model/api_key 不全），全空项分诊使用正则关键词兜底"
+                  "（准确度低于 AI）", file=sys.stderr)
+        for x in items:
+            flags.append(_blank_regex_related(x.get('req_text')))
+
+    related = sum(1 for f in flags if f)
+    stats = {'blank_count': len(items), 'related_count': related,
+             'unrelated_count': len(items) - related,
+             'method': method, 'ai_calls': call_count}
+    return flags, method, stats
+
+
+def _split_blank_triage(args, results):
+    """对 results 做“身份信息全空项”的拆分与接口相关性分诊。
+
+    返回 (kept_results, dropped_reqs, dropped_items, blank_triage_meta)：
+    - kept_results：正常项 + 分诊为“接口相关”的全空项（放回主流程，按原本方法处理）；
+    - dropped_items：分诊为“非接口相关”的全空项（不送匹配）；
+    - dropped_reqs：按 req_id 归档的 dropped_requirements 条目（reason 注明分诊结论）；
+    - blank_triage_meta：分诊统计，供 meta 输出。
+    """
+    def _has_identity(x):
+        return any(v not in (None, '', []) for v in (x['bus'], x['label'], x['req_name'], x['bit']))
+
+    blank_items = [x for x in results if not _has_identity(x)]
+    kept = [x for x in results if _has_identity(x)]
+
+    stats = None
+    related = []
+    if blank_items and not args.no_blank_triage:
+        flags, _method, stats = run_blank_triage(args, blank_items)
+        related = [x for x, fl in zip(blank_items, flags) if fl]
+        unrelated = [x for x, fl in zip(blank_items, flags) if not fl]
+    else:
+        unrelated = blank_items
+    kept.extend(related)   # 接口相关的全空项按原流程处理
+
+    meta = {
+        'enabled': (not args.no_blank_triage),
+        'blank_count': len(blank_items),
+        'related_count': len(related),
+        'unrelated_count': len(unrelated),
+        'method': (stats or {}).get('method', 'disabled'),
+        'ai_calls': (stats or {}).get('ai_calls', 0),
+    }
+
+    by_req = OrderedDict()
+    for x in unrelated:
+        by_req.setdefault(x['req_id'], []).append(x)
+    dropped_reqs = [{
+        'req_id': rid, 'req_text': items[0]['req_text'], 'item_count': len(items),
+        'reason': ('身份信息全空，经接口相关性分诊判定为非接口相关需求，未生成聚类'
+                   if stats is not None else '身份信息（bus/label/name/bit）全为空，未生成聚类'),
+    } for rid, items in by_req.items()]
+    return kept, dropped_reqs, unrelated, meta
+
+
 # ---------------- 6. 主流程 ----------------
 def main():
     args = parse_args()
-    if not os.path.exists(args.docx):
-        print(f"找不到需求文档: {args.docx}", file=sys.stderr)
+    if not os.path.exists(args.hlr):
+        print(f"找不到需求文档: {args.hlr}", file=sys.stderr)
         sys.exit(1)
     if not os.path.exists(args.yaml):
         print(f"找不到属性清单: {args.yaml}", file=sys.stderr)
         sys.exit(1)
 
     attr_order, attr_sources = load_attrs(args.yaml)
-    reqs, skipped_tables = parse_docx(args.docx)
+    reqs, skipped_tables = parse_requirements(args.hlr)
 
     # AI 辅助映射加载（name_map / state_map / signal_map）
     name_map, name_map_status, state_map, state_map_status, signal_map, signal_map_status = \
@@ -1055,21 +1298,8 @@ def main():
                     'req_name': final_name, 'attrs': attrs_i,
                 })
 
-    # ---------------- 身份信息全空的需求接口项：不保留聚类 ----------------
-    # 判据：bus / label / name / bit 全为空 —— 既无法用于后续身份匹配，也聚不出有意义的类
-    # （典型：HSCU 里只写"处理 LBL_XXX"这类泛化需求）。不静默丢弃，单独归档供人工复核。
-    def _has_identity(x):
-        return any(v not in (None, '', []) for v in (x['bus'], x['label'], x['req_name'], x['bit']))
-
-    dropped_items = [x for x in results if not _has_identity(x)]
-    results = [x for x in results if _has_identity(x)]
-    dropped_by_req = OrderedDict()
-    for x in dropped_items:
-        dropped_by_req.setdefault(x['req_id'], []).append(x)
-    dropped_reqs = [{
-        'req_id': rid, 'req_text': items[0]['req_text'], 'item_count': len(items),
-        'reason': '身份信息（bus/label/name/bit）全为空，未生成聚类',
-    } for rid, items in dropped_by_req.items()]
+    # ---------------- 身份信息全空的需求接口项（含接口相关性分诊） ----------------
+    results, dropped_reqs, dropped_items, blank_triage_meta = _split_blank_triage(args, results)
 
     # ---------------- 属性类汇总 ----------------
     attr_classes = []
@@ -1156,7 +1386,7 @@ def main():
 
     out = {
         'meta': {
-            'source_doc': os.path.basename(args.docx),
+            'source_doc': os.path.basename(args.hlr),
             'req_count': len(reqs),
             'item_count': len(results),
             'dedup_count': len(dedup_view),
@@ -1176,6 +1406,7 @@ def main():
             'signal_map_used': bool(signal_map),
             'signal_map_status': signal_map_status,
             'ai_update': _ai_update_summary(ai_info),
+            'blank_triage': blank_triage_meta,
             'dedup_out': dedup_out,
             'cluster_by': ('依据需求表格全部相关字段（需求中文/基本原理等）检测属性：明确提及某属性才归入该类，'
                            '不从 ICD/EoICD 填充；一条需求可出现在多个类；涉及 0/1 编码定义归 OneState/ZeroState/CodedSet；'
@@ -1190,7 +1421,7 @@ def main():
         json.dump(out, f, ensure_ascii=False, indent=2)
     with open(dedup_out, 'w', encoding='utf-8') as f:
         json.dump({'meta': {
-            'source_doc': os.path.basename(args.docx),
+            'source_doc': os.path.basename(args.hlr),
             'req_count': len(reqs),
             'item_count': len(results),
             'dedup_count': len(dedup_view),
@@ -1209,6 +1440,10 @@ def main():
     if dropped_reqs:
         print(f"未生成聚类 {len(dropped_reqs)} 条（身份信息全空，已归档到 dropped_requirements）: "
               f"{[d['req_id'] for d in dropped_reqs]}")
+    if blank_triage_meta['blank_count']:
+        bt = blank_triage_meta
+        print(f"全空项分诊：{bt['blank_count']} 条全空 / {bt['related_count']} 条判为接口相关（放回主流程）"
+              f" / {bt['unrelated_count']} 条判为非接口相关（归档）；方法={bt['method']}")
     print(f"已输出: {args.out}")
     print(f"去重结果: {dedup_out}")
     if args.debug:

@@ -165,6 +165,10 @@ def build_prompt(batch_pairs):
         "2. 不匹配",
         "...",
         "",
+        "【比对提醒】",
+        "HLR name 可能是中文或中英混合；请将其与 EoICD 信号名（英文缩写）仔细比较，",
+        "判断两者是否指代同一物理信号。机器翻译参考仅供辅助理解，最终判定以原始名称语义为准。",
+        "",
     ]
 
     for i, pair in enumerate(batch_pairs, 1):
@@ -172,9 +176,19 @@ def build_prompt(batch_pairs):
         eoicd = pair["eoicd"]
         bus = eoicd.get("identity", {}).get("bus", "N/A")
         label = eoicd.get("identity", {}).get("label", "N/A")
+        # 与算法相似度一致的 EoICD 锚点（signal_name 优先，其次 signal_short_name，兜底 identity.name）
+        eoicd_name = (
+            eoicd.get("signal_name")
+            or eoicd.get("signal_short_name")
+            or eoicd.get("identity", {}).get("name", "N/A")
+        )
         lines.append(f"--- 组 {i} ---")
-        lines.append(f"HLR name：{hlr['name']}")
-        lines.append(f"EoICD identity-name：{eoicd['identity']['name']}")
+        lines.append(f"HLR name（原始）：{hlr['name']}")
+        if hlr.get("name_en"):
+            lines.append(f"HLR name（机器翻译参考，仅供参考、不作为判定依据）：{hlr['name_en']}")
+        if hlr.get("name_abbr"):
+            lines.append(f"HLR name（工程缩写参考，算法比对用，仅供参考）：{hlr['name_abbr']}")
+        lines.append(f"EoICD 信号名：{eoicd_name}")
         lines.append(f"已确认锚点：Bus={bus}, Label={label}")
         lines.append("")
 

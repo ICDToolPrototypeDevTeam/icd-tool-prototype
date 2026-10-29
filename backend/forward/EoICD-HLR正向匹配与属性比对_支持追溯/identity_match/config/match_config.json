@@ -76,10 +76,21 @@
     // 如 "L11" → "11"，设为空字符串则不去除
     "hlr_label_strip_prefix": "L",
 
-    // 含 null 字段 unit 的名称门控（替代 null_is_wildcard 全匹配爆炸）
-    // 仅当 null_is_wildcard 生效且 unit 含 null 字段、且 HLR name 非 None 时启用
+    // 名称门控（替代 null_is_wildcard 全匹配爆炸）：对所有含 name 的候选对执行
+    // true = 含 name 的候选对一律门控（L1 默认）；false = 仅含 null 字段的 unit 门控（原行为，可回退）
+    "null_identity_gate_all": true,
     "null_identity_sim_threshold": 0.3,   // T：门控阈值，保留名称覆盖比例 ≥ 30% 的候选
-    "null_identity_top_k": 30             // MAX_K：单 unit 候选簇数安全天花板（仅病理泛化名信号触发）
+    "null_identity_top_k": 30,            // MAX_K：单 unit 候选簇数安全天花板（仅病理泛化名信号触发）
+    "per_signal_cap_enabled": true,       // 每信号封顶总开关（false 则回到无 per-signal 封顶的原行为，召回率安全阀）
+    "per_signal_cap_attr_margin": 2,      // K = 已填属性数 + 此余量（补偿"一条需求覆盖多属性/整信号"的近似）
+    "per_signal_cap_floor": 3,            // K 至少为此值（防止属性缺失信号被过度裁剪）
+    "per_signal_cap_group0_exempt": true, // 组0（name_sim 为 None：翻译失败中文名/无名）不占 K、全部保送；false 则回退"组0/组1 同池竞争 K"原行为
+
+    // 中文名翻译预通行（MT-then-token）：将含中文的 HLR name 用 API 大模型译为英文，
+    // 供 name_similarity 走拉丁 token 排序 / 展示；原名保留交 AI 仔细比对。
+    // 仅翻译含中文名，按名去重 + 磁盘缓存，重跑免费；API 失败回退原名。
+    "name_translation_enabled": true,     // 总开关（false 则完全跳过，行为回到"中文名一律交 LLM"）
+    "translation_batch_size": 50          // 每批翻译的名数量（按原始名去重后分批）
   },
 
   "output": {
@@ -87,7 +98,7 @@
     "save_rejected": true,
 
     // 是否保存中间文件（裁剪输入、AI 结果等）
-    "save_intermediate": true,
+    "save_intermediate": false,
 
     // JSON 缩进空格数，0 则为紧凑格式
     "indent_json": 2

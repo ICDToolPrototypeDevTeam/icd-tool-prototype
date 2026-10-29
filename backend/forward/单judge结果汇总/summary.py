@@ -25,7 +25,8 @@ comparisons 后，按既定汇总规则产出：
     report_{pub,sub}.json        —— 结构化结果（含下钻）
     summary_{pub,sub}.docx      —— 人读汇总（Word 文档；未装 python-docx 时回退 .txt）
     summary_{pub,sub}.xlsx      —— 全量明细展开 Excel 附件（含『统计页』『汇总页』与按问题类型分类的多张明细 Sheet）
-  设备名前缀（文件夹名 XXX 部分）默认从 ./input 下名称含『高层需求规范』的 .docx 自动识别，
+  设备名前缀（文件夹名 XXX 部分）默认从 ./input 下软件高层需求文件（.docx 或 .xlsx）自动识别，
+  文件名含『软高需求/软件高层需求/高层需求规范/需求规范』等关键字，去掉已知后缀与版本标记；
   也可用 --device 显式指定；时间戳格式 YYYYMMDD_HHMMSS。
 
 用法：
@@ -37,6 +38,7 @@ comparisons 后，按既定汇总规则产出：
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -76,18 +78,37 @@ def _run_timestamp():
 
 
 def _detect_device_name(raw_dir):
-    """从 input 下名称含『高层需求规范』的 .docx 自动识别设备名（文件夹名 XXX 前缀）。
-    取文件名去掉已知后缀（控制软件高层需求规范 / 软件高层需求规范 / 高层需求规范 / .docx）
-    后的部分；找不到则返回空串（文件夹名不加前缀）。"""
+    """从 input 下软件高层需求文件自动识别设备名（文件夹名 XXX 前缀）。
+
+    支持 .docx 与 .xlsx / .xlsm 两种需求文件格式；文件名含下列任一关键字即视为需求文件：
+    软高需求 / 软件高层需求 / 高层需求规范 / 高层需求 / 需求规范。
+    取文件名去掉已知后缀（控制软件高层需求规范 / 软件高层需求规范 / 高层需求规范 /
+    软件高层需求 / 高层需求 / 软高需求 / 需求规范）及尾部版本/状态标记（如 _未注入故障v1、_v1）后的部分；
+    找不到则返回空串（文件夹名不加前缀）。
+    """
     if not os.path.isdir(raw_dir):
         return ""
+    req_keywords = ('软高需求', '软件高层需求', '高层需求规范', '高层需求', '需求规范')
+    req_suffixes = ('控制软件高层需求规范', '软件高层需求规范', '高层需求规范',
+                    '软件高层需求', '高层需求', '软高需求', '需求规范')
     for fn in os.listdir(raw_dir):
-        if fn.lower().endswith(".docx") and "高层需求规范" in fn:
-            name = fn[:-5]  # 去掉 .docx
-            for suffix in ("控制软件高层需求规范", "软件高层需求规范", "高层需求规范"):
-                if name.endswith(suffix):
-                    name = name[: -len(suffix)]
-                    break
+        low = fn.lower()
+        if not (low.endswith('.docx') or low.endswith('.xlsm') or low.endswith('.xlsx')):
+            continue
+        if not any(kw in fn for kw in req_keywords):
+            continue
+        name = fn
+        for ext in ('.docx', '.xlsm', '.xlsx'):
+            if name.lower().endswith(ext):
+                name = name[: -len(ext)]
+                break
+        # 先去掉尾部版本/状态标记（如 _未注入故障v1 / _v1 / _2024），再剥需求后缀
+        name = re.sub(r'[_\-]?(?:未注入故障|注入故障|故障)?v?\d+$', '', name, flags=re.UNICODE)
+        for suffix in req_suffixes:
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        if name:
             return name
     return ""
 
@@ -575,102 +596,18 @@ def run_direction(attr_report, cfg):
     return out
 
 
-def _iter_json_array_values(fp, array_key):
-    """从 {..., "<array_key>": [ ... ]} 流中逐个产出数组元素，内存友好。
-
-    仅解析目标数组，不把整个（可能数十 MB 的）文件一次性读入内存。适用于
-    rejected_{stage}_{direction}.json 这类顶层为对象、内部含大数组的产物。
-    """
-    dec = json.JSONDecoder()
-    target = '"%s"' % array_key
-    # 1) 定位 "<array_key>": [ 之后的数组起始
-    tail = ""
-    buf = ""
-    started = False
-    while not started:
-        chunk = fp.read(1 << 20)
-        if not chunk:
-            return
-        buf = tail + chunk
-        pos = buf.find(target)
-        if pos == -1:
-            tail = buf[-(len(target) + 8):]
-            continue
-        after = buf.find("[", pos)
-        if after == -1:
-            tail = buf[pos:]
-            continue
-        buf = buf[after + 1:]
-        started = True
-    # 2) 逐个 raw_decode 数组元素
-    #    采用整数偏移 idx 在 buf 上游走，仅在跨越分块边界时对 buf[idx:] 做一次压缩，
-    #    避免每解析一个元素就对剩余缓冲反复切片（原写法对大数组为 O(n^2)，是 54 分钟
-    #    级耗时的根因）。修正后为 O(n)，输出完全一致。
-    idx = 0
-    n = len(buf)
-    while True:
-        while idx < n and buf[idx] in " \t\r\n,":
-            idx += 1
-        if idx >= n:
-            chunk = fp.read(1 << 20)
-            if not chunk:
-                return
-            buf = buf[idx:] + chunk
-            idx = 0
-            n = len(buf)
-            continue
-        if buf[idx] == "]":
-            return
-        try:
-            obj, end = dec.raw_decode(buf, idx)
-        except json.JSONDecodeError:
-            chunk = fp.read(1 << 20)
-            if not chunk:
-                return
-            buf = buf[idx:] + chunk
-            idx = 0
-            n = len(buf)
-            continue
-        yield obj
-        idx = end
-
-
-# 身份识别拒绝原因 → 具体未通过的参数（信号名称/方向/总线/位/标签）
-_REASON_TO_PARAM = {
-    "name mismatch (AI)": "name",
-    "direction mismatch": "direction",
-    "bus mismatch": "bus",
-    "bit mismatch": "bit",
-    "label mismatch": "label",
-}
 _PARAM_CN = {"name": "信号名称(name)", "direction": "方向(direction)",
              "bus": "总线(bus)", "bit": "位(bit)", "label": "标签(label)"}
 _PARAM_ORDER = ["name", "direction", "bus", "bit", "label"]
-_PARAM_EOICD_KEY = {"name": "eoicd_signal_short_name", "direction": "eoicd_direction",
-                    "bus": "eoicd_bus", "bit": "eoicd_bit", "label": "eoicd_label"}
-_PARAM_HLR_KEY = {"bus": "hlr_bus", "bit": "hlr_bit", "direction": "hlr_direction"}
-
-
-def _hlr_value_of(param, obj):
-    """取 HLR 侧期望取值：标签优先 hlr_label_raw（缺失回退 extracted），
-    信号名称取 hlr_name，其余取对应键。"""
-    if param == "label":
-        hv = obj.get("hlr_label_raw")
-        if not hv or hv == "None":
-            hv = obj.get("hlr_label_extracted")
-        return hv
-    if param == "name":
-        return obj.get("hlr_name")
-    return obj.get(_PARAM_HLR_KEY.get(param))
 
 
 def load_identity_rejections(direction, rejected_dir):
     """读取身份识别阶段产物（rejected 文件夹）并按信号聚合拒绝信息。
 
-    身份识别阶段分 name / direction / bus_label_bit 三个子阶段，各自输出
-    rejected_{stage}_{direction}.json，结构为 {meta, rejections:[...]}，每条 rejection
-    含 eoicd_cluster_id / hlr_req_id / reason 等。这里把三个文件按 eoicd_cluster_id
-    聚合，返回 {cid: {"hlrs": set(hlr_req_id), "reasons": set(reason)}}。
+    run_identity_match 在写盘时已将拒绝记录按 eoicd_cluster_id 聚合成
+    {cid: {hlrs, reasons, name, name_full, params}}（见 identity_match/src/rejection_utils），
+    此处仅做跨阶段合并：相同 cid 合并 reasons/hlrs，参数取值取并集；
+    信号名遵循「全名优先、可覆盖已存短名」规则（name_full 优先，否则空位补短名）。
     任一文件缺失则跳过该文件（不报错）；全部缺失返回空 dict。
     """
     agg = {}
@@ -680,36 +617,30 @@ def load_identity_rejections(direction, rejected_dir):
             print("[提示] 未找到身份识别产物 %s，跳过该子阶段" % fn)
             continue
         with open(fn, encoding="utf-8") as f:
-            for obj in _iter_json_array_values(f, "rejections"):
-                cid = obj.get("eoicd_cluster_id")
-                if not cid:
-                    continue
-                d = agg.setdefault(cid, {"hlrs": set(), "reasons": set(), "name": None, "params": {}})
-                h = obj.get("hlr_req_id")
+            data = json.load(f)
+        stage_agg = data.get("rejections_aggregated", {})
+        for cid, info in stage_agg.items():
+            d = agg.setdefault(cid, {"hlrs": set(), "reasons": set(), "name": None, "params": {}})
+            for h in info.get("hlrs", []):
                 if h:
                     d["hlrs"].add(h)
-                r = obj.get("reason")
+            for r in info.get("reasons", []):
                 if r:
                     d["reasons"].add(r)
-                    param = _REASON_TO_PARAM.get(r)
-                    if param:
-                        p = d["params"].get(param)
-                        if p is None:
-                            p = {"eoicd": set(), "hlr": set()}
-                            d["params"][param] = p
-                        ev = obj.get(_PARAM_EOICD_KEY.get(param))
-                        if ev not in (None, ""):
-                            p["eoicd"].add(str(ev))
-                        hv = _hlr_value_of(param, obj)
-                        if hv not in (None, ""):
-                            p["hlr"].add(str(hv))
-                full = obj.get("eoicd_signal_name")
-                short = obj.get("eoicd_signal_short_name")
-                # 「有全名就用全名、否则短名」：全名优先，且可覆盖已存的短名
-                if full:
-                    d["name"] = full
-                elif short and not d["name"]:
-                    d["name"] = short
+            for pk, pv in info.get("params", {}).items():
+                p = d["params"].setdefault(pk, {"eoicd": set(), "hlr": set()})
+                for v in pv.get("eoicd", []):
+                    if v:
+                        p["eoicd"].add(str(v))
+                for v in pv.get("hlr", []):
+                    if v:
+                        p["hlr"].add(str(v))
+            # 全名优先、可覆盖已存短名；无全名时仅在空位补短名（与原逐条规则一致）
+            nf = info.get("name_full")
+            if nf:
+                d["name"] = nf
+            elif not d["name"]:
+                d["name"] = info.get("name")
     return agg
 
 
@@ -1279,7 +1210,7 @@ def main():
     parser.add_argument("--out", default=default_out,
                         help="输出根目录；每次运行在其中生成 '<设备名>EoICD到软件高层需求的落实检查_<时间戳>' 子文件夹")
     parser.add_argument("--device", default=None,
-                        help="设备名前缀（文件夹名 XXX 部分）；默认从 input 下 '高层需求规范' docx 自动识别")
+                        help="设备名前缀（文件夹名 XXX 部分）；默认从 input 下软件高层需求文件（.docx/.xlsx）自动识别")
     args = parser.parse_args()
 
     cfg = load_cfg(args.config)

@@ -165,6 +165,33 @@ def sheet_summary_block(wb, summary: dict):
     ws.cell(r, 3, round(summary.get("average_star_rating", 0), 2)).font = Font(bold=True)
     r += 2
 
+    # ── 运行有效性（2026-10-29）──
+    # judge 失效时必须让读者看见：Word 侧有同口径小节，Excel 台账也要能自证
+    # 「本轮实际由几个模型判定」（2026-10-29 实测：judge_C 崩溃后 372/372 条
+    # 信号的共识都只由 2 个 judge 支撑，而正文未作任何说明）。
+    _je = summary.get("judge_effectiveness") or {}
+    _judges = _je.get("judges") or {}
+    if _judges:
+        _bad = [(n, m.get("error") or "未知原因")
+                for n, m in _judges.items() if not m.get("valid")]
+        _line = "有效 judge：{0}/{1}".format(_je.get("valid", 0), _je.get("configured", 0))
+        if _bad:
+            _line += "（失效：" + "，".join("{0}={1}".format(n, e) for n, e in _bad) + "）"
+        ws.cell(r, 1, _line).font = Font(bold=True, color=_RED if _bad else _GREEN)
+        r += 1
+        for _n, _m in _judges.items():
+            ws.cell(r, 1, "{0}（{1}）".format(_n, _m.get("model") or "—"))
+            ws.cell(r, 2, "正常" if _m.get("valid") else "失效").font = Font(
+                bold=True, color=_GREEN if _m.get("valid") else _RED)
+            ws.cell(r, 3, _m.get("error") or "—").alignment = _WRAP
+            ws.cell(r, 4, "产出信号数 {0}".format(_m.get("n_signals", 0)))
+            r += 1
+        r += 1
+
+    # 注：「AI 复核覆盖」**不进用户向交付物**（Word/Excel 同口径）——复核过程是中间产物，
+    # 交付物只呈现落实结论。复核执行与失败情况落在 runs 工作区的
+    # multi_judge_summary.json / multi_judge_aggregate.json 与 runner 控制台。
+
     # 处置建议
     ws.cell(r, 1, "处置建议").font = Font(bold=True, size=12)
     r += 1
