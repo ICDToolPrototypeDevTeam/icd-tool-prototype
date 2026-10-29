@@ -337,6 +337,9 @@ def _merge_reverse_match_outputs(
         "hlr_已匹配": sum(1 for r in merged_results if r.match_type == "已匹配"),
         "hlr_待确定": sum(1 for r in merged_results if r.match_type == "待确定"),
         "hlr_无匹配": sum(1 for r in merged_results if r.match_type == "无匹配"),
+        "hlr_内部接口": sum(
+            1 for r in merged_results if r.match_evidence.get("internal_channel")
+        ),
         "eoicd_blocks_total": total_blocks if total_blocks > 0 else result_b.stats.get("eoicd_blocks_total", 0),
         "eoicd_blocks_matched": sum(1 for r in merged_results if r.matched_profile_keys),
         "eoicd_blocks_unmatched": len(unmatched_keys),
@@ -461,8 +464,12 @@ def _match_reverse_with_trace(
         # any HLR, retry against the full EoICD set.  The traceability
         # table may be incomplete or its block_keys may be incompatible
         # with the HLR's matching path (e.g. label mismatch).
+        # 内部通道条目是有意判无匹配，不应触发全量 EoICD 重试。
         fallback_ids = {
-            r.hlr_id for r in result_a.results if r.match_type == "无匹配"
+            r.hlr_id
+            for r in result_a.results
+            if r.match_type == "无匹配"
+            and not r.match_evidence.get("internal_channel")
         }
         if fallback_ids:
             fallback_hlrs = [h for h in group_a_hlrs if h.requirement_id in fallback_ids]

@@ -30,6 +30,7 @@ from app.v4.matching.hlr_classifier import (
     extract_sdi_values,
     extract_direction,
 )
+from app.v4.matching.internal_channel import is_internal_channel_requirement
 from app.v4.matching.signal_profiler import build_profiles, build_blocks, SignalProfile, ICDBlock
 from app.v4.models import (
     HLRCoverageResult,
@@ -1128,6 +1129,30 @@ def match_reverse(
 
     for hlr in hlr_reqs:
         lbl = hlr_labels.get(hlr.requirement_id)
+
+        # 内部通道数据（R_norm3）：两型控制器之间的内部数据不在 EoICD
+        # Pub/Sub 表中，按 Label 号命中的 Block 信号名/位定义无法对应。
+        # 直接按“无匹配 + 内部接口标注”处理，不进入 Block 评分，也不
+        # 计入 matched_block_keys；未标注 HLR 同样适用。
+        if is_internal_channel_requirement(hlr.content, enhancements):
+            prof = build_hlr_profile(hlr, lbl) if lbl is not None else None
+            cat = prof.signal_category if prof is not None else ""
+            labels = list(prof.labels) if prof is not None else []
+            label_str = f"（labels: {', '.join(labels[:3])}）" if labels else ""
+            results.append(HLRCoverageResult(
+                hlr_id=hlr.requirement_id,
+                hlr_content=hlr.content,
+                hlr_rationale=hlr.rationale,
+                signal_category=cat,
+                match_type="无匹配",
+                matched_profile_keys=[],
+                matched_profile_count=0,
+                match_evidence={"internal_channel": True, "labels": labels},
+                overall="unmatched",
+                summary=f"[内部接口] 内部通道数据{label_str}，不在 EoICD Pub/Sub 范围，按无匹配处理",
+            ))
+            continue
+
         if lbl is None:
             results.append(HLRCoverageResult(
                 hlr_id=hlr.requirement_id,
@@ -1296,6 +1321,9 @@ def match_reverse(
         "hlr_已匹配": sum(1 for r in results if r.match_type == "已匹配"),
         "hlr_待确定": sum(1 for r in results if r.match_type == "待确定"),
         "hlr_无匹配": sum(1 for r in results if r.match_type == "无匹配"),
+        "hlr_内部接口": sum(
+            1 for r in results if r.match_evidence.get("internal_channel")
+        ),
         "eoicd_blocks_total": len(all_block_keys),
         "eoicd_blocks_matched": len(matched_block_keys),
         "eoicd_blocks_unmatched": len(unmatched_keys),

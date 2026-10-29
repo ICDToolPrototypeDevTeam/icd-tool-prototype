@@ -51,6 +51,56 @@
 
 ## 3. 开发记录
 
+### 2026-10-29 反向匹配：环控内部通道需求按无匹配处理（带内部接口标注）
+
+#### 任务目标
+
+环控（AMS）文档中“从邻通道、对侧通道、对邻通道A429接收数据中解析 Lxx”描述的是两型控制器之间的内部数据路径，不在 EoICD Pub/Sub 表中。旧流程按 Label 号命中 Block 后，信号名/位定义无法对应，裁判会判不一致或需确认（job `0a724eaa` 中 HLR_915/916/923/926）。目标是在匹配层把这类需求直接判为无匹配并带内部接口标注，不进入裁判，且不影响其他 profile 与普通外部需求。
+
+#### 完成内容
+
+1. `MatcherEnhancementConfig` 新增 5 个内部通道字段（默认关闭/空），`_parse_matcher_enhancement` 解析并校验词表、阈值与两个正则；仅 AMS `config.yaml` 启用。
+2. 新增 `matching/internal_channel.py`：同句至少 3 个不同通道词 + 数据路径动词（接收/发送/解析/写入）即命中；支持 `邻/对侧/对邻通道` 简写展开，分隔符覆盖 `、，和及与或以及或者`；`internal_channel_exclude_pattern` 留空即不做告警排除。
+3. `match_reverse` 在 Label 判断前插入前置分支：命中直接输出 `match_type=无匹配`、`match_evidence.internal_channel=true`、`[内部接口]` summary，不进入 Block 评分；`stats` 增加 `hlr_内部接口`。
+4. `_merge_reverse_match_outputs` 同步子计数；trace fallback 排除内部条目，避免全量 EoICD 重试。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/internal_channel.py`（新增）
+2. `backend/app/v4/matching/reverse_matcher.py`
+3. `backend/app/v4/profiles/base.py`
+4. `backend/app/v4/profiles/ams/config.yaml`
+5. `backend/app/v4/pipeline.py`
+
+#### 验证方式
+
+1. profile 加载与配置校验：5 个 profile 均可加载，仅 AMS 启用；词表不足、非法正则、空数据路径正则抛 `ProfileLoadError`。
+2. 39 条环控文档：对比 21 条 ground-truth 内部需求与 18 条外部需求。
+3. job `0a724eaa` 匹配层复跑：逐条对比 `reverse_matches.json`。
+4. mock 反向全流程（`USE_MOCK_LLM=1`）：检查 stats、case 数、4 份 Word。
+5. 历史 AMS job 扫描：57 个 job 去重 111 条需求，对比新旧规则命中集合。
+
+#### 验证结果
+
+**已通过（本机，2026-10-29）**：
+
+1. 39 条文档：21 条内部全部命中、18 条外部 0 误报。
+2. job `0a724eaa`：915/916/923/926 → 无匹配 + `internal_channel=true`；其余 4 条逐字段不变；`hlr_已匹配/待确定/无匹配` 4/4/0 → 3/1/4，`eoicd_blocks_matched/unmatched` 22/1606 → 10/1618。
+3. mock 全流程：裁判 case 8→4，4 份 Word 均显示 `[内部接口]` 文案。
+4. 历史 AMS 语料：旧规则 5 条命中，新规则同样 5 条，无新增/丢失命中。
+5. **尚未执行**：39 条文档 mock 全流程（mock 标注恒为空标签）、2371 条历史 SWHLR 回归、真实模型复跑。
+
+#### 遗留问题
+
+1. 计划中 `comparison/report_generator.py` 的“关键发现”汇总句未实施（按“只改匹配层”范围）。
+2. 告警语境不再排除；若后续出现“三通道均故障发送告警”类外部需求，需重新评估 `internal_channel_exclude_pattern`。
+3. 真实模型端到端结论待复验。
+
+#### 下一步建议
+
+1. 真实模型环境复跑 AMS job，确认裁判分布为“已覆盖 1 / 不一致 3 / 无匹配 4”。
+2. 如需汇总句，再单独放开报告层改动。
+
 ### 2026-10-26 反向裁判可见 DP/RP 分侧原始定义（Block 聚类与匹配不变）
 
 #### 任务目标

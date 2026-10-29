@@ -3,6 +3,16 @@ profile:
   display_name: 空气管理系统控制器 (AMS)
   version: 1.0
 
+matcher:
+  # 内部通道数据前置判断（R_norm3，2026-10-29）。
+  # 命中后按“无匹配 + 内部接口标注”处理，不进入 EoICD Pub/Sub 比对。
+  enable_internal_channel_detection: true
+  internal_channel_terms: [邻通道, 对侧通道, 对邻通道]
+  internal_channel_min_terms: 3
+  internal_channel_data_path_pattern: '(?:A429\s*)?(?:接收|发送|解析|写入)'
+  # 留空表示不做告警语境排除（当前不需要）。
+  internal_channel_exclude_pattern: ''
+
 hlr_parser:
   glossary_table_index: 0
   glossary_header_keywords: ["缩略语", "缩写"]

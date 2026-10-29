@@ -93,7 +93,7 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | `v4/errors.py` | 管线异常 → 面向用户的错误分类与建议；复用 `degradation.fallback.classify_exception` |
 | `v4/models.py` | V4 Pydantic 模型（EoICDRequirement / HLRLabel / ReverseCase / ConsensusResult 等） |
 | `v4/parsers/`  | EoICD PubSub Excel + HLR Word 解析；`glossary_tables.py` 按表头语义识别缩略语表/术语表（不依赖固定表序号、列数或列顺序） |
-| `v4/matching/` | HLR 标注、条目过滤、信号画像、Block 聚合、HLR 分类、反向匹配、追溯预筛选；`glossary_index.py` 为每条 case 选取命中的文档术语（只供裁判/复查 prompt，不参与匹配评分） |
+| `v4/matching/` | HLR 标注、条目过滤、信号画像、Block 聚合、HLR 分类、反向匹配、追溯预筛选；`glossary_index.py` 为每条 case 选取命中的文档术语（只供裁判/复查 prompt，不参与匹配评分）；`internal_channel.py` 为 AMS 内部通道需求前置判断（命中按无匹配 + 内部接口标注，不进入 Block 评分与裁判） |
 | `v4/comparison/` | 多模型裁判、Review Agent 共识、一星复查、报告生成 |
 | `v4/degradation/` | Provider 健康跟踪、Case 超时、熔断、星级降级 |
 | `v4/doc_generators/` | xlsx + 单模型 docx + 共识 docx 生成（反向） |
@@ -373,6 +373,7 @@ backend/forward/            # 正向管线原样代码树（唯一事实源；�
    3c. ICD Block 聚合: 按 (label, signal_family) 分组 → ICDBlock
    3d. HLR 分类: 4 路正则分类 + 提取 Label/位字段/SDI/方向 — matching/hlr_classifier.py
    3e. 两阶段 Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三层过滤 → 三级分层）— matching/reverse_matcher.py
+       说明: AMS profile 开启 `matcher.enable_internal_channel_detection` 时，评分前先做内部通道判断（同句 ≥3 个不同通道词 + 数据路径动词），命中直接输出 `match_type=无匹配` + `match_evidence.internal_channel=true`，summary 带 `[内部接口]` 标注；`stats` 增加 `hlr_内部接口` 子计数 — matching/internal_channel.py
    3f. 可选追溯表预筛选 + 兜底机制 — matching/traceability.py
 
 3.5 RPDU refine 后处理（仅 RPDU profile，由 pipeline `refine=True` 触发）

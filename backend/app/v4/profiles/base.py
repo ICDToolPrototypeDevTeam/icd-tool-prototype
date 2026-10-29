@@ -139,9 +139,9 @@ class HLRParserDriverConfig:
 class MatcherEnhancementConfig:
     """Profile-specific knobs for the reverse-matcher scorer.
 
-    Every flag defaults to False / 20 so AMS/FGMC/HSCU — which omit this
-    section entirely — keep byte-identical scoring. Only RPDU (and any
-    future profile that declares them) opt in.
+    Every flag defaults to False / 20 so profiles that omit this section
+    keep byte-identical scoring. RPDU opts into the three scoring flags;
+    AMS opts into the internal-channel pre-filter (R_norm3).
 
     Attributes:
         enable_cn_suffix_strip: Strip common Chinese suffixes
@@ -161,12 +161,39 @@ class MatcherEnhancementConfig:
         top_k: Override the hardcoded ``_TOP_K = 20`` for candidates
             passed downstream. RPDU raises this to 50 because its HLR
             catalogue expects a wider candidate window.
+        enable_internal_channel_detection: AMS-only pre-filter (R_norm3).
+            When enabled, an HLR whose same clause contains at least
+            ``internal_channel_min_terms`` distinct channel terms and a
+            data-path verb is marked 无匹配 with
+            ``match_evidence["internal_channel"] = True`` before any block
+            scoring. An optional exclude pattern can veto clauses.
+            Internally transmitted cross-channel data is not an EoICD
+            Pub/Sub interface, so Label-number hits are coincidental.
+        internal_channel_terms: Channel terms counted by the pre-filter.
+            Defaults to empty; AMS config supplies
+            ("邻通道", "对侧通道", "对邻通道").
+        internal_channel_min_terms: Minimum distinct channel terms in one
+            clause. AMS uses 3 (the current document's writing style).
+        internal_channel_data_path_pattern: Data-path verb pattern that
+            must appear in the same clause. Defaults to A429 + receive /
+            send / parse / write.
+        internal_channel_exclude_pattern: Clause context that vetoes the
+            match. Empty (default) disables the veto; AMS currently leaves
+            it empty so alarm/warning clauses are not excluded.
     """
 
     enable_cn_suffix_strip: bool = False
     enable_direction_soft_on_exact_signal: bool = False
     enable_signal_number_bonus: bool = False
     top_k: int = 20  # default matches legacy hardcoded constant
+
+    # AMS internal-channel pre-filter (R_norm3, 2026-10-29). All defaults
+    # keep the legacy matcher path, so non-AMS profiles are unaffected.
+    enable_internal_channel_detection: bool = False
+    internal_channel_terms: tuple[str, ...] = ()
+    internal_channel_min_terms: int = 3
+    internal_channel_data_path_pattern: str = r"(?:A429\s*)?(?:接收|发送|解析|写入)"
+    internal_channel_exclude_pattern: str = ""
 
 
 @dataclass(frozen=True)
@@ -406,6 +433,79 @@ def _parse_matcher_enhancement(data: dict[str, Any] | None) -> MatcherEnhancemen
         raise ProfileLoadError(
             f"matcher.top_k must be an integer, got {top_k_raw!r}"
         ) from e
+
+    terms_raw = data.get("internal_channel_terms", ())
+    if terms_raw is None:
+        terms_raw = ()
+    elif isinstance(terms_raw, str):
+        terms_raw = (terms_raw,)
+    if not isinstance(terms_raw, (list, tuple)):
+        raise ProfileLoadError(
+            "matcher.internal_channel_terms must be a list of strings, "
+            f"got {type(terms_raw).__name__}"
+        )
+    if not all(isinstance(term, str) for term in terms_raw):
+        raise ProfileLoadError(
+            "matcher.internal_channel_terms must contain only strings"
+        )
+    internal_channel_terms = tuple(
+        term.strip() for term in terms_raw if term.strip()
+    )
+
+    min_terms_raw = data.get("internal_channel_min_terms", 3)
+    try:
+        internal_channel_min_terms = int(min_terms_raw)
+    except (TypeError, ValueError) as e:
+        raise ProfileLoadError(
+            "matcher.internal_channel_min_terms must be an integer, "
+            f"got {min_terms_raw!r}"
+        ) from e
+    if internal_channel_min_terms < 1:
+        raise ProfileLoadError(
+            "matcher.internal_channel_min_terms must be >= 1, "
+            f"got {internal_channel_min_terms}"
+        )
+
+    enable_internal_channel_detection = bool(
+        data.get("enable_internal_channel_detection", False)
+    )
+    if (
+        enable_internal_channel_detection
+        and len(internal_channel_terms) < internal_channel_min_terms
+    ):
+        raise ProfileLoadError(
+            "matcher.internal_channel_terms defines "
+            f"{len(internal_channel_terms)} term(s), fewer than "
+            f"internal_channel_min_terms={internal_channel_min_terms}"
+        )
+
+    data_path_pattern = str(
+        data.get(
+            "internal_channel_data_path_pattern",
+            r"(?:A429\s*)?(?:接收|发送|解析|写入)",
+        )
+    ).strip()
+    exclude_pattern = str(
+        data.get("internal_channel_exclude_pattern", "")
+    ).strip()
+    if enable_internal_channel_detection and not data_path_pattern:
+        raise ProfileLoadError(
+            "matcher.internal_channel_data_path_pattern must not be empty "
+            "when internal-channel detection is enabled"
+        )
+    for key, pattern in (
+        ("internal_channel_data_path_pattern", data_path_pattern),
+        ("internal_channel_exclude_pattern", exclude_pattern),
+    ):
+        if not pattern:
+            continue
+        try:
+            re.compile(pattern)
+        except re.error as e:
+            raise ProfileLoadError(
+                f"matcher.{key} is not a valid regex: {pattern!r} ({e})"
+            ) from e
+
     return MatcherEnhancementConfig(
         enable_cn_suffix_strip=bool(data.get("enable_cn_suffix_strip", False)),
         enable_direction_soft_on_exact_signal=bool(
@@ -413,6 +513,11 @@ def _parse_matcher_enhancement(data: dict[str, Any] | None) -> MatcherEnhancemen
         ),
         enable_signal_number_bonus=bool(data.get("enable_signal_number_bonus", False)),
         top_k=top_k,
+        enable_internal_channel_detection=enable_internal_channel_detection,
+        internal_channel_terms=internal_channel_terms,
+        internal_channel_min_terms=internal_channel_min_terms,
+        internal_channel_data_path_pattern=data_path_pattern,
+        internal_channel_exclude_pattern=exclude_pattern,
     )
 
 

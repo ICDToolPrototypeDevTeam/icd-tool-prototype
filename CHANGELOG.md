@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-10-29
+
+### Fixed
+
+- **反向匹配：环控（AMS）内部通道需求按 Label 号巧合匹配，被裁判误报不一致**：`邻通道、对侧通道、对邻通道A429接收数据` 描述的是两型控制器之间的内部数据路径，不体现为 EoICD Pub/Sub 接口；旧流程仅按 Label 号命中 Block，信号名/位定义无法对应，裁判据此判 inconsistent/needs_review（job `0a724eaa` 中 HLR_915/916/923/926 共 4 条，3 条待确定 + 1 条误判已匹配）。本次在匹配层增加 AMS 专属前置判断（R_norm3）：新增 `matching/internal_channel.py`，同一子句（按 `。；;\n` 切分）内至少出现 3 个不同通道词（`邻通道`/`对侧通道`/`对邻通道`，先展开 `邻/对侧/对邻通道` 等共用后缀简写，分隔符支持 `、，和及与或以及或者`）且出现数据路径动词（`接收/发送/解析/写入`，可带 `A429`）即命中；命中后直接输出 `match_type=无匹配`、`match_evidence.internal_channel=true`、summary `[内部接口] 内部通道数据（labels: …），不在 EoICD Pub/Sub 范围，按无匹配处理`，不进入 Block 评分、不占用 `matched_block_keys`，并跳过 trace 模式的全量 EoICD 兜底重试。规则由 profile `matcher` 配置驱动：`MatcherEnhancementConfig` 新增 5 个字段（默认关闭/空），仅 AMS `config.yaml` 启用；`internal_channel_exclude_pattern` 预留告警语境排除，AMS 当前留空（不排除）。`match_reverse` 与 `_merge_reverse_match_outputs` 的 `stats` 增加 `hlr_内部接口` 子计数。**验证**：job `0a724eaa` 匹配层复跑，4 条内部需求全部 `无匹配` + `internal_channel=true`，其余 4 条 `match_type`/`matched_profile_keys`/`summary` 逐字段不变；`hlr_已匹配/待确定/无匹配` 4/4/0 → 3/1/4，`eoicd_blocks_matched/unmatched` 22/1606 → 10/1618；39 条环控文档 21 条内部全部命中、18 条外部 0 误报；57 个历史 AMS job 去重 111 条需求，新旧规则命中集合一致（5 条）；mock 全流程 4 份 Word 均显示 `[内部接口]`。**边界**：仅 AMS 启用；两通道/单通道不命中；告警语境暂不排除；HLR 级整条判定（混合范围需求也会整条无匹配）。该改动需**重建后端镜像**才生效。
+
 ## [Unreleased] - 2026-10-28
 
 ### Added

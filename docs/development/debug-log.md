@@ -3261,3 +3261,73 @@ def extract_sdi_values(text: str) -> set[str]:
 1. 需重建后端镜像才在服务器生效。
 2. 真实模型端到端结论待复验。
 3. BitOffsetWithinDS / BitOffsetWithinMsg 的接收侧基准问题另案处理。
+
+---
+
+## BUG-20261029-001：环控内部通道需求被按 Label 命中 Pub/Sub Block，裁判误报不一致
+
+#### 状态
+
+verified（匹配层已复验；真实模型端到端待复验）
+
+#### 发现日期
+
+2026-10-29
+
+#### 关联 Issue / PR
+
+- Issue 待补（本地分支 `issue-xxx-internal-channel-false-alarm-release`）
+- 关联 job：`0a724eaa-39f0-4065-88e6-3118d72a6544`
+- 关联文档：`issues_file/plan-内部通道需求无匹配标注-2026-10-28.md`
+
+#### 问题现象
+
+环控（AMS）SWHLR 中 HLR_915 / HLR_916 / HLR_923 / HLR_926 描述“从邻通道、对侧通道、对邻通道A429接收数据中解析 Lxx”。这类需求是两型 AMSC 控制器之间的内部数据通路，不在 EoICD Pub/Sub 表中，但 HLR 里的 Label 编号恰好能命中 EoICD 中的某个 Block。匹配层据此给出 `已匹配` / `待确定` 并送裁判，裁判看到信号名、偏移量、SDI 等完全对不上，判为不一致或需确认，形成误报。
+
+#### 影响范围
+
+仅 AMS profile 的“三通道内部数据”写法；两通道/单通道描述、无数据路径动词的引用、以及 FGMC/HSCU/RPDU/FSECU profile 均不受影响。39 条环控文档中 21 条内部需求命中、18 条外部需求 0 误报；57 个历史 AMS job 去重 111 条需求中旧规则 5 条命中、新规则同样 5 条。
+
+#### 原因分析
+
+（已定位）匹配层没有“内部接口”概念，`match_reverse` 对所有 HLR 一律按 Label 前缀粗筛 + 6 维评分找 Block。内部通道需求的 Label 编号与 Pub/Sub 中的块编号同域，粗筛必然命中，评分维度（Label 相同、信号关键词部分重叠）又能过阈值，于是产生“看似匹配、内容全错”的结果。
+
+#### 修复方案
+
+在匹配层（不改提示词）加入 R_norm3 前置判断：
+
+1. `MatcherEnhancementConfig` 新增 5 个内部通道字段（默认关闭），仅 AMS `config.yaml` 启用；
+2. 新增 `internal_channel.py`：同句至少 3 个不同通道词（邻通道/对侧通道/对邻通道，支持 `邻、对侧、对邻通道` 简写展开与 `以及/或者/和/及/与/或` 分隔）+ 数据路径动词（`A429 接收/发送/解析/写入`）即命中；
+3. `match_reverse` 在 Label 分支前插入该判断，命中直接输出 `match_type=无匹配` + `match_evidence.internal_channel=true` + `[内部接口]` summary，不进入 Block 评分与裁判；
+4. `stats` 增加 `hlr_内部接口` 子计数，`_merge_reverse_match_outputs` 同步；trace fallback 排除内部条目。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/internal_channel.py`（新增）
+2. `backend/app/v4/matching/reverse_matcher.py`
+3. `backend/app/v4/profiles/base.py`
+4. `backend/app/v4/profiles/ams/config.yaml`
+5. `backend/app/v4/pipeline.py`
+
+#### 验证方式
+
+1. 5 个 profile 加载与配置校验（词表不足 / 非法正则 / 空数据路径正则抛 `ProfileLoadError`）。
+2. 39 条环控文档 ground-truth 对比；57 个历史 AMS job 去重需求扫描。
+3. job `0a724eaa` 匹配层复跑，逐条对比 `reverse_matches.json`。
+4. mock 反向全流程（`USE_MOCK_LLM=1`）检查 stats、case 数与 4 份 Word。
+
+#### 验证结果
+
+**已通过（本机，2026-10-29）**：
+
+1. 39 条文档：21 条内部全部命中、18 条外部 0 误报；5 个 profile 仅 AMS 启用。
+2. job `0a724eaa`：915/916/923/926 → `无匹配` + `internal_channel=true`；其余 4 条逐字段不变；`hlr_已匹配/待确定/无匹配` 4/4/0 → 3/1/4，`eoicd_blocks_matched/unmatched` 22/1606 → 10/1618，`hlr_内部接口=4`。
+3. mock 全流程：裁判 case 8→4，4 份 Word 均出现 `[内部接口]` 文案。
+4. 历史 AMS 语料：新旧规则命中集合一致（5 条），无新增/丢失。
+5. **尚未执行**：真实模型端到端复跑、39 条文档 mock 全流程（mock 标注恒为空标签）、2371 条历史 SWHLR 回归、trace fallback 运行时路径（当前 job 无 trace_dir，仅代码审查）。
+
+#### 遗留问题
+
+1. 报告层“关键发现”汇总句未加内部接口说明（按“只改匹配层”范围未实施）。
+2. 告警语境不再排除；若后续出现“三通道均故障发送告警”类外部需求，需重新评估 `internal_channel_exclude_pattern`。
+3. 需重建后端镜像才在服务器生效。
