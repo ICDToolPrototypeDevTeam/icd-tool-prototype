@@ -1207,7 +1207,6 @@ def match_reverse(
             else:
                 match_type = "待确定"
         elif cat == "A429显式" and hlr_prof.labels:
-            has_label_in_eoicd = False
             for label_str in hlr_prof.labels:
                 clean_label = label_str.strip().upper()
                 if not clean_label.startswith("L"):
@@ -1215,7 +1214,6 @@ def match_reverse(
                 prefix = clean_label + "/"
                 label_blocks = [block_index[k] for k in block_index if k.startswith(prefix)]
                 if label_blocks:
-                    has_label_in_eoicd = True
                     # Score all label-matched blocks without threshold filter,
                     # sort by score desc, so AI has signal context even for weak matches
                     raw_scored: list[tuple[int, dict[str, int], ICDBlock]] = []
@@ -1228,7 +1226,10 @@ def match_reverse(
                     raw_scored = _apply_hard_gates(hlr_prof, raw_scored, enhancements=enhancements)
                     scored = raw_scored
                     break
-            match_type = "待确定" if has_label_in_eoicd else "无匹配"
+            # Label 存在不等于有证据：候选可能全部被硬门控剔除（如方向
+            # 矛盾且 signal_name=0）。此时没有任何 Block 可交给 AI 裁判，
+            # 按无匹配处理，避免 0 证据的“待确定”进入裁判流程。
+            match_type = "待确定" if scored else "无匹配"
         else:
             match_type = "无匹配"
 

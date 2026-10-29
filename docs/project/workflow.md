@@ -34,6 +34,7 @@ Step 3: 反向匹配（含条目过滤→信号画像→Block 聚合→HLR 分�
     3c: ICD Block 聚合（按 (label, signal_family) 分组 → ICDBlock）
     3d: HLR 分类（4 路正则分类 + 提取 Label/位字段/SDI/方向）— matching/hlr_classifier.py
     3e: 两阶段 Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三层过滤 → 三级分层）— matching/reverse_matcher.py
+        A429显式路径在 Label 命中但硬门控剔除全部候选时输出“无匹配”，不生成 0 Block 的“待确定” case
         前置判断（仅 AMS profile，`matcher.enable_internal_channel_detection`）：同句 ≥3 个不同通道词 + 数据路径动词 → 纳入“无匹配”并加内部接口标注，不进入 Block 评分与 AI 裁判
     3f: 可选追溯表预筛选 + 兜底机制 — matching/traceability.py
 

@@ -3397,3 +3397,70 @@ verified
 1. 表 1～扫描起点之间的前置需求表仍保持原行为；当前语料未出现该形态。
 2. `parse-hlr` CLI 缺少 profile 参数（`TypeError`），与本次无关，另行处理。
 3. 需重建后端镜像才在服务器生效。
+
+---
+
+## BUG-20261029-003：零 Block 的“待确定”被当作有证据结果送入 AI 裁判
+
+#### 状态
+
+verified（匹配层差分 + mock 全流程已复验；真实模型端到端待复验）
+
+#### 发现日期
+
+2026-10-29
+
+#### 关联 Issue / PR
+
+- Issue 待补（本地分支 `issue-xxx-internal-channel-false-alarm-release`）
+- 关联 job：`8569002a-6947-4419-a929-7af3ced706a4`（当前复现）
+- 历史同型 job：`0d4c8720-2e90-49cb-a103-d7e6666bb059`、`75ac77de-0c9d-46cb-b8ba-2912a413d75d`、`a93e900e-39d6-4d98-ba3b-e86fbe028f63`、`5a46f028-235b-4d78-9ac8-aa8da8fb8957`
+
+#### 问题现象
+
+`FSF21000101_HLR_2939` 预期为无匹配：EoICD 中只有 `L20/AFT_CED_U1`（方向接收、`signal_name=0`），没有 HLR 描述的 `FWD_CAR_TS` 温度/有效性信号。但 `reverse_matches.json` 输出 `待确定`、`matched_profile_keys` 为空，随后 `build_reverse_cases` 仍把该条送入 AI 裁判，裁判只能看到 0 个 Block。
+
+#### 影响范围
+
+仅 A429显式路径、Label 前缀命中但硬门控剔除全部候选的 HLR。历史上 225 个 job 输出中 530 条 `待确定` 里 21 条为 0 Block；其中 HSCU `FSF29005501_HLR_023194` 在当前 HEAD 上已因代码漂移不再重现，实际新旧代码差分为 20 条（9 个不同 HLR）。仍有 Block 的 509 条 `待确定` 与 1183 条 `已匹配` 不受影响。
+
+#### 原因分析
+
+（已定位）`match_reverse` 的 A429显式兜底分支在 Path1 无候选时，会重评分全部 Label 块并执行硬门控，但旧代码用 `has_label_in_eoicd` 决定类型：只要 Label 在 EoICD 中出现过就输出 `待确定`，不检查硬门控后 `scored` 是否为空。`HLR_2939` 的唯一候选因方向矛盾被 Gate 1 剔除，`scored` 已为空，`match_type` 仍为 `待确定`；`build_reverse_cases` 的过滤条件为 `match_type in ("已匹配", "待确定")`，因此 0 Block 结果进入裁判。
+
+#### 修复方案
+
+以硬门控后的候选集合为准，而不是 Label 是否存在：
+
+```python
+match_type = "待确定" if scored else "无匹配"
+```
+
+兜底分支的全量重评分、硬门控、排序与 Top-K 逻辑不变；Block 选择与证据内容不变。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/reverse_matcher.py`
+
+#### 验证方式
+
+1. HEAD 匹配器与工作区匹配器在同一解析输入上差分（6 个含零 Block 待确定的历史 job，覆盖 AMS/HSCU）。
+2. 当前 job `8569002a` 全量 8 条 HLR 逐字段对比。
+3. 四 profile 回归：AMS `ae916d09`、HSCU `cb2110b2`、FGMC `d619f867`、RPDU `cbe23e48`。
+4. `1029测试1.docx` 执行 `USE_MOCK_LLM=1` 反向全流程，检查 stats、裁判 case、Word 产物。
+
+#### 验证结果
+
+**已通过（本机，2026-10-29）**：
+
+1. 6 个 job 差分：仅 20 条 `待确定`（0 Block）→ `无匹配`（0 Block），`matched_profile_keys` 全部一致；`hlr_已匹配`、`eoicd_blocks_matched/unmatched` 不变。第 21 条 HSCU `HLR_023194` 在 HEAD 上已不重现（新旧代码均为 0 条待确定），属于历史代码漂移。
+2. 当前 job：仅 `HLR_2939` 变化（`待确定` 0 Block → `无匹配` 0 Block），其余 7 条逐字段不变；stats `待确定 3 → 2`、`无匹配 2 → 3`，`eoicd_blocks_matched` 27 不变。
+3. 四 profile：AMS 23 / HSCU 10 / FGMC 7 条 0 差异；RPDU 11 条匹配类型不变（Block 数差异来自历史 trace 模式基线，非本改动）。
+4. mock 全流程：8 条 HLR，stats `已匹配 3 / 待确定 2 / 无匹配 3 / 内部接口 2`；裁判 case 5 条，`HLR_2939` 进入 NOMATCH；4 份 Word 与 Excel 正常生成。
+5. **尚未执行**：真实模型端到端复跑。
+
+#### 遗留问题
+
+1. `comparison/report_generator.py` 的“关键发现”仍写“N 条SWHLR未进入AI裁判: x条待确定, y条无匹配”，其中 `待确定` 实际会进入裁判，且与“判定分布”重复统计；经确认该字段只写入 `reverse_report.json` 并打印到任务日志，不进入 4 份 Word，暂不修改。
+2. 历史已落盘结果不回溯；续跑/重跑才应用新类型。
+3. 需重建后端镜像才在服务器生效。

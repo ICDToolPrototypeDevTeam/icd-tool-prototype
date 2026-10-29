@@ -373,6 +373,7 @@ backend/forward/            # 正向管线原样代码树（唯一事实源；�
    3c. ICD Block 聚合: 按 (label, signal_family) 分组 → ICDBlock
    3d. HLR 分类: 4 路正则分类 + 提取 Label/位字段/SDI/方向 — matching/hlr_classifier.py
    3e. 两阶段 Block 级匹配（Label 前缀粗筛 → 6 维评分 → 三层过滤 → 三级分层）— matching/reverse_matcher.py
+       说明: A429 显式路径在 Label 命中但硬门控剔除全部候选时输出 `match_type=无匹配`，不生成 0 Block 的 `待确定` case
        说明: AMS profile 开启 `matcher.enable_internal_channel_detection` 时，评分前先做内部通道判断（同句 ≥3 个不同通道词 + 数据路径动词），命中直接输出 `match_type=无匹配` + `match_evidence.internal_channel=true`，summary 带 `[内部接口]` 标注；`stats` 增加 `hlr_内部接口` 子计数 — matching/internal_channel.py
    3f. 可选追溯表预筛选 + 兜底机制 — matching/traceability.py
 

@@ -51,6 +51,50 @@
 
 ## 3. 开发记录
 
+### 2026-10-29 反向匹配：零证据“待确定”按无匹配处理
+
+#### 任务目标
+
+`match_reverse` 的 A429显式兜底分支在 Label 命中但硬门控剔除全部候选后，仍按“Label 存在”输出 `待确定`，导致 0 个 Block 的 case 被 `build_reverse_cases` 送入 AI 裁判（job `8569002a` 的 `FSF21000101_HLR_2939`）。目标是在匹配层把这类零证据结果直接判为 `无匹配`，不影响仍有 Block 的 `待确定` 与 `已匹配`。
+
+#### 完成内容
+
+1. 删除兜底分支的 `has_label_in_eoicd` 标志，改为以硬门控后的 `scored` 是否为空决定类型：`match_type = "待确定" if scored else "无匹配"`。
+2. 保留兜底分支原有的全量 Label 块重评分、硬门控与 Top-K 逻辑，Block 选择与证据内容不变。
+3. 补充注释说明“Label 存在不等于有证据”，避免后续误把零候选当待确定。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/reverse_matcher.py`
+
+#### 验证方式
+
+1. 将 HEAD 的匹配器导出为独立模块，与工作区代码在相同解析输入上逐 job 差分（6 个含零 Block 待确定的历史 job，含 AMS/HSCU）。
+2. 当前 job `8569002a` 全量 8 条 HLR 对比 `match_type`、`matched_profile_keys`、`overall` 与统计。
+3. 四 profile 回归：AMS `ae916d09`、HSCU `cb2110b2`、FGMC `d619f867`、RPDU `cbe23e48`。
+4. `1029测试1.docx` 执行 `USE_MOCK_LLM=1` 反向全流程，检查 stats、裁判 case 与 Word 产物。
+
+#### 验证结果
+
+**已通过（本机，2026-10-29）**：
+
+1. 6 个 job 新旧差分：仅 20 条 `待确定`（0 Block）变为 `无匹配`（0 Block），`matched_profile_keys` 全部一致；`hlr_已匹配` 与 `eoicd_blocks_matched/unmatched` 不变。历史扫描中的第 21 条（HSCU `FSF29005501_HLR_023194`）在 HEAD 上已因代码漂移不再重现，新旧代码均为 0 条 `待确定`，与本改动无关。
+2. 当前 job：仅 `HLR_2939` 由 `待确定` 变 `无匹配`，其余 7 条逐字段不变；stats `待确定 3 → 2`、`无匹配 2 → 3`。
+3. 四 profile：AMS/HSCU/FGMC 0 差异；RPDU 11 条匹配类型不变（Block 数差异来自历史 trace 模式基线，与本改动无关）。
+4. mock 全流程：8 条 HLR，stats `已匹配 3 / 待确定 2 / 无匹配 3 / 内部接口 2`；裁判 case 5 条，`HLR_2939` 进入 NOMATCH；4 份 Word / Excel 正常生成。
+5. **尚未执行**：真实模型端到端复跑（本次为匹配层类型判定改动，mock 已覆盖下游串联）。
+
+#### 遗留问题
+
+1. `comparison/report_generator.py` 的“关键发现”汇总句把 `待确定` 计入“未进入AI裁判”，且与“判定分布”重复统计；经确认该字段只写入 `reverse_report.json` 并打印到任务日志，不进入 4 份 Word，暂不修改。
+2. 历史已落盘结果不回溯；续跑/重跑才会应用新类型。
+3. 需重建后端镜像才在服务器生效。
+
+#### 下一步建议
+
+1. 真实模型环境复跑 `8569002a`，确认 `HLR_2939` 在报告中的“无匹配”展示与裁判 case 数。
+2. 单独评估报告层汇总句修复（`待确定` 实际会进入裁判，应按真实 case 集合统计）。
+
 ### 2026-10-29 HLR Word 解析：纳入文档第一张需求表（方案 B）
 
 #### 任务目标
