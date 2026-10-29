@@ -116,7 +116,7 @@
     "save_full_report": true,
 
     // 是否保存中间文件（mismatch 裁剪输入、AI 复核结果）
-    "save_intermediate": true,
+    "save_intermediate": false,
 
     // JSON 缩进空格数
     "indent_json": 2

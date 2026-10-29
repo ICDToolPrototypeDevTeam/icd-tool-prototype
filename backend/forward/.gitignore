@@ -23,6 +23,9 @@ integration_workspace*/
 结果汇总/input/
 结果汇总/outputs/
 
+# 身份匹配：中文名翻译磁盘缓存（运行时按 HLR 内容生成，可重建，不入库）
+EoICD-HLR正向匹配与属性比对_支持追溯/identity_match/src/cache/
+
 # EoICD 数据处理模块的输出目录（processed / processed_eps）为运行时生成，不入库
 # 注意：input/ams、input/eps 是输入样本数据，需要入库，不要忽略
 EoICD侧数据处理/data/processed/

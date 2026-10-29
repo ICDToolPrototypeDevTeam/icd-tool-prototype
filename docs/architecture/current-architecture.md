@@ -171,12 +171,13 @@ Step 6 报告生成
 
 ### 7.1 正向完整性分析流程（EoICD → HLR，多 judge 一致性管线）
 
-正向管线回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析（正确性比对）互补。Issue #119 起，正向改为**原样集成**的多 judge 一致性管线，当前代码树对应「正向检查集成-发送工具集成版 V3」：业务实现全部在 `backend/forward/` 原样代码树内（`multi_judge_runner.py` 编排），工程侧由适配层 `backend/app/forward/` 驱动，与反向管线（`v4/pipeline.py`）严格分离。
+正向管线回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析（正确性比对）互补。Issue #119 起，正向改为**原样集成**的多 judge 一致性管线，当前代码树对应「正向检查集成-发送工具集成版 V4.1」：业务实现全部在 `backend/forward/` 原样代码树内（`multi_judge_runner.py` 编排），工程侧由适配层 `backend/app/forward/` 驱动，与反向管线（`v4/pipeline.py`）严格分离。
 
 ```text
-上传文件（HLR Word + EoICD PubSub Excel[+ 追溯表 0-N 张，单槽多文件，未传=全量 / 传任一张=追溯]）
+上传文件（HLR 需求文件 .docx/.xlsx + EoICD PubSub Excel[+ 追溯表 0-N 张，单槽多文件，未传=全量 / 传任一张=追溯]）
     ↓
 Step 1/4 阶段1 共享（EoICD 数据处理，只跑一次）
+   HLR .xlsx 走扁平需求清单解析（V4.1）；中文名称先做翻译预扫并落盘缓存
    共享产物复制给各 judge（「输入只解析一次」在新正向中的落点）
     ↓
 Step 2/4 各 judge 并行独立判定（阶段2/3/4；每 judge 一个子进程）
@@ -184,6 +185,7 @@ Step 2/4 各 judge 并行独立判定（阶段2/3/4；每 judge 一个子进程�
     ↓
 Step 3/4 聚合 + Step5 仲裁 + Step5.5 peer-aware 复查
    仲裁固定 deepseek（配置 arbitrator 段）
+   V4.1 起输出 judge 有效性与复核失败计数；单 judge 有硬上限 watchdog
     ↓
 Step 4/4 报告生成
    Word 报告 + Excel 明细；按固定交付名复制到 <job_dir>/output/
@@ -196,7 +198,8 @@ Step 4/4 报告生成
 正向集成层（Issue #119）的模块边界与约束：
 
 ```text
-backend/forward/            正向代码树（唯一事实源，内容与「发送工具集成版 V3」一致，工程侧不改其业务实现）
+backend/forward/            正向代码树（唯一事实源，内容与「发送工具集成版 V4.1」一致，工程侧不改其业务实现；
+                             仅保留工程集成契约：token 增量标记 / sidecar / --base-tokens、--ai-key 日志脱敏）
 backend/app/forward/        适配层（编排与翻译，零业务算法）：
                               projects（系统类型识别：显式选择优先，否则按文件名自动识别）
                               config_builder（mock / 真实两套配置；真实密钥仅运行环境解析、子进程 env 传入）
@@ -209,6 +212,7 @@ backend/app/forward/        适配层（编排与翻译，零业务算法）：
 并发隔离                    正向 runner 的工作区硬编码在代码树内（runs/integration_workspace、output/），
                              两个并发任务共用一棵树会互相覆盖 → 每任务把代码树（约 2MB，仅代码）
                              复制到 <job_dir>/forward/ 运行；续跑复用已有副本，保住 judge 中间结果；
+                             复制时跳过运行时缓存（identity_match/src/cache、单judge结果汇总/outputs），
                              任务成功收尾时清理副本内 runs/（失败/中断保留，供续跑与排查）
 结果口径                    6 张统计卡取自判定分布（已落实→covered_direct、部分落实→covered_aggregate、
                              未落实→uncovered，其余需人工判断项含「不一致」桶汇总为 possible）；
@@ -479,7 +483,7 @@ V4 工程化集成的关键决策由 `docs/decisions/ADR-001-V4后端接入策�
 - ADR-001 中 D3（`/api/v4` 命名空间）、D4（import 适配但不改业务逻辑）、D5（mock_models 显式标识）、D6（`consistency/{model}` 扩展点）、D7（JSON 不暴露）仍有效。
 - ADR-001 中 D2 / D8 及 D1 的「暂不删 V3」部分已由 ADR-002 取代（V3 已移除、`kind` 字段已删除）。
 - ADR-002 记录了 V3 移除范围、决策点 A1（去 kind）与 B（保留 app/v4 正向原型）；其中 D4（保留正向原型）已由 ADR-003 取代（正向原型已删除）。
-- ADR-003 记录了 V4 早期正向原型与旧单模型反向 CLI 的移除范围，并约定未来正向采用 ICDBlock 级 Case、候选检索算法待定。其中**与正向相关的表述已被 Issue #119 取代**：正向已改为原样集成「发送工具集成版 V3」多 judge 一致性管线（见 §7.1），不再采用 ICDBlock 级 Case 的旧设计，`v4/` 内的旧正向模块已删除。
+- ADR-003 记录了 V4 早期正向原型与旧单模型反向 CLI 的移除范围，并约定未来正向采用 ICDBlock 级 Case、候选检索算法待定。其中**与正向相关的表述已被 Issue #119 取代**：正向已改为原样集成「发送工具集成版」多 judge 一致性管线（当前为 V4.1，见 §7.1），不再采用 ICDBlock 级 Case 的旧设计，`v4/` 内的旧正向模块已删除。
 
 如未来 V4 路由 / Schema / JobManager / LLM 抽象层有变化，需同时更新本节与相应 ADR。
 
@@ -545,4 +549,4 @@ adapter 对账（必须在 cleanup_run_workspace 删除 runs/ 之前）：
   → job.result.token_usage 与 forward_summary.json
 ```
 
-约束：父进程只认增量标记（`[tokens] delta=N`）；三类 sidecar 路径（identity / attribute / AI 映射）是 runner 与入口脚本之间的契约，未来若与「发送工具集成版」源树同步，必须连同增量标记、sidecar 文件名/路径、`--base-tokens` 一并保留，否则逐字节一致性测试会失败。V3 起 runner 会把 judge 子进程的关键行加 `[judge_N name] ` 前缀回显，父进程解析必须用 search 而非 match。
+约束：父进程只认增量标记（`[tokens] delta=N`）；三类 sidecar 路径（identity / attribute / AI 映射）是 runner 与入口脚本之间的契约，未来若与「发送工具集成版」源树同步，必须连同增量标记、sidecar 文件名/路径、`--base-tokens` 一并保留，否则逐字节一致性测试会失败。V3 起 runner 会把 judge 子进程的关键行加 `[judge_N name] ` 前缀回显，父进程解析必须用 search 而非 match。**2026-10-29 同步 V4.1 时上游删除了全部 token 采集代码，工程侧已按本契约重新落回源树（见 `backend/forward/使用说明.md` §6.1），后续同步必须继续保留。**

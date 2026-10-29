@@ -56,7 +56,7 @@ export default function CompletenessPage() {
 
   function handleStart() {
     if (!hlrWordFile) {
-      alert('请上传 HLR Word 文件')
+      alert('请上传 HLR 需求文件（Word/Excel）')
       return
     }
     if (!publisherFile && !subscriberFile) {

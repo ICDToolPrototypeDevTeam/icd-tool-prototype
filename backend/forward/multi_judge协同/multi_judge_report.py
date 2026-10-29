@@ -289,6 +289,51 @@ def generate_report(agg: dict, summary: dict, output_path: Path,
     )
     _sum_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
+    # ── 运行有效性（2026-10-29）──
+    # 「多模型共识」报告必须让读者看见本轮实际有几个模型真正参与了判定。
+    # 2026-10-29 实测：judge_C 崩溃（returncode=1）后，372/372 条信号的共识都只由
+    # 2 个 judge 支撑，而正文对此只字未提（仅在明细 note 里写「覆盖缺口：judge_C(...)」），
+    # 读者会把 2 模型结论误读为 3 模型共识。
+    _je = summary.get("judge_effectiveness") or {}
+    _judges = _je.get("judges") or {}
+    if _judges:
+        doc.add_heading("运行有效性", level=3)
+        _valid = int(_je.get("valid", 0) or 0)
+        _cfg = int(_je.get("configured", 0) or 0)
+        if _valid < _cfg:
+            _p = doc.add_paragraph()
+            _r = _p.add_run("本轮实际参与判定的 judge 为 {0}/{1} 个".format(_valid, _cfg))
+            _r.bold = True
+            _p.add_run("，缺失的 judge 及其原因见下表；本报告的结论由存活的 {0} 个 judge "
+                       "共同支撑，并非全部 {1} 个模型的共识。".format(_valid, _cfg))
+        else:
+            doc.add_paragraph("本轮 {0} 个 judge 全部正常参与判定。".format(_cfg))
+        _jt = doc.add_table(rows=1, cols=5)
+        _jt.style = "Table Grid"
+        style_header(_jt, ["judge", "模型", "状态", "原因", "产出信号数"])
+        for _name, _m in _judges.items():
+            _row = _jt.add_row()
+            _ok = bool(_m.get("valid"))
+            set_cell(_row.cells[0], str(_name), bold=True)
+            set_cell(_row.cells[1], str(_m.get("model") or "—"))
+            set_cell(_row.cells[2], "正常" if _ok else "失效", bold=True,
+                     color=_GREEN if _ok else _RED)
+            set_cell(_row.cells[3], str(_m.get("error") or "—"),
+                     color=None if _ok else _RED)
+            set_cell(_row.cells[4], str(_m.get("n_signals", 0)))
+        for r in _jt.rows:
+            r.cells[0].width = Cm(2.6)
+            r.cells[1].width = Cm(4.2)
+            r.cells[2].width = Cm(1.8)
+            r.cells[3].width = Cm(5.4)
+            r.cells[4].width = Cm(2.0)
+        layout_fixed(_jt)
+
+    # 注：「AI 复核覆盖」**不进用户向交付物**——复核过程是中间产物，交付物只呈现
+    # 落实结论（约定见 multi_judge_summary.format_summary_text 的 include_review_coverage
+    # 说明，报告侧固定传 False）。复核执行与失败情况落在 runs 工作区的
+    # multi_judge_summary.json / multi_judge_aggregate.json 与 runner 控制台，需要时从那里查。
+
     doc.add_heading("判定分布", level=3)
     st = doc.add_table(rows=1, cols=2)
     st.style = "Table Grid"
@@ -297,8 +342,13 @@ def generate_report(agg: dict, summary: dict, output_path: Path,
         row = st.add_row()
         set_cell(row.cells[0], label, bold=True, color=_verdict_color(label))
         set_cell(row.cells[1], f"{count} 条")
-    set_cell(st.add_row().cells[0], "合计", bold=True)
-    set_cell(st.add_row().cells[0], str(summary.get("total", 0)), bold=True)
+    # 合计行：两格填在**同一行**。
+    # 2026-10-29 修复：原写成两个 add_row()（一个放「合计」、另一个放总数），
+    # 于是合计被拆成两行、数量列还留空 —— 与 Excel 侧同表写法（gen_excel_report.py
+    # 的 ws.cell(r,1,"合计") + ws.cell(r,2,total)）不一致，看着像漏了数据。
+    _sum_row = st.add_row()
+    set_cell(_sum_row.cells[0], "合计", bold=True)
+    set_cell(_sum_row.cells[1], f"{summary.get('total', 0)} 条", bold=True)
     for r in st.rows:
         r.cells[0].width = Cm(6.0)
         r.cells[1].width = Cm(3.0)

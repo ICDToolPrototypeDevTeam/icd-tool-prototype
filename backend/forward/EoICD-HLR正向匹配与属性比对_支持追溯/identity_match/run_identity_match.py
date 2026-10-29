@@ -45,7 +45,9 @@ from name_cropper import crop_name_input
 from name_ai_matcher import batch_ai_match
 from name_pair_deduper import select_representatives, radiate_results
 from name_result_feeder import feed_ai_results
+from name_translator import run_translation
 from bit_matcher import generate_match_report
+from rejection_utils import aggregate_rejections, rejections_to_jsonable
 
 
 # ============================ 配置默认值 ============================
@@ -132,7 +134,7 @@ def step_bus_label_bit(eoicd_clusters, hlr_units, config, direction: str, projec
         safe_save_json(
             {
                 "meta": {"direction": direction, "stage": "bus_label_bit", "total_rejected": len(rejected_bus_label_bit)},
-                "rejections": rejected_bus_label_bit,
+                "rejections_aggregated": rejections_to_jsonable(aggregate_rejections(rejected_bus_label_bit)),
             },
             os.path.join(paths["rejected_dir"], f"rejected_bus_label_bit_{direction}.json"),
             project_root, indent,
@@ -174,7 +176,7 @@ def step_direction(retained_bus_label_bit, config, direction: str, project_root:
         safe_save_json(
             {
                 "meta": {"direction": direction, "stage": "direction", "total_rejected": rejected_count},
-                "rejections": rejected_direction,
+                "rejections_aggregated": rejections_to_jsonable(aggregate_rejections(rejected_direction)),
             },
             os.path.join(paths["rejected_dir"], f"rejected_direction_{direction}.json"),
             project_root, indent,
@@ -222,7 +224,7 @@ def step_name_pipeline(retained_direction, config, direction: str, project_root:
                 {
                     "meta": {"direction": direction, "stage": "null_identity_retrieval",
                              "total_rejected": len(retrieval_rejected)},
-                    "rejections": retrieval_rejected,
+                    "rejections_aggregated": rejections_to_jsonable(aggregate_rejections(retrieval_rejected)),
                 },
                 os.path.join(paths["rejected_dir"], f"rejected_null_identity_retrieval_{direction}.json"),
                 project_root, indent,
@@ -289,7 +291,7 @@ def step_name_pipeline(retained_direction, config, direction: str, project_root:
         safe_save_json(
             {
                 "meta": {"direction": direction, "stage": "name", "total_rejected": len(rejected_name)},
-                "rejections": rejected_name,
+                "rejections_aggregated": rejections_to_jsonable(aggregate_rejections(rejected_name)),
             },
             os.path.join(paths["rejected_dir"], f"rejected_name_{direction}.json"),
             project_root, indent,
@@ -570,18 +572,18 @@ def main():
     for d in ["output_dir", "intermediate_dir", "rejected_dir"]:
         (PROJECT_ROOT / config["paths"][d]).mkdir(parents=True, exist_ok=True)
 
+    # token 用量 sidecar：进程退出时落盘，供 multi_judge_runner 生成报告时汇总。
+    # 相对路径按 PROJECT_ROOT 解析（与上面创建输出目录的规则一致）。
+    atexit.register(
+        write_token_sidecar,
+        PROJECT_ROOT / config["paths"]["output_dir"] / "token_usage.json",
+    )
+
     # 加载数据
     print(f"\n[加载数据]")
     t0 = time.time()
 
     paths = config["paths"]
-
-    # token 用量 sidecar：进程退出时落盘，供 multi_judge_runner 生成报告时汇总。
-    # 相对路径按 PROJECT_ROOT 解析（与上面创建输出目录的规则一致）。
-    atexit.register(
-        write_token_sidecar,
-        PROJECT_ROOT / paths["output_dir"] / "token_usage.json",
-    )
 
     # Publisher 侧：仅当处理方向包含 pub 且输入文件存在时才加载；
     # 仅 Subscriber 侧的项目无 publisher 输入，跳过 pub 方向（不崩，镜像 sub 处理）。
@@ -632,6 +634,9 @@ def main():
         hlr_units = flatten_hlr_requirements(hlr_data)
         hlr_clustered = hlr_data
         print(f"  使用 HLR 聚类结果: {len(hlr_units)} 条需求")
+
+    # 中文名翻译预通行（MT-then-token）：给每个 HLR unit 附 name_en，供相似度排序与 AI 参考
+    hlr_units = run_translation(hlr_units, config)
 
     t_load = time.time() - t0
     if eoicd_pub is not None:

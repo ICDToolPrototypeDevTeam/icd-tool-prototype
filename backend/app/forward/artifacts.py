@@ -8,7 +8,7 @@ Word/Excel 落 ``<正向树根>/output``。两个并发任务共用一棵树必�
 :func:`cleanup_run_workspace` 清副本内 ``runs/``（中间产物可达数百 MB）；失败/中断
 任务不清理，供续跑复用与排查。
 
-Excel：当前 runner（发送工具集成版 V3）聚合完成后已自动生成 xlsx（manifest 的
+Excel：当前 runner（发送工具集成版 V4.1）聚合完成后已自动生成 xlsx（manifest 的
 excel_report 兑现），:func:`run_excel_report` 作为兜底仍会重跑
 ``multi_judge协同/gen_excel_report.py`` 的 ``main()``（读 runs 工作区
 aggregate/summary，同名同内容覆盖写，开销仅数秒）。注意 V3 起脚本的
@@ -37,13 +37,18 @@ _MANIFEST_GLOB = "run_manifest_*.json"
 
 def _ignore_runtime_dirs(_dir, names):
     """复制时排除运行时目录：input(样本 35M)、output/runs(历史产物)、
-    EoICD侧数据处理/data(阶段1 中间数据 23M)、__pycache__、*.log。"""
+    EoICD侧数据处理/data(阶段1 中间数据 23M)、identity_match/src/cache(翻译缓存)、
+    单judge结果汇总/outputs、__pycache__、*.log。"""
     skipped = []
     for n in names:
         p = Path(_dir) / n
         if n in {"input", "output", "runs", "__pycache__", ".git"}:
             skipped.append(n)
         elif n == "data" and p.parent.name == "EoICD侧数据处理":
+            skipped.append(n)
+        elif n == "cache" and p.parent.name == "src" and p.parent.parent.name == "identity_match":
+            skipped.append(n)
+        elif n == "outputs" and p.parent.name == "单judge结果汇总":
             skipped.append(n)
         elif n.endswith(".log"):
             skipped.append(n)

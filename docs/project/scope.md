@@ -1,24 +1,28 @@
 # 项目范围说明
 
-本文档用于说明 **ICD工具原型** 的项目范围、输入输出边界和当前版本限制。当前版本仅保留 V4 反向管线；V3 旧范围已随 V3 代码移除（见 ADR-002）。
+本文档用于说明 **ICD工具原型** 的项目范围、输入输出边界和当前版本限制。当前版本包含 V4 反向管线（HLR→EoICD 正确性比对）与正向完整性分析管线（EoICD→HLR 漏写检查）；V3 旧范围已随 V3 代码移除（见 ADR-002）。
 
 ## 1. 项目定位
 
-ICD工具原型 是一套「**反向**」覆盖性分析工具：从软件高层需求（HLR）出发，判断每条 HLR 是否在 EoICD 文档（PubSub Excel）里有对应的接口定义；如缺失或不匹配，输出差异报告。
+ICD工具原型 是一套双向覆盖性分析工具：
+
+- **反向**（HLR → EoICD）：从软件高层需求（HLR）出发，判断每条 HLR 是否在 EoICD 文档（PubSub Excel）里有对应的接口定义；如缺失或不匹配，输出差异报告；
+- **正向**（EoICD → HLR）：从 EoICD 源文件出发，检查每个业务对象是否在 HLR 正文中被对应描述，识别漏写并输出完整性分析报告与明细。
 
 当前版本定位为本地演示原型，重点验证以下能力：
 
-1. EoICD PubSub Excel 与 HLR Word 解析；
+1. EoICD PubSub Excel 与 HLR 需求文件（.docx / .xlsx）解析；
 2. HLR 需求 AI 标注；
 3. HLR→EoICD 反向匹配（含追溯表预筛选）；
 4. 多模型裁判与 Review Agent 共识评分；
-5. 条目化清单（xlsx）与差异分析报告（docx）输出。
+5. 条目化清单（xlsx）与差异分析报告（docx）输出；
+6. EoICD→HLR 多 judge 正向完整性分析（含追溯范围分析）。
 
 ## 2. 当前支持范围
 
 工具输入包括：
 
-1. **HLR Word 文档**（必填）：从「软件需求」章节下的 8 行 × 2 列需求表中提取字段，命名为 `hlr_word_file`。
+1. **HLR 需求文件**（必填）：反向管线为 .docx（从「软件需求」章节下的需求表中提取字段），正向管线 V4.1 起额外支持 .xlsx 扁平需求清单；统一命名为 `hlr_word_file`。
 2. **EoICD Publisher PubSub Excel**（与 Subscriber 二选一）：`.xlsx`，命名为 `eoicd_publisher_file`。
 3. **EoICD Subscriber PubSub Excel**（与 Publisher 二选一）：`.xlsx`，命名为 `eoicd_subscriber_file`。
 4. **追溯 Excel**（可选，0-N 个）：设备→HLR / 设备→ICD 追溯表，启用预筛选时必填，命名为 `traceability_files`。
@@ -86,7 +90,7 @@ Issue #74 在不破坏 AMS/FGMC/HSCU 既有行为（默认全部关闭）的前�
 
 | 字段 | 扩展名 | 大小限制 | 必填 |
 | --- | --- | --- | --- |
-| `hlr_word_file` | `.docx` | ≤ 50 MB | 是 |
+| `hlr_word_file` | `.docx`（反向） / `.docx`、`.xlsx`（正向，V4.1 起） | ≤ 50 MB | 是 |
 | `eoicd_publisher_file` | `.xlsx` | ≤ 50 MB | 二选一 |
 | `eoicd_subscriber_file` | `.xlsx` | ≤ 50 MB | 二选一 |
 | `traceability_files` (list) | `.xlsx` | ≤ 50 MB / 文件 | 0-N；启用 `enable_traceability_prefilter=true` 时建议 ≥1 |

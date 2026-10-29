@@ -9,6 +9,7 @@ bit 不匹配直接拒绝，减少后续 AI 匹配量。
 from collections import defaultdict
 
 from utils import extract_label, match_field, parse_bit_range, name_similarity
+from name_translator import has_chinese
 
 
 def get_cluster_id(eoicd):
@@ -57,9 +58,16 @@ def run_bus_label_matching(eoicd_clusters, hlr_units, config):
     rules = config.get("matching_rules", {})
     null_is_wildcard = rules.get("null_is_wildcard", True)
     strip_prefix = rules.get("hlr_label_strip_prefix", "L")
-    # 含 null 字段 unit 的名称门控参数（替代 null_is_wildcard 全匹配爆炸）
+    # 名称门控参数（替代 null_is_wildcard 全匹配爆炸）
+    # gate_all=True 时对"所有含 name 的候选对"执行名称门控；False 时仅对含 null 字段的 unit 执行（原行为）
     sim_threshold = rules.get("null_identity_sim_threshold", 0.3)
     top_k = rules.get("null_identity_top_k", 30)
+    gate_all = rules.get("null_identity_gate_all", True)
+    # 每信号封顶（治"一个信号匹配一堆需求"的爆炸）：K = 已填属性数 + 余量，且不低于地板。
+    # 作为安全天花板而非主动降秩过滤器；false 时回到无 per-signal 封顶的原行为（召回率安全阀）。
+    per_signal_enabled = rules.get("per_signal_cap_enabled", True)
+    per_signal_margin = rules.get("per_signal_cap_attr_margin", 2)
+    per_signal_floor = rules.get("per_signal_cap_floor", 3)
 
     retained = []
     rejected = []
@@ -126,28 +134,34 @@ def run_bus_label_matching(eoicd_clusters, hlr_units, config):
                 })
                 continue
 
-            # 含 null 字段且 HLR name 非 None 的 unit 走名称门控：
-            # 替代 null_is_wildcard 触发的全匹配爆炸，仅保留名称覆盖比例 ≥ 阈值的簇。
-            # name 为 None 的 unit 不走门控（保留原通配行为，下游 skip_ai_pairs 处理）。
-            # 含中文(无拉丁子串) unit 经 name_similarity 返回 None → 跳过确定性门控，交 LLM 判定。
+            # 名称门控：对所有"含 name 的候选对"执行（L1 扩展，替代仅含 null 字段才门控）。
+            # gate_all=False 时退化为仅含 null 字段的 unit 门控（原行为）。
+            # 相似度用"翻译名优先"(name_en or 原名) 计算，供排序/展示；
+            # 确定性脚本门控：仅对"可算相似度且英文名(不含中文)"的候选执行——
+            #  - 纯英文名（不含中文）：门控
+            #  - 含中文名（纯中文 / 混合名）一律不门控，只参与 cap 排序、交 LLM，
+            #    避免缩写展开 VLV→Valve、CMD→Command 或中文语义字面不命中被误杀
             unit_name = unit.get("name")
+            translated = unit.get("name_abbr") or unit.get("name_en")
             has_null = unit_bus is None or unit_label is None or unit_bit is None
             name_sim = None
-            if has_null and unit_name is not None:
+            if unit_name is not None and (gate_all or has_null):
                 eoicd_name = eoicd.get("signal_name") or eoicd.get("signal_short_name") or ""
-                name_sim = name_similarity(unit_name, eoicd_name)
-                # 仅对"可判定"的英文名做确定性门控；含中文(name_sim=None)交 LLM，不丢弃。
-                if name_sim is not None and name_sim < sim_threshold:
-                    rejected.append({
-                        "eoicd_cluster_id": cluster_id,
-                        "eoicd_signal_name": eoicd.get("signal_name"),
-                        "hlr_req_id": req_id,
-                        "hlr_interface_idx": interface_idx,
-                        "reason": "null_identity_gate",
-                        "name_sim": name_sim,
-                        "hlr_name": unit_name,
-                    })
-                    continue
+                name_sim = name_similarity(translated or unit_name, eoicd_name)
+                is_pure_chinese = has_chinese(unit_name)
+                if name_sim is not None and not is_pure_chinese:
+                    if name_sim is not None and name_sim < sim_threshold:
+                        rejected.append({
+                            "eoicd_cluster_id": cluster_id,
+                            "eoicd_signal_name": eoicd.get("signal_name"),
+                            "eoicd_signal_short_name": eoicd.get("signal_short_name"),
+                            "hlr_req_id": req_id,
+                            "hlr_interface_idx": interface_idx,
+                            "reason": "name_identity_gate",
+                            "name_sim": name_sim,
+                            "hlr_name": unit_name,
+                        })
+                        continue
 
             candidate_interfaces.append({
                 "unit": unit,
@@ -166,6 +180,59 @@ def run_bus_label_matching(eoicd_clusters, hlr_units, config):
                 "eoicd_cluster": eoicd,
                 "candidate_interfaces": candidate_interfaces,
             })
+
+    # 每信号封顶（治"一个信号匹配一堆需求"的爆炸）：
+    # 一个 EoICD 信号最多保留 K 个最相似候选，K = 该信号「已填属性数」+ 余量，且不低于地板。
+    # 上界逻辑：一条 HLR 需求通常描述信号的一个属性，故一个信号的合法需求数 ≲ 其属性数。
+    # K 随信号丰富度自适应（属性多→易被多条需求引用→K 大），作为安全天花板而非主动降秩过滤器。
+    # 按 name_sim 降序截 top-K；name_sim 为 None（中文名/无名，交 LLM 判定）的候选优先保留，
+    # 避免把本要送 LLM 的模糊候选误删。被截候选不计入 rejected（避免重新放大产物体积）。
+    #
+    # per_signal_cap_group0_exempt（默认 true）：组 0（name_sim 为 None：翻译失败中文名/无名，交 LLM）
+    #   全部保送、不占 K；组 1（有相似度）独立按 K 截断（取相似度最高的 top-K），与组0 数量无关。
+    #   设为 false 则回到「组0/组1 同池竞争 K」原行为（召回率安全后阀，防组0 过大引爆下游 LLM）。
+    #   注：本开关仅控制"封顶阶段组0 是否占 K"，不另加下游护栏；组0 过大时由 false 回退兜底。
+    if per_signal_enabled:
+        def _eoicd_attr_count(eoicd):
+            n = 0
+            for _layer, layer_attrs in (eoicd.get("attributes") or {}).items():
+                if isinstance(layer_attrs, dict):
+                    n += sum(1 for v in layer_attrs.values() if v is not None)
+            return n
+
+        def _cap_key(c):
+            ns = c["match_info"].get("name_sim")
+            # name_sim 为 None（翻译失败的中文名/无名，交 LLM）优先保留（组 0）；
+            # 翻译成功的中文名已带真实相似度，按相似度与其他候选一起竞争（组 1），
+            # 不再强制占满 K（修复"中文名占满 K"的 L2 缺陷）。
+            return (0 if ns is None else 1, -(ns if ns is not None else 0.0))
+
+        group0_exempt = rules.get("per_signal_cap_group0_exempt", True)
+
+        capped_signals = 0
+        capped_pairs = 0
+        for item in retained:
+            cands = item["candidate_interfaces"]
+            if len(cands) <= 1:
+                continue
+            k = max(_eoicd_attr_count(item["eoicd_cluster"]) + per_signal_margin, per_signal_floor)
+            if len(cands) <= k:
+                continue
+            capped_signals += 1
+            if group0_exempt:
+                # 组 0（name_sim 为 None：翻译失败中文名/无名，交 LLM）全部保送、不占 K；
+                # 组 1（有相似度）独立按 K 截断（取相似度最高的 top-K），不受组 0 数量影响。
+                # 下游 LLM 成本随组0 数量放大，由 per_signal_cap_group0_exempt=false 回退原行为兜底。
+                g0 = [c for c in cands if c["match_info"].get("name_sim") is None]
+                g1 = [c for c in cands if c["match_info"].get("name_sim") is not None]
+                g1_kept = sorted(g1, key=lambda c: -(c["match_info"]["name_sim"]))[:k]
+                capped_pairs += len(cands) - (len(g0) + len(g1_kept))
+                item["candidate_interfaces"] = g0 + g1_kept
+            else:
+                capped_pairs += len(cands) - k
+                item["candidate_interfaces"] = sorted(cands, key=_cap_key)[:k]
+        if capped_signals:
+            print(f"  [每信号封顶] {capped_signals} 个信号被截顶，共减少 {capped_pairs} 对候选")
 
     # 按 unit 聚合，单 unit 候选簇 > top_k 则截断到相似度最高的 top_k。
     # 仅"全 null + 名字泛化"的病理信号会触发；正常数据到不了，故零开销。

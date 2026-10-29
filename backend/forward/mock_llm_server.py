@@ -46,12 +46,29 @@ def _build_response(body: dict) -> dict:
     text = sys_txt + "\n" + user_txt
 
     # ---- 阶段判定（按关键词，特异性从高到低）----
+    # V4.1 新增：身份匹配前的中文名翻译预通行（name_translator）。
+    # 不单独识别会落到兜底 JSON，被翻译解析器当成译名写进磁盘缓存。
+    is_translate = ("术语翻译助手" in text) and ("ABBR:" in user_txt)
     is_map = ("name_map" in user_txt) or ("OneState" in user_txt) or ("signal_map" in user_txt)
     is_identity = ("判断每组 HLR 需求名称与 EoICD 信号名称" in user_txt)
     is_attr = ("属性比对专家" in sys_txt) or ("属性值是否等价" in user_txt)
     is_arb = ("复查仲裁者" in sys_txt) or ("final_verdict" in text and "仲裁" in text)
 
-    if is_map:
+    if is_translate:
+        # 返回与输入同名的英文行：mock 不做真实翻译，但保持「每名一行」的解析契约，
+        # 并保留原名中的英文缩写，避免污染 mock 身份匹配的候选排序。
+        lines = []
+        for raw in user_txt.splitlines():
+            m = re.match(r"^\s*\d+[.)、]\s*(.+?)\s*$", raw)
+            if not m:
+                continue
+            name = m.group(1)
+            abbr = " ".join(re.findall(r"[A-Za-z0-9]+", name)).upper()
+            lines.append(f"EN: {name} ABBR: {abbr}")
+        lines.append(PAD)
+        content = "\n".join(lines)
+
+    elif is_map:
         # 阶段2：空映射即可，下游用语义匹配；返回合法 JSON 字符串
         content = json.dumps({}, ensure_ascii=False)
 

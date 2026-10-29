@@ -265,7 +265,27 @@ def test_reconcile() -> None:
     assert len(a5["inconsistent_attributes"]) == 1, a5["inconsistent_attributes"]
     assert a5["need_review"] is True, a5["need_review"]
 
-    print("方案Y _reconcile_and_recompute 通过（清行 + need_review 永真修复 + 合法标记保留 + 不误删）")
+    # 5) 2026-10-29：仲裁改写 agreement/star 后必须同步 consensus_label 与 need_review 审计链。
+    #    背景：仲裁把 agreement 覆盖成 majority、star 5→3，但 consensus_label 仍残留聚合阶段
+    #    按旧星级算出的「完全共识」→ 同一行出现「3★ + 完全共识 + majority」的自相矛盾；
+    #    need_review 因 coverage_gap 被重算为 True，但 rules/details 未同步 → 审计链全空。
+    a6 = {"agreement": "majority", "field_disagreements": [], "inconsistent_attributes": [],
+          "need_review_rules": [], "coverage_gap": ["judge_C"],
+          "consensus_label": "完全共识", "star_rating": 5, "need_review": False,
+          "n_valid_sources": 2, "n_judges_configured": 3,
+          "need_review_disabled_rules": [], "need_review_on_split": True}
+    _reconcile_and_recompute(a6, {})
+    assert a6["star_rating"] == 3, a6["star_rating"]
+    # 标签必须与星级同源，不能残留旧的「完全共识」
+    assert a6["consensus_label"] == "多数共识", a6["consensus_label"]
+    # coverage_gap 是硬事实 → need_review 为 True，且审计链必须有内容
+    assert a6["need_review"] is True, a6["need_review"]
+    assert a6["need_review_rules"], a6["need_review_rules"]
+    assert "coverage_gap" in a6["need_review_rules"], a6["need_review_rules"]
+    assert a6["need_review_details"], a6["need_review_details"]
+
+    print("方案Y _reconcile_and_recompute 通过（清行 + need_review 永真修复 + 合法标记保留 + 不误删"
+          " + 仲裁后标签/审计链同步）")
 
 
 # ---------------------------------------------------------------------------
@@ -428,11 +448,108 @@ def test_d1() -> None:
           " + 改判后子类重算）")
 
 
+def test_http_error_classification() -> None:
+    """2026-10-29：HTTP 错误分类与止损策略。
+
+    背景：实测 94 次仲裁失败里 58 次是 HTTP 400（账户欠费 Arrearage，0.2 秒瞬时返回），
+    而原实现把 400 当作可重试错误 → 每条重试 3 次、白发请求、还让熔断计数虚增；
+    且 HTTPError 的响应体未被读取，失败原因被丢进黑洞（只剩 "Bad Request"）。
+    新策略：全局性永久错误（欠费/鉴权/模型不存在）不重试且立即跳闸；其余 400 不重试
+    但不止损（其余信号照常处理）；5xx 维持退避重试；错误响应体必须被记录。
+    """
+    import json as _json
+    import urllib.error as _urlerr
+    from multi_judge_arbitrator import (_classify_http_error, _err_brief,
+                                        _CircuitBreaker, call_llm)
+
+    ARREAR = _json.dumps({"error": {"type": "Arrearage",
+                                    "message": "Access denied, overdue-payment"}})
+
+    # ① 分类
+    assert _classify_http_error(400, ARREAR) == "fatal"
+    assert _classify_http_error(400, '{"error":{"message":"bad param"}}') == "request"
+    assert _classify_http_error(401, None) == "fatal"
+    assert _classify_http_error(403, None) == "fatal"
+    assert _classify_http_error(404, None) == "fatal"
+    assert _classify_http_error(500, None) == "transient"
+    assert _classify_http_error(429, None) == "transient"
+    assert "overdue" in _err_brief(ARREAR)
+    assert _err_brief(None) == ""
+
+    # ② 熔断器立即跳闸并记住原因
+    br = _CircuitBreaker(15)
+    assert br.tripped is False
+    br.trip("永久性错误（HTTP 400）：Access denied")
+    assert br.tripped is True
+    assert "Access denied" in br.trip_reason
+
+    # ③ call_llm 行为（mock urlopen + 拦截失败落盘，避免写真实日志）
+    orig_urlopen = arb_mod.urllib.request.urlopen
+    orig_record = arb_mod._record_llm_failure
+    records = []
+
+    def _mk_raiser(code, body):
+        def _r(*a, **k):
+            e = _urlerr.HTTPError("u", code, "boom", {}, None)
+            e.read = lambda: body.encode("utf-8")
+            raise e
+        return _r
+
+    def _run(code, body, breaker=None):
+        calls = {"n": 0}
+
+        def _fake(req, timeout=None):
+            calls["n"] += 1
+            _mk_raiser(code, body)()
+        records.clear()
+        arb_mod.urllib.request.urlopen = _fake
+        arb_mod._record_llm_failure = lambda rec: records.append(rec)
+        ctx = {"full": "SIG", "stage": "step5"}
+        if breaker is not None:
+            ctx["_breaker"] = breaker
+        try:
+            out = call_llm("m", "http://x/v1", "k", "sys", "user", ctx=ctx)
+        finally:
+            arb_mod.urllib.request.urlopen = orig_urlopen
+            arb_mod._record_llm_failure = orig_record
+        return out, calls["n"], list(records), ctx
+
+    # ③a 欠费(400 Arrearage)：只调 1 次（不重试）+ 熔断器立即跳闸 + 响应体被记录
+    br2 = _CircuitBreaker(15)
+    out, n, recs, ctx = _run(400, ARREAR, br2)
+    assert out is None
+    assert n == 1, f"欠费错误不应重试，实际调用 {n} 次"
+    assert br2.tripped is True, "欠费应立即跳闸"
+    assert recs and "Arrearage" in (recs[0].get("resp_body") or ""), recs
+
+    # ③b 普通 400：只调 1 次，但不跳闸（其余信号照常处理）
+    br3 = _CircuitBreaker(15)
+    out, n, recs, ctx = _run(400, '{"error":{"message":"bad param"}}', br3)
+    assert out is None
+    assert n == 1, f"单条请求错误不应重试，实际调用 {n} 次"
+    assert br3.tripped is False, "单条请求错误不应触发全局跳闸"
+
+    # ③c 5xx：维持退避重试（首次 + 2 次重试 = 3 次）
+    out, n, recs, ctx = _run(500, "server error")
+    assert out is None
+    assert n == 3, f"5xx 应按重试策略尝试 3 次，实际 {n} 次"
+
+    # ③d 永久错误的原因回传 ctx，供上层写进 review_trace / 记账
+    br4 = _CircuitBreaker(15)
+    out, n, recs, ctx = _run(400, ARREAR, br4)
+    assert ctx.get("_perm_error"), "永久错误原因应回传 ctx"
+    assert "HTTP 400" in ctx["_perm_error"], ctx["_perm_error"]
+
+    print("HTTP 错误分类通过（欠费/鉴权/模型不存在 → 不重试+立即止损；普通 400 → 不重试不止损；"
+          "5xx → 维持重试；错误响应体已记录）")
+
+
 def run_all() -> None:
     """入口：跑所有仲裁层自测。"""
     test_main()
     test_reconcile()
     test_d1()
+    test_http_error_classification()
 
 
 if __name__ == "__main__":

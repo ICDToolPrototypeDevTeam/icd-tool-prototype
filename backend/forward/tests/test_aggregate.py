@@ -111,12 +111,17 @@ def test_main() -> None:
 
     c = agg["SIG_C"]["aggregation"]
     assert c["coverage_gap"] == ["judge_same"], c["coverage_gap"]
-    # 2 票有效且完全一致（未落实）→ agreement=full，覆盖缺口仅作标记不强制需复核
+    # 2026-10-29 口径变更：有效源数 < 配置 judge 数时不再判 full。
+    # 旧口径「2 票有效且完全一致（未落实）→ agreement=full / 5★」会把 2/3 误标成
+    # 「完全共识」，报告里看不出实际只有 2 个 judge 参与（2026-10-29 实测：judge_C
+    # 失效时 372 条里 334 条被标「完全共识」）。现降级为 majority / 3★。
+    # 注意：**覆盖缺口仍仅作标记、不强制需复核**（need_review 仍为 False）——这一条
+    # 与旧口径一致，本次未变。
     assert c["identity_consensus"] == "未落实", c["identity_consensus"]
     assert c["agreement_level"] == "2/3"
-    assert c["agreement"] == "full"
+    assert c["agreement"] == "majority", c["agreement"]
     assert c["need_review"] is False
-    assert c["star_rating"] == 5, c["star_rating"]
+    assert c["star_rating"] == 3, c["star_rating"]
     # #12 未落实二级子类：SIG_C 两票均 matched_hlr=空 & name_match_status=False → 未识别
     assert c["sub_classification"] == "未识别", c["sub_classification"]
 

@@ -82,14 +82,17 @@ def run_cmd(cmd: list[str], desc: str) -> tuple[int, float]:
     return result.returncode, elapsed
 
 
-def resolve_paths(proj: dict, raw_dir_arg: str | None) -> tuple[Path, Path, Path]:
-    """返回 (raw_dir, pub_excel, sub_excel)"""
+def resolve_paths(proj: dict, raw_dir_arg: str | None, active_sides: list[str]) -> tuple[Path, Path, Path]:
+    """返回 (raw_dir, pub_excel, sub_excel)。
+
+    仅对 active_sides 中实际要处理的侧解析文件路径；未启用的侧对应返回 None，
+    避免「配置里声明了 sub 键但用户没给 sub 输入」时去检查一个不存在的文件。
+    """
     raw_dir = Path(raw_dir_arg) if raw_dir_arg else (_PROJECT_ROOT / proj["raw_dir"])
     if not raw_dir.is_absolute():
         raw_dir = _PROJECT_ROOT / raw_dir
-    sub_excel = raw_dir / proj["sub"] if proj.get("sub") else None
-    # 仅 Subscriber 侧的项目（subscriber-only）无 pub 键；镜像 sub 处理，pub 缺失时置 None
-    pub_excel = raw_dir / proj["pub"] if proj.get("pub") else None
+    pub_excel = raw_dir / proj["pub"] if ("publisher" in active_sides and proj.get("pub")) else None
+    sub_excel = raw_dir / proj["sub"] if ("subscriber" in active_sides and proj.get("sub")) else None
     return raw_dir, pub_excel, sub_excel
 
 
@@ -98,7 +101,7 @@ def located_path(processed_dir: Path, proj: dict, side: str) -> Path:
 
 
 def step_locate(processed_dir: Path, config_dir: Path, proj: dict,
-                pub_excel: Path, sub_excel: Path) -> dict[str, float]:
+                pub_excel: Path, sub_excel: Path, active_sides: list[str]) -> dict[str, float]:
     """第一步：定向定位"""
     timings = {}
 
@@ -108,7 +111,7 @@ def step_locate(processed_dir: Path, config_dir: Path, proj: dict,
 
     locate_config = config_dir / proj["locate_config"]
 
-    for side in proj.get("sides", ["publisher", "subscriber"]):
+    for side in active_sides:
         input_file = pub_excel if side == "publisher" else sub_excel
         output_file = located_path(processed_dir, proj, side)
 
@@ -131,13 +134,13 @@ def step_locate(processed_dir: Path, config_dir: Path, proj: dict,
 
 
 def step_crop(processed_dir: Path, config_dir: Path, proj: dict,
-              pub_excel: Path, sub_excel: Path) -> dict[str, float]:
+              pub_excel: Path, sub_excel: Path, active_sides: list[str]) -> dict[str, float]:
     """第二步：属性裁剪"""
     timings = {}
 
     crop_config = config_dir / "eoicd_crop.yaml"
 
-    for side in proj.get("sides", ["publisher", "subscriber"]):
+    for side in active_sides:
         raw_file = pub_excel if side == "publisher" else sub_excel
         located = located_path(processed_dir, proj, side)
         # 跳过定位时直接读原始表；否则读定位后的文件
@@ -184,7 +187,7 @@ def step_trace(processed_dir: Path, config_dir: Path, raw_dir: Path) -> dict[str
     return timings
 
 
-def step_dedup(processed_dir: Path, proj: dict) -> dict[str, float]:
+def step_dedup(processed_dir: Path, proj: dict, active_sides: list[str]) -> dict[str, float]:
     """第三步：去重归簇（+ 追溯过滤）"""
     timings = {}
 
@@ -197,7 +200,7 @@ def step_dedup(processed_dir: Path, proj: dict) -> dict[str, float]:
         except Exception:  # noqa: BLE001
             trace_enabled = False
 
-    for side in proj.get("sides", ["publisher", "subscriber"]):
+    for side in active_sides:
         input_file = processed_dir / f"eoicd_{side[:3]}.json"
         output_file = processed_dir / f"eoicd_{side[:3]}_clustered.json"
 
@@ -270,11 +273,21 @@ def main():
                         help="输入目录 (默认取项目配置中的 raw_dir)")
     parser.add_argument("--config-dir", default=str(CONFIG_DIR),
                         help=f"配置目录 (默认: {CONFIG_DIR})")
+    parser.add_argument("--sides", default=None,
+                        help="显式指定要处理的信号侧（逗号分隔，如 'publisher' 或 "
+                             "'publisher,subscriber'）。不传则回退 projects.py 的 sides 声明。"
+                             "集成脚本会按实际输入的 --eoicd-pub/--eoicd-sub 自动推导后传入，"
+                             "实现「纯输入驱动」——用户没给的 side 不处理。")
     args = parser.parse_args()
 
     proj = get_project(args.project)
     config_dir = Path(args.config_dir)
-    raw_dir, pub_excel, sub_excel = resolve_paths(proj, args.raw_dir)
+    # 纯输入驱动：优先用 --sides 显式指定；未指定时回退 projects.py 的 sides 声明（兜底）。
+    # 集成脚本会按用户实际提供的 --eoicd-pub/--eoicd-sub 推导后传 --sides，
+    # 从而「用户没给的 side 一律不处理」。
+    active_sides = [s.strip() for s in args.sides.split(",") if s.strip()] \
+        if args.sides else list(proj.get("sides", ["publisher", "subscriber"]))
+    raw_dir, pub_excel, sub_excel = resolve_paths(proj, args.raw_dir, active_sides)
     processed_dir = Path(args.output_dir) if args.output_dir else (BASE_DIR / proj["output_dir"])
     processed_dir.mkdir(parents=True, exist_ok=True)
 
@@ -284,20 +297,25 @@ def main():
     print(f"   项目:     {args.project}")
     print(f"   输入目录: {raw_dir}")
     print(f"   输出目录: {processed_dir}")
+    print(f"   处理侧:   {', '.join(active_sides)}")
     print(f"   执行步骤: {args.step}")
 
-    for f in (pub_excel, sub_excel):
-        if f is None:
+    # 仅对 active_sides 中启用的侧做输入文件存在性检查（未启用的侧其路径为 None，跳过）
+    for side, f in (("publisher", pub_excel), ("subscriber", sub_excel)):
+        if side not in active_sides:
             continue
+        if f is None:
+            print(f"[FAIL] {side} 侧文件未配置（projects.py 缺少对应 pub/sub 键）")
+            sys.exit(1)
         if not f.exists():
             print(f"[FAIL] 输入文件不存在: {f}")
             sys.exit(1)
 
     if args.step in ("locate", "all"):
-        timings.update(step_locate(processed_dir, config_dir, proj, pub_excel, sub_excel))
+        timings.update(step_locate(processed_dir, config_dir, proj, pub_excel, sub_excel, active_sides))
 
     if args.step in ("crop", "all"):
-        timings.update(step_crop(processed_dir, config_dir, proj, pub_excel, sub_excel))
+        timings.update(step_crop(processed_dir, config_dir, proj, pub_excel, sub_excel, active_sides))
 
     if args.step in ("trace", "all"):
         if (config_dir / "traceability.yaml").exists():
@@ -306,7 +324,7 @@ def main():
             print("\n[WARN]  未找到 config/traceability.yaml，跳过追溯步骤")
 
     if args.step in ("dedup", "all"):
-        timings.update(step_dedup(processed_dir, proj))
+        timings.update(step_dedup(processed_dir, proj, active_sides))
 
     print_summary(timings, processed_dir)
 

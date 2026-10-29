@@ -4,7 +4,7 @@
 正向分析（EoICD → HLR）回答「HLR 是否漏写了某个 EoICD 业务对象」，与反向分析
 （HLR → EoICD，正确性比对）互补。字段约定：
 
-- hlr_word_file 必填（.docx）；
+- hlr_word_file 必填（.docx 或 .xlsx；V4.1 起正向树支持 Excel 形式的 HLR 需求表）；
 - eoicd_publisher_file / eoicd_subscriber_file 二选一（.xlsx）；
 - use_mock_llm 由前端可选，由 runner 在本任务线程内绑定运行上下文
   （见 app/runtime_context.py；不写进程 env，支持并发任务）。
@@ -48,8 +48,10 @@ async def completeness_analysis(
     use_mock_llm: Optional[bool] = Form(None),
 ):
     # —— 字段校验 ——
-    if not hlr_word_file.filename.lower().endswith(".docx"):
-        raise HTTPException(status_code=422, detail="hlr_word_file must be .docx")
+    # V4.1 正向树支持 .docx / .xlsx 两种 HLR 需求文件；字段名沿用 hlr_word_file
+    # 以保持既有前端/API 契约不变。
+    if not hlr_word_file.filename.lower().endswith((".docx", ".xlsx")):
+        raise HTTPException(status_code=422, detail="hlr_word_file must be .docx or .xlsx")
 
     if eoicd_publisher_file is None and eoicd_subscriber_file is None:
         raise HTTPException(status_code=422, detail="at least one of eoicd_publisher_file or eoicd_subscriber_file is required")

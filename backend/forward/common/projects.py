@@ -17,9 +17,11 @@ common.projects — 全项目统一的「系统 / 项目」配置（单一数据
     locate_config  定位过滤配置（位于 EoICD侧数据处理/config/ 下）
     skip_locate    是否跳过定位步骤。约定：所有系统均启用定位（False），不再跳过；
                   若某系统确无定位过滤条件，也应提供"全保留"定位配置（空白名单/省略 sheet）而非跳过。
-    sides          该项目实际存在的信号侧列表，默认 ["publisher", "subscriber"]。
-                  仅 Publisher 侧的项目（如 fgmc）须显式设为 ["publisher"]，
-                  下游数据处理/匹配据此跳过 subscriber 侧。
+    sides          该项目「声明」的信号侧列表，默认 ["publisher", "subscriber"]。
+                  注意：本字段**不再作为处理门控**——各阶段实际处理哪些侧，由
+                  「用户是否真的提供了对应 --eoicd-pub / --eoicd-sub 输入文件」决定
+                  （见 run_integration.resolve_active_sides）。sides 仅作为
+                  run_data_processing.py 未显式传 --sides 时的兜底提示。
 """
 from __future__ import annotations
 
@@ -46,17 +48,21 @@ PROJECTS: dict[str, dict] = {
         "locate_config": "eoicd_locate.yaml",
         "skip_locate": False,  # EPS 也走定位步骤（白名单见 eoicd_locate.yaml 并集，含 HF_EMPC_EPS 等全部 EPS 设备）
     },
-    # 燃油测量管理计算机控制器（FGMC）：仅 Publisher 侧（无 Subscriber 表）
-    #   sides 显式声明只存在 publisher 侧，下游数据处理/匹配据此跳过 subscriber。
+    # 燃油测量管理计算机控制器（FGMC）：
+    #   sub 仅声明 Subscriber 表的规范文件名；是否实际处理 subscriber 侧由「用户是否提供
+    #   --eoicd-sub 输入」决定（纯输入驱动，见 run_integration.resolve_active_sides /
+    #   run_data_processing --sides），不再用 sides 硬开关。sides 现仅作为
+    #   run_data_processing.py 未传 --sides 时的兜底提示，不再作为处理门控。
     "fgmc": {
-        "label": "燃油测量管理计算机 FGMC（仅 Publisher 侧）",
+        "label": "燃油测量管理计算机 FGMC",
         "raw_dir": "input/fgmc",
         "output_dir": "data/processed_fgmc",
         "pub": "FGMC_EoICD_Publisher_Table.xlsx",
+        "sub": "FGMC_EoICD_Subscriber_Table.xlsx",
         "located": "FGMC_EoICD_{side}_Located.xlsx",
         "locate_config": "eoicd_locate.yaml",
         "skip_locate": False,
-        "sides": ["publisher"],
+        "sides": ["publisher", "subscriber"],
     },
     # 液压系统控制单元（HSCU）：Publisher + Subscriber 双侧（与 ams/eps 同结构）
     "hscu": {
