@@ -220,6 +220,8 @@ GET /api/v4/jobs/{job_id}/result
 
 降级场景下 `agreement_distribution` 可能出现 `single_source` / `no_consensus` 键（仅 1 个 / 0 个 provider 存活）；0 个存活时对应 case 强制 1★、`no_consensus`，`status_distribution` 计入 待确认。
 
+`matched_count` / `pending_count` / `unmatched_count` 分别取自 `reverse_matches.json` 的 `hlr_已匹配` / `hlr_待确定` / `hlr_无匹配`。AMS 内部通道命中项（14.4）本身计入 `无匹配`，因此也计入 `unmatched_count` 与 `status_distribution["无匹配"]`；`stats.hlr_内部接口` 只是其中的子计数，不影响上述三个计数之和。
+
 ## 7. 下载输出接口
 
 ```text
@@ -652,6 +654,7 @@ GET /api/v4/jobs/{job_id}/intermediates/reverse-matches
 - **浏览器内查看**：`Content-Type: application/json` 且**不发** `Content-Disposition`（未带 `filename`），点击后在新标签页按 JSON 渲染，不落盘；需要留档时在页内另存即可。响应体即磁盘文件原文，不重新序列化（与同事参考文件 diff 时逐字节可比）。
 - 与第 7 节 `/outputs/*` 的分工：那是七类对外产物的**下载**；本接口是 JSON 中间产物的**只读查看**。按 ADR-001 D7 的口径，JSON 中间产物默认不暴露，`reverse_matches.json` 是按 D7 预留的「新开子路由」方式开放的**唯一例外**（第 10 节），其余 6 类仍不暴露。
 - RPDU refine（Step 3.5，仅 RPDU profile）会**覆盖写盘**该文件：查看的是过滤 + 补采后的最终态。
+- AMS 内部通道命中（profile 开启 `matcher.enable_internal_channel_detection`）：该条目 `match_type=无匹配`、`overall=unmatched`、`match_evidence.internal_channel=true`，summary 以 `[内部接口]` 开头；计入 `stats.hlr_无匹配`（同一条目也计入子计数 `stats.hlr_内部接口`），不进入 AI 裁判，也不参与追溯兜底重试。
 - 前端入口：历史结果页里每个 `has_reverse_matches=true` 的条目渲染「匹配中间产物」查看链接（新标签页打开，`target="_blank"`、无 `download` 属性）。
 
 | 场景 | HTTP |

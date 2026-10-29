@@ -3261,3 +3261,206 @@ def extract_sdi_values(text: str) -> set[str]:
 1. 需重建后端镜像才在服务器生效。
 2. 真实模型端到端结论待复验。
 3. BitOffsetWithinDS / BitOffsetWithinMsg 的接收侧基准问题另案处理。
+
+---
+
+## BUG-20261029-001：环控内部通道需求被按 Label 命中 Pub/Sub Block，裁判误报不一致
+
+#### 状态
+
+verified（匹配层已复验；真实模型端到端待复验）
+
+#### 发现日期
+
+2026-10-29
+
+#### 关联 Issue / PR
+
+- Issue 待补（本地分支 `issue-xxx-internal-channel-false-alarm-release`）
+- 关联 job：`0a724eaa-39f0-4065-88e6-3118d72a6544`
+- 关联文档：`issues_file/plan-内部通道需求无匹配标注-2026-10-28.md`
+
+#### 问题现象
+
+环控（AMS）SWHLR 中 HLR_915 / HLR_916 / HLR_923 / HLR_926 描述“从邻通道、对侧通道、对邻通道A429接收数据中解析 Lxx”。这类需求是两型 AMSC 控制器之间的内部数据通路，不在 EoICD Pub/Sub 表中，但 HLR 里的 Label 编号恰好能命中 EoICD 中的某个 Block。匹配层据此给出 `已匹配` / `待确定` 并送裁判，裁判看到信号名、偏移量、SDI 等完全对不上，判为不一致或需确认，形成误报。
+
+#### 影响范围
+
+仅 AMS profile 的“三通道内部数据”写法；两通道/单通道描述、无数据路径动词的引用、以及 FGMC/HSCU/RPDU/FSECU profile 均不受影响。39 条环控文档中 21 条内部需求命中、18 条外部需求 0 误报；57 个历史 AMS job 去重 111 条需求中旧规则 5 条命中、新规则同样 5 条。
+
+#### 原因分析
+
+（已定位）匹配层没有“内部接口”概念，`match_reverse` 对所有 HLR 一律按 Label 前缀粗筛 + 6 维评分找 Block。内部通道需求的 Label 编号与 Pub/Sub 中的块编号同域，粗筛必然命中，评分维度（Label 相同、信号关键词部分重叠）又能过阈值，于是产生“看似匹配、内容全错”的结果。
+
+#### 修复方案
+
+在匹配层（不改提示词）加入 R_norm3 前置判断：
+
+1. `MatcherEnhancementConfig` 新增 5 个内部通道字段（默认关闭），仅 AMS `config.yaml` 启用；
+2. 新增 `internal_channel.py`：同句至少 3 个不同通道词（邻通道/对侧通道/对邻通道，支持 `邻、对侧、对邻通道` 简写展开与 `以及/或者/和/及/与/或` 分隔）+ 数据路径动词（`A429 接收/发送/解析/写入`）即命中；
+3. `match_reverse` 在 Label 分支前插入该判断，命中直接输出 `match_type=无匹配` + `match_evidence.internal_channel=true` + `[内部接口]` summary，不进入 Block 评分与裁判；
+4. `stats` 增加 `hlr_内部接口` 子计数，`_merge_reverse_match_outputs` 同步；trace fallback 排除内部条目。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/internal_channel.py`（新增）
+2. `backend/app/v4/matching/reverse_matcher.py`
+3. `backend/app/v4/profiles/base.py`
+4. `backend/app/v4/profiles/ams/config.yaml`
+5. `backend/app/v4/pipeline.py`
+
+#### 验证方式
+
+1. 5 个 profile 加载与配置校验（词表不足 / 非法正则 / 空数据路径正则抛 `ProfileLoadError`）。
+2. 39 条环控文档 ground-truth 对比；57 个历史 AMS job 去重需求扫描。
+3. job `0a724eaa` 匹配层复跑，逐条对比 `reverse_matches.json`。
+4. mock 反向全流程（`USE_MOCK_LLM=1`）检查 stats、case 数与 4 份 Word。
+
+#### 验证结果
+
+**已通过（本机，2026-10-29）**：
+
+1. 39 条文档：21 条内部全部命中、18 条外部 0 误报；5 个 profile 仅 AMS 启用。
+2. job `0a724eaa`：915/916/923/926 → `无匹配` + `internal_channel=true`；其余 4 条逐字段不变；`hlr_已匹配/待确定/无匹配` 4/4/0 → 3/1/4，`eoicd_blocks_matched/unmatched` 22/1606 → 10/1618，`hlr_内部接口=4`。
+3. mock 全流程：裁判 case 8→4，4 份 Word 均出现 `[内部接口]` 文案。
+4. 历史 AMS 语料：新旧规则命中集合一致（5 条），无新增/丢失。
+5. **尚未执行**：真实模型端到端复跑、39 条文档 mock 全流程（mock 标注恒为空标签）、2371 条历史 SWHLR 回归、trace fallback 运行时路径（当前 job 无 trace_dir，仅代码审查）。
+
+#### 遗留问题
+
+1. 报告层“关键发现”汇总句未加内部接口说明（按“只改匹配层”范围未实施）。
+2. 告警语境不再排除；若后续出现“三通道均故障发送告警”类外部需求，需重新评估 `internal_channel_exclude_pattern`。
+3. 需重建后端镜像才在服务器生效。
+
+---
+
+## BUG-20261029-002：HLR Word 文档第一张需求表被扫描起点跳过
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-10-29
+
+#### 关联 Issue / PR
+
+- Issue 待补（本地分支 `issue-xxx-internal-channel-false-alarm-release`）
+- 关联 job：`6f72537b-f09c-4852-897f-73ecc34c31d2`、`ae916d09-4f64-4793-b078-5246448388db`
+
+#### 问题现象
+
+部分测试文档第一张表就是需求表。解析后该表需求没有进入 `hlr_requirements.json`，也没有 parse warning，后续标注、匹配、报告均缺少这条需求。
+
+实测两份 AMS 文档：
+
+- `1029测试1.docx`：输出 4 条，缺少表 0 的 `FSF21000101_HLR_2939`；
+- `环控控制器控制软件待确认需求.docx`：输出 23 条，缺少表 0 的 `FSF21000101_HLR_288`。
+
+#### 影响范围
+
+仅 `after_glossary` 模式且扫描起点大于 0 的 profile（AMS `glossary_table_index=0`、FGMC `glossary_table_index=1`）。HSCU 使用 `all_tables`（`start=0`）不受影响；RPDU 走 xlsx 解析器，不经过 `HLRWordParser`。
+
+#### 原因分析
+
+（已定位）`parse()` 的需求表扫描起点为 `glossary_idx + 1` 或 `glossary_table_index + 1`，只遍历 `range(start, len(tables))`。虽然 `requirement_indices` 已在全文范围识别需求表（用于避免术语表误判），但表 0 从未进入提取循环。AMS 未定位到术语表时 `start=1`，FGMC 为 `start=2`，因此表 0（以及 FGMC 的表 1）被静默跳过；AMS/FGMC 未开启 `register_skipped`，不会产生告警。
+
+#### 修复方案
+
+方案 B（仅纳入表 0）：在 `after_glossary` 模式下，若表 0 已在 `requirement_indices` 中且列 0 同时存在 `id` 与 `content` 两个行头，则把索引 0 追加到扫描序列最前。其余前置表、`all_tables` 路径、既有 `id_pattern`/空 ID/`_extract_requirement` 门控均不变。双行头判断用于排除首行为列头的汇总表。
+
+#### 修改文件
+
+1. `backend/app/v4/parsers/hlr_word_parser.py`（新增 `_has_requirement_fields` + 扫描序列追加表 0）
+2. `backend/app/v4/profiles/base.py`（`RequirementScanConfig` docstring 补充表 0 例外）
+
+#### 验证方式
+
+1. 修改前后对 27 份历史反向 docx 做解析快照，逐份比较需求 ID、正文 SHA、术语/缩略语数量、告警类型。
+2. 目标两份文档比较需求条数与首条 ID。
+3. HSCU 文档随全量快照比较。
+4. `1029测试1.docx` 执行 `USE_MOCK_LLM=1` 反向全流程。
+5. `py -m py_compile`。
+
+#### 验证结果
+
+**已通过（本机，2026-10-29）**：
+
+1. 27 份文档中仅目标 2 份变化，其余 25 份（含 4 份 HSCU）逐字段一致。
+2. `1029测试1.docx` 4→5 条，新增 `HLR_2939` 排首位；`环控控制器控制软件待确认需求.docx` 23→24 条，新增 `HLR_288` 排首位；原有需求顺序、正文哈希、术语/缩略语、告警类型均不变。
+3. mock 全流程通过：5 条需求进入标注/匹配，4 份 Word 正常生成。
+4. **尚未执行**：真实模型端到端复跑。
+
+#### 遗留问题
+
+1. 表 1～扫描起点之间的前置需求表仍保持原行为；当前语料未出现该形态。
+2. `parse-hlr` CLI 缺少 profile 参数（`TypeError`），与本次无关，另行处理。
+3. 需重建后端镜像才在服务器生效。
+
+---
+
+## BUG-20261029-003：零 Block 的“待确定”被当作有证据结果送入 AI 裁判
+
+#### 状态
+
+verified（匹配层差分 + mock 全流程已复验；真实模型端到端待复验）
+
+#### 发现日期
+
+2026-10-29
+
+#### 关联 Issue / PR
+
+- Issue 待补（本地分支 `issue-xxx-internal-channel-false-alarm-release`）
+- 关联 job：`8569002a-6947-4419-a929-7af3ced706a4`（当前复现）
+- 历史同型 job：`0d4c8720-2e90-49cb-a103-d7e6666bb059`、`75ac77de-0c9d-46cb-b8ba-2912a413d75d`、`a93e900e-39d6-4d98-ba3b-e86fbe028f63`、`5a46f028-235b-4d78-9ac8-aa8da8fb8957`
+
+#### 问题现象
+
+`FSF21000101_HLR_2939` 预期为无匹配：EoICD 中只有 `L20/AFT_CED_U1`（方向接收、`signal_name=0`），没有 HLR 描述的 `FWD_CAR_TS` 温度/有效性信号。但 `reverse_matches.json` 输出 `待确定`、`matched_profile_keys` 为空，随后 `build_reverse_cases` 仍把该条送入 AI 裁判，裁判只能看到 0 个 Block。
+
+#### 影响范围
+
+仅 A429显式路径、Label 前缀命中但硬门控剔除全部候选的 HLR。历史上 225 个 job 输出中 530 条 `待确定` 里 21 条为 0 Block；其中 HSCU `FSF29005501_HLR_023194` 在当前 HEAD 上已因代码漂移不再重现，实际新旧代码差分为 20 条（9 个不同 HLR）。仍有 Block 的 509 条 `待确定` 与 1183 条 `已匹配` 不受影响。
+
+#### 原因分析
+
+（已定位）`match_reverse` 的 A429显式兜底分支在 Path1 无候选时，会重评分全部 Label 块并执行硬门控，但旧代码用 `has_label_in_eoicd` 决定类型：只要 Label 在 EoICD 中出现过就输出 `待确定`，不检查硬门控后 `scored` 是否为空。`HLR_2939` 的唯一候选因方向矛盾被 Gate 1 剔除，`scored` 已为空，`match_type` 仍为 `待确定`；`build_reverse_cases` 的过滤条件为 `match_type in ("已匹配", "待确定")`，因此 0 Block 结果进入裁判。
+
+#### 修复方案
+
+以硬门控后的候选集合为准，而不是 Label 是否存在：
+
+```python
+match_type = "待确定" if scored else "无匹配"
+```
+
+兜底分支的全量重评分、硬门控、排序与 Top-K 逻辑不变；Block 选择与证据内容不变。
+
+#### 修改文件
+
+1. `backend/app/v4/matching/reverse_matcher.py`
+
+#### 验证方式
+
+1. HEAD 匹配器与工作区匹配器在同一解析输入上差分（6 个含零 Block 待确定的历史 job，覆盖 AMS/HSCU）。
+2. 当前 job `8569002a` 全量 8 条 HLR 逐字段对比。
+3. 四 profile 回归：AMS `ae916d09`、HSCU `cb2110b2`、FGMC `d619f867`、RPDU `cbe23e48`。
+4. `1029测试1.docx` 执行 `USE_MOCK_LLM=1` 反向全流程，检查 stats、裁判 case、Word 产物。
+
+#### 验证结果
+
+**已通过（本机，2026-10-29）**：
+
+1. 6 个 job 差分：仅 20 条 `待确定`（0 Block）→ `无匹配`（0 Block），`matched_profile_keys` 全部一致；`hlr_已匹配`、`eoicd_blocks_matched/unmatched` 不变。第 21 条 HSCU `HLR_023194` 在 HEAD 上已不重现（新旧代码均为 0 条待确定），属于历史代码漂移。
+2. 当前 job：仅 `HLR_2939` 变化（`待确定` 0 Block → `无匹配` 0 Block），其余 7 条逐字段不变；stats `待确定 3 → 2`、`无匹配 2 → 3`，`eoicd_blocks_matched` 27 不变。
+3. 四 profile：AMS 23 / HSCU 10 / FGMC 7 条 0 差异；RPDU 11 条匹配类型不变（Block 数差异来自历史 trace 模式基线，非本改动）。
+4. mock 全流程：8 条 HLR，stats `已匹配 3 / 待确定 2 / 无匹配 3 / 内部接口 2`；裁判 case 5 条，`HLR_2939` 进入 NOMATCH；4 份 Word 与 Excel 正常生成。
+5. **尚未执行**：真实模型端到端复跑。
+
+#### 遗留问题
+
+1. `comparison/report_generator.py` 的“关键发现”仍写“N 条SWHLR未进入AI裁判: x条待确定, y条无匹配”，其中 `待确定` 实际会进入裁判，且与“判定分布”重复统计；经确认该字段只写入 `reverse_report.json` 并打印到任务日志，不进入 4 份 Word，暂不修改。
+2. 历史已落盘结果不回溯；续跑/重跑才应用新类型。
+3. 需重建后端镜像才在服务器生效。
