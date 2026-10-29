@@ -4257,7 +4257,7 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
 - **背景（用户提出）**：把集成工程中的正向管线升级到 `E:\Work\2026\ICD_SKILL\V4\正向检查集成-发送工具集成版V4.1`，三项要求：① 不影响反向管线现状与反向质量；② 正向树尽量原封不动集成（沿用既有集成方式）；③ 前端接口全部正常接入，包括终止、历史记录（此前版本已验收的接口不得回退）。
 - **升级方式**：`backend/forward/` 按 V4.1 源树整树覆盖（跳过 input/output/runs/data/cache/outputs/__pycache__/日志等运行时目录，保留 `input/` 样例不入库的既有约定）；上游 80 个文件全部到位，目标树仅多出集成层自带的 `mock_llm_server.py`。逐字节比对确认除下述本地补丁外与 V4.1 完全一致：`shared/utils.py`、`identity_match/{run_identity_match.py,src/name_ai_matcher.py,src/name_translator.py}`、`attribute_match/{run_attribute_match.py,src/attr_mismatch_ai_matcher.py}`、`HLR需求聚类/hlr_cluster_tool/{ai_client.py,cluster_hlr.py}`、`multi_judge协同/{multi_judge_arbitrator.py,multi_judge_report.py}`、`multi_judge_runner.py`（token 契约回植）、`run_integration.py`（日志脱敏 `--ai-key`）、`.gitignore`（忽略翻译缓存）、`使用说明.md`（保留 §6.1 token 契约）。上游 V4.1 自身移除了跨进程 token 统计，本项目按既有约定回植（`[tokens] delta=N`、sidecar、`--base-tokens`、adapter 对账），行为与 V3 集成一致。
 - **V4.1 主要变化**：HLR 支持 `.xlsx/.xlsm` 需求清单（`hlr_cluster_tool.parse_requirements` 按扩展名分派，`parse_xlsx` 与 docx 同口径）；中文名→英文翻译前置（`identity_match/src/name_translator.py`，磁盘缓存，mock 分支同步支持翻译 prompt）；`null_identity_gate_all` / `per_signal_cap_*` 等判定参数；`attr_value_normalizer` 属性值归一；`rejection_utils` 统一拒收口径；judge 有效性统计与 `review_failures` / `review_applied_stages` 记账；看门狗 `killed_by_watchdog` 与 `INTEGRATION_STEP_TIMEOUT` 硬超时；端口/输入侧改为纯输入驱动（`resolve_active_sides` / `--sides`），fgmc 订阅侧可单侧运行；`save_intermediate: false`。
-- **集成层适配**：`backend/app/forward/artifacts.py` 的 `_ignore_runtime_dirs` 增加 `identity_match/src/cache` 与 `单judge结果汇总/outputs`（每任务复制树时排除缓存/中间产物）；进度标记 `parse → multi_judge → review → report` 与既有正则仍兼容，`execution.py` 无需改动；`backend/app/api/v4/completeness.py` 的 `hlr_word_file` 校验扩为 `.docx / .xlsx`（字段名不变，保持前端/API 契约）；`frontend/src/components/CompletenessFileUpload.tsx`、`frontend/src/pages/CompletenessPage.tsx` 文案与 `accept` 同步；`mock_llm_server.py` 增加翻译 prompt 分支（`EN: … ABBR: …`）。
+- **集成层适配**：`backend/app/forward/artifacts.py` 的 `_ignore_runtime_dirs` 增加 `identity_match/src/cache` 与 `单judge结果汇总/outputs`（每任务复制树时排除缓存/中间产物）；进度标记 `parse → multi_judge → review → report` 与既有正则仍兼容，`execution.py` 无需改动；`backend/app/api/v4/completeness.py` 的 `hlr_word_file` 校验扩为 `.docx / .xlsx`（字段名不变，保持前端/API 契约）；`frontend/src/components/CompletenessFileUpload.tsx`、`frontend/src/pages/CompletenessPage.tsx` 文案与 `accept` 同步；`mock_llm_server.py` 增加翻译 prompt 分支（`EN: … ABBR: …`）。后续补充（用户 2026-10-29）：完整性分析「系统类型」下拉的 EPS 选项文案由「配电装置 (EPS / ATA24EPS)」改为「配电系统（EPS）」，`value="eps"` 不变。
 - **修改文件**：`backend/forward/` 下 26 个已有文件（V4.1 内容更新，以及 token 回植 / `--ai-key` 脱敏 / mock 翻译分支等集成层补丁）；`backend/app/api/v4/completeness.py`、`backend/app/forward/artifacts.py`；`frontend/src/components/CompletenessFileUpload.tsx`、`frontend/src/pages/CompletenessPage.tsx`。
 - **新增文件**：`backend/forward/.../identity_match/src/name_translator.py`、`identity_match/src/rejection_utils.py`、`attribute_match/src/attr_value_normalizer.py`、`启动脚本/{.env.example,run_ai.bat,run_ai.sh}`、`工具方案_EoICD-HLR正向匹配.md`；本地测试（`backend/tests/` 已 gitignore、不入库）在 `tests/test_api_completeness_controller.py` 增补 xlsx 接受与 `.txt` 拒绝两例。
 - **删除文件**：无（V4.1 源树与 V3 集成树之间没有需要删除的已跟踪文件；运行时目录不入库）。
@@ -4279,26 +4279,26 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   6. Issue 编号待用户回填。
 - **下一步建议**：1) 用户提交分支并重建后端镜像；2) 服务器实测：分别用 `.docx` 与 `.xlsx` 形式的 HLR 各跑一条正向任务，确认完成页统计、两份产物、日志与历史记录正常，并在运行中点击终止确认 `canceled`；3) 用真实模型观察翻译前置的耗时/token 增量，确认可接受；4) 出包《更新说明》注明本变更部署层：无新端口、无新环境变量、无新依赖。
 
-## 2026-10-29 云服务器交付包：访问端口 8082 + 默认内存上限 10 GB（分支 x-x，改动未提交）
+## 2026-10-29 云服务器交付包：访问端口 8182 + 默认内存上限 10 GB（分支 x-x，改动未提交）
 
-- **背景（用户提出）**：云服务器部署打包还需两处调整：① 对外访问端口改为 8082；② 若部署时未执行 §5.4，容器默认内存上限由 600 多 MB 改为 10 GB。
+- **背景（用户提出）**：云服务器部署打包还需两处调整：① 对外访问端口改为 8182；② 若部署时未执行 §5.4，容器默认内存上限由 600 多 MB 改为 10 GB。
 - **完成内容**：
-  1. `docker-compose.server.yml`：端口映射 `8000:8000` → `8082:8000`（容器内 uvicorn 仍监听 8000，前端同源相对路径无需改动）；`mem_limit` / `memswap_limit` 兜底从 `${...:-640m}` 改为 `${...:-10g}`；注释明确默认值仅在未执行 §5.4（根目录无 `.env`）时生效，物理内存不足 10 GB 的机器仍须执行 §5.4 按实际内存重算。
-  2. `部署说明.md`：§1 访问示意、§2 端口/内存要求、§5.4 兜底说明、§5.6 验收命令与浏览器地址、§6 速查、§9 常见问题、§10 注意事项统一改为 8082；内存验收期望区分「执行 §5.4 的值」与「跳过时的 10 GB（10737418240 字节）」。
+  1. `docker-compose.server.yml`：端口映射 `8000:8000` → `8182:8000`（容器内 uvicorn 仍监听 8000，前端同源相对路径无需改动）；`mem_limit` / `memswap_limit` 兜底从 `${...:-640m}` 改为 `${...:-10g}`；注释明确默认值仅在未执行 §5.4（根目录无 `.env`）时生效，物理内存不足 10 GB 的机器仍须执行 §5.4 按实际内存重算。
+  2. `部署说明.md`：§1 访问示意、§2 端口/内存要求、§5.4 兜底说明、§5.6 验收命令与浏览器地址、§6 速查、§9 常见问题、§10 注意事项统一改为 8182；内存验收期望区分「执行 §5.4 的值」与「跳过时的 10 GB（10737418240 字节）」。
   3. `CHANGELOG.md` 增加 Changed 条目。
-  4. `更新说明.md` 整体重写为 2026-10-29 / V4.1 版本：对比基准 `dist/icd-deploy-20261019`；部署层变化（须换镜像、`.env` 模板不变、compose 端口与默认内存变化、`frontend/dist` 有变化、部署说明已更新）、防火墙须放行 8082/tcp、内存默认值三种情况说明、本版功能变化（正向 V4.1、反向修复、前端 Excel 上传）、部署步骤与 root 清单（权限变化：无）、回滚（回旧包端口恢复 8000）、注意事项（无鉴权、翻译额外调用、旧任务续跑不复用新能力）。
-  5. 出包：`bash scripts/build-image.sh` 生成 `dist/icd-deploy-20261029`（217M）与单文件 `dist/icd-deploy-20261029.tar`。
+  4. `更新说明.md` 整体重写为 2026-10-29 / V4.1 版本：对比基准 `dist/icd-deploy-20261019`；部署层变化（须换镜像、`.env` 模板不变、compose 端口与默认内存变化、`frontend/dist` 有变化、部署说明已更新）、防火墙须放行 8182/tcp、内存默认值三种情况说明、本版功能变化（正向 V4.1、反向修复、前端 Excel 上传）、部署步骤与 root 清单（权限变化：无）、回滚（回旧包端口恢复 8000）、注意事项（无鉴权、翻译额外调用、旧任务续跑不复用新能力）。
+  5. 出包：`bash scripts/build-image.sh` 生成 `dist/icd-deploy-20261029`（217M）与单文件 `dist/icd-deploy-20261029.tar`；端口最终定为 **8182**，并按前端 EPS 选项文案调整于 18:51 再次出包覆盖。
 - **修改文件**：`docker-compose.server.yml`、`部署说明.md`、`更新说明.md`、`CHANGELOG.md`、本 log。
 - **验证方式与结果**：
-  1. `docker compose -f docker-compose.server.yml config` → `published: "8082"`、`target: 8000`、`mem_limit` / `memswap_limit` = `10737418240`（**已验证**）。
+  1. `docker compose -f docker-compose.server.yml config` → `published: "8182"`、`target: 8000`、`mem_limit` / `memswap_limit` = `10737418240`（**已验证**）。
   2. `ICD_MEM_LIMIT=2048m ICD_MEMSWAP_LIMIT=2048m docker compose -f docker-compose.server.yml config` → 2048m 覆盖生效（**已验证**）。
   3. 检索 `部署说明.md`：8000 仅剩「容器内仍监听 8000」的说明性文字（**已验证**）。
-  4. 出包产物核对（**已验证**）：`BUILD_INFO` 构建时间 2026-10-29 18:37:13，源码 `d0851c2+`（工作区有未提交改动），镜像 `icd-tool-backend-v4.0` / `sha256:e88af0b…` / `linux/amd64`，归档 216M、sha256 `299e01e…`；包内 `sha256sum -c` 通过。
-  5. 包内内容核对（**已验证**）：compose 为 `8082:8000` 与 `${ICD_MEM_LIMIT:-10g}`；`部署说明.md` 端口/内存/验收按 8082 与 10 GB 表述；`更新说明.md` 顶部 2026-10-29 且末尾已自动追加机械对比附录；`frontend/dist`、`backend/.env.example` 就位；**无 `backend/.env`**、无任何部署脚本。
-  6. 包内 compose 解析（**已验证**）：默认 `mem_limit`/`memswap_limit` = `10737418240`、`published: "8082"`；`ICD_MEM_LIMIT=2048m` 覆盖仍生效。
-  7. 镜像冒烟（**已验证**）：用新镜像以 `8082:8000` 起容器（挂载包内 `frontend/dist`、`ICD_STATIC_DIR=/app/static`，MOCK 模式），`/api/v4/health` 返回 200 `{"status":"ok","api_version":"v4"}`，`/` 返回 200 且标题为「ICD工具原型」；容器已清理。
+  4. 出包产物核对（**已验证**）：`BUILD_INFO` 构建时间 2026-10-29 18:51:59，源码 `671a1ab+`（工作区有未提交改动），镜像 `icd-tool-backend-v4.0` / `sha256:5fcb1c32…` / `linux/amd64`，归档 216M、sha256 `8dadb8a4…`；包内 `sha256sum -c` 通过。
+  5. 包内内容核对（**已验证**）：compose 为 `8182:8000` 与 `${ICD_MEM_LIMIT:-10g}`；`部署说明.md` 端口/内存/验收按 8182 与 10 GB 表述；`更新说明.md` 顶部 2026-10-29 且末尾已自动追加机械对比附录；`frontend/dist`、`backend/.env.example` 就位；**无 `backend/.env`**、无任何部署脚本。
+  6. 包内 compose 解析（**已验证**）：默认 `mem_limit`/`memswap_limit` = `10737418240`、`published: "8182"`；`ICD_MEM_LIMIT=2048m` 覆盖仍生效。
+  7. 镜像冒烟（**已验证**）：用新镜像以 `8182:8000` 起容器（挂载包内 `frontend/dist`、`ICD_STATIC_DIR=/app/static`，MOCK 模式），`/api/v4/health` 返回 200 `{"status":"ok","api_version":"v4"}`，`/` 返回 200 且标题为「ICD工具原型」；首页引用的 JS 中可检索到「配电系统（EPS）」；容器已清理。
 - **遗留问题**：
-  1. 改动未提交；交付包已生成但**未上服务器**，服务器实跑 8082 与内存默认值仍**尚未验证**。
-  2. 服务器安全组/防火墙需放行 8082/tcp；原 8000 可按需关闭。
+  1. 改动未提交；交付包已生成但**未上服务器**，服务器实跑 8182 与内存默认值仍**尚未验证**。
+  2. 服务器安全组/防火墙需放行 8182/tcp；原 8000 可按需关闭。
   3. 回滚到 `dist/icd-deploy-20261019` 时端口恢复 8000，防火墙需同步恢复。
-- **下一步建议**：1) 把 `dist/icd-deploy-20261029`（或 `.tar`）拷到服务器，按包内 `更新说明.md` + `部署说明.md` §5 逐条手工执行；2) 未执行 §5.4 时确认 `docker inspect` 内存为 10 GB，执行后为按宿主重算值；3) 服务器验收 `http://<IP>:8082`。
+- **下一步建议**：1) 把 `dist/icd-deploy-20261029`（或 `.tar`）拷到服务器，按包内 `更新说明.md` + `部署说明.md` §5 逐条手工执行；2) 未执行 §5.4 时确认 `docker inspect` 内存为 10 GB，执行后为按宿主重算值；3) 服务器验收 `http://<IP>:8182`。

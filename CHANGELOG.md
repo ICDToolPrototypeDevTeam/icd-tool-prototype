@@ -7,11 +7,11 @@
 ### Added
 
 - **正向管线升级并原样集成「发送工具集成版 V4.1」**：`backend/forward/` 代码树整体同步到 V4.1（上游 80 个文件全部到位；相对仓库 HEAD 内容变化 26 个（含集成层补丁）、新增 7 个；工程专用的 `mock_llm_server.py` 保留；运行时目录 `input/`、`output/`、`runs/`、`__pycache__`、`identity_match/src/cache/`、`单judge结果汇总/outputs/` 不参与同步）。V4.1 的业务变化包括：**HLR 需求文件新增 .xlsx 支持**（`cluster_hlr.parse_xlsx` 按表头定位字段、支持双段布局）；中文名称信号在身份匹配前做**术语翻译预扫**（`name_translator.py`，按名去重 + 磁盘缓存，API 失败回退原名）；新增 `null_identity_gate_all`、`per_signal_cap_*` 等召回门控配置；新增 `attr_value_normalizer.py` 属性值归一化与 `rejection_utils.py` 拒答识别；聚合/报告新增 **judge 有效性**（正常完成 / 超时 / 被硬上限 watchdog 终止）与**复核失败记账**（`review_failures` / `review_applied_stages`，区分「获得第二裁决」与「复核调用失败」）；judge 增加硬上限 watchdog 与 `killed_by_watchdog` 标记；单 judge 阶段超时可由 `INTEGRATION_STEP_TIMEOUT` 控制；EoICD 侧处理改为**纯输入驱动**（`resolve_active_sides` / `--sides`：用户给了哪一侧输入就处理哪一侧，不再按 `projects.py` 的 sides 硬开关），并补齐 fgmc subscriber 侧；`save_intermediate` 默认关闭。工程适配层同步更新：进度标记正则确认兼容 V4.1（`> [阶段1 共享]` / `> judge[n]` / `> [复核路由]` / `> 多 judge 聚合完成` / `[汇总] 已写出` / `[tokens] delta=`）；token 统计契约（增量标记、identity/attribute/AI 映射 sidecar、`--base-tokens`、summary `token_usage`、Word 总用量行）在上游 V4.1 删除后由工程侧**重新落回源树**并在 `使用说明.md` §6.1 保留说明；`run_integration.py` 的 `--ai-key` 日志脱敏在 V4.1 移除后重新加回；`mock_llm_server.py` 新增术语翻译请求分支（`术语翻译助手` + `ABBR:`），避免 mock 模式把翻译请求当通用 JSON 缓存。适配层还对每任务代码树副本跳过 `identity_match/src/cache` 与 `单judge结果汇总/outputs` 运行时缓存。**反向管线未改动**。该改动需**重建后端镜像 / 覆盖前端产物**才生效。
-- **正向接口与前端支持 .xlsx HLR 需求文件**：`POST /api/v4/completeness-analysis` 的 `hlr_word_file` 校验从 `.docx` 放宽为 `.docx / .xlsx`（字段名不变）；前端上传区文案改为「HLR 需求文件（Word/Excel）」、`accept` 增加 `.xlsx`、未上传提示同步更新。
+- **正向接口与前端支持 .xlsx HLR 需求文件**：`POST /api/v4/completeness-analysis` 的 `hlr_word_file` 校验从 `.docx` 放宽为 `.docx / .xlsx`（字段名不变）；前端上传区文案改为「HLR 需求文件（Word/Excel）」、`accept` 增加 `.xlsx`、未上传提示同步更新；完整性分析「系统类型」下拉的 EPS 选项文案改为「配电系统（EPS）」（`value="eps"` 不变）。
 
 ### Changed
 
-- **云服务器交付包：对外访问端口改为 8082，未执行 §5.4 时默认容器内存上限改为 10 GB**：`docker-compose.server.yml` 的端口映射由 `8000:8000` 改为 `8082:8000`（容器内 uvicorn 仍监听 8000，前端同源相对路径无需改动）；`mem_limit` / `memswap_limit` 的兜底值由 `640m` 改为 `10g`，仅在未写根目录 `.env`（即跳过 `部署说明.md` §5.4）时生效；执行 §5.4 时仍按宿主实际内存重算并覆盖。`部署说明.md` 同步更新端口、内存说明与验收命令。该改动随下一交付包生效；服务器防火墙/安全组需放行 **8082/tcp**（原 8000 可关闭）。
+- **云服务器交付包：对外访问端口改为 8182，未执行 §5.4 时默认容器内存上限改为 10 GB**：`docker-compose.server.yml` 的端口映射由 `8000:8000` 改为 `8182:8000`（容器内 uvicorn 仍监听 8000，前端同源相对路径无需改动）；`mem_limit` / `memswap_limit` 的兜底值由 `640m` 改为 `10g`，仅在未写根目录 `.env`（即跳过 `部署说明.md` §5.4）时生效；执行 §5.4 时仍按宿主实际内存重算并覆盖。`部署说明.md` 同步更新端口、内存说明与验收命令。该改动随下一交付包生效；服务器防火墙/安全组需放行 **8182/tcp**（原 8000 可关闭）。
 
 ### Fixed
 
