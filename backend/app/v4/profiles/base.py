@@ -34,8 +34,10 @@ class RequirementScanConfig:
     registration of skipped tables (written to ``HLROutput.parse_warnings``).
 
     ``after_glossary`` (default = legacy behaviour): scan tables after
-    ``glossary_table_index``.  ``all_tables``: scan the whole document —
-    requirement tables decoupled from glossary/catalog-table positions.
+    ``glossary_table_index``.  Exception: document table 0 is also scanned
+    when it already looks like a requirement table (id + content row
+    labels).  ``all_tables``: scan the whole document — requirement tables
+    decoupled from glossary/catalog-table positions.
 
     ``id_pattern``: optional regex the id row's value must match; a
     non-empty value that does not match rejects the table (strong signal,

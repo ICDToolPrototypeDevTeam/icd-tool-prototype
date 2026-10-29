@@ -86,6 +86,26 @@ def _id_row_info(table, field_index: dict[str, str]) -> tuple[bool, str]:
     return False, ""
 
 
+def _has_requirement_fields(table, field_index: dict[str, str]) -> bool:
+    """Return True when col-0 shows both an ``id`` and a ``content`` row label.
+
+    Used only to admit a requirement table at document index 0 that sits
+    before the legacy scan start (``glossary_table_index + 1``).  Requiring
+    two resolved row labels keeps column-header summary tables (whose first
+    row happens to start with ``需求ID``) from being extracted as a bogus
+    requirement.
+    """
+    fields: set[str] = set()
+    for r in range(len(table.rows)):
+        header = _cell_text(table, r, 0)
+        if not header:
+            continue
+        std_field = field_index.get(header.lower())
+        if std_field:
+            fields.add(std_field)
+    return {"id", "content"} <= fields
+
+
 def _first_nonempty_cell(table) -> str:
     """First non-empty cell text of a table (row-major). For warning samples."""
     for row in table.rows:
@@ -257,6 +277,12 @@ class HLRWordParser:
         #    glossary was NOT located, the legacy start point
         #    (``glossary_table_index + 1``) is kept so default profiles are
         #    byte-identical to the pre-change behaviour.
+        #  - Exception: table 0 is admitted when it is already identified as
+        #    a requirement table (id + content row labels).  Some documents
+        #    put the first requirement table at index 0, which the legacy
+        #    start point would otherwise skip silently.  Only index 0 is
+        #    rescued for now; pre-start tables at other indices keep the
+        #    legacy behaviour.
         if scan_cfg.mode == "all_tables":
             start = 0
         elif glossary_idx is not None:
@@ -264,7 +290,16 @@ class HLRWordParser:
         else:
             start = self.cfg.glossary_table_index + 1
 
-        for idx in range(start, len(tables)):
+        scan_indices = list(range(start, len(tables)))
+        if (
+            scan_cfg.mode != "all_tables"
+            and start > 0
+            and 0 in requirement_indices
+            and _has_requirement_fields(tables[0], field_index)
+        ):
+            scan_indices.insert(0, 0)
+
+        for idx in scan_indices:
             table = tables[idx]
             if idx in detected_indices:
                 continue

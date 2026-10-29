@@ -3331,3 +3331,69 @@ verified（匹配层已复验；真实模型端到端待复验）
 1. 报告层“关键发现”汇总句未加内部接口说明（按“只改匹配层”范围未实施）。
 2. 告警语境不再排除；若后续出现“三通道均故障发送告警”类外部需求，需重新评估 `internal_channel_exclude_pattern`。
 3. 需重建后端镜像才在服务器生效。
+
+---
+
+## BUG-20261029-002：HLR Word 文档第一张需求表被扫描起点跳过
+
+#### 状态
+
+verified
+
+#### 发现日期
+
+2026-10-29
+
+#### 关联 Issue / PR
+
+- Issue 待补（本地分支 `issue-xxx-internal-channel-false-alarm-release`）
+- 关联 job：`6f72537b-f09c-4852-897f-73ecc34c31d2`、`ae916d09-4f64-4793-b078-5246448388db`
+
+#### 问题现象
+
+部分测试文档第一张表就是需求表。解析后该表需求没有进入 `hlr_requirements.json`，也没有 parse warning，后续标注、匹配、报告均缺少这条需求。
+
+实测两份 AMS 文档：
+
+- `1029测试1.docx`：输出 4 条，缺少表 0 的 `FSF21000101_HLR_2939`；
+- `环控控制器控制软件待确认需求.docx`：输出 23 条，缺少表 0 的 `FSF21000101_HLR_288`。
+
+#### 影响范围
+
+仅 `after_glossary` 模式且扫描起点大于 0 的 profile（AMS `glossary_table_index=0`、FGMC `glossary_table_index=1`）。HSCU 使用 `all_tables`（`start=0`）不受影响；RPDU 走 xlsx 解析器，不经过 `HLRWordParser`。
+
+#### 原因分析
+
+（已定位）`parse()` 的需求表扫描起点为 `glossary_idx + 1` 或 `glossary_table_index + 1`，只遍历 `range(start, len(tables))`。虽然 `requirement_indices` 已在全文范围识别需求表（用于避免术语表误判），但表 0 从未进入提取循环。AMS 未定位到术语表时 `start=1`，FGMC 为 `start=2`，因此表 0（以及 FGMC 的表 1）被静默跳过；AMS/FGMC 未开启 `register_skipped`，不会产生告警。
+
+#### 修复方案
+
+方案 B（仅纳入表 0）：在 `after_glossary` 模式下，若表 0 已在 `requirement_indices` 中且列 0 同时存在 `id` 与 `content` 两个行头，则把索引 0 追加到扫描序列最前。其余前置表、`all_tables` 路径、既有 `id_pattern`/空 ID/`_extract_requirement` 门控均不变。双行头判断用于排除首行为列头的汇总表。
+
+#### 修改文件
+
+1. `backend/app/v4/parsers/hlr_word_parser.py`（新增 `_has_requirement_fields` + 扫描序列追加表 0）
+2. `backend/app/v4/profiles/base.py`（`RequirementScanConfig` docstring 补充表 0 例外）
+
+#### 验证方式
+
+1. 修改前后对 27 份历史反向 docx 做解析快照，逐份比较需求 ID、正文 SHA、术语/缩略语数量、告警类型。
+2. 目标两份文档比较需求条数与首条 ID。
+3. HSCU 文档随全量快照比较。
+4. `1029测试1.docx` 执行 `USE_MOCK_LLM=1` 反向全流程。
+5. `py -m py_compile`。
+
+#### 验证结果
+
+**已通过（本机，2026-10-29）**：
+
+1. 27 份文档中仅目标 2 份变化，其余 25 份（含 4 份 HSCU）逐字段一致。
+2. `1029测试1.docx` 4→5 条，新增 `HLR_2939` 排首位；`环控控制器控制软件待确认需求.docx` 23→24 条，新增 `HLR_288` 排首位；原有需求顺序、正文哈希、术语/缩略语、告警类型均不变。
+3. mock 全流程通过：5 条需求进入标注/匹配，4 份 Word 正常生成。
+4. **尚未执行**：真实模型端到端复跑。
+
+#### 遗留问题
+
+1. 表 1～扫描起点之间的前置需求表仍保持原行为；当前语料未出现该形态。
+2. `parse-hlr` CLI 缺少 profile 参数（`TypeError`），与本次无关，另行处理。
+3. 需重建后端镜像才在服务器生效。
