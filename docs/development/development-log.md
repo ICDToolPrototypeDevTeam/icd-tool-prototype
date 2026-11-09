@@ -4302,3 +4302,36 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   2. 服务器安全组/防火墙需放行 8182/tcp；原 8000 可按需关闭。
   3. 回滚到 `dist/icd-deploy-20261019` 时端口恢复 8000，防火墙需同步恢复。
 - **下一步建议**：1) 把 `dist/icd-deploy-20261029`（或 `.tar`）拷到服务器，按包内 `更新说明.md` + `部署说明.md` §5 逐条手工执行；2) 未执行 §5.4 时确认 `docker inspect` 内存为 10 GB，执行后为按宿主重算值；3) 服务器验收 `http://<IP>:8182`。
+
+## 2026-11-09 自定义 HLR 表格样式（分支 x-x，改动未提交）
+
+- **背景（用户提出）**：不同控制器与不同文档的 SWHLR Word 需求表行标签与需求表位置不一致；此前适配只能修改 controller profile（`config.yaml`）并重新部署，普通用户无法自助处理。
+- **完成内容**：
+  1. 解析层：`RequirementScanConfig` 新增 `required_fields` / `require_content_value`，需求表识别增加字段门槛并在提取后校验 `id_pattern`；新增 `v4/parsers/hlr_schema.py`（样式模型与校验、内置模板派生、`build_parser_config` / `build_profile_with_schema`、`scan_docx_tables` / `preview_parse`）。
+  2. 持久化：新增 `v4/hlr_schema_store.py`（`OUTPUT_DIR/hlr_schemas.json` 原子读写、CRUD、名称唯一校验、`resolve_schema_reference` 三种引用解析与快照序列化）。
+  3. API：新增 `api/v4/hlr_schemas.py` 六个路由（列表 / 新建 / 更新 / 删除 / 扫描 / 试解析）与 `V4HLRSchema*` 模型并在 `router.py` 挂载；`POST /api/v4/coverage-analysis` 新增 `hlr_schema` 表单字段，解析与校验前移到创建任务目录之前（非法引用不留残留目录），快照落 `input/hlr_schema.json` 与 manifest；`runner` 新增 `_resolve_runtime_profile`，首跑与续跑均按快照套用样式。
+  4. 前端：新增 `HlrSchemaEditor.tsx`（内置模板 / 自定义样式下拉、表格扫描、15 个标准字段的标签映射、试解析预览、保存 / 修改 / 删除）；`CorrectnessPage` 集成并提交 `hlr_schema`，未选系统类型时拦截。
+  5. 同日补充（用户确认「适配所有系统」）：
+     - `is_requirement`（是否为需求）加入样式标准字段：只有显式映射后才启用非需求过滤（值「否」的表格跳过）；未映射时不再从 FGMC profile 自动继承过滤；内置 FGMC 模板的 config 包含该字段，保证「内置模板改动后另存」行为不变。
+     - 新增「其他系统（通用）」系统类型 `generic`（`v4/profiles/generic/config.yaml`，中性配置、无 `auto_detect`）：解析完全由自定义样式驱动，选择时必须同时提供样式，下游使用默认配置；暂不支持追溯预筛。
+     - 前端系统类型下拉新增「其他系统（通用，需自定义样式）」；额外字段下拉新增「是否为需求」并在映射后提示过滤规则；通用系统未配样式时前端拦截。
+  6. 同日补充（用户要求重做前端接入方式，仅前端）：「系统类型 + 表格样式」合并为一张「解析规则」卡片，默认只显示系统类型与「内置规则 / 自定义样式」两段选择；进入自定义后，页内只保留一行样式摘要（名称/来源、字段数、「已修改」标记、「编辑」入口），编辑器放入原生 `<dialog>` 弹窗（桌面 960px 居中、86vh 上限，窄屏全屏 sheet），打开时锁定页面滚动，Esc / 遮罩 / 关闭按钮可退出；系统类型成为唯一样式来源，移除与它重复的内置模板下拉，样式来源移入弹窗；15 个字段的映射区与「已选标签」合并为一张表（点字段行切换标注对象，点标签行写入映射，已映射标签再次点击改为选中对应字段）；扫描表格改为下拉并自动选中疑似需求表，编号正则改为「需求编号」行下的折叠子行（有值时摘要旁显示正则片段，输入区与标签列左缘对齐；原先与「添加字段」并排，容易被误认为字段管理），试解析结果精简为总数 + 前 3 条；新增 `onCustomActiveChange`，页面可拦截「自定义样式但未选系统类型」的提交。后端与提交契约未改动。
+- **修改文件**：`backend/app/api/v4/coverage.py`、`backend/app/api/v4/router.py`、`backend/app/api/v4/runner.py`、`backend/app/api/v4/schemas.py`、`backend/app/v4/parsers/hlr_word_parser.py`、`backend/app/v4/profiles/base.py`、`frontend/src/api/index.ts`、`frontend/src/pages/CorrectnessPage.tsx`、`frontend/src/index.css`、`frontend/src/types.ts`。
+- **新增文件**：`backend/app/api/v4/hlr_schemas.py`、`backend/app/v4/hlr_schema_store.py`、`backend/app/v4/parsers/hlr_schema.py`、`backend/app/v4/profiles/generic/config.yaml`、`frontend/src/components/HlrSchemaEditor.tsx`；本地测试（`backend/tests/` 已 gitignore、不入库）`tests/test_hlr_custom_schema.py`、`tests/test_hlr_custom_schema_api.py`。
+- **删除文件**：无。
+- **文档**：`docs/architecture/api.md`（`hlr_schema` 字段与第 16 节六个接口）、`docs/architecture/current-architecture.md`（模块表、解耦关系与目录树）、`docs/project/workflow.md`（Step 1 一句）、`CHANGELOG.md`（`[Unreleased] - 2026-11-09` Added）、新增 `docs/decisions/ADR-006-自定义HLR表格样式.md`、本 log。
+- **验证方式与结果**：
+  1. 后端样式单测：`cd backend && python -m pytest tests/test_hlr_custom_schema.py -q` → **20 passed**；`python -m pytest tests/test_hlr_custom_schema_api.py -q` → **11 passed**（含 coverage `hlr_schema` 校验、快照与续跑透传用例）；终审加固新增 6 例后两文件合计 **37 passed**；同日补充后再跑两文件 **41 passed**（新增 is_requirement 映射过滤、通用系统 preview / coverage / 追溯拒绝用例）（**已验证**）。
+  2. 既有回归（Task 1–6 期间）：`tests/test_hlr_word_parser_glossary.py` → 8 passed；`tests/test_api_mock_env_default.py tests/test_hlr_custom_schema.py` → 25 passed；`tests/test_job_orphan.py tests/test_parse_artifact_reuse.py` 等 → 42 passed / 6 failed，6 项均为既有漂移（job 状态机与陈旧断言，与本改动无关）。`tests/test_hlr_word_parser_adaptivity.py::test_t12` 为既有失败（HEAD 版本同样复现）（**已验证**）。
+  3. 前端构建：`cd frontend && npm run build` → **PASS**（仅既有 chunk > 500 kB 提示，无类型错误；最后一次系统类型提示文案调整后复跑仍 PASS）（**已验证**）。
+  4. 文档自检：API 字段集中在 `docs/architecture/api.md`，架构文档仅描述模块职责与解耦关系，流程文档仅加一句业务说明，`CHANGELOG.md` 仅记能力级变化，未写入 Bug 排查过程（**已核对**）。
+  5. 全量回归（排除 10 个既有陈旧测试模块）：**7 failed / 344 passed / 1 skipped**；7 项失败与改动前基线一致（T12 既有、scheduler 状态机漂移 ×4、陈旧日志断言、`job_scheduler.py:155` 既有 offender），新增用例全部通过（**已验证**）。
+  6. API 级等价验收（本地 `uvicorn` + mock 模式，`acceptance_task10.py`）：**25/25 PASS** —— 不选样式与选 `builtin_ams` 的 mock 全流程任务解析产物逐条一致（32/32）、FGMC 内置与自定义配置过滤一致（7/7）、RPDU `.xlsx` + 自定义样式 422、样式快照落盘、删除样式后预览 404（**已验证**）。
+  7. 浏览器 UI 实际点击（headless Chrome + CDP，1440px / 480px 两档）：选「自定义样式」自动打开弹窗，AMS 预填 8 个映射，改动编号正则后页内摘要出现「已修改」；通用系统自动打开空样式弹窗，上传样例 → 读取表格得到 8 个标签、自动选中疑似需求表 → 映射「需求ID → 需求编号」「需求中文 → 需求正文」→ 试解析通过共 16 条需求，页内摘要显示「手工配置 · 2 个字段」；弹窗打开时页面滚动锁定、关闭后恢复，桌面居中、480px 下全屏且无横向溢出；编号正则已复核：字段区仅「需求编号」行下有 1 个折叠子行、左缘与标签列对齐、不在「添加字段」行内，填写后折叠摘要显示正则片段且页内摘要出现「已修改」，480px 展开无横向溢出（**已验证**）。真实 LLM 全流程**尚未执行**，验收任务均为 mock 模式。
+  8. 通用系统端到端（本地 `uvicorn` :8198 + mock）：AMS 样例 + 自定义样式（内置 AMS 配置全文）+ `controller_profile=generic` 提交 → 任务 `completed`，解析 16 条 HLR，匹配 / 判定与三份单模型报告 + 共识报告均产出；同一文档在 AMS 原生、AMS 自定义样式、通用系统自定义样式三条解析路径下需求 ID 序列完全一致（16/16）（**已验证**）。
+- **遗留问题**：
+  1. 改动未提交；需**重建后端镜像 / 覆盖前端产物**才在服务器生效（无新端口、无新环境变量、无新增第三方依赖）。
+  2. 自定义样式全局共享、无鉴权与用户隔离；样式仅支持 `.docx`；RPDU 内置模板只读且不适用于自定义样式；「其他系统（通用）」无内置增强配置、不支持追溯预筛、不参与自动识别，匹配质量需按实际文档验证 —— 原型阶段的已知限制。
+  3. 终审后已加固：扫描 / 试解析 50 MB 上传上限与损坏文档 422、manifest 坏快照不再永久 PENDING、名称 Cc/Cf/Cs 拒绝、切换控制器时清空残留字段、删除后刷新失败兜底、API 文档 422 表述；仍 park 的 Minor：前端可提交后端必拒的 payload、busy 时编辑可丢、扫描 / 预览无请求序保护、样式文件读取不校验 version 且未 trim、既有 `fsecu` 文档漂移。
+  4. Issue 编号待用户回填。
+- **下一步建议**：1) 用户提交分支并重建后端镜像 / 前端产物；2) 浏览器手工验收（下拉选模板 / 扫描 / 试解析 / 保存 / 删除）；3) 服务器实测：用一份非标准需求表 .docx 扫描 → 保存样式 → 带样式提交任务，确认快照与续跑正常；4) 出包《更新说明》注明本变更部署层：无新端口、无新环境变量、无新依赖。

@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-11-09
+
+### Added
+
+- **自定义 HLR 表格样式：扫描 Word 表格、编辑行标签映射、试解析并保存样式，适配不同控制器 / 文档的需求表写法**：不同控制器与文档的 SWHLR Word 需求表在行标签（如「需求编号 / 需求正文 / 基本原理」）与需求表位置上写法不一，此前只能修改 controller profile 的 YAML 并重新部署来适配。现在新增一套「HLR 表格样式」能力：新增 `GET/POST /api/v4/hlr-schemas` 与 `PUT/DELETE /api/v4/hlr-schemas/{schema_id}` 管理自定义样式（服务端持久化在 `OUTPUT_DIR/hlr_schemas.json`、全局共享，名称忽略大小写唯一，内置模板只读）；`POST /api/v4/hlr-schemas/scan` 扫描上传 .docx 的表格结构（表序号、行列数、疑似需求表、行标签与值预览）；`POST /api/v4/hlr-schemas/preview` 用指定样式试解析并预览前 5 条需求与告警——扫描与试解析均在本地完成，**不调用 LLM**。内置 4 个只读模板（`builtin_ams` / `builtin_fgmc` / `builtin_hscu` / `builtin_rpdu`）由现有 controller profile 派生，可直接作为编辑起点；RPDU 使用内置解析路径，仅列出、不适用于自定义样式。`POST /api/v4/coverage-analysis` 新增可选表单字段 `hlr_schema`，支持完整样式配置、`{"template_id": ...}`、`{"schema_id": ...}` 三种形式：仅支持 `.docx`，使用时必须显式选择系统类型，内置模板须与所选控制器一致；样式快照写入任务目录与 manifest，续跑与历史结果不依赖样式是否仍存在。**不传 `hlr_schema` 时行为与改动前一致**；样式只影响 HLR 解析（行标签映射与需求表识别），匹配、追溯、标注 hook 与后续判定流程不变。前端上传页新增样式编辑器（扫描、标签映射、试解析、保存 / 修改 / 删除）。新增「其他系统（通用）」系统类型 `generic`：没有内置解析规则，必须配合自定义样式使用，不支持追溯预筛，且不参与自动识别（需显式选择）；样式的「是否为需求」列改为可选映射，映射后才启用非需求过滤（未映射时即使 FGMC 系统类型也不过滤）。该改动需**重建后端镜像 / 覆盖前端产物**才生效；无新增第三方依赖、无新增环境变量与端口。
+
 ## [Unreleased] - 2026-10-29
 
 ### Added

@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { CircleStop, TriangleAlert } from 'lucide-react'
 import CorrectnessFileUpload from '../components/CorrectnessFileUpload'
 import CorrectnessResultView from '../components/CorrectnessResultView'
+import HlrSchemaEditor from '../components/HlrSchemaEditor'
 import InterruptedTasks from '../components/InterruptedTasks'
 import ProcessingView from '../components/ProcessingView'
 import WorkflowSteps from '../components/WorkflowSteps'
@@ -13,7 +14,12 @@ import JobLogPanel from '../components/JobLogPanel'
 import { useJobLogs } from '../hooks/useJobLogs'
 import { useMockMode } from '../hooks/useMockMode'
 import { abandonJobV4, analyzeFilesV4, getJobResultV4, resumeJobV4 } from '../api'
-import type { FileItem, V4JobListItem, V4JobResultResponse } from '../types'
+import type {
+  FileItem,
+  HlrSchemaPayload,
+  V4JobListItem,
+  V4JobResultResponse,
+} from '../types'
 
 export default function CorrectnessPage() {
   const job = useAnalysisJob<V4JobResultResponse>()
@@ -27,9 +33,17 @@ export default function CorrectnessPage() {
   const [subscriberFile, setSubscriberFile] = useState<FileItem | null>(null)
   const [traceabilityFiles, setTraceabilityFiles] = useState<FileItem[]>([])
   const [selectedPreviewFile, setSelectedPreviewFile] = useState<FileItem | null>(null)
-  // Reverse-pipeline only: AMS / FGMC / HSCU / RPDU controller profile.
+  // Reverse-pipeline only: AMS / FGMC / HSCU / RPDU / generic controller profile.
   // Forward (Completeness) analysis does not use this selector.
   const [v4ControllerProfile, setV4ControllerProfile] = useState<string>('')
+  // 自定义样式是否处于激活状态：与 hlrSchemaPayload 分开，避免「配置不完整
+  // （payload 为 null）」被误判为「未使用自定义样式」。
+  const [hlrCustomActive, setHlrCustomActive] = useState(false)
+  // 自定义 HLR 表格样式引用（完整配置 / template_id / schema_id），随请求提交。
+  const [hlrSchemaPayload, setHlrSchemaPayload] = useState<HlrSchemaPayload | null>(null)
+  // 「清空全部」时递增：即使当前没有 HLR 文件（hlrFile 保持 null、effect 不会重跑），
+  // 也能强制重挂载样式编辑器，让组件内的选择/字段/试解析结果一并清空。
+  const [hlrEditorResetKey, setHlrEditorResetKey] = useState(0)
 
   // 从工具入口页带 ?job=<id> 跳转过来时自动挂到该任务上（StrictMode 下 effect 会跑两次，用 ref 防重入）
   useEffect(() => {
@@ -54,12 +68,21 @@ export default function CorrectnessPage() {
       alert('请至少上传 Publisher Excel 或 Subscriber Excel')
       return
     }
+    if (hlrCustomActive && !v4ControllerProfile) {
+      alert('使用自定义样式时请选择系统类型')
+      return
+    }
+    if (v4ControllerProfile === 'generic' && !hlrSchemaPayload) {
+      alert('其他系统需要先完成表格样式配置')
+      return
+    }
 
     const formData = new FormData()
     if (hlrWordFile.file) formData.append('hlr_word_file', hlrWordFile.file)
     if (publisherFile?.file) formData.append('eoicd_publisher_file', publisherFile.file)
     if (subscriberFile?.file) formData.append('eoicd_subscriber_file', subscriberFile.file)
     if (v4ControllerProfile) formData.append('controller_profile', v4ControllerProfile)
+    if (hlrSchemaPayload) formData.append('hlr_schema', JSON.stringify(hlrSchemaPayload))
     // 显式传值（而不是「不传即沿用容器配置」）：容器 .env 可能已开 mock，
     // 只有显式 false 才能让顶栏开关双向可用。
     formData.append('use_mock_llm', mockMode ? 'true' : 'false')
@@ -84,6 +107,9 @@ export default function CorrectnessPage() {
     setSubscriberFile(null)
     setTraceabilityFiles([])
     setSelectedPreviewFile(null)
+    setHlrSchemaPayload(null)
+    setHlrCustomActive(false)
+    setHlrEditorResetKey((k) => k + 1)
   }
 
   /** 已终止的任务：就地续跑（后端按参数快照重启并复位取消标志），再挂回轮询 */
@@ -142,30 +168,17 @@ export default function CorrectnessPage() {
             }}
             onPreviewSelect={setSelectedPreviewFile}
           />
-          {/* Controller Profile selector — reverse pipeline only.
-              Matches backend ALLOWED_CONTROLLER_PROFILES in
-              backend/app/api/v4/coverage.py: ams / fgmc / hscu / rpdu. */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 16, marginBottom: 16 }}>
-            <span style={{ fontSize: 14, color: '#555' }}>系统类型：</span>
-            <select
-              value={v4ControllerProfile}
-              onChange={(e) => setV4ControllerProfile(e.target.value)}
-              style={{
-                padding: '6px 12px',
-                borderRadius: 6,
-                border: '1px solid #ddd',
-                fontSize: 14,
-                minWidth: 160,
-              }}
-            >
-              <option value="">自动识别</option>
-              <option value="ams">环控系统 (AMS)</option>
-              <option value="fgmc">燃油系统 (FGMC)</option>
-              <option value="hscu">液压系统 (HSCU)</option>
-              <option value="rpdu">远程功率分配单元 (RPDU)</option>
-            </select>
-            <span style={{ fontSize: 12, color: '#888' }}>（默认自动识别；仅影响反向管线）</span>
-          </div>
+          {/* 解析规则：系统类型与表格样式合并在同一张卡片内选择。
+              controller_profile 取值与 backend/api/v4/coverage.py 的
+              ALLOWED_CONTROLLER_PROFILES 一致：ams / fgmc / hscu / rpdu / generic。 */}
+          <HlrSchemaEditor
+            key={hlrEditorResetKey}
+            hlrFile={hlrWordFile?.file ?? null}
+            controllerProfile={v4ControllerProfile}
+            onControllerProfileChange={setV4ControllerProfile}
+            onChange={setHlrSchemaPayload}
+            onCustomActiveChange={setHlrCustomActive}
+          />
           <div className="action-bar">
             <button className="btn btn--secondary btn--large" onClick={handleReset}>
               清空全部

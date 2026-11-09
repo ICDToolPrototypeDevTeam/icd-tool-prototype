@@ -22,6 +22,8 @@ Step 1: 解析输入
     HLR Word 同时按表头语义识别「缩略语表」（缩写/英文全称/中文全称）与
     「术语表」（术语/定义），不依赖固定表序号、列数或列顺序；识别结果写入
     hlr_requirements.json 的 glossary / terms（terms 为空时不写该字段）
+    可选：提供自定义 HLR 表格样式（完整配置 / 内置模板 / 已保存样式）时，本步按该样式映射行标签与识别需求表；样式只影响解析，不改变后续步骤的输入与产物结构
+    自定义样式与系统类型：「其他系统（通用）」没有内置解析规则，必须提供样式；样式映射「是否为需求」后才启用非需求过滤
     模块: parsers/{eoicd_excel_parser,hlr_word_parser,glossary_tables}.py
 
 Step 2: HLR AI 标注

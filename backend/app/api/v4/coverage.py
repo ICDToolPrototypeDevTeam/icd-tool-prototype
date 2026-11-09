@@ -9,6 +9,7 @@ ADR-001 Issue A：
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Optional
@@ -21,7 +22,13 @@ from app.api.v4.runner import launch_v4_pipeline
 from app.api.v4.schemas import V4AnalyzeResponse
 from app.job_manager import job_manager
 from app.v4.config import get_output_root
+from app.v4.hlr_schema_store import (
+    SchemaNotFoundError,
+    SchemaValidationError,
+    resolve_schema_reference,
+)
 from app.v4.parsers import registered_extensions
+from app.v4.parsers.hlr_schema import HLRSchemaValidationError
 from app.v4.parsers.zip_entry_normalize import ensure_standard_path
 from app.v4.profiles import get_registry, init_registry, _registry
 
@@ -36,7 +43,9 @@ ALLOWED_JUDGE_PROVIDERS = {"deepseek", "minimax", "qwen"}
 SUPPORTED_HLR_EXTENSIONS = frozenset(registered_extensions())
 # Issue #63 / Task 12 + Issue #74: v4 controller profile whitelist.
 # Must match the directories under ``backend/app/v4/profiles/``.
-ALLOWED_CONTROLLER_PROFILES = {"ams", "fgmc", "hscu", "rpdu"}
+# ``generic`` = 其他系统（通用）：解析完全由自定义表格样式驱动，必须显式选择
+# 且同时提供样式；自动识别不会返回它（profile 未声明 auto_detect）。
+ALLOWED_CONTROLLER_PROFILES = {"ams", "fgmc", "hscu", "rpdu", "generic"}
 
 # 文件名安全字符：保留中英数 + . _ - + 空格 + 各种括号（合法 FS 字符）
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._\-一-龥\s()（）\[\]【】]")
@@ -193,6 +202,7 @@ async def coverage_analysis(
     enable_traceability_prefilter: bool = Form(False),
     controller_profile: Optional[str] = Form(None),
     no_refine: bool = Form(False),
+    hlr_schema: Optional[str] = Form(None),
 ):
     # —— 字段校验 ——
     _hlr_ext = Path(hlr_word_file.filename or "").suffix.lower()
@@ -220,6 +230,43 @@ async def coverage_analysis(
                     detail=f"judge_providers: unsupported provider '{p}'; allowed: deepseek, minimax, qwen",
                 )
 
+    # —— 自定义表格样式：必须在创建任务目录之前解析校验 ——
+    # 否则非法样式会留下一个永远不会启动的任务目录（幽灵任务）。
+    resolved_schema = None
+    # 直接调用路由函数的场景不经过 FastAPI 表单解析，缺省值仍是 Form(...) 哨兵；
+    # 只有真正的字符串才算「传了样式」（空串按未传处理）。
+    if isinstance(hlr_schema, str) and hlr_schema:
+        if _hlr_ext != ".docx":
+            raise HTTPException(status_code=422, detail="自定义表格样式仅支持 Word 文档")
+        if not controller_profile:
+            raise HTTPException(status_code=422, detail="使用自定义样式时请选择系统类型")
+        try:
+            resolved = resolve_schema_reference(hlr_schema)
+        except (SchemaValidationError, HLRSchemaValidationError, SchemaNotFoundError) as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        if resolved.mode == "native" and resolved.profile_id != controller_profile:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"内置模板 {resolved.template_id} 属于 {resolved.profile_id}，"
+                    f"与系统类型 {controller_profile} 不一致"
+                ),
+            )
+        resolved_schema = resolved.to_snapshot()
+
+    # 通用系统没有内置解析规则：必须由自定义表格样式提供行标签映射。
+    if controller_profile == "generic":
+        if resolved_schema is None:
+            raise HTTPException(
+                status_code=422,
+                detail="使用通用系统时请配置自定义表格样式",
+            )
+        if enable_traceability_prefilter and traceability_files:
+            raise HTTPException(
+                status_code=422,
+                detail="通用系统暂不支持追溯预筛，请关闭后重试",
+            )
+
     # —— 创建 Job 与目录（V4 路径：backend/output/v4/{job_id}/input/ + output/）——
     # 此刻**不登记**进任务列表：下面的保存上传与自动识别都可能抛错（413/422/500），
     # 那样请求就结束了、线程不会启动，登记了就是一条永远停在「等待开始」的幽灵任务。
@@ -242,6 +289,12 @@ async def coverage_analysis(
             if not tf.filename.lower().endswith(".xlsx"):
                 raise HTTPException(status_code=422, detail=f"traceability file {tf.filename} must be .xlsx")
             await _save_upload(tf, trace_dir)
+
+    # 自定义样式快照落盘（供追溯与续跑；未传样式时不写，任务目录内容不变）
+    if resolved_schema is not None:
+        (input_dir / "hlr_schema.json").write_text(
+            json.dumps(resolved_schema, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     # —— 自动识别或校验 controller_profile ——
     if controller_profile is None:
@@ -270,6 +323,7 @@ async def coverage_analysis(
         use_mock_llm=use_mock_llm,
         controller_profile=controller_profile,
         no_refine=no_refine,
+        hlr_schema=resolved_schema,
     )
 
     return V4AnalyzeResponse(

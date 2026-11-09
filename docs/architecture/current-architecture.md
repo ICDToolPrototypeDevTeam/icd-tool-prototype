@@ -88,11 +88,14 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | `job_scheduler.py` | 进程内任务队列：固定 `MAX_CONCURRENT_JOBS`（默认 2）个常驻工作线程领取任务（新任务 FIFO，续跑任务插队首，不抢占执行中任务）；出队时做票据比对（同一任务的旧条目丢弃）与跳过裁决（排队期间被终止 / 放弃的任务不执行，原因写入该任务日志） |
 | `runtime_settings.py` | 运行时模型设置：三个模型名原子落盘到 `OUTPUT_DIR/settings.json`，保存时写入 `os.environ`，启动时回读；不依赖任何业务管线 |
 | `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（经 `job_scheduler` 入队 + 7 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` / `settings.py` |
+| `api/v4/hlr_schemas.py` | HLR 表格样式管理与辅助接口：样式列表 / 新建 / 更新 / 删除、文档表格扫描与试解析（扫描与试解析均不调用 LLM）；内置模板只读（403），未知样式 404、重名 409、配置非法 422 |
 | `v4/pipeline.py` | V4 反向管线编排（`run_reverse_pipeline`，6 步）；正向管线不在 `v4/` 内（见 `forward/` 与 `app/forward/` 两行） |
 | `v4/config.py` | V4 env 加载（DEEPSEEK_* / USE_MOCK_LLM / JUDGE_PROVIDERS）+ 业务常量 |
 | `v4/errors.py` | 管线异常 → 面向用户的错误分类与建议；复用 `degradation.fallback.classify_exception` |
 | `v4/models.py` | V4 Pydantic 模型（EoICDRequirement / HLRLabel / ReverseCase / ConsensusResult 等） |
 | `v4/parsers/`  | EoICD PubSub Excel + HLR Word 解析；`glossary_tables.py` 按表头语义识别缩略语表/术语表（不依赖固定表序号、列数或列顺序） |
+| `v4/parsers/hlr_schema.py` | HLR 表格样式模型与辅助：样式配置校验与序列化、内置模板派生（AMS/FGMC/HSCU/RPDU）、样式叠加到 `HLRParserConfig` / `ControllerProfile`、文档表格扫描与试解析辅助 |
+| `v4/hlr_schema_store.py` | 自定义 HLR 表格样式的持久化与引用解析：`OUTPUT_DIR/hlr_schemas.json` 原子读写、CRUD、名称唯一校验、`template_id` / `schema_id` / 内联配置三种引用的解析与快照序列化 |
 | `v4/matching/` | HLR 标注、条目过滤、信号画像、Block 聚合、HLR 分类、反向匹配、追溯预筛选；`glossary_index.py` 为每条 case 选取命中的文档术语（只供裁判/复查 prompt，不参与匹配评分）；`internal_channel.py` 为 AMS 内部通道需求前置判断（命中按无匹配 + 内部接口标注，不进入 Block 评分与裁判） |
 | `v4/comparison/` | 多模型裁判、Review Agent 共识、一星复查、报告生成 |
 | `v4/degradation/` | Provider 健康跟踪、Case 超时、熔断、星级降级 |
@@ -104,6 +107,8 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | `forward/`     | 正向（完整性）多 judge 一致性管线**原样代码树**（唯一事实源；每任务整树复制到 `<job_dir>/forward/` 运行） |
 | `app/forward/` | 正向适配层：`root` / `projects` / `config_builder` / `mock_server` / `execution` / `artifacts` / `adapter`；编排与翻译、零业务算法、**不 import `app.v4.*` 业务模块**（唯一例外：零业务算法的纯 I/O 工具 `v4/parsers/zip_entry_normalize`，BUG-20261010-001） |
 | `output/`      | 运行时生成的输出文件存放目录                |
+
+**HLR 表格样式与 controller profile 的分工**：自定义样式只覆盖解析器的 `field_map`（行标签映射）与 `requirement_scan`（需求表识别与 `id_pattern` 校验）；controller profile 继续负责匹配关键词、追溯表配置、AI 标注示例与 preprocess hook —— `build_profile_with_schema` 只替换 `hlr_parser` 配置，profile 的其余配置原样保留。内置模板由各 profile 的 `config.yaml` 派生，未修改的模板按该控制器的原生解析路径执行（native），因此默认行为与样式能力引入前一致。下游管线只消费 `requirement_id` + `content`（可选 `rationale`），样式变化不影响 Step 2 及之后的输入与产物结构。
 
 ## 6. 前端模块划分
 
@@ -126,7 +131,8 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 Step 1 解析输入
    HLR Word + EoICD PubSub Excel → hlr_requirements.json + eoicd_requirements.json
    HLR Word 按表头语义识别缩略语表/术语表 → glossary / terms（terms 为空不写字段）
-   模块: v4/parsers/{eoicd_excel_parser,hlr_word_parser,glossary_tables}.py
+   可选自定义 HLR 表格样式只替换解析层 field_map / requirement_scan，不改变下游契约
+   模块: v4/parsers/{eoicd_excel_parser,hlr_word_parser,glossary_tables,hlr_schema}.py
     ↓
 Step 2 HLR AI 标注
    DeepSeek 标注 bus_types / labels / devices / signal_keywords → hlr_labels.json
@@ -308,14 +314,16 @@ backend/app/
 │       ├── completeness.py # POST /api/v4/completeness-analysis（含 controller_profile）
 │       ├── jobs.py         # GET /api/v4/jobs/{id}[/result]
 │       ├── outputs.py      # GET /api/v4/jobs/{id}/outputs/{kind}
-│       └── settings.py     # GET/PUT /api/v4/settings（运行时模型名）
+│       ├── settings.py     # GET/PUT /api/v4/settings（运行时模型名）
+│       └── hlr_schemas.py  # /api/v4/hlr-schemas（样式 CRUD / 扫描 / 试解析）
 └── v4/                     # V4 业务子包
     ├── cli.py              # V4 CLI 入口
     ├── config.py           # V4 env 加载 + 业务常量
     ├── errors.py           # 管线异常 → 用户可读的错误分类与建议
+    ├── hlr_schema_store.py # 自定义 HLR 表格样式：output/hlr_schemas.json 持久化 + 引用解析
     ├── models.py           # V4 Pydantic 模型
     ├── pipeline.py         # V4 反向管线编排（run_reverse_pipeline）
-    ├── parsers/            # EoICD Excel + HLR Word 解析（含 glossary_tables 表头语义识别）
+    ├── parsers/            # EoICD Excel + HLR Word 解析（含 glossary_tables 表头语义识别、hlr_schema 自定义表格样式）
     ├── profiles/           # Controller profile registry（Issue #63 引入）
     │   ├── __init__.py     # ProfileRegistry 单例 + init_registry / get_registry
     │   ├── base.py         # ControllerProfile + 4 个 Config dataclass
@@ -339,6 +347,8 @@ backend/app/
     │       ├── config.yaml
     │       ├── hooks.py
     │       └── README.md
+    │   └── generic/        # 其他系统（通用）：解析完全由自定义表格样式驱动，下游中性默认配置
+    │       └── config.yaml
     │   └── fsecu/          # FSECU profile（前舱座椅电子控制单元，占位）
     │       ├── __init__.py
     │       ├── hooks.py
