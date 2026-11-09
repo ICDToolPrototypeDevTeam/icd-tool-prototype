@@ -510,6 +510,19 @@ export default function HlrSchemaEditor({
     applyCustomEdit(next, idPattern)
   }
 
+  /** 移除额外字段：连同其已映射标签一起删除，并取消固定显示。 */
+  function removeField(field: string) {
+    if (field === 'id' || field === 'content') return
+    const next: Record<string, string[]> = {}
+    for (const [key, labels] of Object.entries(fields)) {
+      if (key !== field) next[key] = [...labels]
+    }
+    setPinnedFields((prev) => prev.filter((f) => f !== field))
+    if (activeField === field) setActiveField('id')
+    setError('')
+    applyCustomEdit(next, idPattern)
+  }
+
   function handleIdPatternChange(value: string) {
     setError('')
     applyCustomEdit(fields, value)
@@ -946,11 +959,12 @@ export default function HlrSchemaEditor({
                   {visibleFields.map((field) => {
                     const labels = fields[field] ?? []
                     const required = field === 'id' || field === 'content'
+                    const removable = !required
                     const active = activeField === field
                     return (
                       <Fragment key={field}>
                         <div
-                          className={`hlr-map__row${active ? ' hlr-map__row--active' : ''}${field === 'id' ? ' hlr-map__row--has-sub' : ''}`}
+                          className={`hlr-map__row${active ? ' hlr-map__row--active' : ''}${field === 'id' ? ' hlr-map__row--has-sub' : ''}${removable ? ' hlr-map__row--removable' : ''}`}
                           role="button"
                           tabIndex={0}
                           onClick={() => setActiveField(field)}
@@ -989,6 +1003,20 @@ export default function HlrSchemaEditor({
                               ))
                             )}
                           </span>
+                          {removable && (
+                            <button
+                              type="button"
+                              className="hlr-map__remove"
+                              title="移除字段"
+                              aria-label={`移除字段：${fieldLabel(field)}`}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                removeField(field)
+                              }}
+                            >
+                              <X size={13} />
+                            </button>
+                          )}
                         </div>
                         {field === 'id' && (
                           <div className="hlr-map__subrow">
