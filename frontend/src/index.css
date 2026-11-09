@@ -2668,6 +2668,7 @@ body {
 }
 
 .hlr-map__row {
+  position: relative;
   display: grid;
   grid-template-columns: 92px minmax(0, 1fr);
   gap: 8px;
@@ -2675,6 +2676,37 @@ body {
   padding: 8px 12px;
   border-bottom: 1px solid #f4f6f8;
   cursor: pointer;
+}
+
+.hlr-map__row--removable .hlr-map__labels {
+  padding-right: 26px;
+}
+
+.hlr-map__remove {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #9aa4b2;
+  cursor: pointer;
+}
+
+.hlr-map__remove:hover {
+  background: rgba(220, 38, 38, 0.1);
+  color: var(--danger);
+}
+
+.hlr-map__remove:focus-visible {
+  outline: 2px solid rgba(220, 38, 38, 0.45);
+  outline-offset: 1px;
 }
 
 .hlr-map__row:hover {
