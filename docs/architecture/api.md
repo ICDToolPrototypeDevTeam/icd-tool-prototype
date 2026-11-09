@@ -38,6 +38,12 @@ API 设计应遵守以下原则：
 | `/api/v4/history/delete`                       | `POST` | 硬删除历史结果（整目录，含上传的输入文件；需 `confirm=true`） |
 | `/api/v4/settings`                             | `GET`  | 查询当前生效的三个模型名（运行时设置） |
 | `/api/v4/settings`                             | `PUT`  | 保存三个模型名并立即生效（落盘 `output/settings.json`，无需重启） |
+| `/api/v4/hlr-schemas`                          | `GET`  | 查询内置模板与自定义 HLR 表格样式列表（第 16 节） |
+| `/api/v4/hlr-schemas`                          | `POST` | 新建自定义 HLR 表格样式（201） |
+| `/api/v4/hlr-schemas/{schema_id}`              | `PUT`  | 更新自定义样式（内置模板只读） |
+| `/api/v4/hlr-schemas/{schema_id}`              | `DELETE` | 删除自定义样式（内置模板只读） |
+| `/api/v4/hlr-schemas/scan`                     | `POST` | 扫描上传 .docx 的表格结构（不调用 LLM） |
+| `/api/v4/hlr-schemas/preview`                  | `POST` | 用指定样式试解析 .docx（不调用 LLM） |
 
 `{model}` ∈ `{deepseek, minimax, qwen}`。
 
@@ -71,16 +77,33 @@ Content-Type: multipart/form-data
 | `use_mock_llm` | bool (form) | 否（默认不覆盖） | 显式覆盖 mock 开关；未提供时以 `.env` 的 `USE_MOCK_LLM` 为准（当前前端总是显式提交本字段） |
 | `judge_providers` | list[str] (form) | 否（默认 `["deepseek"]`） | 多模型 panel provider 白名单 ∈ `{deepseek, minimax, qwen}` |
 | `enable_traceability_prefilter` | bool (form) | 否（默认 false） | 是否启用追溯预筛选 |
-| `controller_profile` | str (form) | 否（默认 `ams`） | 控制器 profile id ∈ `{ams, fgmc, hscu, rpdu, fsecu}`，决定 HLR 解析规则、分类关键词、追溯表配置与 AI 标注示例 |
+| `controller_profile` | str (form) | 否（空 = 自动识别） | 系统类型 ∈ `{ams, fgmc, hscu, rpdu, generic}`，决定 HLR 解析规则、分类关键词、追溯表配置与 AI 标注示例；`generic`（其他系统/通用）必须同时提供 `hlr_schema`，且不会被自动识别命中 |
 | `no_refine` | bool (form) | 否（默认 false） | 仅 RPDU profile 生效；`true` 时关闭 Step 3.5 refine 后处理（matched ICD Block 无关过滤 + 精确/同义词补采），与最初版 RPDU 行为对齐做 A-B 对照 |
+| `hlr_schema` | str (form, JSON) | 否（默认不启用） | 自定义 HLR 表格样式引用（见下）；仅 `.docx` 且必须同时提供 `controller_profile` |
 
 文件名校验：`[^A-Za-z0-9._\-一-龥]` 之外字符会被替换为 `_`；`safe_filename()`。
 
 `judge_providers` 任一不在白名单 → 422。
 
-`controller_profile` 不在白名单 → 422（在创建任务前 fail fast）。不传该字段时行为与 Issue A 完全一致（AMS 默认）。
+`controller_profile` 不在白名单 → 422（在创建任务前 fail fast）。不传该字段时按文档内容自动识别（只覆盖 `ams` / `fgmc` / `hscu` / `rpdu`；无法识别 → 422，提示手动选择）。
 
 `no_refine` 仅 RPDU profile 生效；非 RPDU profile 传入该字段被忽略。CLI 等价形参为 `reverse-analyze --no-refine`。
+
+`hlr_schema` 为可选的 HLR 表格样式引用（JSON 字符串），仅影响 Step 1 的 HLR 解析（行标签映射与需求表识别），不改变后续步骤的输入契约。接受三种形式：
+
+1. **完整样式配置**：`{"version": 1, "mode": "docx_vertical", "fields": {...}, "identify": {"id_pattern": "..."}}`（结构见第 16 节），可直接使用、无需先保存；
+2. **内置模板引用**：`{"template_id": "builtin_ams"}`（可选 `builtin_ams` / `builtin_fgmc` / `builtin_hscu` / `builtin_rpdu`）；模板所属控制器必须与 `controller_profile` 一致，否则 422；`builtin_rpdu` 不可用于自定义样式（422）；
+3. **已保存样式引用**：`{"schema_id": "sch_xxxxxxxx"}`；样式不存在或配置非法 → 422（创建任务接口统一按样式校验失败处理）。
+
+约束：
+
+- `hlr_schema` 仅支持 `hlr_word_file` 为 `.docx`；`.xlsx` → 422；
+- 使用 `hlr_schema` 时必须在同一请求中显式提供 `controller_profile`（不会走自动识别），否则 422；
+- 样式在创建任务目录之前完成解析与校验，非法引用不会留下残留任务目录；
+- 解析后的样式快照写入任务目录 `input/hlr_schema.json` 与任务 manifest 的 `params.hlr_schema`；续跑（从 manifest 恢复）按快照重建解析配置，不依赖该样式之后是否被修改或删除；
+- 未提供 `hlr_schema` 时行为与改动前完全一致；
+- `controller_profile = "generic"`（其他系统/通用）必须提供 `hlr_schema`，否则 422；通用系统不支持追溯预筛（同时传 `enable_traceability_prefilter=true` 与追溯文件 → 422）；
+- `generic` 未声明 `auto_detect`，不会参与自动识别，必须显式选择。
 
 预期返回（V4AnalyzeResponse）：
 
@@ -258,7 +281,13 @@ Content-Type：
 | 文件 >50 MB | 413 | 整请求 >200 MB |
 | 文件名含非法字符 | 422 | |
 | `judge_providers` 出现 `claude` 等 | 422 | 错误信息含 `allowed: deepseek, minimax, qwen` |
-| `controller_profile` 不在白名单 | 422 | `controller_profile: unsupported '<name>'; allowed: ams, fgmc, hscu, rpdu, fsecu` |
+| `controller_profile` 不在白名单 | 422 | `controller_profile: unsupported '<name>'; allowed: ams, fgmc, hscu, rpdu, generic` |
+| 使用 `hlr_schema` 但 `hlr_word_file` 非 .docx | 422 | `自定义表格样式仅支持 Word 文档` |
+| 使用 `hlr_schema` 但未提供 `controller_profile` | 422 | `使用自定义样式时请选择系统类型` |
+| `hlr_schema` 引用非法（JSON 损坏 / 未知 `template_id` 或 `schema_id` / 内置模板与系统类型不一致 / 配置校验失败） | 422 | 创建任务前 fail fast |
+| 以 `builtin_rpdu` 作为自定义样式引用 | 422 | RPDU 使用内置解析，不支持自定义表格样式 |
+| 使用 `generic` 系统但未提供 `hlr_schema` | 422 | `使用通用系统时请配置自定义表格样式` |
+| `generic` 系统 + 追溯预筛文件 | 422 | `通用系统暂不支持追溯预筛，请关闭后重试` |
 | `{model}` 不在 `{deepseek,minimax,qwen}` | 400 | `invalid model: <name>; allowed: ...` |
 | 任务 `running` 时调 `/result` | 409 | `job not finished: status=...` |
 | 任务 `failed` 时调 `/result` | 409 | |
@@ -270,6 +299,7 @@ Content-Type：
 | --- | --- | --- |
 | V4 | `backend/output/v4/{job_id}/` | 分层：`input/`（用户上传原始文件）+ `output/`（pipeline 产物） |
 | 运行时设置 | `backend/output/settings.json` | 三个模型名（见第 15 节）；容器重建后保留 |
+| 自定义 HLR 表格样式 | `backend/output/hlr_schemas.json` | 全局共享的自定义样式（见第 16 节）；容器重建后保留 |
 
 `docker-compose.yml` volume 映射 `./backend/output:/app/output`。
 
@@ -725,3 +755,187 @@ Content-Type: application/json
 | --- | --- |
 | 模型名为空 / 超长 / 含控制字符 / 类型不对 | 422 |
 | 设置文件无法写入（权限、磁盘等） | 500 |
+
+## 16. HLR 表格样式管理接口
+
+自定义 HLR 表格样式用于适配不同控制器 / 不同文档中 SWHLR Word 需求表的行标签写法与需求表位置。样式只影响 Step 1 的 HLR 解析（行标签映射与需求表识别），不改变后续步骤的输入契约（下游只消费 `requirement_id` / `content` / 可选 `rationale`）。
+
+- **内置模板**：`builtin_ams` / `builtin_fgmc` / `builtin_hscu` / `builtin_rpdu`，由现有控制器 profile 派生，**只读**（`source=builtin`、`deletable=false`，修改 / 删除 → 403）；`usable_for_custom_style=false` 仅出现在 `builtin_rpdu`（RPDU 使用内置解析路径，不支持自定义表格样式）。
+- **自定义样式**：服务端持久化在 `OUTPUT_DIR/hlr_schemas.json`（Docker 中即挂载的 `./backend/output/hlr_schemas.json`），**全局共享**（所有用户 / 会话可见），当前无鉴权与用户隔离。
+- **样式配置结构**（新建 / 更新请求中的 `config`，以及列表响应中的 `config`）：
+
+```json
+{
+  "version": 1,
+  "mode": "docx_vertical",
+  "fields": {
+    "id": ["需求编号", "SWHLR ID"],
+    "content": ["需求正文", "需求中文"],
+    "rationale": ["基本原理"]
+  },
+  "identify": { "id_pattern": "^FSF" }
+}
+```
+
+配置约束（校验失败 → 422）：
+
+- `version` 必须为 `1`；`mode` 必须为 `docx_vertical`（当前唯一支持的文档形态：纵向「行标签 / 值」表格）；
+- `fields` 必须为非空对象，键只能取以下 15 个标准字段名：`id`、`content`、`rationale`、`object_type`、`is_derived`、`is_safety_related`、`verification_method`、`implementation`、`code`、`source`、`covered_ids`、`notes`、`input_data`、`output_data`、`is_requirement`；值为行标签别名列表；
+- `id` 与 `content` 必须存在且至少包含一个非空标签；其余字段可为空列表；
+- 单个标签去首尾空格后 1–100 字符；每个字段最多 20 个别名（同字段内忽略大小写去重）；同一标签（忽略大小写）只能归属一个字段；
+- `is_requirement`（是否为需求）为可选过滤字段：映射后启用非需求过滤，该行值为「否」的表格不进入需求列表；未映射时即使所选系统原生带过滤（如 FGMC）也不过滤；
+- `identify.id_pattern` 可选（默认空串），须为合法正则、≤200 字符；作用于解析出的需求 ID。
+
+### 16.1 查询样式列表
+
+```text
+GET /api/v4/hlr-schemas
+```
+
+预期返回（`V4HLRSchemaListResponse`）：内置模板在前（`builtin_ams` → `builtin_fgmc` → `builtin_hscu` → `builtin_rpdu`），自定义样式按创建顺序在后。
+
+```json
+{
+  "schemas": [
+    {
+      "id": "builtin_ams",
+      "name": "空气管理系统控制器 (AMS)",
+      "source": "builtin",
+      "deletable": false,
+      "usable_for_custom_style": true,
+      "config": { "version": 1, "mode": "docx_vertical", "fields": { "...": ["..."] }, "identify": { "id_pattern": "..." } },
+      "created_at": null,
+      "updated_at": null
+    },
+    {
+      "id": "sch_3f2a9c1d",
+      "name": "某型号需求表",
+      "source": "custom",
+      "deletable": true,
+      "usable_for_custom_style": true,
+      "config": { "...": "..." },
+      "created_at": "2026-11-06T10:00:00+08:00",
+      "updated_at": "2026-11-06T10:00:00+08:00"
+    }
+  ]
+}
+```
+
+内置模板的 `created_at` / `updated_at` 恒为 `null`。
+
+### 16.2 新建自定义样式
+
+```text
+POST /api/v4/hlr-schemas
+Content-Type: application/json
+
+{ "name": "某型号需求表", "config": { "version": 1, "mode": "docx_vertical", "fields": {...}, "identify": {...} } }
+```
+
+- 成功 → **201** + 样式项（结构同 16.1 的列表项，`source=custom`、`deletable=true`）。
+- 名称去首尾空格后 1–50 字符、不含控制字符；与已有自定义样式或内置模板显示名重名（忽略大小写）→ **409**。
+- `config` 校验失败 → **422**。
+
+### 16.3 更新自定义样式
+
+```text
+PUT /api/v4/hlr-schemas/{schema_id}
+Content-Type: application/json
+
+{ "name": "...", "config": {...} }
+```
+
+- 全量替换名称与配置；成功 → **200** + 样式项。
+- 内置模板（`builtin_*`）→ **403**；未知 `schema_id` → **404**；名称冲突 → **409**；`config` 校验失败 → **422**。
+
+### 16.4 删除自定义样式
+
+```text
+DELETE /api/v4/hlr-schemas/{schema_id}
+```
+
+成功 → `{"deleted": true}`。内置模板 → **403**；未知 `schema_id` → **404**。
+
+### 16.5 扫描文档表格
+
+```text
+POST /api/v4/hlr-schemas/scan
+Content-Type: multipart/form-data
+```
+
+请求字段：`file`（UploadFile，仅 `.docx`，非 `.docx` → 422）。本地解析，**不调用 LLM**。
+
+预期返回（`V4HLRSchemaScanResponse`）：
+
+```json
+{
+  "tables": [
+    {
+      "table_index": 0,
+      "row_count": 8,
+      "column_count": 2,
+      "looks_like_requirement": true,
+      "rows": [
+        { "label": "需求编号", "value_preview": "FSF21000101_HLR_001" },
+        { "label": "需求正文", "value_preview": "当……时，应……" }
+      ]
+    }
+  ]
+}
+```
+
+- 最多返回前 30 张表、每表前 30 行；`label` 与 `value_preview` 均截断到 200 字符。
+- `looks_like_requirement` 判定：至少 2 列 2 行，且第 0 列任一行标签命中内置模板的 `id` 别名（忽略大小写）或包含「需求」。
+- 上传文件只写临时目录，请求结束自动清理，不落 `OUTPUT_DIR`。
+
+### 16.6 试解析
+
+```text
+POST /api/v4/hlr-schemas/preview
+Content-Type: multipart/form-data
+```
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 含义 |
+| --- | --- | --- | --- |
+| `file` | UploadFile (.docx) | 是 | 待试解析的 SWHLR Word 文档 |
+| `schema` | str (form, JSON) | 是 | 样式引用，三种形式同第 4 节 `hlr_schema`（完整配置 / `template_id` / `schema_id`） |
+| `controller_profile` | str (form) | 是 | 系统类型 ∈ `{ams, fgmc, hscu, rpdu, generic}` |
+
+本地解析，**不调用 LLM**。预期返回（`V4HLRSchemaPreviewResponse`）：
+
+```json
+{
+  "total_count": 12,
+  "requirements": [
+    {
+      "requirement_id": "FSF21000101_HLR_001",
+      "content_preview": "当……时，应……",
+      "rationale_preview": "……",
+      "extra_fields": { "verification_method": "测试" }
+    }
+  ],
+  "warnings": [{ "kind": "duplicate_id", "message": "存在重复的需求ID：..." }],
+  "parse_warnings": [],
+  "hook_applied": true
+}
+```
+
+- `requirements` 最多 5 条；`content_preview` / `rationale_preview` 截断到 200 字符；`extra_fields` 为 `requirement_id` / `content` / `rationale` / `source_file` 之外的非空字段（`implementation_method` 以 `implementation` 键返回）。
+- `warnings` 汇总重复 ID、空正文与解析器登记的解析告警；`parse_warnings` 保留解析器原始登记项。
+- `hook_applied` 表示试解析过程中该控制器 profile 的 HLR 预处理 hook 是否实际改写了需求内容。
+
+### 16.7 错误响应
+
+| 场景 | HTTP |
+| --- | --- |
+| 新建 / 更新时名称非法（空 / 超 50 字符 / 含控制字符、不可见格式字符或孤立代理项）或 `config` 校验失败 | 422 |
+| `scan` / `preview` 上传文件非 `.docx` | 422 |
+| `scan` / `preview` 上传文件超过 50 MB（分块读取，超限即拒绝） | 422（`文件过大`） |
+| `scan` / `preview` 上传的 Word 无法解析（损坏 zip / python-docx / lxml 错误） | 422（`无法解析该 Word 文档`） |
+| `preview` 的 `controller_profile` 不在白名单，或内置模板与所选控制器不一致 | 422 |
+| 名称与已有自定义样式或内置模板显示名重复（忽略大小写） | 409 |
+| 修改 / 删除内置模板 | 403 |
+| `{schema_id}` 不存在（PUT / DELETE / `preview` 的 `schema_id` 引用） | 404 |
+| 内置控制器配置加载失败（部署包缺失或损坏 profile 目录）：GET 列表与 `preview` 映射为 422；`POST` / `PUT` 在名称唯一性检查中也会间接加载内置模板，部署包损坏时为 500 | 422 / 500 |

@@ -333,3 +333,90 @@ class V4ModelSettings(BaseModel):
     customized: bool = False
     # 仅 customized=True 时有值（ISO 8601，带 +08:00 偏移）
     updated_at: Optional[str] = None
+
+
+# ============================================================================
+# HLR 表格样式管理（自定义样式 CRUD / 文档扫描 / 试解析）
+# ============================================================================
+
+
+class V4HLRSchemaCreate(BaseModel):
+    """POST /api/v4/hlr-schemas 请求体。"""
+
+    name: str
+    config: dict
+
+
+class V4HLRSchemaUpdate(BaseModel):
+    """PUT /api/v4/hlr-schemas/{schema_id} 请求体（全量替换）。"""
+
+    name: str
+    config: dict
+
+
+class V4HLRSchemaItem(BaseModel):
+    """样式列表项 / 新建与更新的响应。"""
+
+    id: str
+    name: str
+    source: str  # "builtin" | "custom"
+    deletable: bool
+    usable_for_custom_style: bool
+    config: dict
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class V4HLRSchemaListResponse(BaseModel):
+    """GET /api/v4/hlr-schemas 响应。"""
+
+    schemas: list[V4HLRSchemaItem]
+
+
+class V4HLRSchemaScanRow(BaseModel):
+    """扫描结果中的一行：第 0 列行标签 + 第 1 列值预览。"""
+
+    label: str
+    value_preview: str
+
+
+class V4HLRSchemaScanTable(BaseModel):
+    """扫描结果中的一张表。"""
+
+    table_index: int
+    row_count: int
+    column_count: int
+    looks_like_requirement: bool
+    rows: list[V4HLRSchemaScanRow]
+
+
+class V4HLRSchemaScanResponse(BaseModel):
+    """POST /api/v4/hlr-schemas/scan 响应。"""
+
+    tables: list[V4HLRSchemaScanTable]
+
+
+class V4HLRSchemaPreviewRequirement(BaseModel):
+    """试解析结果中的单条需求（正文/原理截断为预览）。"""
+
+    requirement_id: str
+    content_preview: str = ""
+    rationale_preview: str = ""
+    extra_fields: dict = {}
+
+
+class V4HLRSchemaPreviewWarning(BaseModel):
+    """试解析警告（重复 ID / 空正文 / 解析器登记项）。"""
+
+    kind: str
+    message: str
+
+
+class V4HLRSchemaPreviewResponse(BaseModel):
+    """POST /api/v4/hlr-schemas/preview 响应。"""
+
+    total_count: int
+    requirements: list[V4HLRSchemaPreviewRequirement]
+    warnings: list[V4HLRSchemaPreviewWarning]
+    parse_warnings: list[dict] = []
+    hook_applied: bool = False

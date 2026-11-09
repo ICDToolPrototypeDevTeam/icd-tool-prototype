@@ -35,8 +35,12 @@ from app.job_manager import Job, JobCancelled, JobStatus, job_manager
 from app.runtime_context import RuntimeContext, bind_runtime, restore_runtime
 from app.v4.errors import classify_pipeline_error
 from app.v4.llm.factory import use_mock_llm as mock_mode_enabled
+from app.v4.parsers.hlr_schema import (
+    build_profile_with_schema,
+    validate_schema_payload,
+)
 from app.v4.pipeline import run_reverse_pipeline
-from app.v4.profiles import ProfileRegistry
+from app.v4.profiles import ControllerProfile, ProfileRegistry
 
 
 # V4 输出文件路径常量（与 V4 pipeline.py 输出一致；ADR-001 §6）
@@ -411,6 +415,17 @@ def _reuse_parse_inputs(
     return hlr_path, None
 
 
+def _resolve_runtime_profile(
+    profile: ControllerProfile, hlr_schema: Optional[dict]
+) -> ControllerProfile:
+    """按任务快照套用自定义表格样式；native/未传样式时原样返回 profile。"""
+    if not hlr_schema or hlr_schema.get("mode") != "custom":
+        return profile
+    return build_profile_with_schema(
+        profile, validate_schema_payload(hlr_schema["schema"])
+    )
+
+
 def run_v4_pipeline_thread(
     job: Job,
     job_dir: Path,
@@ -422,6 +437,7 @@ def run_v4_pipeline_thread(
     use_mock_llm: Optional[bool],
     controller_profile: str = "ams",
     no_refine: bool = False,
+    hlr_schema: Optional[dict] = None,
 ) -> None:
     """在后台线程内跑 V4 反向管线；线程内绑定运行上下文；异常 → job.status=FAILED。"""
     output_dir = job_dir / "output"
@@ -439,6 +455,10 @@ def run_v4_pipeline_thread(
     saved_judge_providers = os.environ.get("JUDGE_PROVIDERS")
     prev_binding = None
     try:
+        # 自定义表格样式只在解析之前套用一次，后续各阶段复用同一份 profile。
+        # 必须放在 try 内：损坏的快照（如字符串 / 缺 schema）抛出的异常要落到
+        # failed，否则会逃逸出工作线程，任务永远停在「等待开始」。
+        profile = _resolve_runtime_profile(profile, hlr_schema)
         if judge_providers:
             os.environ["JUDGE_PROVIDERS"] = ",".join(judge_providers)
 
@@ -548,6 +568,7 @@ def launch_v4_pipeline(
     use_mock_llm: Optional[bool],
     controller_profile: str = "ams",
     no_refine: bool = False,
+    hlr_schema: Optional[dict] = None,
 ) -> None:
     """工厂：落盘参数快照 + 登记，然后把任务交给进程内队列（job_scheduler）。
 
@@ -566,6 +587,7 @@ def launch_v4_pipeline(
         "use_mock_llm": use_mock_llm,
         "controller_profile": controller_profile,
         "no_refine": no_refine,
+        "hlr_schema": hlr_schema,
     })
     # 登记即「已承诺运行」：在此之前失败的上传请求不会留下 pending 幽灵任务
     # （见 JobManager.new_job）。
@@ -573,7 +595,7 @@ def launch_v4_pipeline(
     job_scheduler.submit(job, functools.partial(
         run_v4_pipeline_thread,
         job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir,
-        judge_providers, use_mock_llm, controller_profile, no_refine,
+        judge_providers, use_mock_llm, controller_profile, no_refine, hlr_schema,
     ))
 
 
@@ -632,6 +654,7 @@ def relaunch_from_manifest(job: Job, job_dir: Path) -> None:
         use_mock_llm=params.get("use_mock_llm"),
         controller_profile=params.get("controller_profile", "ams"),
         no_refine=bool(params.get("no_refine", False)),
+        hlr_schema=params.get("hlr_schema"),
     )
 
 

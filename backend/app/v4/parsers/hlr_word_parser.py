@@ -67,14 +67,17 @@ def _build_field_map_index(
 
 
 def _id_row_info(table, field_index: dict[str, str]) -> tuple[bool, str]:
-    """Return ``(has_id_header_row, id_value)`` for one table.
+    """Return ``(has_id_header_row, first_id_value)`` for one table.
 
     ``has_id_header_row`` is True when some row's col-0 header resolves via
     the field map to std_field ``"id"`` (first such row wins).
-    ``id_value`` is that row's col-1 text ("" when absent or empty).
+    ``first_id_value`` is that row's col-1 text ("" when absent or empty).
 
-    Used by the requirement-scan layer (D2) to apply ``id_pattern`` and to
-    distinguish "looks like a requirement table but id value is odd"
+    ``id_pattern`` is NOT applied to this value: it is checked against the
+    FINAL extracted id (``HLRRequirement.requirement_id``), which may come
+    from a later id-alias row (see ``parse``).  The value is kept for
+    callers that need the raw first id cell; the scan layer only uses
+    ``has_id_header_row`` to distinguish "has an id row but was rejected"
     (strong signal) from "no id row header at all" (weak signal).
     """
     for r in range(len(table.rows)):
@@ -84,6 +87,25 @@ def _id_row_info(table, field_index: dict[str, str]) -> tuple[bool, str]:
         if field_index.get(header.lower()) == "id":
             return True, _cell_text(table, r, 1)
     return False, ""
+
+
+def _table_field_names(table, field_index: dict[str, str]) -> set[str]:
+    """Return the set of std_field names resolved from col-0 row labels.
+
+    An empty/unmapped label contributes nothing.  Used by the
+    requirement-scan layer to enforce ``RequirementScanConfig.
+    required_fields``: every required std_field must appear in this set for
+    the table to be identified and extracted.
+    """
+    fields: set[str] = set()
+    for r in range(len(table.rows)):
+        header = _cell_text(table, r, 0)
+        if not header:
+            continue
+        std_field = field_index.get(header.lower())
+        if std_field:
+            fields.add(std_field)
+    return fields
 
 
 def _has_requirement_fields(table, field_index: dict[str, str]) -> bool:
@@ -124,11 +146,14 @@ def _extract_requirement(
     non_requirement_value: str,
     skip_when_empty: bool,
     non_requirement_field_aliases: tuple[str, ...] = ("is_requirement",),
+    require_content_value: bool = False,
 ) -> HLRRequirement | None:
     """Extract one HLRRequirement from a table by matching row headers.
 
     Returns None if the row should be skipped (empty id, or
     filter_non_requirement=True with the indicator column marked '否').
+    With ``require_content_value=True``, a table whose content value is
+    empty / whitespace-only is also skipped.
     """
     # First pass: build a dict of {std_field: row_value} by reading row 0 (header)
     # then row 1 (value).  For multi-row tables the same pattern is repeated.
@@ -153,6 +178,10 @@ def _extract_requirement(
         # std_field to non_requirement_field_aliases in their profile.
         if std_field in non_requirement_field_aliases:
             is_requirement_value = value
+
+    content = rows_data.get("content", "")
+    if require_content_value and not content.strip():
+        return None
 
     # Apply filter_non_requirement
     if filter_non_requirement:
@@ -218,13 +247,18 @@ class HLRWordParser:
         # because one of its field labels contains a glossary-like word.
         requirement_indices: set[int] = set()
         id_info: dict[int, tuple[bool, str]] = {}
+        required = set(scan_cfg.required_fields)
         for idx in range(len(tables)):
             table = tables[idx]
             if len(table.columns) < 2:
                 continue
             info = _id_row_info(table, field_index)
             id_info[idx] = info
-            if info[0]:
+            fields_present = _table_field_names(table, field_index)
+            if required:
+                if required <= fields_present:
+                    requirement_indices.add(idx)
+            elif info[0]:
                 requirement_indices.add(idx)
         first_requirement_index = (
             min(requirement_indices) if requirement_indices else None
@@ -308,22 +342,10 @@ class HLRWordParser:
             # semantic criterion instead (field_map "id" row, value non-empty).
             if len(table.columns) < 2:
                 continue
-            has_id_row, id_value = id_info[idx]
-            if id_re is not None and id_value and not id_re.match(id_value):
-                # 强信号：有 id 行头行、值非空但不匹配 → 拒收（D2 登记）。
-                if scan_cfg.register_skipped:
-                    parse_warnings.append(
-                        {
-                            "table_index": idx,
-                            "kind": "id_pattern_rejected",
-                            "reason": (
-                                f"id 值不匹配 id_pattern（{scan_cfg.id_pattern}）："
-                                f"{id_value!r}"
-                            ),
-                            "sample": id_value[:120],
-                        }
-                    )
+            required = set(scan_cfg.required_fields)
+            if required and not required <= _table_field_names(table, field_index):
                 continue
+            has_id_row, _ = id_info[idx]
             req = _extract_requirement(
                 table,
                 field_index,
@@ -332,7 +354,23 @@ class HLRWordParser:
                 non_requirement_value=self.cfg.non_requirement_value,
                 skip_when_empty=self.cfg.skip_requirement_when_empty,
                 non_requirement_field_aliases=self.cfg.non_requirement_field_aliases,
+                require_content_value=scan_cfg.require_content_value,
             )
+            if id_re is not None and req is not None and not id_re.match(req.requirement_id):
+                # 强信号：最终提取出的 id 不匹配 id_pattern → 拒收（D2 登记）。
+                if scan_cfg.register_skipped:
+                    parse_warnings.append(
+                        {
+                            "table_index": idx,
+                            "kind": "id_pattern_rejected",
+                            "reason": (
+                                f"id 值不匹配 id_pattern（{scan_cfg.id_pattern}）："
+                                f"{req.requirement_id!r}"
+                            ),
+                            "sample": req.requirement_id[:120],
+                        }
+                    )
+                continue
             if req is not None:
                 requirements.append(req)
                 continue

@@ -222,3 +222,50 @@ export type V4ModelSettingsUpdate = Pick<
   V4ModelSettings,
   'deepseek_model' | 'minimax_model' | 'qwen_model'
 >
+
+export interface HlrSchemaConfig {
+  version: number
+  mode: 'docx_vertical'
+  fields: Record<string, string[]>
+  identify?: { id_pattern?: string }
+}
+
+export interface HlrSchemaItem {
+  id: string
+  name: string
+  source: 'builtin' | 'custom'
+  deletable: boolean
+  usable_for_custom_style: boolean
+  config: HlrSchemaConfig
+  created_at?: string
+  updated_at?: string
+}
+
+export interface HlrSchemaScanRow { label: string; value_preview: string }
+export interface HlrSchemaScanTable {
+  table_index: number
+  row_count: number
+  column_count: number
+  looks_like_requirement: boolean
+  rows: HlrSchemaScanRow[]
+}
+
+export interface HlrSchemaPreviewResult {
+  total_count: number
+  requirements: {
+    requirement_id: string
+    content_preview: string
+    rationale_preview: string
+    extra_fields: Record<string, string>
+  }[]
+  warnings: { kind: string; message: string }[]
+  parse_warnings: Record<string, unknown>[]
+  hook_applied: boolean
+}
+
+// `hlr_schema` 接受三种形式：完整配置对象 / 内置模板引用 / 已保存样式引用。
+// 完整配置就是 HlrSchemaConfig 本身，不要再包一层 { config: ... }。
+export type HlrSchemaPayload =
+  | HlrSchemaConfig
+  | { template_id: string }
+  | { schema_id: string }

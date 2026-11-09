@@ -39,9 +39,22 @@ class RequirementScanConfig:
     labels).  ``all_tables``: scan the whole document — requirement tables
     decoupled from glossary/catalog-table positions.
 
-    ``id_pattern``: optional regex the id row's value must match; a
-    non-empty value that does not match rejects the table (strong signal,
+    ``id_pattern``: optional regex the FINAL extracted id must match — the
+    value that becomes ``HLRRequirement.requirement_id`` (the last col-0
+    row label resolving to std_field ``id``), not the first id row's value.
+    A non-empty value that does not match rejects the table (strong signal,
     registered as ``id_pattern_rejected`` when ``register_skipped`` is on).
+
+    ``required_fields``: std_field names that must ALL appear among the
+    table's col-0 row labels before the table is considered a requirement
+    table.  Empty (default) keeps the legacy "has an id row" criterion.
+    When set, it constrains both identification (``requirement_indices``)
+    and extraction, so a table with an id row but no content row is
+    rejected even without ``require_content_value``.
+
+    ``require_content_value``: when True, extraction returns None for a
+    table whose ``content`` value is empty / whitespace-only.  False
+    (default) keeps the legacy behaviour.
 
     ``register_skipped``: when True, tables that look like requirement
     tables but were not collected are registered as parse warnings (weak
@@ -55,6 +68,8 @@ class RequirementScanConfig:
     id_pattern: str = ""
     register_skipped: bool = False
     warn_min_rows: int = 5
+    required_fields: tuple[str, ...] = ()
+    require_content_value: bool = False
 
 
 @dataclass(frozen=True)
@@ -348,6 +363,8 @@ def _parse_requirement_scan(data: dict[str, Any] | None) -> RequirementScanConfi
         id_pattern=id_pattern,
         register_skipped=bool(data.get("register_skipped", False)),
         warn_min_rows=warn_min_rows,
+        required_fields=_to_tuple(data.get("required_fields", [])),
+        require_content_value=bool(data.get("require_content_value", False)),
     )
 
 

@@ -12,6 +12,11 @@ import type {
   V4HistoryDeleteResponse,
   V4ModelSettings,
   V4ModelSettingsUpdate,
+  HlrSchemaItem,
+  HlrSchemaConfig,
+  HlrSchemaScanTable,
+  HlrSchemaPreviewResult,
+  HlrSchemaPayload,
 } from '../types'
 
 // ========== V4 API ==========
@@ -243,4 +248,60 @@ export async function getForwardPreviewHtmlV4(jobId: string, kind: V4ForwardDown
 
   const result = await mammoth.convertToHtml({ arrayBuffer: buf })
   return result.value
+}
+
+export async function listHlrSchemas(): Promise<HlrSchemaItem[]> {
+  const res = await fetch(`${API_V4_BASE}/hlr-schemas`)
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return (await res.json()).schemas
+}
+
+export async function createHlrSchema(payload: {
+  name: string; config: HlrSchemaConfig
+}): Promise<HlrSchemaItem> {
+  const res = await fetch(`${API_V4_BASE}/hlr-schemas`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+export async function updateHlrSchema(
+  id: string,
+  payload: { name: string; config: HlrSchemaConfig },
+): Promise<HlrSchemaItem> {
+  const res = await fetch(`${API_V4_BASE}/hlr-schemas/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+export async function deleteHlrSchema(id: string): Promise<void> {
+  const res = await fetch(`${API_V4_BASE}/hlr-schemas/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+}
+
+export async function scanHlrSchema(file: File): Promise<HlrSchemaScanTable[]> {
+  const fd = new FormData()
+  fd.append('file', file)
+  const res = await fetch(`${API_V4_BASE}/hlr-schemas/scan`, { method: 'POST', body: fd })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return (await res.json()).tables
+}
+
+export async function previewHlrSchema(
+  file: File, schema: HlrSchemaPayload, controllerProfile: string,
+): Promise<HlrSchemaPreviewResult> {
+  const fd = new FormData()
+  fd.append('file', file)
+  fd.append('schema', JSON.stringify(schema))
+  fd.append('controller_profile', controllerProfile)
+  const res = await fetch(`${API_V4_BASE}/hlr-schemas/preview`, { method: 'POST', body: fd })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
 }
