@@ -158,7 +158,7 @@ class MatcherEnhancementConfig:
 
     Every flag defaults to False / 20 so profiles that omit this section
     keep byte-identical scoring. RPDU opts into the three scoring flags;
-    AMS opts into the internal-channel pre-filter (R_norm3).
+    AMS opts into the internal-channel pre-filter (R_norm).
 
     Attributes:
         enable_cn_suffix_strip: Strip common Chinese suffixes
@@ -178,7 +178,7 @@ class MatcherEnhancementConfig:
         top_k: Override the hardcoded ``_TOP_K = 20`` for candidates
             passed downstream. RPDU raises this to 50 because its HLR
             catalogue expects a wider candidate window.
-        enable_internal_channel_detection: AMS-only pre-filter (R_norm3).
+        enable_internal_channel_detection: AMS-only pre-filter (R_norm).
             When enabled, an HLR whose same clause contains at least
             ``internal_channel_min_terms`` distinct channel terms and a
             data-path verb is marked 无匹配 with
@@ -190,10 +190,11 @@ class MatcherEnhancementConfig:
             Defaults to empty; AMS config supplies
             ("邻通道", "对侧通道", "对邻通道").
         internal_channel_min_terms: Minimum distinct channel terms in one
-            clause. AMS uses 3 (the current document's writing style).
+            clause. Defaults to 3; AMS uses 2 to cover the
+            "对侧通道 + 对邻通道 + 收到" source-selection writing.
         internal_channel_data_path_pattern: Data-path verb pattern that
             must appear in the same clause. Defaults to A429 + receive /
-            send / parse / write.
+            send / parse / write; AMS adds "收到".
         internal_channel_exclude_pattern: Clause context that vetoes the
             match. Empty (default) disables the veto; AMS currently leaves
             it empty so alarm/warning clauses are not excluded.
@@ -204,8 +205,9 @@ class MatcherEnhancementConfig:
     enable_signal_number_bonus: bool = False
     top_k: int = 20  # default matches legacy hardcoded constant
 
-    # AMS internal-channel pre-filter (R_norm3, 2026-10-29). All defaults
-    # keep the legacy matcher path, so non-AMS profiles are unaffected.
+    # AMS internal-channel pre-filter (R_norm, 2026-10-29; AMS 2-term
+    # + "收到" since 2026-11-09). All defaults keep the legacy matcher
+    # path, so non-AMS profiles are unaffected.
     enable_internal_channel_detection: bool = False
     internal_channel_terms: tuple[str, ...] = ()
     internal_channel_min_terms: int = 3

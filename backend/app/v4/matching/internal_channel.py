@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""内部通道需求识别（R_norm3）。
+"""内部通道需求识别（R_norm）。
 
 规则（须同时满足）：
-1. 同一句内至少出现 ``min_terms`` 个不同通道词（AMS 默认 3 个）；
-2. 同一句内出现数据路径动词（默认 接收/发送/解析/写入，可带 A429）。
+1. 同一句内至少出现 ``min_terms`` 个不同通道词（由 profile 配置，
+   AMS 当前为 2 个）；
+2. 同一句内出现数据路径动词（默认 接收/发送/解析/写入，可带 A429；
+   AMS 当前额外包含“收到”）。
 
 可选的告警语境排除由 ``internal_channel_exclude_pattern`` 控制；留空
 表示不排除（AMS 当前为空，即不启用告警排除）。
@@ -75,7 +77,7 @@ def is_internal_channel_requirement(
     text: str,
     config: MatcherEnhancementConfig,
 ) -> bool:
-    """判断一条 HLR 是否属于内部通道数据需求（R_norm3）。"""
+    """判断一条 HLR 是否属于内部通道数据需求（R_norm）。"""
     if not config.enable_internal_channel_detection:
         return False
     terms = tuple(config.internal_channel_terms)

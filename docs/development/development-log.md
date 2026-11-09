@@ -51,6 +51,58 @@
 
 ## 3. 开发记录
 
+### 2026-11-09 反向匹配：内部通道识别补充“两通道 + 收到”源选择写法
+
+#### 任务目标
+
+`1103测试1.docx` 的 `FSF21000101_HLR_5113` 使用“从对侧通道和对邻通道收到的 LABEL37 有效标志…进行源选择”写法；现有 R_norm 要求同句至少 3 个不同通道词，数据路径动词只有 `接收/发送/解析/写入`，导致该需求未被识别，按 `A429显式` 带 1 个错误候选 Block（`L37/BAS_BLEED_PRESSURE_REF_psig`）以 `待确定` 进入 AI 裁判。目标是在不改变既有内部通道命中集合的前提下补充该写法。
+
+#### 完成内容
+
+1. AMS `internal_channel_min_terms` 由 3 调整为 2。
+2. AMS `internal_channel_data_path_pattern` 增加 `收到`。
+3. 同步更新 `internal_channel.py`、`base.py`、`reverse_matcher.py` 中的 R_norm 表述；规则仍保持**逐子句**判定，不按整条需求统计通道词。
+4. 同步更新 workflow / architecture 的 Step 3e 说明。
+
+#### 修改文件
+
+1. `backend/app/v4/profiles/ams/config.yaml`
+2. `backend/app/v4/matching/internal_channel.py`
+3. `backend/app/v4/profiles/base.py`
+4. `backend/app/v4/matching/reverse_matcher.py`
+5. `docs/project/workflow.md`
+6. `docs/architecture/current-architecture.md`
+7. `CHANGELOG.md`
+8. `docs/development/debug-log.md`
+
+#### 验证方式
+
+1. 规则级：1103 文档 5 条需求 + 历史 11 条含通道词样本（6 条内部、5 条非内部）。
+2. 完整匹配：旧/新 AMS 配置在 1103 文档 + 3 条历史样本上逐条差分。
+3. 历史语料：200 个 AMS job、137 条去重需求，对比新旧命中集合。
+4. mock 全流程：`USE_MOCK_LLM=1 reverse-analyze`，检查 `reverse_matches.json`、stats 与 4 份 Word。
+
+#### 验证结果
+
+**已通过（本机，2026-11-09）**：
+
+1. 规则级：1103 文档仅 `HLR_5113` 由 false→true，其余 4 条不变；6 条历史内部需求仍为 true，5 条非内部需求（HLR_2939/680/4443/14466/14470）仍为 false。
+2. 完整匹配差分：仅 `HLR_5113` 由 `待确定/1 Block`（`L37/BAS_BLEED_PRESSURE_REF_psig`）变为 `无匹配/0 Block/[内部接口]`；其余 4 条 1103 需求与 HLR_2939/4443/915 逐字段不变。
+3. 历史语料：200 个 AMS job、137 条去重需求，新旧命中集合均为 6 条且 ID 完全一致，新增/丢失均为 0。
+4. mock 全流程：5 条 HLR，stats `已匹配 0 / 待确定 4 / 无匹配 1 / 内部接口 1`；`HLR_5113` 在 `reverse_matches.json` 中为 `match_type=无匹配`、`internal_channel=true`、0 Block；4 份 Word 正常生成，单模型与多模型报告均显示 `[内部接口]`。
+5. **尚未执行**：真实模型端到端复跑（本次为匹配层前置规则扩展，mock 已覆盖下游串联）。
+
+#### 遗留问题
+
+1. 方案 A 的残余误报面：若外部需求把两个通道名写在同一子句并带接收/发送动词，可能被判为内部接口；历史 137 条未出现，暂不启用 `internal_channel_exclude_pattern` 兜底。
+2. 历史已落盘结果不回溯；续跑/重跑才会应用新规则。
+3. 需重建后端镜像才在服务器生效。
+
+#### 下一步建议
+
+1. 真实模型环境复跑 `1103测试1.docx`，确认 `HLR_5113` 在报告中的展示与裁判 case 数。
+2. 若后续出现“外部 A429 位定义行合并两个通道名”的误报，评估启用 `internal_channel_exclude_pattern` 或升级为“两通道 + 证据门槛”规则。
+
 ### 2026-10-29 反向匹配：零证据“待确定”按无匹配处理
 
 #### 任务目标

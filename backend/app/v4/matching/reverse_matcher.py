@@ -1130,7 +1130,7 @@ def match_reverse(
     for hlr in hlr_reqs:
         lbl = hlr_labels.get(hlr.requirement_id)
 
-        # 内部通道数据（R_norm3）：两型控制器之间的内部数据不在 EoICD
+        # 内部通道数据（R_norm）：两型控制器之间的内部数据不在 EoICD
         # Pub/Sub 表中，按 Label 号命中的 Block 信号名/位定义无法对应。
         # 直接按“无匹配 + 内部接口标注”处理，不进入 Block 评分，也不
         # 计入 matched_block_keys；未标注 HLR 同样适用。
