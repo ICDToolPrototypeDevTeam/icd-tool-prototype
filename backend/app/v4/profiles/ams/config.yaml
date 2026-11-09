@@ -4,12 +4,14 @@ profile:
   version: 1.0
 
 matcher:
-  # 内部通道数据前置判断（R_norm3，2026-10-29）。
+  # 内部通道数据前置判断（R_norm，2026-10-29）。
   # 命中后按“无匹配 + 内部接口标注”处理，不进入 EoICD Pub/Sub 比对。
+  # 2026-11-09：支持“对侧通道 + 对邻通道 + 收到”的源选择写法，
+  # 同句通道词阈值由 3 降为 2，数据路径动词增加“收到”。
   enable_internal_channel_detection: true
   internal_channel_terms: [邻通道, 对侧通道, 对邻通道]
-  internal_channel_min_terms: 3
-  internal_channel_data_path_pattern: '(?:A429\s*)?(?:接收|发送|解析|写入)'
+  internal_channel_min_terms: 2
+  internal_channel_data_path_pattern: '(?:A429\s*)?(?:接收|收到|发送|解析|写入)'
   # 留空表示不做告警语境排除（当前不需要）。
   internal_channel_exclude_pattern: ''
 
