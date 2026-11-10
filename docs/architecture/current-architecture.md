@@ -48,7 +48,7 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 6. 展示任务处理状态（六步进度）；
 7. 展示处理结果摘要（统计卡片 + 星级分布）；
 8. 提供输出文档预览与下载入口；
-9. 提供模型设置页面，运行时修改三个模型名称（无需重启服务）。
+9. 提供模型设置页面，运行时修改三个模型名称与思考模式开关（无需重启服务）。
 
 前端不负责：
 
@@ -86,7 +86,7 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | `token_usage.py` | 反向 LLM token 采集：解析 OpenAI 兼容 `usage` 的三种形状，并从线程绑定的 Job 累加（只 import `job_log`，不 import `job_manager`，避免循环依赖） |
 | `job_log.py`   | 进程级任务日志缓冲、stdout/stderr Tee、线程归属与 job.log 落盘；不依赖任何 `app.*` 模块 |
 | `job_scheduler.py` | 进程内任务队列：固定 `MAX_CONCURRENT_JOBS`（默认 2）个常驻工作线程领取任务（新任务 FIFO，续跑任务插队首，不抢占执行中任务）；出队时做票据比对（同一任务的旧条目丢弃）与跳过裁决（排队期间被终止 / 放弃的任务不执行，原因写入该任务日志） |
-| `runtime_settings.py` | 运行时模型设置：三个模型名原子落盘到 `OUTPUT_DIR/settings.json`，保存时写入 `os.environ`，启动时回读；不依赖任何业务管线 |
+| `runtime_settings.py` | 运行时模型设置：三个模型名与三个思考开关原子落盘到 `OUTPUT_DIR/settings.json`，保存时写入 `os.environ`，启动时回读；不依赖任何业务管线 |
 | `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（经 `job_scheduler` 入队 + 7 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` / `settings.py` |
 | `api/v4/hlr_schemas.py` | HLR 表格样式管理与辅助接口：样式列表 / 新建 / 更新 / 删除、文档表格扫描与试解析（扫描与试解析均不调用 LLM）；内置模板只读（403），未知样式 404、重名 409、配置非法 422 |
 | `v4/pipeline.py` | V4 反向管线编排（`run_reverse_pipeline`，6 步）；正向管线不在 `v4/` 内（见 `forward/` 与 `app/forward/` 两行） |
@@ -453,9 +453,13 @@ backend/forward/            # 正向管线原样代码树（唯一事实源；�
 llm/factory.py
   get_llm(provider: str) -> LLMClient
     if USE_MOCK_LLM=1: return MockLLMClient
-    if provider == "deepseek": return DeepSeekClient(api_key, base_url, model)
-    if provider == "qwen": return QwenClient(api_key, base_url, model)
-    if provider == "minimax": return MiniMaxClient(api_key, base_url, model)
+    if provider == "deepseek": return DeepSeekClient(api_key, base_url, model, thinking=...)
+    if provider == "qwen": return QwenClient(api_key, base_url, model, thinking=...)
+    if provider == "minimax": return MiniMaxClient(api_key, base_url, model, thinking=...)
+
+llm/thinking.py
+  thinking_enabled(provider) / cache_variant(provider)
+    读 *_THINKING（默认开启）；关闭值供缓存 key 追加 _thinking=disabled
 
 llm/deepseek_client.py
   DeepSeekClient.chat(messages, temperature, max_tokens=1024, timeout=120, max_retries=2, ...)
@@ -473,10 +477,13 @@ llm/mock_llm.py
     返写死 JSON，按 MOCK_JUDGE_RESULT 切 covered / inconsistent / needs_review
 ```
 
-三个模型名（`DEEPSEEK_MODEL` / `MINIMAX_MODEL` / `QWEN_MODEL`）支持运行时修改：
+三个模型名（`DEEPSEEK_MODEL` / `MINIMAX_MODEL` / `QWEN_MODEL`）与三个思考开关
+（`DEEPSEEK_THINKING` / `MINIMAX_THINKING` / `QWEN_THINKING`）支持运行时修改：
 `app/runtime_settings.py` 把前端保存的值写入 `OUTPUT_DIR/settings.json` 并立即更新
 `os.environ`；`get_llm()` 每次调用、正向 `config_builder` 每个任务开始时读取，因此
-无需重启。启动时 `main.py` lifespan 回读落盘值（优先于 `.env`）。
+无需重启。启动时 `main.py` lifespan 回读落盘值（优先于 `.env`）。思考开关仅由反向
+管线的 `get_llm()` 消费，正向 `config_builder` 不使用；关闭时 `llm_cache` 的 key
+追加 `_thinking=disabled` 变体，开启路径沿用历史 key。
 
 V4 内 LLM 调用入口：
 - `comparison/semantic_judge.py` × 2 处

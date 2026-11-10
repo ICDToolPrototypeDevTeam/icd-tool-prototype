@@ -14,11 +14,13 @@ class MiniMaxClient:
 
     PROVIDER = "minimax"
 
-    def __init__(self, api_key: str, base_url: str, model: str, default_timeout: int = 120):
+    def __init__(self, api_key: str, base_url: str, model: str,
+                 default_timeout: int = 120, thinking: bool = True):
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._default_timeout = default_timeout
+        self._thinking = thinking
 
     @property
     def model(self) -> str:
@@ -49,6 +51,12 @@ class MiniMaxClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        # 本通道计划切换为 Qwen 兼容接口：按 Qwen 的 enable_thinking 协议发送。
+        # 开启时保持历史请求体不变（不发送 enable_thinking）；关闭时发送 false。
+        # 当前真实 MiniMax OpenAI 兼容接口会忽略该字段（思考无法关闭），切换
+        # 到 Qwen 接口后生效；PROVIDER 仍为 minimax，token 记账与报告标签不变。
+        if not self._thinking:
+            payload["enable_thinking"] = False
 
         last_error = None
         for attempt in range(max_retries + 1):

@@ -51,6 +51,70 @@
 
 ## 3. 开发记录
 
+### 2026-11-10 模型设置：三家 LLM 思考模式前端可开关（仅反向管线）
+
+#### 任务目标
+
+把此前写死在 client 里的思考模式改为前端「模型设置」页可显式开关：DeepSeek / Qwen / MiniMax 三家默认开启；不暴露 effort 档位；只作用于反向管线，正向管线不动；默认开启路径的请求体、缓存 key 与现有结果保持不变，并兼容旧 `settings.json`、旧前端与旧 API 调用。
+
+#### 完成内容
+
+1. 后端设置层新增三个思考开关字段（`deepseek_thinking` / `minimax_thinking` / `qwen_thinking`），与三个模型名一起原子落盘到 `OUTPUT_DIR/settings.json`，保存时写入 `DEEPSEEK_THINKING` / `MINIMAX_THINKING` / `QWEN_THINKING`，启动时回读；缺失字段回落环境变量 / 默认开启，单个非法字段只告警并回落，不影响模型名加载。
+2. API 的 `GET/PUT /api/v4/settings` 增加三个布尔字段；`PUT` 省略或传 `null` 时保留当前生效值，旧客户端只提交三个模型名的行为不变；非布尔值由 Pydantic 返回 422。
+3. 新增 `app/v4/llm/thinking.py`，统一解析 `*_THINKING`（仅 `0/false/no/off` 视为关闭，其余按开启），并提供缓存 key 变体；`factory.get_llm()` 按 provider 把 `thinking` 传入三个 client。
+4. 协议按 provider 区分：DeepSeek 开启时保持 `thinking: enabled` + `reasoning_effort: low`，关闭时只发 `thinking: disabled`；Qwen 开启时保持历史请求体（不发 `enable_thinking`），关闭时发 `enable_thinking: false`；MiniMax 按 Qwen 兼容协议发送 `enable_thinking: false`，`PROVIDER` 仍为 `minimax`，token 记账与报告标签不变。
+5. `llm_cache.compute_key` 仅在关闭时追加 provider 级 `_thinking=disabled` 变体；开启路径 key 与改动前逐字节一致，升级后仍可命中历史缓存。
+6. 前端模型设置页每个 provider 增加「思考模式」开关与开启 / 关闭状态；页面说明思考开关只影响反向管线。
+7. 同步更新 API / 架构文档、`CHANGELOG.md` 与 `.env.example`。
+
+#### 修改文件
+
+1. `backend/app/runtime_settings.py`
+2. `backend/app/api/v4/schemas.py`
+3. `backend/app/api/v4/settings.py`
+4. `backend/app/v4/llm/thinking.py`（新增）
+5. `backend/app/v4/llm/factory.py`
+6. `backend/app/v4/llm/deepseek_client.py`
+7. `backend/app/v4/llm/qwen_client.py`
+8. `backend/app/v4/llm/minimax_client.py`
+9. `backend/app/v4/llm_cache.py`
+10. `backend/.env.example`
+11. `frontend/src/pages/SettingsPage.tsx`
+12. `frontend/src/index.css`
+13. `frontend/src/types.ts`
+14. `docs/architecture/api.md`
+15. `docs/architecture/current-architecture.md`
+16. `CHANGELOG.md`
+17. `docs/development/development-log.md`
+
+#### 验证方式
+
+1. `cd backend && ../.venv-build/Scripts/python.exe -m py_compile app/runtime_settings.py app/api/v4/schemas.py app/api/v4/settings.py app/v4/llm/thinking.py app/v4/llm/factory.py app/v4/llm/deepseek_client.py app/v4/llm/qwen_client.py app/v4/llm/minimax_client.py app/v4/llm_cache.py`
+2. `C:\tmp\verify_thinking_mode.py`：临时 `OUTPUT_DIR` 下覆盖默认值、部分更新、持久化、旧 `settings.json` 兼容、非法字段回落、三个 client 开关请求体、factory 传参、缓存 key（开启等于历史 key / 关闭不同 / provider 隔离）、路由层 GET/PUT 与 422。
+3. `USE_MOCK_LLM=1` 反向全流程：`1103测试1.docx` + 历史 AMS EoICD，输出到 `C:\tmp\thinking_e2e`。
+4. `cd frontend && npm run build`。
+5. `git diff --check`。
+6. Docker 容器内探针：`docker compose cp C:\tmp\verify_current_thinking.py backend:/tmp/verify_current_thinking.py && docker compose exec backend python /tmp/verify_current_thinking.py`（读取 `/app/output/settings.json`，patch `requests.post` 打印三家真实请求体，不发起网络调用）。
+
+#### 验证结果
+
+1. 后端 9 个文件 `py_compile` 通过。
+2. 行为探针 30 项全部通过：三个 client 开启路径请求体与改动前一致（DeepSeek 仍为 enabled + low，Qwen / MiniMax 不发送思考参数）；关闭路径分别发送 `thinking: disabled` / `enable_thinking: false`；开启缓存 key 与旧公式完全一致，关闭 key 不同且 provider 间互不影响；旧 `settings.json` 与省略开关的 PUT 均保持兼容。
+3. mock 反向全流程通过：5 条 SWHLR、4 条裁判 case、4 份 Word 正常生成；匹配统计与 PR #171 验证时一致（已匹配 0 / 待确定 4 / 无匹配 1 / 内部接口 1）。
+4. 前端 `tsc && vite build` 通过。
+5. `git diff --check` 无空白错误。
+
+#### 遗留问题
+
+1. MiniMax 关闭参数是否生效取决于 `MINIMAX_BASE_URL` 指向的接口：指向 Qwen 兼容接口时生效，旧版 MiniMax OpenAI 兼容接口可能忽略该参数。本次未改 `backend/.env`。
+2. 真实模型验证：2026-11-10 在 Docker 容器（镜像含本次代码）中运行任务 `43b5db61-d9ff-4f55-b64e-e29a9258e05d`（`1103测试1.docx`，7 条 SWHLR，真实 provider），任务 `completed`，4 份 Word 报告全部生成。任务缓存记录显示：`hlr_label` / `consensus` 使用 `deepseek-v4-flash`；三个裁判分别使用 `deepseek-v4-flash` / `qwen3.7-flash`（MiniMax 槽位，`MINIMAX_BASE_URL` 指向 DashScope）/ `qwen3.6-35b-a3b`，与页面设置一致。容器内探针确认请求体为 DeepSeek `thinking.enabled` + `reasoning_effort=low`、Qwen 与 MiniMax `enable_thinking=false`。尚未做同一任务开关前后的对照测量（耗时 / reasoning tokens / 判定差异）。
+3. 服务器生效需重建后端镜像并覆盖前端产物。
+
+#### 下一步建议
+
+1. 在真实模型环境分别用开启 / 关闭思考复跑同一批样本，记录 token、耗时与判定差异。
+2. 完成 MiniMax 槽位到 Qwen 兼容接口的部署配置切换后，再验证 MiniMax 开关的实际效果。
+
 ### 2026-11-09 反向匹配：内部通道识别补充“两通道 + 收到”源选择写法
 
 #### 任务目标
