@@ -108,7 +108,29 @@ def safe_save_json(data, rel_path: str, project_root: Path, indent: int = 2):
 
 # ============================ 各步骤实现 ============================
 
-def step_bus_label_bit(eoicd_clusters, hlr_units, config, direction: str, project_root: Path):
+def _resolve_save_retained(config: dict, step: str) -> bool:
+    """决定是否把 retained_* 中间态落盘（2026-11-03）。
+
+    背景：retained_bus_label_bit / retained_direction / retained_name 三份中间态
+    是「阶段间数据」——在 --step all（全流程）下，阶段之间**已经在内存里直接传参**
+    （step_bus_label_bit → step_direction → step_name_pipeline），
+    落盘纯粹是为「分步续跑」准备的文件缓存。单 judge 上这三份合计可达数百 MB
+    （pub 侧 retained_bus_label_bit 172M + retained_direction 153M + retained_name 153M），
+    ×N 个 judge 会把工作区撑到 GB 级，而全流程路径下它们**写完从不被读**。
+
+    规则：
+      · --step != all（手动分步续跑）→ **必须落盘**，否则下一步读不到上一步结果；
+      · --step all（全流程）→ 默认**不落盘**（阶段间走内存）；
+        可在 config 的 output.save_retained_intermediate 里显式开启（调试/留证用）。
+    """
+    out_cfg = config.get("output") or {}
+    if step and step != "all":
+        return True
+    return bool(out_cfg.get("save_retained_intermediate", False))
+
+
+def step_bus_label_bit(eoicd_clusters, hlr_units, config, direction: str, project_root: Path,
+                       save_retained: bool = True):
     """
     Step 1: Bus + Label + Bit 脚本匹配
     """
@@ -140,16 +162,18 @@ def step_bus_label_bit(eoicd_clusters, hlr_units, config, direction: str, projec
             project_root, indent,
         )
 
-    safe_save_json(
-        retained_bus_label_bit,
-        os.path.join(paths["output_dir"], f"retained_bus_label_bit_{direction}.json"),
-        project_root, indent,
-    )
+    if save_retained:
+        safe_save_json(
+            retained_bus_label_bit,
+            os.path.join(paths["output_dir"], f"retained_bus_label_bit_{direction}.json"),
+            project_root, indent,
+        )
 
     return retained_bus_label_bit, rejected_bus_label_bit, elapsed
 
 
-def step_direction(retained_bus_label_bit, config, direction: str, project_root: Path):
+def step_direction(retained_bus_label_bit, config, direction: str, project_root: Path,
+                   save_retained: bool = True):
     """
     Step 2: Direction 方向匹配
     """
@@ -182,16 +206,18 @@ def step_direction(retained_bus_label_bit, config, direction: str, project_root:
             project_root, indent,
         )
 
-    safe_save_json(
-        retained_direction,
-        os.path.join(paths["output_dir"], f"retained_direction_{direction}.json"),
-        project_root, indent,
-    )
+    if save_retained:
+        safe_save_json(
+            retained_direction,
+            os.path.join(paths["output_dir"], f"retained_direction_{direction}.json"),
+            project_root, indent,
+        )
 
     return retained_direction, rejected_direction, elapsed
 
 
-def step_name_pipeline(retained_direction, config, direction: str, project_root: Path, skip_ai: bool = False):
+def step_name_pipeline(retained_direction, config, direction: str, project_root: Path,
+                       skip_ai: bool = False, save_retained: bool = True):
     """
     Step 3~5: Name 裁剪 → AI 匹配 → 结果反哺（合并为一个逻辑步骤）
     """
@@ -297,11 +323,12 @@ def step_name_pipeline(retained_direction, config, direction: str, project_root:
             project_root, indent,
         )
 
-    safe_save_json(
-        final_retained,
-        os.path.join(paths["output_dir"], f"retained_name_{direction}.json"),
-        project_root, indent,
-    )
+    if save_retained:
+        safe_save_json(
+            final_retained,
+            os.path.join(paths["output_dir"], f"retained_name_{direction}.json"),
+            project_root, indent,
+        )
 
     elapsed_total = time.time() - t0_total
     print_step_result(True, elapsed_total)
@@ -354,10 +381,20 @@ def process_direction(
     final_retained = None
     match_report = None
 
+    # 2026-11-03：retained_* 中间态落盘策略（见 _resolve_save_retained 说明）。
+    # 全流程（--step all）默认不落盘——阶段间已在内存里直接传参，落盘写完从不被读；
+    # 手动分步续跑（--step != all）必须落盘，否则下一步读不到上一步结果。
+    save_retained = _resolve_save_retained(config, step)
+    if not save_retained:
+        print("  [落盘策略] retained_* 中间态不落盘（阶段间内存直传）；"
+              "如需断点续跑请用 --step bus_label_bit/direction/name 分步执行，"
+              "或置 config.output.save_retained_intermediate=true")
+
     # Step 1: Bus + Label + Bit
     if step in ("all", "bus_label_bit"):
         retained_bus_label_bit, _, t = step_bus_label_bit(
-            eoicd_clusters, hlr_units, config, direction, project_root
+            eoicd_clusters, hlr_units, config, direction, project_root,
+            save_retained=save_retained,
         )
         timings["bus_label_bit"] = t
     else:
@@ -369,7 +406,8 @@ def process_direction(
     # Step 2: Direction 方向匹配
     if step in ("all", "direction"):
         retained_direction, _, t = step_direction(
-            retained_bus_label_bit, config, direction, project_root
+            retained_bus_label_bit, config, direction, project_root,
+            save_retained=save_retained,
         )
         timings["direction"] = t
     else:
@@ -385,7 +423,8 @@ def process_direction(
     # Step 3~5: Name 全流程
     if step in ("all", "name"):
         final_retained, _, t_crop, t_ai, t_feed = step_name_pipeline(
-            retained_direction, config, direction, project_root, skip_ai
+            retained_direction, config, direction, project_root, skip_ai,
+            save_retained=save_retained,
         )
         timings["name_crop"] = t_crop
         timings["ai_match"] = t_ai

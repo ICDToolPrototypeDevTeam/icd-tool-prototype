@@ -19,23 +19,33 @@ if str(_PROJECT) not in sys.path:
 if str(_MULTI_DIR) not in sys.path:
     sys.path.insert(0, str(_MULTI_DIR))
 
-# 三个 test 模块
-from tests import test_aggregate, test_ai_maps, test_arbitrator, test_runner_review_route  # noqa: E402
+# 六个 test 模块
+from tests import (  # noqa: E402
+    test_aggregate,
+    test_ai_maps,
+    test_arbitrator,
+    test_io_reduction,
+    test_memory_reduction,
+    test_runner_review_route,
+)
 
 
 def main() -> int:
-    """依次跑 7 个模块的测试；任一失败打印 traceback 并返回非 0。
+    """依次跑各模块的测试；任一失败打印 traceback 并返回非 0。
 
-    前 4 个（aggregate / ai_maps / arbitrator / runner_review_route）：
+    前 6 个（aggregate / ai_maps / arbitrator / io_reduction /
+    memory_reduction / runner_review_route）：
     从生产文件迁出 / 新增大自测；
     后 3 个（summary / report / excel）：新增的最小 _self_test（在生产文件内）。
     """
     failures: list[tuple[str, Exception]] = []
-    # 前 4：迁出到 tests/ 的大自测 + 新增 ai_maps 自测（① ③ 修复）
+    # 前 6：迁出到 tests/ 的大自测 + 新增 ai_maps / io_reduction / memory_reduction 自测
     for name, mod in (
         ("aggregate", test_aggregate),
         ("ai_maps", test_ai_maps),
         ("arbitrator", test_arbitrator),
+        ("io_reduction", test_io_reduction),
+        ("memory_reduction", test_memory_reduction),
         ("runner_review_route", test_runner_review_route),
     ):
         print(f"\n{'=' * 60}\n> tests.{name}.run_all()\n{'=' * 60}")
@@ -67,7 +77,7 @@ def main() -> int:
         for n, e in failures:
             print(f"  - {n}: {e}")
         return 1
-    print("[OK] 所有自测通过（aggregate / ai_maps / arbitrator / runner_review_route / summary / report / excel）")
+    print("[OK] 所有自测通过（aggregate / ai_maps / arbitrator / io_reduction / memory_reduction / runner_review_route / summary / report / excel）")
     return 0
 
 

@@ -387,6 +387,10 @@ def generate_match_report_from_dedup(final_retained, hlr_clustered, config):
     """
     # 构建 req_id -> 聚类条目的快速查找表
     # 结构: {req_id: [{attribute_class, attr_value, evidence}, ...]}
+    # 2026-11-03：slim=True 时不写 evidence / match_pipeline（下游不读），见下方注释
+    out_cfg = (config or {}).get("output") or {}
+    slim = bool(out_cfg.get("slim_match_report", True))
+
     req_id_to_clustered = {}
     for attr_cls in hlr_clustered.get("attribute_classes", []):
         attr_name = attr_cls.get("attribute", "")
@@ -429,24 +433,32 @@ def generate_match_report_from_dedup(final_retained, hlr_clustered, config):
                 # 收集该 req_id 涉及的所有属性类
                 attribute_classes = [entry.get("attribute_class", "") for entry in clustered_entries if entry.get("attribute_class")]
                 attr_value = clustered_entries[0].get("attr_value")
-                evidence = clustered_entries[0].get("evidence", [])
+                evidence = clustered_entries[0].get("evidence", []) if not slim else []
             else:
                 attribute_classes = []
                 attr_value = None
                 evidence = []
 
-            matched_hlrs.append({
+            # 2026-11-03 写入端瘦身：只保留下游（属性匹配阶段）真正读取的字段。
+            # 下游 aggregate_hlr_by_req 对每条候选只用 req_id + hlr_identity
+            # （选接口用 name/bit），属性值优先从 hlr_clustered.json 读、
+            # 缺失时才回退到这里的 attribute_classes/attr_value（实测 fallback 触发 5544 次，
+            # 故这两个字段必须保留）；evidence 与 match_pipeline **下游完全不读**，删掉无影响。
+            # 收益：候选条目从 295B 降到 ~174B，match_report_pub.json 体积降约 66%。
+            entry = {
                 "req_id": req_id,
                 "hlr_identity": hlr_identity,
                 "attribute_classes": attribute_classes,
                 "attr_value": attr_value,
-                "evidence": evidence,
-                "match_pipeline": {
+            }
+            if not slim:
+                entry["evidence"] = evidence
+                entry["match_pipeline"] = {
                     "bus_label_bit": {"status": "matched"},
                     "direction": {"status": "matched"},
                     "name": {"status": "matched"},
-                },
-            })
+                }
+            matched_hlrs.append(entry)
 
             # 身份主键字符串
             eoicd_id_key = _fmt_identity_key(eoicd_identity)

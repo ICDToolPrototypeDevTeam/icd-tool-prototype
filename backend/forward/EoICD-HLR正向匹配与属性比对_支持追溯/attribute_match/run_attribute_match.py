@@ -231,7 +231,9 @@ def _run_attribute_match(args, config, project_root):
 
             try:
                 output_dir = resolve_path(config["paths"]["output_dir"], project_root)
-                cluster_path = run_clustering(output_dir, direction)
+                # 2026-11-03：传入 config，供 run_clustering 在消费完 attr_not_mentioned
+                # 后删除该中间态（开关：output.keep_not_mentioned_intermediate）
+                cluster_path = run_clustering(output_dir, direction, config)
 
                 with open(cluster_path, "r", encoding="utf-8") as f:
                     clustered = json.load(f)
@@ -283,6 +285,34 @@ def _run_attribute_match(args, config, project_root):
     return results
 
 
+def _cleanup_clustered(clustered_path, direction, args, config):
+    """删除已被冲突处理消费完的聚类中间态 attr_clustered_{direction}.json。
+
+    2026-11-09 引入。消费链核实：全工程唯一读取方是冲突处理阶段本身
+    （attr_conflict_extractor.extract_conflict_items），最终报告
+    attribute_match_report_{dir}.json 走的是内存里的 clustering_data
+    （见 _run_attribute_match Phase 3），不读磁盘上的 attr_clustered。
+    ⇒ 冲突处理完成后该文件彻底无人再读，属可再生中间态（pub 侧单份约 271MB）。
+
+    保留条件（与已落地的 retained_* 判定同构）：
+      · --step all                → 一趟跑完，聚类结果无后续用途 ⇒ 删除
+      · --step attribute_match     → 聚类后要另行跑冲突处理 ⇒ 保留
+      · --step conflict_resolution → 本阶段单独跑，文件是输入 ⇒ 保留
+    开关：config.output.keep_clustered_intermediate = true 时一律保留（留证用）。
+    """
+    if args.step != "all":
+        return
+    if bool((config.get("output") or {}).get("keep_clustered_intermediate", False)):
+        return
+    try:
+        size = os.path.getsize(clustered_path)
+        os.remove(clustered_path)
+        print(f"    [清理] 已删除中间态（冲突处理已消费）: "
+              f"attr_clustered_{direction}.json（{size / 1024 / 1024:.0f} MB）")
+    except OSError as e:
+        print(f"    [清理] 删除 attr_clustered_{direction}.json 失败: {e}")
+
+
 def _run_conflict_resolution(args, config, project_root):
     """运行冲突处理阶段（Step 1→2→3）"""
     if not CONFLICT_MODULES_AVAILABLE:
@@ -307,9 +337,10 @@ def _run_conflict_resolution(args, config, project_root):
 
         with open(clustered_path, "r", encoding="utf-8") as f:
             clustered = json.load(f)
-        
+
         if clustered["meta"]["total_conflict_attributes"] == 0:
             print(f"    ✓ 无冲突属性，跳过冲突处理")
+            _cleanup_clustered(clustered_path, direction, args, config)
             continue
 
         # Step 1: 提取冲突项
@@ -359,6 +390,10 @@ def _run_conflict_resolution(args, config, project_root):
         print(f"      - resolved_mismatch: {result['resolved_mismatch_path']}")
         if result['manual_review_count'] > 0:
             print(f"      - manual_review ({result['manual_review_count']} 项): {result['manual_review_path']}")
+
+        # 2026-11-09：删除已被消费完的聚类中间态 attr_clustered_{direction}.json
+        #   （消费链与保留条件见 _cleanup_clustered 的 docstring）。
+        _cleanup_clustered(clustered_path, direction, args, config)
 
 
 # ============================ 主入口 ============================

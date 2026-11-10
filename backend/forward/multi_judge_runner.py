@@ -526,15 +526,15 @@ def run_single_judge(ctx: JudgeRunContext) -> dict:
     name = judge["name"]
     print(f"\n> judge[{idx}] {name}  ({judge.get('model')})")
 
-    # 复制共享阶段1产物（raw 输入 + eoicd_processed）到本 judge 工作区
+    # 复制共享阶段1的 raw 输入到本 judge 工作区。
+    # 2026-11-03：原先还把 shared/eoicd_processed/ 整目录拷贝进来，但 judge 只用到其中
+    # 4 个 *_clustered*.json（约 1MB），其余 eoicd_pub.json / trace_result.json /
+    # *_Located.xlsx 等只有阶段1自己用——单 judge 白拷约 40MB，×N judge 成倍放大。
+    # 现改为通过 --eoicd-processed-dir 让 judge 只读引用 shared 里的原位置。
     ws_raw = judge_ws / "data" / "raw"
-    ws_eoicd = judge_ws / "eoicd_processed"
     src_raw = shared_ws / "data" / "raw"
-    src_eoicd = shared_ws / "eoicd_processed"
     if src_raw.exists():
         shutil.copytree(src_raw, ws_raw, dirs_exist_ok=True)
-    if src_eoicd.exists():
-        shutil.copytree(src_eoicd, ws_eoicd, dirs_exist_ok=True)
 
     # 每 judge 独立 map 缓存（阶段2 映射隔离，防交叉污染）
     nm = judge_ws / "name_map.json"
@@ -564,6 +564,14 @@ def run_single_judge(ctx: JudgeRunContext) -> dict:
         "--workspace", str(judge_ws),
         "--output-dir", str(out_dir),
         "--project", cfg["project"],
+        # 阶段1 产物只读引用 shared 工作区（不各自拷贝一份，见上方注释）
+        "--eoicd-processed-dir", str(shared_ws / "eoicd_processed"),
+        # 2026-11-09：judge 的 --output-dir 指向**自己工作区**（ws/output），
+        # 而聚合层只通过 _latest_summary_folder(judge_ws) 读 ws/summary/data/
+        # 那份原件 ⇒ ws/output/ 下的 report_*.json 是同内容（md5 相同）的
+        # 归档副本，无任何消费者、纯白占盘（pub 侧单份约 44MB，×N judge）。
+        # 故不归档它；需要留证时可去掉本参数（副本会恢复）。
+        "--no-report-archive",
     ]
     if cfg.get("eoicd_pub"):
         cmd += ["--eoicd-pub", cfg["eoicd_pub"]]

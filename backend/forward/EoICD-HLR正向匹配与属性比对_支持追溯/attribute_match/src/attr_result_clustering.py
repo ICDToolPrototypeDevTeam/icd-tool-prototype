@@ -28,6 +28,35 @@ import json
 import os
 
 
+def _cleanup_consumed_intermediates(output_dir: str, direction: str,
+                                    config: dict | None = None) -> None:
+    """删除本阶段已消费完的中间态文件（2026-11-03）。
+
+    attr_not_mentioned_{direction}.json 由属性匹配阶段（Phase 1）写出，
+    在本模块 load_result_files() 里被读一次并展开成内存结构后就不再需要——
+    聚类产出 attr_clustered 后它已完全无用。
+
+    为何要删：单 judge 上 pub 侧约 429MB、sub 侧约 41MB，×N judge 后是 GB 级占用，
+    而这些内容在整条流水线里**没有任何其他消费者**（全工程仅 attr_result_clustering.py 读它）。
+
+    为何保留 attr_clustered：它要被冲突处理阶段（_run_conflict_resolution）读，
+    且是"分步续跑"（--step conflict_resolution）的输入，删了会断链。
+
+    关闭方式：config["output"]["keep_not_mentioned_intermediate"] = true（调试/留证用）。
+    """
+    out_cfg = (config or {}).get("output") or {}
+    if out_cfg.get("keep_not_mentioned_intermediate"):
+        return
+    path = os.path.join(output_dir, f"attr_not_mentioned_{direction}.json")
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            print(f"  [清理] 已删除中间态（聚类已消费）: {os.path.basename(path)}")
+    except OSError as e:
+        # 删不掉不影响正确性（只是占盘），不阻断流程
+        print(f"  [清理] 删除中间态失败（忽略）: {os.path.basename(path)} — {e}")
+
+
 def load_result_files(output_dir: str, direction: str) -> dict:
     """
     加载属性匹配阶段的四类结果文件。
@@ -291,7 +320,7 @@ def cluster_attribute_results(output_dir: str, direction: str) -> dict:
     return output
 
 
-def run_clustering(output_dir: str, direction: str) -> str:
+def run_clustering(output_dir: str, direction: str, config: dict | None = None) -> str:
     """
     执行聚类并保存结果文件。
 
@@ -302,5 +331,9 @@ def run_clustering(output_dir: str, direction: str) -> str:
     output_path = os.path.join(output_dir, f"attr_clustered_{direction}.json")
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(clustered, f, ensure_ascii=False, indent=2)
+
+    # 2026-11-03：attr_not_mentioned 已被本函数读完并展开，删除以免白占磁盘
+    # （pub 侧单份约 429MB）。保留 attr_clustered（冲突处理阶段还要读）。
+    _cleanup_consumed_intermediates(output_dir, direction, config)
 
     return output_path

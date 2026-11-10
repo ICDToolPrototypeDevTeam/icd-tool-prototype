@@ -100,6 +100,25 @@
     // 是否保存中间文件（裁剪输入、AI 结果等）
     "save_intermediate": false,
 
+    // 是否保存 retained_* 中间态（retained_bus_label_bit / retained_direction / retained_name）。
+    // false = 全流程（--step all）不落盘——阶段间已在内存里直接传参，落盘写完从不被读；
+    //        单 judge 这三份合计可达数百 MB，×N judge 会把工作区撑到 GB 级。
+    //        注意：手动分步续跑（--step bus_label_bit/direction/name）时**始终落盘**，
+    //        否则下一步读不到上一步结果（不受此项影响）。
+    // true  = 无论哪种执行方式都落盘（调试/留证用）。
+    "save_retained_intermediate": false,
+
+    // 是否对 match_report 的 matched_hlrs 做写入端瘦身（2026-11-03）
+    // true  = 默认。每条候选只写下游（属性匹配阶段）真正读取的 4 个字段：
+    //         req_id / hlr_identity / attribute_classes / attr_value；
+    //         删掉下游**完全不读**的 evidence 与 match_pipeline。
+    //         候选条目 295B → ~174B，match_report_pub.json 体积降约 66%
+    //         （实测 292MB → ~100MB；对应 json.load 内存峰值 1352MB → ~460MB）。
+    //         注：attribute_classes/attr_value 虽多数情况用不到（属性值优先从
+    //         hlr_clustered.json 读），但 fallback 路径实测触发 5544 次，**必须保留**。
+    // false = 写完整版（含 evidence / match_pipeline），留证/调试用。
+    "slim_match_report": true,
+
     // JSON 缩进空格数，0 则为紧凑格式
     "indent_json": 2
   },

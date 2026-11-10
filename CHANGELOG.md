@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-11-10
+
+### Changed
+
+- **正向管线升级并原样集成「发送工具集成版 V5」（内存 / 磁盘占用优化，接口与产物不变）**：`backend/forward/` 代码树整体同步到 V5（同步 82 个受控文件，相对当前 HEAD 为 15 个内容修改、3 个新增、0 个删除；新增 `common/jsonstream.py`、`tests/test_io_reduction.py`、`tests/test_memory_reduction.py`；工程专用的 `mock_llm_server.py` / `multi_judge_config.mock.json` 保留；`input/`、`output/`、`runs/`、`__pycache__`、`EoICD侧数据处理/data/`、`identity_match/src/cache/`、`单judge结果汇总/outputs/` 不参与同步）。V5 的变化集中在资源占用：属性比对大报告改用 `common/jsonstream.py` 流式解析（不再整文件载入）；阶段1 共享产物由 `--eoicd-processed-dir` 直接引用，不再逐 judge 复制；`retained_*`、`attr_not_mentioned_*`、`attr_clustered_*` 等中间态默认不落盘（`config.output` 的 `save_retained_intermediate` / `keep_not_mentioned_intermediate` / `keep_clustered_intermediate` 可显式保留）；judge 子进程增加 `--no-report-archive`，不再归档 `report_*.json`。工程集成层契约（`[tokens] delta=N` 增量标记、三类 sidecar、`--base-tokens`、Word 报告总 Token 行、`--ai-key` 日志脱敏、`使用说明.md` §6.1）在上游删除后由工程侧重新落回（13 处代码/配置补丁 + 1 处文档补丁）。上传字段、结果口径与两份交付物名称不变，**反向管线零改动**。该改动需**重建后端镜像**才生效。
+
 ## [Unreleased] - 2026-11-09
 
 ### Added

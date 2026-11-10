@@ -40,6 +40,9 @@ def _generate_match_report_legacy(final_retained, config):
     """旧版报告生成（无聚类数据回填，用于兼容）。"""
     matches = []
     match_summary = []
+    # 2026-11-03 写入端瘦身：与新版一致，slim 时不写下游不读的字段
+    out_cfg = (config or {}).get("output") or {}
+    slim = bool(out_cfg.get("slim_match_report", True))
 
     for item in final_retained:
         eoicd = item["eoicd_cluster"]
@@ -60,18 +63,20 @@ def _generate_match_report_legacy(final_retained, config):
             }
 
             req_id = unit.get("req_id")
-            matched_hlrs.append({
+            entry = {
                 "req_id": req_id,
                 "hlr_identity": hlr_identity,
                 "attribute_classes": [],
                 "attr_value": None,
-                "evidence": [],
-                "match_pipeline": {
+            }
+            if not slim:
+                entry["evidence"] = []
+                entry["match_pipeline"] = {
                     "bus_label_bit": {"status": "matched"},
                     "direction": {"status": "matched"},
                     "name": {"status": "matched"},
-                },
-            })
+                }
+            matched_hlrs.append(entry)
 
             # 身份主键字符串
             eoicd_id_key = _fmt_identity_key(eoicd_identity)
