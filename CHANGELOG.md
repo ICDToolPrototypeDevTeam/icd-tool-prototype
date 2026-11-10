@@ -2,6 +2,12 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-11-10
+
+### Changed
+
+- **模型设置：三家 LLM 的思考模式改为前端可开关（仅反向管线）**：前端「模型设置」页在三个模型名下方各新增一个「思考模式」开关，默认开启；保存后与模型名一起写入 `OUTPUT_DIR/settings.json`（`deepseek_thinking` / `minimax_thinking` / `qwen_thinking`）并立即写入 `DEEPSEEK_THINKING` / `MINIMAX_THINKING` / `QWEN_THINKING`，无需重启。协议按 provider 区分：DeepSeek 开启时保持 `thinking: enabled` + `reasoning_effort: low`，关闭时只发 `thinking: disabled` 且不发 `reasoning_effort`；Qwen 开启时保持历史请求体（不发送 `enable_thinking`），关闭时发 `enable_thinking: false`；MiniMax 按 Qwen 兼容协议发送 `enable_thinking: false`，是否生效取决于 `MINIMAX_BASE_URL` 指向的接口：指向 Qwen 兼容接口时生效，旧版 MiniMax OpenAI 兼容接口可能忽略该参数；槽位仍按 minimax 记账与出报告。缓存 key 在关闭时追加 provider 级 `_thinking=disabled` 变体，开启路径沿用历史 key。旧 `settings.json` 缺开关字段时回落环境变量 / 默认开启；`PUT` 省略开关字段时保留当前值。**正向管线（完整性分析）未改动**，思考开关只作用于反向管线。该改动需**重建后端镜像 / 覆盖前端产物**才生效；无新增第三方依赖与端口。
+
 ## [Unreleased] - 2026-11-09
 
 ### Added

@@ -14,11 +14,13 @@ class QwenClient:
 
     PROVIDER = "qwen"
 
-    def __init__(self, api_key: str, base_url: str, model: str, default_timeout: int = 120):
+    def __init__(self, api_key: str, base_url: str, model: str,
+                 default_timeout: int = 120, thinking: bool = True):
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._default_timeout = default_timeout
+        self._thinking = thinking
 
     @property
     def model(self) -> str:
@@ -49,6 +51,11 @@ class QwenClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        # 思考模式由前端「模型设置」页控制：Qwen 默认开启，因此开启时保持
+        # 历史请求体不变（不发送 enable_thinking）；关闭时显式发送 false。
+        # 不发送 reasoning_effort——当前默认行为即不指定档位。
+        if not self._thinking:
+            payload["enable_thinking"] = False
 
         last_error = None
         for attempt in range(max_retries + 1):

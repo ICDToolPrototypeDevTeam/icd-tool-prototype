@@ -8,6 +8,8 @@ user_prompt）以及 provider / model / 调用参数。上游任何变化（HLR 
 
 CACHE_VERSION 必须递增的场景（无法从 prompt 体现、但会改变结果的改动）：
   - LLM client 内部 payload（thinking / reasoning_effort / 截断重试的 max_tokens 倍增）
+    —— 例外：思考开关的关闭值由 ``llm.thinking.cache_variant`` 编入 key（开启
+    路径不加标记，保持历史 key 可命中），调整该开关无需递增版本
   - _extract_json 的解析与修复逻辑
   - 判定结果的 schema 或字段语义
   - 任何让「相同 prompt 应产生不同结果」的改动
@@ -21,6 +23,8 @@ import json
 import sys
 import threading
 from pathlib import Path
+
+from app.v4.llm.thinking import cache_variant
 
 CACHE_VERSION = 1
 CACHE_FILENAME = "llm_cache.jsonl"
@@ -40,9 +44,16 @@ def compute_key(
     user_prompt: str,
     params: dict | None = None,
 ) -> str:
-    """对完整调用载荷取内容寻址 key。"""
+    """对完整调用载荷取内容寻址 key。
+
+    思考模式关闭时追加 provider 级 ``_thinking=disabled``：同一 prompt 在
+    「开 / 关」下结果不同，不能复用缓存。开启路径不加任何标记，升级后默认
+    配置的 key 与改动前逐字节一致，仍可命中历史缓存。
+    """
+    effective_params = dict(params or {})
+    effective_params.update(cache_variant(provider))
     canonical = json.dumps(
-        [CACHE_VERSION, kind, provider, model, params or {}, system_prompt, user_prompt],
+        [CACHE_VERSION, kind, provider, model, effective_params, system_prompt, user_prompt],
         ensure_ascii=False,
         sort_keys=True,
     )

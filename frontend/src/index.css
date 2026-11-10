@@ -2010,7 +2010,7 @@ body {
   gap: 16px;
   padding: 20px 0;
   border-bottom: 1px solid var(--border);
-  cursor: text;
+  cursor: default;
 }
 
 .model-field:last-child {
@@ -2048,6 +2048,7 @@ body {
   flex-direction: column;
   gap: 4px;
   min-width: 0;
+  cursor: text;
 }
 
 .model-field__name {
@@ -2094,6 +2095,54 @@ body {
   background: var(--white);
   border-color: var(--primary);
   box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.12);
+}
+
+.model-field__control {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.model-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.model-thinking input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+
+.model-thinking__label {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.model-thinking__state {
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.model-thinking__state--on {
+  color: #047857;
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.model-thinking__state--off {
+  color: var(--text-secondary);
+  background: var(--bg-light);
+  border: 1px solid var(--border);
 }
 
 .settings-card__hint {
@@ -2181,7 +2230,7 @@ body {
     grid-template-columns: 44px minmax(0, 1fr);
   }
 
-  .model-field__input {
+  .model-field__control {
     grid-column: 1 / -1;
   }
 
