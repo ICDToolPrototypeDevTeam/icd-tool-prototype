@@ -665,25 +665,22 @@ def run_attribute_match(args: argparse.Namespace, workspace: Path) -> None:
 
 
 def prepare_summary_input(args: argparse.Namespace, workspace: Path) -> None:
-    """将属性匹配报告、身份识别 rejected 文件和 HLR 需求文档复制到汇总模块输入目录。"""
+    """把身份识别的 rejected 文件与 HLR 需求文档准备到汇总模块的输入目录。
+
+    2026-11-03：属性匹配报告（attribute_match_report_{pub,sub}.json，单份可达 460MB）
+    **不再复制**到本目录——汇总模块本身支持用 --match 直接指定报告路径，
+    由 run_summary() 传入 data/output/attribute_match/ 下的原始位置。
+    原先的复制会在每个 judge 工作区里白占一份同样大小的副本（3 judge ≈ 1.5GB）。
+
+    仍需保留在 input/ 下的：
+      · rejected/ —— 完整性兜底要按方向读 rejected_{stage}_{direction}.json
+                     （summary.py 硬编码从 ./input/rejected/ 读取，路径固定）；
+      · HLR 需求文档 —— summary.py 从 input 下按文件名识别设备名前缀。
+    """
     summary_input = workspace / "summary" / "input"
     summary_input.mkdir(parents=True, exist_ok=True)
 
-    attr_out = workspace / "data" / "output" / "attribute_match"
     rejected_dir = workspace / "data" / "output" / "identity_match" / "rejected"
-
-    # 仅当 publisher 侧属性匹配报告存在时才复制（仅 Subscriber 侧项目无 pub 报告）
-    pub_report = attr_out / "attribute_match_report_pub.json"
-    if pub_report.exists():
-        shutil.copyfile(pub_report, summary_input / "attribute_match_report_pub.json")
-    else:
-        print(f"  [跳过] 无 publisher 侧属性匹配报告（{pub_report.name}），仅汇总 subscriber 侧")
-    # 仅当 subscriber 侧属性匹配报告存在时才复制（仅 Publisher 侧项目无 sub 报告）
-    sub_report = attr_out / "attribute_match_report_sub.json"
-    if sub_report.exists():
-        shutil.copyfile(sub_report, summary_input / "attribute_match_report_sub.json")
-    else:
-        print(f"  [跳过] 无 subscriber 侧属性匹配报告（{sub_report.name}），仅汇总 publisher 侧")
 
     # 完整性兜底需要 rejected 文件
     rejected_out = summary_input / "rejected"
@@ -721,12 +718,21 @@ def run_summary(args: argparse.Namespace, workspace: Path) -> Path:
     ]
     # 仅传入实际存在的属性匹配报告；summary.py 自身也会跳过缺失文件，
     # 但显式按需传入可避免把不存在的 sub 报告路径塞进去
-    pub_match = summary_input / "attribute_match_report_pub.json"
-    sub_match = summary_input / "attribute_match_report_sub.json"
+    #
+    # 2026-11-03：指向 **原始位置** data/output/attribute_match/，不再指向
+    # summary/input/ 下的拷贝——原先 prepare_summary_input 会把这份报告
+    # （pub 侧单份约 460MB）复制一份到 summary/input/，纯占盘无意义。
+    attr_out = workspace / "data" / "output" / "attribute_match"
+    pub_match = attr_out / "attribute_match_report_pub.json"
+    sub_match = attr_out / "attribute_match_report_sub.json"
     if pub_match.exists():
         cmd.extend(["--match", str(pub_match)])
+    else:
+        print(f"  [跳过] 无 publisher 侧属性匹配报告（{pub_match.name}），仅汇总 subscriber 侧")
     if sub_match.exists():
         cmd.extend(["--match", str(sub_match)])
+    else:
+        print(f"  [跳过] 无 subscriber 侧属性匹配报告（{sub_match.name}），仅汇总 publisher 侧")
     if args.device:
         cmd.extend(["--device", args.device])
 
@@ -742,7 +748,8 @@ def run_summary(args: argparse.Namespace, workspace: Path) -> Path:
     return run_dirs[-1]
 
 
-def copy_final_outputs(run_dir: Path, output_dir: str) -> list[str]:
+def copy_final_outputs(run_dir: Path, output_dir: str,
+                       archive_reports: bool = True) -> list[str]:
     """将汇总结果从本次运行的时间戳子文件夹归档到最终输出目录下的同名时间戳子文件夹。
 
     输出目录结构示例：
@@ -754,16 +761,25 @@ def copy_final_outputs(run_dir: Path, output_dir: str) -> list[str]:
 
     汇总模块每次运行都会生成新的时间戳文件夹（run_dir.name），这里按同名归档，
     保证多次运行各自独立、互不覆盖；integration.log 由 main() 一并放入该子文件夹。
+
+    ★2026-11-09 新增 archive_reports 开关：
+      多 judge 场景下 judge 的 --output-dir 指向**自己的工作区**（ws/output），
+      而聚合层与 archive 工具都只通过 _latest_summary_folder(judge_ws) 读
+      **ws/summary/data/** 那份（原件）。⇒ ws/output/ 下的 report_*.json
+      是同内容（md5 相同）的**归档副本，无任何消费者**，纯白占盘
+      （pub 侧单份约 44MB，×N judge）。
+      故多 judge 传 archive_reports=False，只归档 docx/xlsx（给人看的部分）。
+      单 judge 直跑（--output-dir 默认顶层 BASE_DIR/output）保持 True ——
+      那里的 report_*.json 就是**用户向交付物**，不能少。
     """
     # 在 output/ 下按本次运行的时间戳子文件夹归档，而不是平铺到 output/ 根
     dst = Path(output_dir).resolve() / run_dir.name
     dst.mkdir(parents=True, exist_ok=True)
 
-    candidates = [
-        "report_pub.json", "report_sub.json",
-        "summary_pub.docx", "summary_pub.xlsx",
-        "summary_sub.docx", "summary_sub.xlsx",
-    ]
+    candidates = ["summary_pub.docx", "summary_pub.xlsx",
+                  "summary_sub.docx", "summary_sub.xlsx"]
+    if archive_reports:
+        candidates = ["report_pub.json", "report_sub.json"] + candidates
 
     copied: list[str] = []
     for name in candidates:
@@ -804,6 +820,11 @@ def main() -> int:
                              "（如 EPS 的 RPDU_HLR未注入故障v1.docx），请显式指定，例：--device 配电装置RPDU")
     parser.add_argument("--output-dir", default=str(BASE_DIR / "output"), help="最终输出根目录（默认 ./output，与模块平级）。每次运行会在其下生成 "
                         "独立的 '<设备名>EoICD到软件高层需求的落实检查_<时间戳>' 子文件夹归档全部结果，多次运行互不覆盖。")
+    parser.add_argument("--no-report-archive", action="store_true",
+                        help="不把 report_pub.json / report_sub.json 归档到 --output-dir（只归档 docx/xlsx）。"
+                             "仅供多 judge 编排使用：此时 --output-dir 指向 judge 自己的工作区，"
+                             "聚合层读的是 ws/summary/data/ 那份原件，output/ 下的副本无消费者、纯白占盘。"
+                             "单 judge 直跑请勿传此参数——那里的 report_*.json 就是用户向交付物。")
     parser.add_argument("--workspace", default=str(BASE_DIR / "runs" / "integration_workspace"), help="工作目录（默认 ./runs/integration_workspace）")
     parser.add_argument("--skip-ai", action="store_true", help="跳过 AI 调用（纯脚本模式）")
     parser.add_argument("--use-trace", action="store_true",
@@ -827,6 +848,10 @@ def main() -> int:
     parser.add_argument("--steps", default=None,
                         help="逗号分隔的多个阶段，例如 'hlr,identity,attribute,summary'（用于多 judge 编排时跳过阶段1）。"
                              "与 --step 互斥，二选一；含 'all' 等同全部。")
+    parser.add_argument("--eoicd-processed-dir", default=None,
+                        help="阶段1（EoICD 数据处理）产物的目录，缺省为本工作区的 eoicd_processed/。"
+                             "多 judge 编排时由编排器指向 shared 工作区的产物目录，"
+                             "使各 judge 只读引用同一份产物而不必各自拷贝一份。")
     parser.add_argument("--clean", action="store_true", help="运行前清理工作目录（现已默认开启，保留以兼容旧命令）")
     parser.add_argument("--no-clean", action="store_true", help="运行前不清空工作目录（默认会先清空旧 workspace 再重写）")
     args = parser.parse_args()
@@ -889,6 +914,14 @@ def main() -> int:
         # ---- 阶段 1: EoICD 数据处理 ----
         if "eoicd" in active:
             eoicd_out = run_eoicd_processing(args, workspace)
+        elif args.eoicd_processed_dir:
+            # 2026-11-03：多 judge 编排下，阶段1 产物由 shared 工作区产出并被所有 judge 共享。
+            # 原先编排器把 shared/eoicd_processed/ 整目录拷贝进每个 judge 工作区
+            # （含 eoicd_pub.json / trace_result.json / *_Located.xlsx 等 judge 用不到的文件，
+            #   单 judge 约 40MB，×N judge 白占），现改为**只读引用** shared 里的原位置。
+            eoicd_out = Path(args.eoicd_processed_dir).resolve()
+            if not eoicd_out.is_dir():
+                raise RuntimeError(f"--eoicd-processed-dir 指向的目录不存在: {eoicd_out}")
         else:
             eoicd_out = workspace / "eoicd_processed"
 
@@ -913,10 +946,16 @@ def main() -> int:
             prepare_summary_input(args, workspace)
             run_dir = run_summary(args, workspace)
             final_out_dir = Path(args.output_dir).resolve() / run_dir.name
-            copied = copy_final_outputs(run_dir, args.output_dir)
+            # 2026-11-09：--no-report-archive 时不归档 report_*.json（多 judge 场景，
+            #   聚合层读的是 ws/summary/data/ 那份原件，output/ 下的副本无消费者）。
+            copied = copy_final_outputs(run_dir, args.output_dir,
+                                        archive_reports=not args.no_report_archive)
             print(f"\n[DIR] 最终输出已复制到: {final_out_dir}", flush=True)
             for name in copied:
                 print(f"  - {name}", flush=True)
+            if args.no_report_archive:
+                print("  [说明] 已跳过 report_pub.json / report_sub.json 的归档副本"
+                      "（原件仍在 summary/data/ 下，聚合层从那里读取）", flush=True)
 
         total_time = time.time() - total_start
         print(f"\n{'=' * 60}", flush=True)

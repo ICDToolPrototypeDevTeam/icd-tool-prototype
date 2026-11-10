@@ -89,6 +89,33 @@ def extract_json(text):
     raise AIError(f'无法解析模型返回的 JSON：{s[:200]}')
 
 
+# ---------------------------------------------------------------------------
+# 思考模式请求字段（前端「模型设置」开关的正向侧接入）
+# ---------------------------------------------------------------------------
+# 与 shared/utils.py 的同名实现保持同步：本工具只用标准库、可独立运行，故不
+# import 匹配阶段的 utils。只有显式关闭时才追加字段；开启/未知 provider 返回空。
+_THINKING_ENV = {
+    'deepseek': 'DEEPSEEK_THINKING',
+    'minimax': 'MINIMAX_THINKING',
+    'qwen': 'QWEN_THINKING',
+}
+_THINKING_FALSE = {'0', 'false', 'no', 'off'}
+
+
+def thinking_payload(provider=None):
+    """返回请求体需追加的思考字段；开启 / 未知 provider / 未配置 → 空 dict。"""
+    provider = (provider or os.environ.get('AI_PROVIDER', '')).strip().lower()
+    env_name = _THINKING_ENV.get(provider)
+    if not env_name:
+        return {}
+    if (os.environ.get(env_name, '') or '').strip().lower() in _THINKING_FALSE:
+        if provider == 'deepseek':
+            return {'thinking': {'type': 'disabled'}}
+        # qwen / minimax：与反向 QwenClient / MiniMaxClient 的关闭字段一致
+        return {'enable_thinking': False}
+    return {}
+
+
 def _normalize_overrides(overrides):
     """把环境变量名（BASE_URL/API_KEY/AI_MODEL）归一为内部键
     （base_url/api_key/model），再交给 __init__ 覆盖。"""
@@ -181,6 +208,8 @@ class AIClient:
         }
         if json_mode:
             payload['response_format'] = {'type': 'json_object'}
+        # 前端思考开关：仅显式关闭时追加 provider 字段；开启/未知 provider 不变
+        payload.update(thinking_payload())
         headers = {
             'Content-Type': 'application/json',
             'Authorization': f"Bearer {self.cfg['api_key']}",

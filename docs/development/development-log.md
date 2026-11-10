@@ -4451,3 +4451,57 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   3. 终审后已加固：扫描 / 试解析 50 MB 上传上限与损坏文档 422、manifest 坏快照不再永久 PENDING、名称 Cc/Cf/Cs 拒绝、切换控制器时清空残留字段、删除后刷新失败兜底、API 文档 422 表述；仍 park 的 Minor：前端可提交后端必拒的 payload、busy 时编辑可丢、扫描 / 预览无请求序保护、样式文件读取不校验 version 且未 trim、既有 `fsecu` 文档漂移。
   4. Issue 编号待用户回填。
 - **下一步建议**：1) 用户提交分支并重建后端镜像 / 前端产物；2) 浏览器手工验收（下拉选模板 / 扫描 / 试解析 / 保存 / 删除）；3) 服务器实测：用一份非标准需求表 .docx 扫描 → 保存样式 → 带样式提交任务，确认快照与续跑正常；4) 出包《更新说明》注明本变更部署层：无新端口、无新环境变量、无新依赖。
+
+## 2026-11-10 正向管线升级 V5（发送工具集成版 V5，分支 Test-Intranet-Debug-and-Optimize，改动未提交）
+
+- **背景（用户提出）**：把正向管线升级到 `E:\Work\2026\ICD_SKILL\V4\正向检查集成-发送工具集成版V5`，三项要求：① 不影响反向任何功能；② 正向功能尽量原封不动集成；③ 正向前端各接口均正常。
+- **升级方式**：`backend/forward/` 按 V5 源树整树覆盖（跳过 `input/`、`output/`、`runs/`、`__pycache__`、`EoICD侧数据处理/data/`、`identity_match/src/cache/`、`单judge结果汇总/outputs/` 与 `*.pyc/*.log`）；同步 82 个受控文件，相对 HEAD 为 15 个修改、3 个新增、0 个删除（另有 25 个文件被重写但内容与 HEAD 逐字节一致，`git status` 因 stat 缓存会暂时显示为 M，`git diff` 无内容差异）；目标树仅多出集成层自带的 `mock_llm_server.py` 与 `multi_judge_config.mock.json`。文本统一 CRLF（`.sh` 保持 LF），二进制按原字节复制。逐文件一致性核对（忽略行尾）：差异**恰好**只落在 13 个补丁文件上，无其他意外差异。
+- **V5 主要变化（资源占用优化，对外契约不变）**：新增 `common/jsonstream.py` 流式解析属性比对大报告（不再整文件载入）；阶段1 共享产物通过 `--eoicd-processed-dir` 直接引用，不再逐 judge 复制；`retained_*` / `attr_not_mentioned_*` / `attr_clustered_*` 等中间态默认不落盘（`config.output` 的 `save_retained_intermediate` / `keep_not_mentioned_intermediate` / `keep_clustered_intermediate` 可显式保留）；`summary/input` 不再复制属性报告，`--match` 指向原路径；judge 子进程新增 `--no-report-archive`，不再归档 `report_*.json`。上游 V5 同样未包含跨进程 token 统计，工程侧按既有契约回植 13 处代码/配置补丁（`[tokens] delta=N`、identity/attribute/AI 映射 sidecar、`--base-tokens`、summary `token_usage`、Word 总 Token 行、`--ai-key` 日志脱敏、翻译缓存忽略），并从备份恢复 `使用说明.md` §6.1 token 契约说明（V5 上游文档未包含）。
+- **修改文件**：`backend/forward/` 下 15 个已跟踪文件（V5 内容更新与上述集成层补丁）；`CHANGELOG.md`、`docs/architecture/current-architecture.md`、本 log。
+- **新增文件**：`backend/forward/common/jsonstream.py`、`backend/forward/tests/test_io_reduction.py`、`backend/forward/tests/test_memory_reduction.py`。
+- **删除文件**：无。
+- **验证方式与结果**：
+  1. V5 源树一致性核对（忽略行尾、排除运行时目录）：13 个差异文件全部为预期补丁，`unexpected_diff=0 / missing=0 / extra=2`（`mock_llm_server.py`、`multi_judge_config.mock.json`）（**已验证**）。
+  2. `python -m compileall -q backend/forward backend/app/forward` → 通过（**已验证**）。
+  3. `cd backend/forward && python tests/run_all.py` → 全部自测通过（aggregate / ai_maps / arbitrator / io_reduction / memory_reduction / runner_review_route / summary / report / excel）（**已验证**）。
+  4. 正向 pytest 8 个文件 → **50 passed in 17.31s**（与既有基线一致）（**已验证**）。
+  5. `python multi_judge_runner.py --selftest --base-tokens 12345` → 退出码 0，`--base-tokens` 解析与工作区重置自测通过（**已验证**）。
+  6. 全量回归（10 个既有反向收集错误文件 ignore）→ **344 passed / 7 failed / 1 skipped**，7 项失败与既有基线逐项一致（`test_hlr_word_parser_adaptivity::test_t12`、`test_job_api_ext`、`test_job_cancel`、`test_job_orphan`×2、`test_parse_artifact_reuse`、`test_runner_cancel`）（**已验证**）。
+  7. API 级 mock 端到端（临时 uvicorn :8021 + AMSC 32 条 HLR + pub/sub + 2 张追溯表，trace 模式）：任务 `a806950b` `completed`，约 3 分 56 秒；`summary` = `analysis_mode=trace / total_blocks=372 / covered_direct=53 / covered_aggregate=16 / uncovered=65 / possible=238 / ai_reviewed=61 / eoicd_count=372`；`outputs.forward_xlsx=true`、`forward_docx=true`；两文件下载 64116 / 54597 字节且 zip 结构完整；`GET /api/v4/history` 247 条且包含本任务；`token_usage.total_tokens=0`（mock 响应无 `usage`，属预期）（**已验证**）。
+  8. 取消链路顺带验证：全量模式任务 `acb13485` 在报告阶段 `POST /cancel` 返回 200 并停止（该轮全量模式因 `exceptions_only` 需渲染 4500+ 行未跑完，已弃用）（**已验证**）。
+- **遗留问题**：
+  1. 改动未提交；需**重建后端镜像**才在服务器生效（本次无新端口、无新环境变量、无新依赖、前端无改动）。
+  2. 真实模型端到端**尚未验证**：V5 的内存/磁盘收益需在真实全量任务（约 446MB 属性报告量级）上实测峰值内存与耗时；mock 下 token 为 0 属预期。
+  3. 上游 V5 再次移除 token 契约，本项目已回植；后续同步上游时必须重新回植（`使用说明.md` §6.1 已固化）。
+  4. 全量模式 Word 报告慢的既有问题未变（`exceptions_only` 会把数千条「未落实」全部渲染）；本次 E2E 因此改用 trace 模式。是否在全量任务默认改用 `top_n` 需业务确认，未改动。
+  5. 已中断/续跑的旧任务其 `<job_dir>/forward/` 副本仍是旧代码；如需 V5 逻辑请新建任务。
+  6. Issue 编号待用户回填。
+- **下一步建议**：1) 用户提交分支并重建后端镜像；2) 服务器用真实 key 跑一条全量正向任务，观察峰值内存、磁盘占用与 Word 报告耗时；3) 用一条 trace 任务复核前端完成页、历史结果与两份产物；4) 出包《更新说明》注明本变更部署层：无新端口、无新环境变量、无新依赖。
+
+## 2026-11-10 正向管线接入模型思考开关（分支 issue-174-forward-v5-integration，改动未提交）
+
+- **背景（用户提出）**：前端「模型设置」页新增了三个 LLM 的思考模式开关（默认开启，保存后写入 `OUTPUT_DIR/settings.json` 与对应环境变量）；此前只有反向管线消费该设置，正向管线仍固定发送历史请求体，需要把正向接入，同时不改变默认行为。
+- **实现方式**：
+  1. 开关语义：新增共享 helper `thinking_enabled()` / `thinking_payload(provider)`。**只在显式关闭时**返回 provider 专属字段——DeepSeek 返回 `{"thinking": {"type": "disabled"}}`，Qwen / MiniMax 返回 `{"enable_thinking": false}`；开启、未配置、非法值、未知 provider 一律返回空字典，请求体与接入前一致。默认开启，只有 `0 / false / no / off` 视为关闭（与反向 `v4/llm/thinking.py` 口径一致）。
+  2. provider 传递：正向没有统一 LLM 客户端，必须让每个请求点知道自己是谁。`app/forward/config_builder.py::build_real_config` 为每个 judge 与 arbitrator 写入 `provider`（mock 配置不写，保证 mock 请求体不变）；`multi_judge_runner.py::run_single_judge` 把本 judge 的 provider 以 `AI_PROVIDER` 注入子进程环境，`_resolve_arbitrator_cfg` 兜底配置同样带上 `provider`；仲裁器在 `arbitrate` / `peer_aware_review` 中显式把 `arb_cfg["provider"]` 传给 `call_llm`（Step5.6 二次仲裁复用 `arbitrate`，自动覆盖）。
+  3. 5 个请求构造点接入：`shared/utils.py`（共享 helper）、`identity_match/src/name_ai_matcher.py`、`identity_match/src/name_translator.py`、`attribute_match/src/attr_mismatch_ai_matcher.py`（`attr_conflict_ai_judge` 复用同一函数）、`HLR需求聚类/hlr_cluster_tool/ai_client.py`、`multi_judge协同/multi_judge_arbitrator.py`。其中仲裁器与聚类 AI 客户端因需独立可运行，各保留一份镜像实现（`_THINKING_ENV` / `_THINKING_FALSE` / `thinking_payload`），三处必须同步修改。
+  4. 前端与文档：`SettingsPage.tsx` 提示改为「同时作用于正确性分析（反向管线）与完整性分析（正向管线）」；`types.ts` 注释同步；`docs/architecture/api.md` 更新开关作用范围、无需重启的边界（反向每次调用实时读取；正向 judge 子进程环境是创建任务时的快照，只影响之后新建的正向任务）与正向协议差异（开启时不追加 DeepSeek 的 `reasoning_effort`，保持历史请求体）。
+- **修改文件**：`backend/app/forward/config_builder.py`、`backend/app/runtime_settings.py`（docstring）、`backend/forward/multi_judge_runner.py`、`backend/forward/EoICD-HLR正向匹配与属性比对_支持追溯/shared/utils.py`、`identity_match/src/name_ai_matcher.py`、`identity_match/src/name_translator.py`、`attribute_match/src/attr_mismatch_ai_matcher.py`、`backend/forward/HLR需求聚类/hlr_cluster_tool/ai_client.py`、`backend/forward/multi_judge协同/multi_judge_arbitrator.py`、`backend/forward/tests/run_all.py`、`frontend/src/pages/SettingsPage.tsx`、`frontend/src/types.ts`。
+- **新增文件**：`backend/forward/tests/test_thinking_toggle.py`（7 个用例：helper 语义、5 个请求点、config_builder provider 字段）。
+- **删除文件**：无。
+- **文档**：`CHANGELOG.md`（2026-11-10 Changed 两条，修正「仅反向管线」表述并补充正向接入）、`docs/architecture/api.md`、`docs/architecture/current-architecture.md`（§7.1 与模型设置段）、本 log。
+- **验证方式与结果**：
+  1. `cd backend && python -m pytest forward/tests/test_thinking_toggle.py -q` → **7 passed**（**已验证**）。
+  2. `cd backend/forward && python tests/run_all.py` → 全部自测通过（含新增 `thinking_toggle`）（**已验证**）。
+  3. `cd backend && python -m pytest forward/tests -q` → **36 passed**（**已验证**）。
+  4. 正向相关用例集合 → **67 passed / 1 skipped**（**已验证**）。
+  5. 全量回归（10 个既有反向收集错误文件 ignore，与 V5 集成时同一口径）→ **344 passed / 7 failed / 1 skipped**，7 项与既有基线逐项一致（**已验证**）。
+  6. 反向代码零改动：`git diff --name-only backend/app/` 仅 `app/forward/config_builder.py`、`app/runtime_settings.py`（仅 docstring），`app/v4/` 无任何改动（**已核对**）。
+  7. mock 端到端（临时 uvicorn :8021）在用户要求下**中途停止，未纳入验收**：停止前任务已跑到 372 条信号、61 条 Step5.5 复核、聚合与 summary 已写出，停在 Word 报告生成阶段；停止后确认无残留 uvicorn / python 进程、8021 无监听。真实模型端到端**尚未执行**。
+- **遗留问题**：
+  1. 改动未提交；需**重建后端镜像 / 覆盖前端产物**才在服务器生效（无新端口、无新环境变量、无新增依赖）。
+  2. mock E2E 未跑完、真实模型未验证：关闭开关后，三家 provider 是否接受追加字段需在真实网关上复核（Qwen / MiniMax 若指向非兼容接口可能忽略 `enable_thinking`，与反向同一风险）。
+  3. 正向 `thinking_payload` 有 3 份镜像实现（`shared/utils.py`、`hlr_cluster_tool/ai_client.py`、`multi_judge_arbitrator.py`），后续同步上游时必须重新落回，且三处要保持一致；外部同步脚本 `E:\Work\2026\ICD_SKILL\V4\_sync_forward_v5.py` 尚未包含本组补丁（涉及正向源树 7 个文件：shared/utils.py、name_ai_matcher.py、name_translator.py、attr_mismatch_ai_matcher.py、ai_client.py、multi_judge_arbitrator.py、multi_judge_runner.py）。
+  4. 已有 / 续跑任务的 `<job_dir>/forward/` 是旧代码副本，思考开关对它们不生效；需新建任务。
+  5. Issue 编号待用户回填。
+- **下一步建议**：1) 用户提交分支并重建镜像 / 前端产物；2) 服务器上用真实 key 各跑一条正向任务（开关开 / 关各一次），确认 token 与时延变化符合预期、请求不被网关拒绝；3) 后续同步上游 V5 前，把本组补丁并入 `_sync_forward_v5.py`，避免被整树覆盖丢失。

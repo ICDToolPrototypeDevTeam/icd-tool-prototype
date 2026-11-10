@@ -26,7 +26,7 @@ import time
 import requests
 
 try:
-    from utils import read_stream_with_stall_guard, record_token_usage
+    from utils import read_stream_with_stall_guard, record_token_usage, thinking_payload
 except ImportError:  # pragma: no cover
     # 独立运行（自测）时 utils 不在搜索路径 —— 生产路径由 run_attribute_match.py 引导，
     # 这里仅兜底补上 shared 目录后重试。
@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover
         _os.path.abspath(__file__)))), "shared")
     if _os.path.isdir(_shared) and _shared not in _sys.path:
         _sys.path.insert(0, _shared)
-    from utils import read_stream_with_stall_guard, record_token_usage
+    from utils import read_stream_with_stall_guard, record_token_usage, thinking_payload
 
 
 def get_api_config(ai_cfg: dict) -> dict:
@@ -227,6 +227,8 @@ def call_ai_api(prompt: str, api_cfg: dict) -> str:
         "max_tokens": api_cfg["max_tokens"],
         "temperature": api_cfg["temperature"],
     }
+    # 前端思考开关：仅显式关闭时追加 provider 字段；开启/未知 provider 不变
+    payload.update(thinking_payload())
 
     url = f"{api_cfg['base_url']}/chat/completions"
 

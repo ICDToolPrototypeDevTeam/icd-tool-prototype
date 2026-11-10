@@ -9,7 +9,9 @@
 为什么无需重启即可生效：
 - 反向管线：``v4/llm/factory.get_llm()`` 每次调用都读 ``*_MODEL`` /
   ``*_THINKING`` 环境变量；
-- 正向管线：``forward/config_builder.build_real_config()`` 每个任务开始时读环境变量；
+- 正向管线：``forward/config_builder.build_real_config()`` 每个任务开始时读模型名；
+  ``*_THINKING`` 随进程环境传给 judge 子进程（runner 再注入 ``AI_PROVIDER``），
+  由各 LLM 请求点读取；
 - 缓存 key：``llm_cache.resolve_model()`` 走同一个工厂，模型名变化后自然 miss；
   思考开关的关闭值另行编入 key（见 ``llm/thinking.cache_variant``）。
 

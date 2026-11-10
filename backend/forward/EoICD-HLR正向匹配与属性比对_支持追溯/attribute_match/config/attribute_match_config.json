@@ -118,6 +118,24 @@
     // 是否保存中间文件（mismatch 裁剪输入、AI 复核结果）
     "save_intermediate": false,
 
+    // 是否保留 attr_not_mentioned_{direction}.json（2026-11-03）
+    // false = 聚类读完即删（默认）。该文件是"读一次即弃"的中间态，
+    //         pub 侧单份可达 429MB，×N judge 会把工作区撑到 GB 级；
+    //         全工程仅 attr_result_clustering.py 读它，删后不影响任何结论。
+    // true  = 保留（调试/留证用）。注意：--step conflict_resolution 只需要
+    //         attr_clustered（始终保留），故本项不影响分步续跑。
+    "keep_not_mentioned_intermediate": false,
+
+    // 是否保留 attr_clustered_{direction}.json（2026-11-09）
+    // false = 冲突处理读完后即删（默认）。该文件是"读一次即弃"的中间态，
+    //         pub 侧单份约 271MB，×N judge 会把工作区撑到 GB 级；
+    //         全工程仅冲突处理阶段读它，最终报告走内存里的 clustering_data，
+    //         删后不影响任何结论。
+    // true  = 保留（调试/留证用）。注意：--step attribute_match /
+    //         --step conflict_resolution 都会保留（前者要另行跑冲突处理，
+    //         后者以它为输入），故本项只影响 --step all 的一趟完整运行。
+    "keep_clustered_intermediate": false,
+
     // JSON 缩进空格数
     "indent_json": 2
   },

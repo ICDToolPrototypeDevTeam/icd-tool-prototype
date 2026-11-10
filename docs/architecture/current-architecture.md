@@ -177,7 +177,7 @@ Step 6 报告生成
 
 ### 7.1 正向完整性分析流程（EoICD → HLR，多 judge 一致性管线）
 
-正向管线回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析（正确性比对）互补。Issue #119 起，正向改为**原样集成**的多 judge 一致性管线，当前代码树对应「正向检查集成-发送工具集成版 V4.1」：业务实现全部在 `backend/forward/` 原样代码树内（`multi_judge_runner.py` 编排），工程侧由适配层 `backend/app/forward/` 驱动，与反向管线（`v4/pipeline.py`）严格分离。
+正向管线回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析（正确性比对）互补。Issue #119 起，正向改为**原样集成**的多 judge 一致性管线，当前代码树对应「正向检查集成-发送工具集成版 V5」：业务实现全部在 `backend/forward/` 原样代码树内（`multi_judge_runner.py` 编排），工程侧由适配层 `backend/app/forward/` 驱动，与反向管线（`v4/pipeline.py`）严格分离。
 
 ```text
 上传文件（HLR 需求文件 .docx/.xlsx + EoICD PubSub Excel[+ 追溯表 0-N 张，单槽多文件，未传=全量 / 传任一张=追溯]）
@@ -201,10 +201,14 @@ Step 4/4 报告生成
 
 进度口径（前端 `ProcessingView.STAGE_LABELS`，与反向复用同一套四段）：`parse → multi_judge → review → report`；`case_index / case_total` = 已完成 / 全部 judge 数。
 
+V5 起为降低内存与磁盘占用：属性比对大报告用 `common/jsonstream.py` 流式解析（不再整文件载入）；阶段1 共享产物由 `--eoicd-processed-dir` 直接引用，不再逐 judge 复制；`retained_*` / `attr_not_mentioned_*` / `attr_clustered_*` 等中间态默认不落盘（`config.output` 下 `save_retained_intermediate` / `keep_not_mentioned_intermediate` / `keep_clustered_intermediate` 可显式保留）；judge 子进程不再归档 `report_*.json`（`--no-report-archive`）。上传字段、产物名称与结果口径不变。
+
+2026-11-10 起正向管线接入前端「模型设置」的思考开关：`config_builder` 为每个真实 judge / 仲裁器写入 `provider`，`multi_judge_runner` 以 `AI_PROVIDER` 传入 judge 子进程；HLR 聚类 AI 映射、名称判定、术语翻译、属性比对（含冲突判定）、仲裁共 5 个请求构造点在开关**关闭时**追加 provider 专属字段，开启 / 未知 provider / mock 保持历史请求体。原有业务算法不变。
+
 正向集成层（Issue #119）的模块边界与约束：
 
 ```text
-backend/forward/            正向代码树（唯一事实源，内容与「发送工具集成版 V4.1」一致，工程侧不改其业务实现；
+backend/forward/            正向代码树（唯一事实源，内容与「发送工具集成版 V5」一致，工程侧不改其业务实现；
                              仅保留工程集成契约：token 增量标记 / sidecar / --base-tokens、--ai-key 日志脱敏）
 backend/app/forward/        适配层（编排与翻译，零业务算法）：
                               projects（系统类型识别：显式选择优先，否则按文件名自动识别）
@@ -479,9 +483,12 @@ llm/mock_llm.py
 （`DEEPSEEK_THINKING` / `MINIMAX_THINKING` / `QWEN_THINKING`）支持运行时修改：
 `app/runtime_settings.py` 把前端保存的值写入 `OUTPUT_DIR/settings.json` 并立即更新
 `os.environ`；`get_llm()` 每次调用、正向 `config_builder` 每个任务开始时读取，因此
-无需重启。启动时 `main.py` lifespan 回读落盘值（优先于 `.env`）。思考开关仅由反向
-管线的 `get_llm()` 消费，正向 `config_builder` 不使用；关闭时 `llm_cache` 的 key
-追加 `_thinking=disabled` 变体，开启路径沿用历史 key。
+无需重启。启动时 `main.py` lifespan 回读落盘值（优先于 `.env`）。思考开关由反向
+`get_llm()` 与正向各 LLM 请求点共同消费：正向 `config_builder` 为每个真实 judge /
+仲裁器写入 `provider`，`multi_judge_runner` 以 `AI_PROVIDER` 传入 judge 子进程，
+5 个请求构造点只在**关闭**时追加 provider 专属字段（DeepSeek `thinking: disabled`，
+Qwen / MiniMax `enable_thinking: false`），开启 / 未知 provider / mock 保持历史请求体。
+反向关闭时 `llm_cache` 的 key 追加 `_thinking=disabled` 变体，开启路径沿用历史 key。
 
 V4 内 LLM 调用入口：
 - `comparison/semantic_judge.py` × 2 处
@@ -566,4 +573,4 @@ adapter 对账（必须在 cleanup_run_workspace 删除 runs/ 之前）：
   → job.result.token_usage 与 forward_summary.json
 ```
 
-约束：父进程只认增量标记（`[tokens] delta=N`）；三类 sidecar 路径（identity / attribute / AI 映射）是 runner 与入口脚本之间的契约，未来若与「发送工具集成版」源树同步，必须连同增量标记、sidecar 文件名/路径、`--base-tokens` 一并保留，否则逐字节一致性测试会失败。V3 起 runner 会把 judge 子进程的关键行加 `[judge_N name] ` 前缀回显，父进程解析必须用 search 而非 match。**2026-10-29 同步 V4.1 时上游删除了全部 token 采集代码，工程侧已按本契约重新落回源树（见 `backend/forward/使用说明.md` §6.1），后续同步必须继续保留。**
+约束：父进程只认增量标记（`[tokens] delta=N`）；三类 sidecar 路径（identity / attribute / AI 映射）是 runner 与入口脚本之间的契约，未来若与「发送工具集成版」源树同步，必须连同增量标记、sidecar 文件名/路径、`--base-tokens` 一并保留，否则逐字节一致性测试会失败。V3 起 runner 会把 judge 子进程的关键行加 `[judge_N name] ` 前缀回显，父进程解析必须用 search 而非 match。**2026-10-29 同步 V4.1 时上游删除了全部 token 采集代码，工程侧已按本契约重新落回源树（见 `backend/forward/使用说明.md` §6.1），后续同步必须继续保留；2026-11-10 同步 V5 时上游同样未包含 token 采集代码与 §6.1，工程侧已再次按契约落回。**

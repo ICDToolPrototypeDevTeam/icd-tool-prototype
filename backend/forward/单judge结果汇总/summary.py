@@ -50,6 +50,7 @@ if str(_p) not in sys.path:
     sys.path.insert(0, str(_p))
 
 from common import safe_load_json  # noqa: E402
+from common import jsonstream      # noqa: E402  大 JSON 流式读取（2026-11-09）
 
 
 def _safe_path(path):
@@ -305,6 +306,10 @@ def load_cfg(path):
     cfg = {
         "priority": "不一致 ＞ 未落实 ＞ 部分落实 ＞ 已落实",
         "indent_json": 2,
+        # 2026-11-09：是否在交付物 report_{pub,sub}.json 的 attributes 里保留纯追溯字段
+        # （missing_in_hlrs / signal_id_matched_hlrs）。默认 false = 剥离（体积大幅下降，
+        # 判定结论零变化）；置 true = 保留完整追溯明细（留证用，体积回到原水平）。
+        "keep_trace_fields": False,
     }
     if path and os.path.isfile(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -337,16 +342,9 @@ def _hlr_evidence(identity):
     return "@".join(parts) if parts else None
 
 
-def normalize_attribute_match(raw):
-    """将 attribute_match_report_* 重排为 {meta, comparisons}。
-
-    每条 comparison 额外透传 eoicd_signal_full_name（信号全名）与
-    signal_id_matched_hlrs（not_mentioned 信号级匹配到的需求编号），
-    供 run_direction 生成"明细展开"表格的「信号FullName」「匹配的需求编号」列。
-    """
+def _comparisons_from_matched(raw):
+    """matched 组 → 「一致」comparisons。"""
     comparisons = []
-
-    # 1) matched → 一致
     for e in raw.get("matched", []):
         comparisons.append({
             "eoicd_cluster_id": e.get("eoicd_cluster_id"),
@@ -362,8 +360,12 @@ def normalize_attribute_match(raw):
             "detail": "",
             "rule_result": e.get("rule"),
         })
+    return comparisons
 
-    # 2) mismatch → 不一致
+
+def _comparisons_from_mismatch(raw):
+    """mismatch 组 → 「不一致」comparisons。"""
+    comparisons = []
     for e in raw.get("mismatch", []):
         comparisons.append({
             "eoicd_cluster_id": e.get("eoicd_cluster_id"),
@@ -379,8 +381,12 @@ def normalize_attribute_match(raw):
             "detail": "",
             "rule_result": e.get("rule"),
         })
+    return comparisons
 
-    # 3) null_value → 无具体值（占位；当前数据为空）
+
+def _comparisons_from_null_value(raw):
+    """null_value 组 → 「无具体值」comparisons。"""
+    comparisons = []
     for e in raw.get("null_value", []):
         comparisons.append({
             "eoicd_cluster_id": e.get("eoicd_cluster_id"),
@@ -389,69 +395,120 @@ def normalize_attribute_match(raw):
             "matched_hlr_req_id": e.get("req_id"),
             "hlr_value": e.get("hlr_value"),
             "hlr_evidence": _hlr_evidence(e.get("hlr_identity")),
-            "hlr_identity": e.get("hlr_identity"),   # 透传地址四元组，供多judge KEY_FIELDS比对
+            "hlr_identity": e.get("hlr_identity"),
             "eoicd_path": e.get("eoicd_signal_short_name"),
             "eoicd_signal_full_name": e.get("eoicd_signal_name"),
             "eoicd_value": e.get("eoicd_value"),
             "detail": "EoICD 属性值为空，无具体值",
             "rule_result": e.get("rule"),
         })
+    return comparisons
 
-    # 4) not_mentioned → 逐(信号, 属性) 展一条「未提及」
-    #    raw 的 not_mentioned 按 (信号, 属性, 缺失HLR) 计（一个属性可能同时缺失于
-    #    多个 HLR）。若逐缺失 HLR 展开，会让"无提及"按 HLR 数重复计，放大单属性
-    #    分布与覆盖率口径。故此处按 (信号, 属性) 去重，每个属性只计一条；同时用
-    #    missing_in_hlrs 字段保留该属性"缺失于哪些 HLR"的全量追溯（不计入计数口径）。
+
+def _comparisons_from_not_mentioned_signal(sig):
+    """not_mentioned 组里的**单个信号** → 「未提及」comparisons。
+
+    raw 的 not_mentioned 按 (信号, 属性, 缺失HLR) 计（一个属性可能同时缺失于
+    多个 HLR）。若逐缺失 HLR 展开，会让"无提及"按 HLR 数重复计，放大单属性
+    分布与覆盖率口径。故此处按 (信号, 属性) 去重，每个属性只计一条；同时用
+    missing_in_hlrs 字段保留该属性"缺失于哪些 HLR"的全量追溯（不计入计数口径）。
+
+    2026-11-09：拆出单信号版本，供流式消费（一次只驻留一个信号）。
+    """
+    comparisons = []
+    cid = sig.get("eoicd_cluster_id")
+    short = sig.get("eoicd_signal_short_name")
+    full = sig.get("eoicd_signal_name")
+    id_matched = sig.get("id_matched_hlrs")
+    for attr in sig.get("not_mentioned_attributes", []):
+        miss_list = attr.get("missing_in_hlrs") or []
+        if miss_list:
+            missing_hlrs = [
+                {"req_id": m.get("req_id"),
+                 "hlr_evidence": _hlr_evidence(m.get("hlr_identity"))}
+                for m in miss_list
+            ]
+            first = miss_list[0]
+            comparisons.append({
+                "eoicd_cluster_id": cid,
+                "result": "未提及",
+                "attribute_class": attr.get("attribute"),
+                "matched_hlr_req_id": first.get("req_id"),
+                "hlr_value": None,
+                "hlr_evidence": _hlr_evidence(first.get("hlr_identity")),
+                "eoicd_path": short,
+                "eoicd_signal_full_name": full,
+                "eoicd_value": attr.get("eoicd_value"),
+                "detail": "",
+                "rule_result": None,
+                "missing_in_hlrs": missing_hlrs,
+                "signal_id_matched_hlrs": id_matched,
+            })
+        else:
+            # missing_in_hlrs 为空：该属性无"缺失于具体哪个 HLR"的记录，
+            # 本质是未被任何需求承接。不借用信号级 id_matched_hlrs 填 req_id，
+            # 否则下钻会误导成"命中了某需求"。信号级匹配编号仍透传备用。
+            comparisons.append({
+                "eoicd_cluster_id": cid,
+                "result": "未提及",
+                "attribute_class": attr.get("attribute"),
+                "matched_hlr_req_id": None,
+                "hlr_value": None,
+                "hlr_evidence": None,
+                "eoicd_path": short,
+                "eoicd_signal_full_name": full,
+                "eoicd_value": attr.get("eoicd_value"),
+                "detail": "",
+                "rule_result": None,
+                "missing_in_hlrs": [],
+                "signal_id_matched_hlrs": id_matched,
+            })
+    return comparisons
+
+
+def normalize_attribute_match(raw):
+    """将 attribute_match_report_* 重排为 {meta, comparisons}（整体读入版）。
+
+    ★本函数保留整体读入的原始语义（供小文件与自测使用）。
+    生产路径请用 normalize_attribute_match_streaming()（2026-11-09 新增），
+    它对 446MB 的大报告做流式读取，峰值从 2230MB 降到 ~20MB。
+    """
+    comparisons = []
+    comparisons.extend(_comparisons_from_matched(raw))
+    comparisons.extend(_comparisons_from_mismatch(raw))
+    comparisons.extend(_comparisons_from_null_value(raw))
     for sig in raw.get("not_mentioned", {}).get("not_mentioned_by_signal", []):
-        cid = sig.get("eoicd_cluster_id")
-        short = sig.get("eoicd_signal_short_name")
-        full = sig.get("eoicd_signal_name")
-        id_matched = sig.get("id_matched_hlrs")
-        for attr in sig.get("not_mentioned_attributes", []):
-            miss_list = attr.get("missing_in_hlrs") or []
-            if miss_list:
-                missing_hlrs = [
-                    {"req_id": m.get("req_id"),
-                     "hlr_evidence": _hlr_evidence(m.get("hlr_identity"))}
-                    for m in miss_list
-                ]
-                first = miss_list[0]
-                comparisons.append({
-                    "eoicd_cluster_id": cid,
-                    "result": "未提及",
-                    "attribute_class": attr.get("attribute"),
-                    "matched_hlr_req_id": first.get("req_id"),
-                    "hlr_value": None,
-                    "hlr_evidence": _hlr_evidence(first.get("hlr_identity")),
-                    "eoicd_path": short,
-                    "eoicd_signal_full_name": full,
-                    "eoicd_value": attr.get("eoicd_value"),
-                    "detail": "",
-                    "rule_result": None,
-                    "missing_in_hlrs": missing_hlrs,
-                    "signal_id_matched_hlrs": id_matched,
-                })
-            else:
-                # missing_in_hlrs 为空：该属性无"缺失于具体哪个 HLR"的记录，
-                # 本质是未被任何需求承接。不借用信号级 id_matched_hlrs 填 req_id，
-                # 否则下钻会误导成"命中了某需求"。信号级匹配编号仍透传备用。
-                comparisons.append({
-                    "eoicd_cluster_id": cid,
-                    "result": "未提及",
-                    "attribute_class": attr.get("attribute"),
-                    "matched_hlr_req_id": None,
-                    "hlr_value": None,
-                    "hlr_evidence": None,
-                    "eoicd_path": short,
-                    "eoicd_signal_full_name": full,
-                    "eoicd_value": attr.get("eoicd_value"),
-                    "detail": "",
-                    "rule_result": None,
-                    "missing_in_hlrs": [],
-                    "signal_id_matched_hlrs": id_matched,
-                })
-
+        comparisons.extend(_comparisons_from_not_mentioned_signal(sig))
     return {"meta": raw.get("meta", {}), "comparisons": comparisons}
+
+
+def normalize_attribute_match_streaming(path):
+    """流式版本：单趟扫描大报告，产出 {meta, comparisons}。
+
+    与 normalize_attribute_match(raw) 的产出**逐字段完全一致（含顺序）**：
+      规范顺序 = matched → mismatch → null_value → not_mentioned
+      ★注意：文件的物理键顺序里 mismatch 在 matched 之前，故必须按规范顺序
+        归位，不能直接按文件顺序拼接，否则判定结果会变。
+
+    内存特性（实测于 446MB 的真实报告）：
+      · 整树 json.load      常驻 651MB / 峰值 2230MB
+      · 本函数（流式）      常驻  15MB / 峰值   20MB
+    """
+    sections = {}
+    nm_comparisons = []
+    for kind, payload in jsonstream.iter_attribute_report(path):
+        if kind == "signal":
+            # not_mentioned 的元素（逐个产出、逐个可释放）
+            nm_comparisons.extend(_comparisons_from_not_mentioned_signal(payload))
+            continue
+        sections[kind] = payload
+    # 按规范顺序拼接（matched → mismatch → null_value → not_mentioned）
+    comparisons = []
+    comparisons.extend(_comparisons_from_matched(sections))
+    comparisons.extend(_comparisons_from_mismatch(sections))
+    comparisons.extend(_comparisons_from_null_value(sections))
+    comparisons.extend(nm_comparisons)
+    return {"meta": sections.get("meta", {}), "comparisons": comparisons}
 
 
 def run_direction(attr_report, cfg):
@@ -563,6 +620,21 @@ def run_direction(attr_report, cfg):
         sub_clf = None
         if final == "未落实":
             sub_clf = "未识别" if not req_ids else "已识别未承接"
+        # 2026-11-09：交付物瘦身——剥离纯追溯字段（必须在 req_ids 与 matched_hlrs
+        #   构造完成之后，否则会丢掉生成 matched_hlrs 所需的 signal_id_matched_hlrs）。
+        #   missing_in_hlrs（该属性缺失于哪些 HLR 的全量明细）与
+        #   signal_id_matched_hlrs（信号级匹配到的需求编号全量）合计占 attributes 的
+        #   98%（实测 pub 侧 474KB/条 → 其中 69% + 29%）。
+        #   消费链已逐段核实：聚合层 build_shard 只保留 6 个子字段
+        #   （attribute_class/single_result/matched_hlr_req_id/eoicd_value/
+        #     hlr_value/hlr_identity），这两个字段在聚合层即被丢弃；
+        #   Word/Excel 报告层完全不读；跨模块零引用。
+        #   ⇒ 剥离后交付物 report_pub.json 体积大幅下降，且判定结论零变化。
+        #   留证需要完整追溯时，把 config 的 keep_trace_fields 置为 true。
+        if not cfg.get("keep_trace_fields", False):
+            for _a in attrs:
+                _a.pop("missing_in_hlrs", None)
+                _a.pop("signal_id_matched_hlrs", None)
         signals.append({
             "eoicd_cluster_id": cid,
             "signal_full_name": full_name,
@@ -1231,8 +1303,11 @@ def main():
         if not os.path.isfile(mp):
             print("[跳过] 缺属性匹配报告: %s" % mp)
             continue
-        raw = load_json(mp)
-        attr_report = normalize_attribute_match(raw)
+        # 2026-11-09：改用流式读取。属性匹配报告单份可达 446MB，
+        # 整体 json.load 的实测峰值 2230MB，3 judge 并发会撑爆 8G 服务器；
+        # 流式读取后本阶段峰值降到 ~20MB（实测）。
+        # 流式与整体两条路径产出的 comparisons 逐字段完全一致（含顺序）。
+        attr_report = normalize_attribute_match_streaming(mp)
         out = run_direction(attr_report, cfg)
         direction = (attr_report.get("meta", {}).get("direction")
                      or os.path.basename(mp).replace("attribute_match_report_", "").replace(".json", ""))

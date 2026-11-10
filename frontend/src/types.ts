@@ -212,7 +212,7 @@ export interface V4ModelSettings {
   deepseek_model: string
   minimax_model: string
   qwen_model: string
-  /** 是否开启思考模式；默认 true，仅作用于正确性分析（反向管线） */
+  /** 是否开启思考模式；默认 true，作用于正确性（反向）与完整性（正向）分析 */
   deepseek_thinking: boolean
   minimax_thinking: boolean
   qwen_thinking: boolean

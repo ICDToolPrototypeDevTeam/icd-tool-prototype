@@ -272,12 +272,40 @@ def _record_llm_failure(record: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 思考模式请求字段（前端「模型设置」开关的正向侧接入）
+# ---------------------------------------------------------------------------
+# 与 shared/utils.py 的同名实现保持同步：本模块可被独立运行/测试，故不 import
+# 匹配阶段的 utils。只有显式关闭时才追加字段；开启/未知 provider 返回空。
+_THINKING_ENV = {
+    "deepseek": "DEEPSEEK_THINKING",
+    "minimax": "MINIMAX_THINKING",
+    "qwen": "QWEN_THINKING",
+}
+_THINKING_FALSE = {"0", "false", "no", "off"}
+
+
+def thinking_payload(provider=None) -> dict:
+    """返回请求体需追加的思考字段；开启 / 未知 provider / 未配置 → 空 dict。"""
+    provider = (provider or os.environ.get("AI_PROVIDER", "")).strip().lower()
+    env_name = _THINKING_ENV.get(provider)
+    if not env_name:
+        return {}
+    if (os.environ.get(env_name, "") or "").strip().lower() in _THINKING_FALSE:
+        if provider == "deepseek":
+            return {"thinking": {"type": "disabled"}}
+        # qwen / minimax：与反向 QwenClient / MiniMaxClient 的关闭字段一致
+        return {"enable_thinking": False}
+    return {}
+
+
+# ---------------------------------------------------------------------------
 # 最小 OpenAI 兼容 LLM 客户端（标准库 urllib，无第三方依赖）
 # ---------------------------------------------------------------------------
 
 def call_llm(model: str, base_url: str, api_key: str, system: str, user: str,
              temperature: float = 0.1, timeout: int | None = None,
-             max_retries: int | None = None, ctx: dict | None = None) -> dict | None:
+             max_retries: int | None = None, ctx: dict | None = None,
+             provider: str | None = None) -> dict | None:
     """调用 OpenAI 兼容 /chat/completions，要求 JSON 输出，返回解析后的 dict；失败返回 None。
 
     timeout 默认从 env MULTI_JUDGE_REVIEW_TIMEOUT 读取（默认 60s），避免单条调用卡满 180s；
@@ -337,6 +365,8 @@ def call_llm(model: str, base_url: str, api_key: str, system: str, user: str,
         ],
         "response_format": {"type": "json_object"},
     }
+    # 前端思考开关：仅显式关闭时追加 provider 字段；开启/未知 provider 不变
+    payload.update(thinking_payload(provider))
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json",
@@ -907,6 +937,7 @@ def arbitrate(agg: dict, shards: dict, arb_cfg: dict, only: set[str] | None = No
     model = arb_cfg.get("model")
     base_url = arb_cfg.get("base_url")
     api_key = os.environ.get(arb_cfg.get("api_key_env", ""), "")
+    provider = arb_cfg.get("provider", "")
     if not (model and base_url and api_key):
         print("  [仲裁] 未配置有效 arbitrator（model/base_url/api_key），跳过 Step5")
         return agg
@@ -976,7 +1007,8 @@ def arbitrate(agg: dict, shards: dict, arb_cfg: dict, only: set[str] | None = No
         # 由它立即跳闸止损，而不是让 372 条信号各撞 3 次。
         _ctx = {"full": full, "stage": stage, "_breaker": breaker}
         try:
-            out = call_llm(model, base_url, api_key, CONSENSUS_SYSTEM, user, ctx=_ctx)
+            out = call_llm(model, base_url, api_key, CONSENSUS_SYSTEM, user,
+                           ctx=_ctx, provider=provider)
         except Exception:
             out = None
         if not isinstance(out, dict):
@@ -1065,6 +1097,7 @@ def peer_aware_review(agg: dict, shards: dict, arb_cfg: dict,
     model = arb_cfg.get("model")
     base_url = arb_cfg.get("base_url")
     api_key = os.environ.get(arb_cfg.get("api_key_env", ""), "")
+    provider = arb_cfg.get("provider", "")
     if not (model and base_url and api_key):
         return agg
 
@@ -1121,7 +1154,8 @@ def peer_aware_review(agg: dict, shards: dict, arb_cfg: dict,
             try:
                 # 本函数无 stage 变量（阶段名硬编码为 "step5.5"，同 _mark_skipped），
                 # 诊断上下文用字面量，勿引用不存在的 stage。
-                out = call_llm(model, base_url, api_key, REVIEW_SYSTEM, user, ctx=_ctx)
+                out = call_llm(model, base_url, api_key, REVIEW_SYSTEM, user,
+                               ctx=_ctx, provider=provider)
             except Exception:
                 out = None
             if not isinstance(out, dict):
