@@ -727,7 +727,7 @@ GET /api/v4/settings
 
 - `customized=false`：模型名来自部署配置（`backend/.env`）或代码默认值；思考开关来自 `DEEPSEEK_THINKING` / `MINIMAX_THINKING` / `QWEN_THINKING` 或默认开启；`updated_at=null`。
 - `customized=true`：来自服务器输出目录下的 `settings.json`；`updated_at` 为上次保存时间（ISO 8601，东八区）。
-- 思考开关只作用于**反向管线（正确性分析）**的模型调用；正向管线（完整性分析）不使用这些开关。
+- 思考开关同时作用于**反向管线（正确性分析）**与**正向管线（完整性分析）**的模型调用。正向侧按 judge 的 provider 生效：`forward/config_builder` 为每个 judge 写入 `provider`，`multi_judge_runner` 再以 `AI_PROVIDER` 传给 judge 子进程，5 个 LLM 请求构造点据此追加字段（见 15.2 思考模式协议）。
 
 ### 15.2 更新设置
 
@@ -752,7 +752,7 @@ Content-Type: application/json
 - 先去首尾空格再校验；空、超过 200 字符或含换行/控制字符 → 422。
 - 思考开关省略或传 `null` → **保留当前生效值**，兼容旧前端 / 旧脚本只提交三个模型名的调用方式。
 - 原子写入 `OUTPUT_DIR/settings.json`（Docker 中即挂载的 `./backend/output/settings.json`），并立即更新进程环境变量。
-- 反向管线（`v4/llm/factory.get_llm()`）每次调用、正向管线（`forward/config_builder`）每个任务开始时都读取模型名，因此**无需重启**；修改只影响之后的模型调用，正在运行的任务若继续发起调用会读到新值。
+- 反向管线（`v4/llm/factory.get_llm()`）每次调用、正向管线（`forward/config_builder`）每个任务开始时都读取模型名与开关，因此**无需重启**；修改只影响之后的模型调用。反向的 client 每次调用都读环境变量；正向 judge 子进程在任务启动时继承环境快照，因此**只对之后新建的正向任务生效**，正在运行的正向任务不受影响。
 - 持久化值**优先于** `backend/.env`；若要让 `.env` 重新生效，删除 `output/settings.json` 后重启服务。
 - 只管理模型名与思考开关。API key / base_url / `JUDGE_PROVIDERS` 仍由部署配置管理；`USE_MOCK_LLM=1` 时模型名与开关不参与实际调用。
 
@@ -765,6 +765,7 @@ Content-Type: application/json
 | MiniMax | 保持历史请求体，不发送 `enable_thinking` | 按 Qwen 兼容协议发送 `enable_thinking: false` |
 
 - 不向前端暴露 effort 档位；Qwen / MiniMax 不发送 `reasoning_effort`（保持历史行为）。
+- 正向管线使用同一套 provider 字段，但只在**关闭**时追加；开启 / 未知 provider / mock 保持历史请求体不变（因此正向「开启」不等于反向 DeepSeek 的显式 `thinking: enabled` + `reasoning_effort: low`，服务端默认行为仍为开启）。
 - MiniMax 槽位仍保留 `minimax` 的模型名、token 记账与报告标签。关闭时按 Qwen 兼容协议发送 `enable_thinking: false`，是否生效取决于 `MINIMAX_BASE_URL` 指向的接口：指向 Qwen 兼容接口时生效，旧版 MiniMax OpenAI 兼容接口可能忽略该参数。
 - 缓存 key：开启路径沿用历史 key（升级后默认配置仍命中旧缓存）；关闭路径追加 provider 级 `_thinking=disabled` 变体，不复用开启状态下的判定结果。
 

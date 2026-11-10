@@ -19,7 +19,7 @@ if str(_PROJECT) not in sys.path:
 if str(_MULTI_DIR) not in sys.path:
     sys.path.insert(0, str(_MULTI_DIR))
 
-# 六个 test 模块
+# 七个 test 模块
 from tests import (  # noqa: E402
     test_aggregate,
     test_ai_maps,
@@ -27,6 +27,7 @@ from tests import (  # noqa: E402
     test_io_reduction,
     test_memory_reduction,
     test_runner_review_route,
+    test_thinking_toggle,
 )
 
 
@@ -39,7 +40,8 @@ def main() -> int:
     后 3 个（summary / report / excel）：新增的最小 _self_test（在生产文件内）。
     """
     failures: list[tuple[str, Exception]] = []
-    # 前 6：迁出到 tests/ 的大自测 + 新增 ai_maps / io_reduction / memory_reduction 自测
+    # 前 7：迁出到 tests/ 的大自测 + 新增 ai_maps / io_reduction / memory_reduction /
+    # thinking_toggle 自测
     for name, mod in (
         ("aggregate", test_aggregate),
         ("ai_maps", test_ai_maps),
@@ -47,6 +49,7 @@ def main() -> int:
         ("io_reduction", test_io_reduction),
         ("memory_reduction", test_memory_reduction),
         ("runner_review_route", test_runner_review_route),
+        ("thinking_toggle", test_thinking_toggle),
     ):
         print(f"\n{'=' * 60}\n> tests.{name}.run_all()\n{'=' * 60}")
         try:
@@ -77,7 +80,7 @@ def main() -> int:
         for n, e in failures:
             print(f"  - {n}: {e}")
         return 1
-    print("[OK] 所有自测通过（aggregate / ai_maps / arbitrator / io_reduction / memory_reduction / runner_review_route / summary / report / excel）")
+    print("[OK] 所有自测通过（aggregate / ai_maps / arbitrator / io_reduction / memory_reduction / runner_review_route / thinking_toggle / summary / report / excel）")
     return 0
 
 

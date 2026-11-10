@@ -19,7 +19,7 @@ import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from utils import read_stream_with_stall_guard, record_token_usage
+from utils import read_stream_with_stall_guard, record_token_usage, thinking_payload
 
 
 # ------------------------------------------------------------------
@@ -240,6 +240,8 @@ def call_ai_api(prompt, api_cfg):
         "max_tokens": api_cfg["max_tokens"],
         "temperature": api_cfg["temperature"],
     }
+    # 前端思考开关：仅显式关闭时追加 provider 字段；开启/未知 provider 不变
+    payload.update(thinking_payload())
 
     url = f"{api_cfg['base_url']}/chat/completions"
 

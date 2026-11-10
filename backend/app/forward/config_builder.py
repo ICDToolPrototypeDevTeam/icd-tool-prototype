@@ -120,7 +120,9 @@ def build_real_config(*, project: str, eoicd_pub: Optional[Path], eoicd_sub: Opt
             continue
         api_key_env = f"FORWARD_{prefix}_API_KEY"
         judges.append({"name": f"judge_{provider}", "model": model,
-                       "base_url": base, "api_key_env": api_key_env})
+                       "base_url": base, "api_key_env": api_key_env,
+                       # provider 供正向各 LLM 请求点读取思考开关（*_THINKING）。
+                       "provider": provider})
         child_env[api_key_env] = key
     if not judges:
         raise ForwardConfigError(
@@ -132,7 +134,8 @@ def build_real_config(*, project: str, eoicd_pub: Optional[Path], eoicd_sub: Opt
                        hlr=hlr, use_trace=use_trace)
     cfg["judges"] = judges
     cfg["arbitrator"] = {"model": arb_src["model"], "base_url": arb_src["base_url"],
-                         "api_key_env": arb_src["api_key_env"], "allow_same_as_judge": True}
+                         "api_key_env": arb_src["api_key_env"], "allow_same_as_judge": True,
+                         "provider": arb_src.get("provider", "")}
     return cfg, child_env
 
 

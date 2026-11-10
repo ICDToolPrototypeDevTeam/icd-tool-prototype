@@ -4477,3 +4477,31 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   5. 已中断/续跑的旧任务其 `<job_dir>/forward/` 副本仍是旧代码；如需 V5 逻辑请新建任务。
   6. Issue 编号待用户回填。
 - **下一步建议**：1) 用户提交分支并重建后端镜像；2) 服务器用真实 key 跑一条全量正向任务，观察峰值内存、磁盘占用与 Word 报告耗时；3) 用一条 trace 任务复核前端完成页、历史结果与两份产物；4) 出包《更新说明》注明本变更部署层：无新端口、无新环境变量、无新依赖。
+
+## 2026-11-10 正向管线接入模型思考开关（分支 issue-174-forward-v5-integration，改动未提交）
+
+- **背景（用户提出）**：前端「模型设置」页新增了三个 LLM 的思考模式开关（默认开启，保存后写入 `OUTPUT_DIR/settings.json` 与对应环境变量）；此前只有反向管线消费该设置，正向管线仍固定发送历史请求体，需要把正向接入，同时不改变默认行为。
+- **实现方式**：
+  1. 开关语义：新增共享 helper `thinking_enabled()` / `thinking_payload(provider)`。**只在显式关闭时**返回 provider 专属字段——DeepSeek 返回 `{"thinking": {"type": "disabled"}}`，Qwen / MiniMax 返回 `{"enable_thinking": false}`；开启、未配置、非法值、未知 provider 一律返回空字典，请求体与接入前一致。默认开启，只有 `0 / false / no / off` 视为关闭（与反向 `v4/llm/thinking.py` 口径一致）。
+  2. provider 传递：正向没有统一 LLM 客户端，必须让每个请求点知道自己是谁。`app/forward/config_builder.py::build_real_config` 为每个 judge 与 arbitrator 写入 `provider`（mock 配置不写，保证 mock 请求体不变）；`multi_judge_runner.py::run_single_judge` 把本 judge 的 provider 以 `AI_PROVIDER` 注入子进程环境，`_resolve_arbitrator_cfg` 兜底配置同样带上 `provider`；仲裁器在 `arbitrate` / `peer_aware_review` 中显式把 `arb_cfg["provider"]` 传给 `call_llm`（Step5.6 二次仲裁复用 `arbitrate`，自动覆盖）。
+  3. 5 个请求构造点接入：`shared/utils.py`（共享 helper）、`identity_match/src/name_ai_matcher.py`、`identity_match/src/name_translator.py`、`attribute_match/src/attr_mismatch_ai_matcher.py`（`attr_conflict_ai_judge` 复用同一函数）、`HLR需求聚类/hlr_cluster_tool/ai_client.py`、`multi_judge协同/multi_judge_arbitrator.py`。其中仲裁器与聚类 AI 客户端因需独立可运行，各保留一份镜像实现（`_THINKING_ENV` / `_THINKING_FALSE` / `thinking_payload`），三处必须同步修改。
+  4. 前端与文档：`SettingsPage.tsx` 提示改为「同时作用于正确性分析（反向管线）与完整性分析（正向管线）」；`types.ts` 注释同步；`docs/architecture/api.md` 更新开关作用范围、无需重启的边界（反向每次调用实时读取；正向 judge 子进程环境是创建任务时的快照，只影响之后新建的正向任务）与正向协议差异（开启时不追加 DeepSeek 的 `reasoning_effort`，保持历史请求体）。
+- **修改文件**：`backend/app/forward/config_builder.py`、`backend/app/runtime_settings.py`（docstring）、`backend/forward/multi_judge_runner.py`、`backend/forward/EoICD-HLR正向匹配与属性比对_支持追溯/shared/utils.py`、`identity_match/src/name_ai_matcher.py`、`identity_match/src/name_translator.py`、`attribute_match/src/attr_mismatch_ai_matcher.py`、`backend/forward/HLR需求聚类/hlr_cluster_tool/ai_client.py`、`backend/forward/multi_judge协同/multi_judge_arbitrator.py`、`backend/forward/tests/run_all.py`、`frontend/src/pages/SettingsPage.tsx`、`frontend/src/types.ts`。
+- **新增文件**：`backend/forward/tests/test_thinking_toggle.py`（7 个用例：helper 语义、5 个请求点、config_builder provider 字段）。
+- **删除文件**：无。
+- **文档**：`CHANGELOG.md`（2026-11-10 Changed 两条，修正「仅反向管线」表述并补充正向接入）、`docs/architecture/api.md`、`docs/architecture/current-architecture.md`（§7.1 与模型设置段）、本 log。
+- **验证方式与结果**：
+  1. `cd backend && python -m pytest forward/tests/test_thinking_toggle.py -q` → **7 passed**（**已验证**）。
+  2. `cd backend/forward && python tests/run_all.py` → 全部自测通过（含新增 `thinking_toggle`）（**已验证**）。
+  3. `cd backend && python -m pytest forward/tests -q` → **36 passed**（**已验证**）。
+  4. 正向相关用例集合 → **67 passed / 1 skipped**（**已验证**）。
+  5. 全量回归（10 个既有反向收集错误文件 ignore，与 V5 集成时同一口径）→ **344 passed / 7 failed / 1 skipped**，7 项与既有基线逐项一致（**已验证**）。
+  6. 反向代码零改动：`git diff --name-only backend/app/` 仅 `app/forward/config_builder.py`、`app/runtime_settings.py`（仅 docstring），`app/v4/` 无任何改动（**已核对**）。
+  7. mock 端到端（临时 uvicorn :8021）在用户要求下**中途停止，未纳入验收**：停止前任务已跑到 372 条信号、61 条 Step5.5 复核、聚合与 summary 已写出，停在 Word 报告生成阶段；停止后确认无残留 uvicorn / python 进程、8021 无监听。真实模型端到端**尚未执行**。
+- **遗留问题**：
+  1. 改动未提交；需**重建后端镜像 / 覆盖前端产物**才在服务器生效（无新端口、无新环境变量、无新增依赖）。
+  2. mock E2E 未跑完、真实模型未验证：关闭开关后，三家 provider 是否接受追加字段需在真实网关上复核（Qwen / MiniMax 若指向非兼容接口可能忽略 `enable_thinking`，与反向同一风险）。
+  3. 正向 `thinking_payload` 有 3 份镜像实现（`shared/utils.py`、`hlr_cluster_tool/ai_client.py`、`multi_judge_arbitrator.py`），后续同步上游时必须重新落回，且三处要保持一致；外部同步脚本 `E:\Work\2026\ICD_SKILL\V4\_sync_forward_v5.py` 尚未包含本组补丁（涉及正向源树 7 个文件：shared/utils.py、name_ai_matcher.py、name_translator.py、attr_mismatch_ai_matcher.py、ai_client.py、multi_judge_arbitrator.py、multi_judge_runner.py）。
+  4. 已有 / 续跑任务的 `<job_dir>/forward/` 是旧代码副本，思考开关对它们不生效；需新建任务。
+  5. Issue 编号待用户回填。
+- **下一步建议**：1) 用户提交分支并重建镜像 / 前端产物；2) 服务器上用真实 key 各跑一条正向任务（开关开 / 关各一次），确认 token 与时延变化符合预期、请求不被网关拒绝；3) 后续同步上游 V5 前，把本组补丁并入 `_sync_forward_v5.py`，避免被整树覆盖丢失。

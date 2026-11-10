@@ -203,6 +203,8 @@ Step 4/4 报告生成
 
 V5 起为降低内存与磁盘占用：属性比对大报告用 `common/jsonstream.py` 流式解析（不再整文件载入）；阶段1 共享产物由 `--eoicd-processed-dir` 直接引用，不再逐 judge 复制；`retained_*` / `attr_not_mentioned_*` / `attr_clustered_*` 等中间态默认不落盘（`config.output` 下 `save_retained_intermediate` / `keep_not_mentioned_intermediate` / `keep_clustered_intermediate` 可显式保留）；judge 子进程不再归档 `report_*.json`（`--no-report-archive`）。上传字段、产物名称与结果口径不变。
 
+2026-11-10 起正向管线接入前端「模型设置」的思考开关：`config_builder` 为每个真实 judge / 仲裁器写入 `provider`，`multi_judge_runner` 以 `AI_PROVIDER` 传入 judge 子进程；HLR 聚类 AI 映射、名称判定、术语翻译、属性比对（含冲突判定）、仲裁共 5 个请求构造点在开关**关闭时**追加 provider 专属字段，开启 / 未知 provider / mock 保持历史请求体。原有业务算法不变。
+
 正向集成层（Issue #119）的模块边界与约束：
 
 ```text
@@ -481,9 +483,12 @@ llm/mock_llm.py
 （`DEEPSEEK_THINKING` / `MINIMAX_THINKING` / `QWEN_THINKING`）支持运行时修改：
 `app/runtime_settings.py` 把前端保存的值写入 `OUTPUT_DIR/settings.json` 并立即更新
 `os.environ`；`get_llm()` 每次调用、正向 `config_builder` 每个任务开始时读取，因此
-无需重启。启动时 `main.py` lifespan 回读落盘值（优先于 `.env`）。思考开关仅由反向
-管线的 `get_llm()` 消费，正向 `config_builder` 不使用；关闭时 `llm_cache` 的 key
-追加 `_thinking=disabled` 变体，开启路径沿用历史 key。
+无需重启。启动时 `main.py` lifespan 回读落盘值（优先于 `.env`）。思考开关由反向
+`get_llm()` 与正向各 LLM 请求点共同消费：正向 `config_builder` 为每个真实 judge /
+仲裁器写入 `provider`，`multi_judge_runner` 以 `AI_PROVIDER` 传入 judge 子进程，
+5 个请求构造点只在**关闭**时追加 provider 专属字段（DeepSeek `thinking: disabled`，
+Qwen / MiniMax `enable_thinking: false`），开启 / 未知 provider / mock 保持历史请求体。
+反向关闭时 `llm_cache` 的 key 追加 `_thinking=disabled` 变体，开启路径沿用历史 key。
 
 V4 内 LLM 调用入口：
 - `comparison/semantic_judge.py` × 2 处

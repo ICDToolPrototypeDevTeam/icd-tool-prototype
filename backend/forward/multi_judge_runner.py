@@ -552,6 +552,10 @@ def run_single_judge(ctx: JudgeRunContext) -> dict:
     env["AI_MODEL"] = judge["model"]
     env["BASE_URL"] = judge["base_url"]
     env["API_KEY"] = os.environ.get(judge.get("api_key_env", "API_KEY"), "")
+    # 前端思考开关：把本 judge 的 provider 传给子进程，供各 LLM 请求点读取
+    # DEEPSEEK_THINKING / MINIMAX_THINKING / QWEN_THINKING 后追加对应字段。
+    # 旧配置没有 provider 时为空串 → 请求体保持历史行为。
+    env["AI_PROVIDER"] = (judge.get("provider") or "").strip()
     if judge.get("parallel_api_keys"):
         env["JUDGE_PARALLEL_KEYS"] = ",".join(
             os.environ.get(k, "") for k in judge["parallel_api_keys"]
@@ -843,6 +847,7 @@ def _resolve_arbitrator_cfg(cfg: dict) -> tuple[dict, str]:
             "model": j0.get("model"),
             "base_url": j0.get("base_url"),
             "api_key_env": j0.get("api_key_env", ""),
+            "provider": j0.get("provider", ""),
         }
         source = "回落：沿用 judge[0]({0}) 的 model/base_url".format(j0.get("name"))
     else:

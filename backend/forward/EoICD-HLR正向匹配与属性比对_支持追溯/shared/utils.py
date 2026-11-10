@@ -179,6 +179,47 @@ def write_token_sidecar(path):
 
 
 # ------------------------------------------------------------------
+# 0.2 思考模式请求字段（前端「模型设置」开关的正向侧接入）
+# ------------------------------------------------------------------
+#
+# 前端保存设置后 runtime_settings 把 DEEPSEEK_THINKING / MINIMAX_THINKING /
+# QWEN_THINKING 写进进程环境；正向 judge 子进程由 multi_judge_runner 额外注入
+# AI_PROVIDER（deepseek/minimax/qwen）。本函数据此返回需要追加到请求体的字段。
+# 只在「显式关闭」时返回字段：开启 / 未知 provider 返回空 dict，保证与集成前
+# 请求体完全一致（默认开启即历史行为），语义与反向 v4/llm/thinking.py 对齐。
+#
+# 注意：multi_judge_arbitrator.py 与 hlr_cluster_tool/ai_client.py 各自持有
+# 同名实现（那些模块可独立运行）；三处语义必须保持同步。
+
+_THINKING_ENV = {
+    "deepseek": "DEEPSEEK_THINKING",
+    "minimax": "MINIMAX_THINKING",
+    "qwen": "QWEN_THINKING",
+}
+_THINKING_FALSE = {"0", "false", "no", "off"}
+
+
+def thinking_enabled(provider=None):
+    """该 provider 当前是否开启思考；未知 provider / 非法值 → True。"""
+    provider = (provider or os.environ.get("AI_PROVIDER", "")).strip().lower()
+    env_name = _THINKING_ENV.get(provider)
+    if not env_name:
+        return True
+    return (os.environ.get(env_name, "") or "").strip().lower() not in _THINKING_FALSE
+
+
+def thinking_payload(provider=None):
+    """返回请求体需追加的思考字段；开启 / 未知 provider / 未配置 → 空 dict。"""
+    provider = (provider or os.environ.get("AI_PROVIDER", "")).strip().lower()
+    if provider not in _THINKING_ENV or thinking_enabled(provider):
+        return {}
+    if provider == "deepseek":
+        return {"thinking": {"type": "disabled"}}
+    # qwen / minimax：与反向 QwenClient / MiniMaxClient 的关闭字段一致
+    return {"enable_thinking": False}
+
+
+# ------------------------------------------------------------------
 # 1. 配置加载
 # ------------------------------------------------------------------
 
