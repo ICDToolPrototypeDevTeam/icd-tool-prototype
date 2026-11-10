@@ -36,8 +36,8 @@ API 设计应遵守以下原则：
 | `/api/v4/jobs/{job_id}/outputs/forward-docx`   | `GET`  | 下载正向完整性分析报告（docx）            |
 | `/api/v4/history`                              | `GET`  | 查询服务器上保留的历史结果（磁盘口径，含内存中没有的已完成任务） |
 | `/api/v4/history/delete`                       | `POST` | 硬删除历史结果（整目录，含上传的输入文件；需 `confirm=true`） |
-| `/api/v4/settings`                             | `GET`  | 查询当前生效的三个模型名（运行时设置） |
-| `/api/v4/settings`                             | `PUT`  | 保存三个模型名并立即生效（落盘 `output/settings.json`，无需重启） |
+| `/api/v4/settings`                             | `GET`  | 查询当前生效的模型名与思考开关（运行时设置） |
+| `/api/v4/settings`                             | `PUT`  | 保存模型名与思考开关并立即生效（落盘 `output/settings.json`，无需重启） |
 | `/api/v4/hlr-schemas`                          | `GET`  | 查询内置模板与自定义 HLR 表格样式列表（第 16 节） |
 | `/api/v4/hlr-schemas`                          | `POST` | 新建自定义 HLR 表格样式（201） |
 | `/api/v4/hlr-schemas/{schema_id}`              | `PUT`  | 更新自定义样式（内置模板只读） |
@@ -298,7 +298,7 @@ Content-Type：
 | 版本 | 根目录 | 内部结构 |
 | --- | --- | --- |
 | V4 | `backend/output/v4/{job_id}/` | 分层：`input/`（用户上传原始文件）+ `output/`（pipeline 产物） |
-| 运行时设置 | `backend/output/settings.json` | 三个模型名（见第 15 节）；容器重建后保留 |
+| 运行时设置 | `backend/output/settings.json` | 三个模型名与思考开关（见第 15 节）；容器重建后保留 |
 | 自定义 HLR 表格样式 | `backend/output/hlr_schemas.json` | 全局共享的自定义样式（见第 16 节）；容器重建后保留 |
 
 `docker-compose.yml` volume 映射 `./backend/output:/app/output`。
@@ -702,7 +702,7 @@ GET /api/v4/jobs/{job_id}/intermediates/reverse-matches
 
 ## 15. 运行时模型设置接口
 
-用于在服务器部署完成后，直接从前端修改三个模型名，避免为改配置重新部署/重建容器。
+用于在服务器部署完成后，直接从前端修改三个模型名与思考模式开关，避免为改配置重新部署/重建容器。
 
 ### 15.1 查询设置
 
@@ -717,13 +717,17 @@ GET /api/v4/settings
   "deepseek_model": "deepseek-v4-flash",
   "minimax_model": "MiniMax-M2.5",
   "qwen_model": "qwen3.6-35b-a3b",
+  "deepseek_thinking": true,
+  "minimax_thinking": true,
+  "qwen_thinking": true,
   "customized": false,
   "updated_at": null
 }
 ```
 
-- `customized=false`：三个名字来自部署配置（`backend/.env`）或代码默认值；`updated_at=null`。
+- `customized=false`：模型名来自部署配置（`backend/.env`）或代码默认值；思考开关来自 `DEEPSEEK_THINKING` / `MINIMAX_THINKING` / `QWEN_THINKING` 或默认开启；`updated_at=null`。
 - `customized=true`：来自服务器输出目录下的 `settings.json`；`updated_at` 为上次保存时间（ISO 8601，东八区）。
+- 思考开关只作用于**反向管线（正确性分析）**的模型调用；正向管线（完整性分析）不使用这些开关。
 
 ### 15.2 更新设置
 
@@ -732,28 +736,47 @@ PUT /api/v4/settings
 Content-Type: application/json
 ```
 
-请求体（三个字段全量提交）：
+请求体（三个模型名全量提交；三个思考开关可省略）：
 
 ```json
 {
   "deepseek_model": "deepseek-v4-flash",
   "minimax_model": "MiniMax-M2.5",
-  "qwen_model": "qwen3.6-35b-a3b"
+  "qwen_model": "qwen3.6-35b-a3b",
+  "deepseek_thinking": true,
+  "minimax_thinking": true,
+  "qwen_thinking": true
 }
 ```
 
 - 先去首尾空格再校验；空、超过 200 字符或含换行/控制字符 → 422。
+- 思考开关省略或传 `null` → **保留当前生效值**，兼容旧前端 / 旧脚本只提交三个模型名的调用方式。
 - 原子写入 `OUTPUT_DIR/settings.json`（Docker 中即挂载的 `./backend/output/settings.json`），并立即更新进程环境变量。
 - 反向管线（`v4/llm/factory.get_llm()`）每次调用、正向管线（`forward/config_builder`）每个任务开始时都读取模型名，因此**无需重启**；修改只影响之后的模型调用，正在运行的任务若继续发起调用会读到新值。
 - 持久化值**优先于** `backend/.env`；若要让 `.env` 重新生效，删除 `output/settings.json` 后重启服务。
-- 只管理模型名。API key / base_url / `JUDGE_PROVIDERS` 仍由部署配置管理；`USE_MOCK_LLM=1` 时模型名不参与实际调用。
-- 当前系统无鉴权，能访问页面的用户都可以修改（内网演示原型的已知限制）。
+- 只管理模型名与思考开关。API key / base_url / `JUDGE_PROVIDERS` 仍由部署配置管理；`USE_MOCK_LLM=1` 时模型名与开关不参与实际调用。
 
-### 15.3 错误响应
+#### 思考模式协议
+
+| provider | 开启（默认） | 关闭 |
+| --- | --- | --- |
+| DeepSeek | 发送 `thinking: {"type": "enabled"}` + `reasoning_effort: "low"` | 发送 `thinking: {"type": "disabled"}`，不发送 `reasoning_effort` |
+| Qwen | 保持历史请求体，不发送 `enable_thinking`（服务端默认开启） | 发送 `enable_thinking: false` |
+| MiniMax | 保持历史请求体，不发送 `enable_thinking` | 按 Qwen 兼容协议发送 `enable_thinking: false` |
+
+- 不向前端暴露 effort 档位；Qwen / MiniMax 不发送 `reasoning_effort`（保持历史行为）。
+- MiniMax 槽位仍保留 `minimax` 的模型名、token 记账与报告标签。关闭时按 Qwen 兼容协议发送 `enable_thinking: false`，是否生效取决于 `MINIMAX_BASE_URL` 指向的接口：指向 Qwen 兼容接口时生效，旧版 MiniMax OpenAI 兼容接口可能忽略该参数。
+- 缓存 key：开启路径沿用历史 key（升级后默认配置仍命中旧缓存）；关闭路径追加 provider 级 `_thinking=disabled` 变体，不复用开启状态下的判定结果。
+
+### 15.3 兼容与错误响应
+
+- 旧 `settings.json` 缺少三个思考开关字段时，按环境变量 / 默认开启处理；下次保存后写入完整字段。
+- 设置文件中的单个开关值非法时，该字段回落环境变量 / 默认开启并打印告警，不影响三个模型名的加载。
 
 | 场景 | HTTP |
 | --- | --- |
 | 模型名为空 / 超长 / 含控制字符 / 类型不对 | 422 |
+| 思考开关不是布尔值 | 422 |
 | 设置文件无法写入（权限、磁盘等） | 500 |
 
 ## 16. HLR 表格样式管理接口

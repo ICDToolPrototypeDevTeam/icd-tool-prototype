@@ -3,10 +3,12 @@ import { AlertCircle, CheckCircle2, Info, SlidersHorizontal } from 'lucide-react
 import { ApiError, getModelSettingsV4, updateModelSettingsV4 } from '../api'
 import type { V4ModelSettings, V4ModelSettingsUpdate } from '../types'
 
-type ModelKey = keyof V4ModelSettingsUpdate
+type ModelKey = 'deepseek_model' | 'minimax_model' | 'qwen_model'
+type ThinkingKey = 'deepseek_thinking' | 'minimax_thinking' | 'qwen_thinking'
 
 interface ProviderMeta {
   key: ModelKey
+  thinkingKey: ThinkingKey
   name: string
   short: string
   role: string
@@ -18,6 +20,7 @@ interface ProviderMeta {
 const PROVIDERS: ProviderMeta[] = [
   {
     key: 'deepseek_model',
+    thinkingKey: 'deepseek_thinking',
     name: 'DeepSeek',
     short: 'DS',
     role: '标注 · 共识 · 裁判',
@@ -27,6 +30,7 @@ const PROVIDERS: ProviderMeta[] = [
   },
   {
     key: 'minimax_model',
+    thinkingKey: 'minimax_thinking',
     name: 'MiniMax',
     short: 'MM',
     role: '裁判',
@@ -36,6 +40,7 @@ const PROVIDERS: ProviderMeta[] = [
   },
   {
     key: 'qwen_model',
+    thinkingKey: 'qwen_thinking',
     name: 'Qwen',
     short: 'QW',
     role: '裁判',
@@ -50,6 +55,9 @@ function pickForm(settings: V4ModelSettings): V4ModelSettingsUpdate {
     deepseek_model: settings.deepseek_model,
     minimax_model: settings.minimax_model,
     qwen_model: settings.qwen_model,
+    deepseek_thinking: settings.deepseek_thinking,
+    minimax_thinking: settings.minimax_thinking,
+    qwen_thinking: settings.qwen_thinking,
   }
 }
 
@@ -110,9 +118,18 @@ export default function SettingsPage() {
   const dirty =
     saved !== null &&
     form !== null &&
-    PROVIDERS.some((provider) => form[provider.key].trim() !== saved[provider.key])
+    (PROVIDERS.some((provider) => form[provider.key].trim() !== saved[provider.key]) ||
+      PROVIDERS.some(
+        (provider) => form[provider.thinkingKey] !== saved[provider.thinkingKey],
+      ))
 
   function updateField(key: ModelKey, value: string) {
+    setForm((current) => (current ? { ...current, [key]: value } : current))
+    setNotice('')
+    setError('')
+  }
+
+  function updateThinking(key: ThinkingKey, value: boolean) {
     setForm((current) => (current ? { ...current, [key]: value } : current))
     setNotice('')
     setError('')
@@ -131,6 +148,9 @@ export default function SettingsPage() {
       deepseek_model: form.deepseek_model.trim(),
       minimax_model: form.minimax_model.trim(),
       qwen_model: form.qwen_model.trim(),
+      deepseek_thinking: form.deepseek_thinking,
+      minimax_thinking: form.minimax_thinking,
+      qwen_thinking: form.qwen_thinking,
     }
     if (!payload.deepseek_model || !payload.minimax_model || !payload.qwen_model) {
       setNotice('')
@@ -145,7 +165,7 @@ export default function SettingsPage() {
       const updated = await updateModelSettingsV4(payload)
       setSaved(updated)
       setForm(pickForm(updated))
-      setNotice('已保存，后续模型调用将使用新的模型名称')
+      setNotice('已保存，后续模型调用将使用新的模型名称与思考模式')
     } catch (e) {
       setError(describeError(e))
     } finally {
@@ -158,7 +178,7 @@ export default function SettingsPage() {
       <div className="landing-hero">
         <h1 className="landing-hero__title">模型设置</h1>
         <p className="landing-hero__subtitle">
-          配置三类分析模型的服务端模型名称，保存后对新任务生效，无需重启服务
+          配置三类分析模型的服务端模型名称与思考模式，保存后对后续模型调用生效，无需重启服务
         </p>
       </div>
 
@@ -181,7 +201,7 @@ export default function SettingsPage() {
               )}
             </div>
             <p className="settings-card__subtitle">
-              三个模型分别用于正确性分析的多模型裁判与完整性分析的多 judge 判定
+              三个模型用于正确性分析（反向）的标注、裁判与共识；模型名同时用于完整性分析（正向）
             </p>
           </div>
           {saved?.customized && saved.updated_at && (
@@ -209,29 +229,54 @@ export default function SettingsPage() {
             <>
               <div className="model-fields">
                 {PROVIDERS.map((provider) => (
-                  <label className="model-field" key={provider.key}>
+                  <div className="model-field" key={provider.key}>
                     <span
                       className={`model-field__badge model-field__badge--${provider.tone}`}
                     >
                       {provider.short}
                     </span>
-                    <span className="model-field__info">
+                    <label
+                      className="model-field__info"
+                      htmlFor={`model-${provider.key}`}
+                    >
                       <span className="model-field__name">
                         {provider.name}
                         <span className="model-field__role">{provider.role}</span>
                       </span>
                       <span className="model-field__desc">{provider.desc}</span>
-                    </span>
-                    <input
-                      className="model-field__input"
-                      value={form[provider.key]}
-                      placeholder={provider.placeholder}
-                      maxLength={200}
-                      spellCheck={false}
-                      autoComplete="off"
-                      onChange={(event) => updateField(provider.key, event.target.value)}
-                    />
-                  </label>
+                    </label>
+                    <div className="model-field__control">
+                      <input
+                        id={`model-${provider.key}`}
+                        className="model-field__input"
+                        value={form[provider.key]}
+                        placeholder={provider.placeholder}
+                        maxLength={200}
+                        spellCheck={false}
+                        autoComplete="off"
+                        onChange={(event) => updateField(provider.key, event.target.value)}
+                      />
+                      <label className="model-thinking">
+                        <input
+                          type="checkbox"
+                          checked={form[provider.thinkingKey]}
+                          onChange={(event) =>
+                            updateThinking(provider.thinkingKey, event.target.checked)
+                          }
+                        />
+                        <span className="model-thinking__label">思考模式</span>
+                        <span
+                          className={`model-thinking__state ${
+                            form[provider.thinkingKey]
+                              ? 'model-thinking__state--on'
+                              : 'model-thinking__state--off'
+                          }`}
+                        >
+                          {form[provider.thinkingKey] ? '开启' : '关闭'}
+                        </span>
+                      </label>
+                    </div>
+                  </div>
                 ))}
               </div>
 
@@ -240,6 +285,8 @@ export default function SettingsPage() {
                 <span>
                   设置保存在服务器输出目录，容器重启后仍然有效。修改只影响之后的模型调用；
                   如当前有任务正在运行，建议等其结束后再保存。
+                  <br />
+                  思考模式仅作用于正确性分析（反向管线），完整性分析（正向）不受影响。
                 </span>
               </div>
 

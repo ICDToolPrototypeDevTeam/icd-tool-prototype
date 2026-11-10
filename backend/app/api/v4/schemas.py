@@ -314,6 +314,7 @@ class V4ModelSettingsUpdate(BaseModel):
 
     ``str_strip_whitespace`` 先去空格再校验长度，避免「只输空格」通过
     ``min_length``；落盘前 ``runtime_settings`` 还会再做一次同样的校验。
+    三个思考开关可省略：省略表示保留当前生效值，兼容旧前端 / 旧脚本。
     """
 
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -321,6 +322,9 @@ class V4ModelSettingsUpdate(BaseModel):
     deepseek_model: str = Field(min_length=1, max_length=200)
     minimax_model: str = Field(min_length=1, max_length=200)
     qwen_model: str = Field(min_length=1, max_length=200)
+    deepseek_thinking: Optional[bool] = None
+    minimax_thinking: Optional[bool] = None
+    qwen_thinking: Optional[bool] = None
 
 
 class V4ModelSettings(BaseModel):
@@ -329,6 +333,10 @@ class V4ModelSettings(BaseModel):
     deepseek_model: str
     minimax_model: str
     qwen_model: str
+    # 思考模式开关：默认开启；当前 MiniMax 接口暂不识别关闭参数
+    deepseek_thinking: bool = True
+    minimax_thinking: bool = True
+    qwen_thinking: bool = True
     # False = 沿用部署配置（backend/.env）或 factory 默认值
     customized: bool = False
     # 仅 customized=True 时有值（ISO 8601，带 +08:00 偏移）

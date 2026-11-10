@@ -7,6 +7,7 @@ import os
 from typing import Protocol, TypedDict
 
 from app.runtime_context import current_runtime
+from app.v4.llm.thinking import thinking_enabled
 
 
 # 截断自适应重试的 max_tokens 上限（各模型的 max output 防止无限倍增）
@@ -80,6 +81,7 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
             base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             model=os.getenv("DEEPSEEK_MODEL", DEFAULT_MODELS["deepseek"]),
             default_timeout=default_timeout,
+            thinking=thinking_enabled("deepseek"),
         )
 
     if provider == "qwen":
@@ -95,6 +97,7 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
             base_url=os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
             model=os.getenv("QWEN_MODEL", DEFAULT_MODELS["qwen"]),
             default_timeout=default_timeout,
+            thinking=thinking_enabled("qwen"),
         )
 
     if provider == "minimax":
@@ -110,6 +113,7 @@ def get_llm(provider: str = "deepseek") -> LLMClient:
             base_url=os.getenv("MINIMAX_BASE_URL", "https://api.minimax.chat"),
             model=os.getenv("MINIMAX_MODEL", DEFAULT_MODELS["minimax"]),
             default_timeout=default_timeout,
+            thinking=thinking_enabled("minimax"),
         )
 
     raise ValueError(

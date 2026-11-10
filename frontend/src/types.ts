@@ -207,20 +207,29 @@ export interface V4HistoryDeleteResponse {
 
 // ========== V4 运行时模型设置 ==========
 
-/** 当前生效的三个模型名；customized=false 表示沿用部署配置（.env）。 */
+/** 当前生效的三个模型名与思考开关；customized=false 表示沿用部署配置（.env）。 */
 export interface V4ModelSettings {
   deepseek_model: string
   minimax_model: string
   qwen_model: string
+  /** 是否开启思考模式；默认 true，仅作用于正确性分析（反向管线） */
+  deepseek_thinking: boolean
+  minimax_thinking: boolean
+  qwen_thinking: boolean
   customized: boolean
   /** 仅 customized=true 时有值（ISO 8601，带 +08:00 偏移） */
   updated_at: string | null
 }
 
-/** PUT /api/v4/settings 请求体（三个字段全量提交）。 */
+/** PUT /api/v4/settings 请求体（模型名 + 思考开关全量提交）。 */
 export type V4ModelSettingsUpdate = Pick<
   V4ModelSettings,
-  'deepseek_model' | 'minimax_model' | 'qwen_model'
+  | 'deepseek_model'
+  | 'minimax_model'
+  | 'qwen_model'
+  | 'deepseek_thinking'
+  | 'minimax_thinking'
+  | 'qwen_thinking'
 >
 
 export interface HlrSchemaConfig {

@@ -15,11 +15,13 @@ class DeepSeekClient:
 
     PROVIDER = "deepseek"
 
-    def __init__(self, api_key: str, base_url: str, model: str, default_timeout: int = 120):
+    def __init__(self, api_key: str, base_url: str, model: str,
+                 default_timeout: int = 120, thinking: bool = True):
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._default_timeout = default_timeout
+        self._thinking = thinking
 
     @property
     def model(self) -> str:
@@ -50,14 +52,19 @@ class DeepSeekClient:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            # deepseek-v4-flash/pro 默认开启思考且 reasoning 计入 max_tokens；
-            # 曾显式关闭思考（"thinking": disabled）换取低 error 率，但符号位/位对
-            # 组装类等价推理质量下降（covered 翻成 needs_review/inconsistent）。
-            # 折中：开启思考 + reasoning_effort=low，在 8192 预算内既保留关键推理
-            # 又控制输出长度（20-block case 实测 reasoning≈3k tokens、finish=stop）。
-            "thinking": {"type": "enabled"},
-            "reasoning_effort": "low",
         }
+        # 思考模式由前端「模型设置」页控制，默认开启。
+        # 开启：deepseek-v4-flash/pro 默认开启思考且 reasoning 计入 max_tokens；
+        # 曾显式关闭思考换取低 error 率，但符号位/位对组装类等价推理质量下降
+        # （covered 翻成 needs_review/inconsistent）。折中：开启思考 +
+        # reasoning_effort=low，在 8192 预算内既保留关键推理又控制输出长度
+        # （20-block case 实测 reasoning≈3k tokens、finish=stop）。
+        # 关闭：只发 thinking disabled；无思考时 reasoning_effort 无意义，不发送。
+        if self._thinking:
+            payload["thinking"] = {"type": "enabled"}
+            payload["reasoning_effort"] = "low"
+        else:
+            payload["thinking"] = {"type": "disabled"}
 
         last_error = None
         for attempt in range(max_retries + 1):
