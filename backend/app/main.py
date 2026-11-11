@@ -12,12 +12,19 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+# 必须在导入 app.api.v4.router 之前加载 backend/.env：auth/backend.py 在导入期
+# 构造 auth_backend，需要 AUTH_JWT_SECRET 等环境变量。容器内由 compose env_file 注入。
+load_dotenv(Path(__file__).resolve().parent.parent / '.env')
+
 from app.api.v4.router import router as v4_router
+from app.auth.db import close_db, init_db
+from app.auth.seed import ensure_admin_seed
 from app.job_log import install_log_tee, set_config_lines
 from app.job_manager import job_manager
 from app.runtime_settings import load_persisted_settings
@@ -65,6 +72,14 @@ async def lifespan(app: FastAPI):
         load_persisted_settings()
     except Exception as e:  # noqa: BLE001
         print(f'[settings] load failed: {type(e).__name__}: {e}', file=sys.stderr)
+    # Mongo 是登录与账号管理的硬依赖：不可达或初始管理员创建失败时直接让启动失败，
+    # 不做静默降级（依据用户鉴权与隔离设计 D12）。
+    try:
+        await init_db()
+        await ensure_admin_seed()
+    except Exception as e:  # noqa: BLE001
+        print(f'[auth] init failed: {type(e).__name__}: {e}', file=sys.stderr)
+        raise
     # 启动扫描：把上一个进程遗留的未完成任务标记为 interrupted，供前端选择
     # 继续 / 放弃。任何异常都不得影响启动。
     try:
@@ -74,6 +89,7 @@ async def lifespan(app: FastAPI):
     # 启动配置自检：写进全局日志缓冲，并在每个任务日志开头重复
     set_config_lines(_config_snapshot())
     yield
+    await close_db()
 
 
 app = FastAPI(title='ICD工具原型', lifespan=lifespan)
