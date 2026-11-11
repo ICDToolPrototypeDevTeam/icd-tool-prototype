@@ -278,3 +278,21 @@ export type HlrSchemaPayload =
   | HlrSchemaConfig
   | { template_id: string }
   | { schema_id: string }
+
+// ========== Auth Types ==========
+
+/** 当前登录用户（GET /api/v4/auth/me）。 */
+export interface AuthUser {
+  id: string
+  username: string
+  is_admin: boolean
+}
+
+/** 管理员用户管理列表项（GET /api/v4/admin/users，Task 9 使用）。 */
+export interface AdminUser {
+  id: string
+  username: string
+  is_active: boolean
+  is_superuser: boolean
+  created_at: string
+}

@@ -17,6 +17,7 @@ import type {
   HlrSchemaScanTable,
   HlrSchemaPreviewResult,
   HlrSchemaPayload,
+  AuthUser,
 } from '../types'
 
 // ========== V4 API ==========
@@ -32,8 +33,64 @@ export class ApiError extends Error {
   }
 }
 
+/** 401 全局事件名：AuthContext 监听后清空当前用户，路由守卫随即回到登录页。 */
+export const AUTH_UNAUTHORIZED_EVENT = 'icd:unauthorized'
+
+/**
+ * 统一 API 请求入口：默认同源携带登录 Cookie。
+ * 非 `/auth/*` 请求返回 401 时派发全局事件；仍原样返回 Response，
+ * 由各调用方照常抛 ApiError，不改变既有错误处理方式。
+ */
+export async function apiFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+): Promise<Response> {
+  const res = await fetch(input, { credentials: 'same-origin', ...init })
+  if (res.status === 401) {
+    const url =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+    if (!/\/auth\//.test(url)) {
+      window.dispatchEvent(new Event(AUTH_UNAUTHORIZED_EVENT))
+    }
+  }
+  return res
+}
+
+// ========== 认证 ==========
+
+/** 登录：后端通过 HttpOnly Cookie 下发会话；失败抛出 ApiError。 */
+export async function loginV4(username: string, password: string): Promise<void> {
+  // 裸 fetch：登录失败的 401 不应触发全局未登录事件
+  const res = await fetch(`${API_V4_BASE}/auth/login`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ username, password }),
+  })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+}
+
+/** 登出：由 AuthContext 负责无论成败都清空本地登录态。 */
+export async function logoutV4(): Promise<void> {
+  const res = await apiFetch(`${API_V4_BASE}/auth/logout`, { method: 'POST' })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+}
+
+/** 当前登录用户；未登录（401）返回 null，其它错误抛出。 */
+export async function getMeV4(): Promise<AuthUser | null> {
+  // 裸 fetch：未登录是正常状态，不应触发全局未登录事件
+  const res = await fetch(`${API_V4_BASE}/auth/me`, { credentials: 'same-origin' })
+  if (res.status === 401) return null
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
 export async function analyzeFilesV4(formData: FormData): Promise<{ job_id: string; status: string; message: string }> {
-  const res = await fetch(`${API_V4_BASE}/coverage-analysis`, {
+  const res = await apiFetch(`${API_V4_BASE}/coverage-analysis`, {
     method: 'POST',
     body: formData,
   })
@@ -45,7 +102,7 @@ export async function analyzeFilesV4(formData: FormData): Promise<{ job_id: stri
 }
 
 export async function analyzeCompletenessV4(formData: FormData): Promise<{ job_id: string; status: string; message: string }> {
-  const res = await fetch(`${API_V4_BASE}/completeness-analysis`, {
+  const res = await apiFetch(`${API_V4_BASE}/completeness-analysis`, {
     method: 'POST',
     body: formData,
   })
@@ -57,7 +114,7 @@ export async function analyzeCompletenessV4(formData: FormData): Promise<{ job_i
 }
 
 export async function getJobStatusV4(jobId: string): Promise<V4JobStatusResponse> {
-  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}`)
+  const res = await apiFetch(`${API_V4_BASE}/jobs/${jobId}`)
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }
@@ -71,19 +128,19 @@ export async function listJobsV4(
   if (filter.status) query.set('status', filter.status)
   if (filter.taskType) query.set('task_type', filter.taskType)
   const suffix = query.toString() ? `?${query.toString()}` : ''
-  const res = await fetch(`${API_V4_BASE}/jobs${suffix}`)
+  const res = await apiFetch(`${API_V4_BASE}/jobs${suffix}`)
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }
 
 export async function resumeJobV4(jobId: string): Promise<{ job_id: string; status: string; message: string }> {
-  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/resume`, { method: 'POST' })
+  const res = await apiFetch(`${API_V4_BASE}/jobs/${jobId}/resume`, { method: 'POST' })
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }
 
 export async function abandonJobV4(jobId: string): Promise<{ job_id: string; status: string; message: string }> {
-  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/abandon`, { method: 'POST' })
+  const res = await apiFetch(`${API_V4_BASE}/jobs/${jobId}/abandon`, { method: 'POST' })
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }
@@ -92,7 +149,7 @@ export async function abandonJobV4(jobId: string): Promise<{ job_id: string; sta
 export const MOCK_STORAGE_KEY = 'icd.useMock'
 
 export async function cancelJobV4(jobId: string): Promise<{ job_id: string; status: string; message: string }> {
-  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/cancel`, { method: 'POST' })
+  const res = await apiFetch(`${API_V4_BASE}/jobs/${jobId}/cancel`, { method: 'POST' })
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }
@@ -102,7 +159,7 @@ export async function cancelJobV4(jobId: string): Promise<{ job_id: string; stat
  * 只影响这一个任务，不重启进程、不影响其他任务；不删文件、不支持续跑。
  */
 export async function forceCancelJobV4(jobId: string): Promise<{ job_id: string; status: string; message: string }> {
-  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/force-cancel`, { method: 'POST' })
+  const res = await apiFetch(`${API_V4_BASE}/jobs/${jobId}/force-cancel`, { method: 'POST' })
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }
@@ -113,19 +170,19 @@ export async function getJobLogsV4(
   limit = 500,
 ): Promise<V4JobLogsResponse> {
   const query = new URLSearchParams({ offset: String(offset), limit: String(limit) })
-  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/logs?${query.toString()}`)
+  const res = await apiFetch(`${API_V4_BASE}/jobs/${jobId}/logs?${query.toString()}`)
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }
 
 export async function getJobResultV4(jobId: string): Promise<V4JobResultResponse> {
-  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/result`)
+  const res = await apiFetch(`${API_V4_BASE}/jobs/${jobId}/result`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function getForwardJobResultV4(jobId: string): Promise<V4ForwardJobResultResponse> {
-  const res = await fetch(`${API_V4_BASE}/jobs/${jobId}/result`)
+  const res = await apiFetch(`${API_V4_BASE}/jobs/${jobId}/result`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -159,7 +216,7 @@ export function getReverseMatchesViewUrlV4(jobId: string): string {
 
 /** 服务器上保留的全部历史结果（磁盘口径，按创建时间倒序）。 */
 export async function listHistoryV4(): Promise<V4HistoryItem[]> {
-  const res = await fetch(`${API_V4_BASE}/history`)
+  const res = await apiFetch(`${API_V4_BASE}/history`)
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }
@@ -169,7 +226,7 @@ export async function listHistoryV4(): Promise<V4HistoryItem[]> {
  * 后端要求显式 confirm，因此这里固定带 `confirm: true`（前端已做过二次确认）。
  */
 export async function deleteHistoryV4(jobIds: string[]): Promise<V4HistoryDeleteResponse> {
-  const res = await fetch(`${API_V4_BASE}/history/delete`, {
+  const res = await apiFetch(`${API_V4_BASE}/history/delete`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ job_ids: jobIds, confirm: true }),
@@ -182,7 +239,7 @@ export async function deleteHistoryV4(jobIds: string[]): Promise<V4HistoryDelete
 
 /** 读取服务器当前生效的三个模型名。 */
 export async function getModelSettingsV4(): Promise<V4ModelSettings> {
-  const res = await fetch(`${API_V4_BASE}/settings`)
+  const res = await apiFetch(`${API_V4_BASE}/settings`)
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }
@@ -191,7 +248,7 @@ export async function getModelSettingsV4(): Promise<V4ModelSettings> {
 export async function updateModelSettingsV4(
   payload: V4ModelSettingsUpdate,
 ): Promise<V4ModelSettings> {
-  const res = await fetch(`${API_V4_BASE}/settings`, {
+  const res = await apiFetch(`${API_V4_BASE}/settings`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -221,7 +278,7 @@ function xlsxToHtml(buf: ArrayBuffer): string {
 
 export async function getPreviewHtmlV4(jobId: string, kind: V4DownloadKind): Promise<string> {
   const url = getDownloadUrlV4(jobId, kind)
-  const res = await fetch(url)
+  const res = await apiFetch(url)
   if (!res.ok) throw new Error('Failed to fetch preview')
 
   const buf = await res.arrayBuffer()
@@ -237,7 +294,7 @@ export async function getPreviewHtmlV4(jobId: string, kind: V4DownloadKind): Pro
 
 export async function getForwardPreviewHtmlV4(jobId: string, kind: V4ForwardDownloadKind): Promise<string> {
   const url = getForwardDownloadUrlV4(jobId, kind)
-  const res = await fetch(url)
+  const res = await apiFetch(url)
   if (!res.ok) throw new Error('Failed to fetch preview')
 
   const buf = await res.arrayBuffer()
@@ -251,7 +308,7 @@ export async function getForwardPreviewHtmlV4(jobId: string, kind: V4ForwardDown
 }
 
 export async function listHlrSchemas(): Promise<HlrSchemaItem[]> {
-  const res = await fetch(`${API_V4_BASE}/hlr-schemas`)
+  const res = await apiFetch(`${API_V4_BASE}/hlr-schemas`)
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return (await res.json()).schemas
 }
@@ -259,7 +316,7 @@ export async function listHlrSchemas(): Promise<HlrSchemaItem[]> {
 export async function createHlrSchema(payload: {
   name: string; config: HlrSchemaConfig
 }): Promise<HlrSchemaItem> {
-  const res = await fetch(`${API_V4_BASE}/hlr-schemas`, {
+  const res = await apiFetch(`${API_V4_BASE}/hlr-schemas`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -272,7 +329,7 @@ export async function updateHlrSchema(
   id: string,
   payload: { name: string; config: HlrSchemaConfig },
 ): Promise<HlrSchemaItem> {
-  const res = await fetch(`${API_V4_BASE}/hlr-schemas/${id}`, {
+  const res = await apiFetch(`${API_V4_BASE}/hlr-schemas/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -282,14 +339,14 @@ export async function updateHlrSchema(
 }
 
 export async function deleteHlrSchema(id: string): Promise<void> {
-  const res = await fetch(`${API_V4_BASE}/hlr-schemas/${id}`, { method: 'DELETE' })
+  const res = await apiFetch(`${API_V4_BASE}/hlr-schemas/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new ApiError(res.status, await res.text())
 }
 
 export async function scanHlrSchema(file: File): Promise<HlrSchemaScanTable[]> {
   const fd = new FormData()
   fd.append('file', file)
-  const res = await fetch(`${API_V4_BASE}/hlr-schemas/scan`, { method: 'POST', body: fd })
+  const res = await apiFetch(`${API_V4_BASE}/hlr-schemas/scan`, { method: 'POST', body: fd })
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return (await res.json()).tables
 }
@@ -301,7 +358,7 @@ export async function previewHlrSchema(
   fd.append('file', file)
   fd.append('schema', JSON.stringify(schema))
   fd.append('controller_profile', controllerProfile)
-  const res = await fetch(`${API_V4_BASE}/hlr-schemas/preview`, { method: 'POST', body: fd })
+  const res = await apiFetch(`${API_V4_BASE}/hlr-schemas/preview`, { method: 'POST', body: fd })
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }
