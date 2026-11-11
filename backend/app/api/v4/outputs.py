@@ -12,10 +12,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from app.api.v4.runner import FORWARD_OUTPUT_FILES, V4_OUTPUT_FILES
+from app.auth.access import is_valid_job_id, require_job_access
+from app.auth.deps import current_user
+from app.auth.models import User
 from app.job_manager import MANIFEST_NAME, job_manager
 from app.v4.config import get_output_root
 
@@ -51,8 +54,12 @@ def _manifest_task_type(job_dir: Path) -> Optional[str]:
     return task_type if isinstance(task_type, str) and task_type else None
 
 
-def _output_root(job_id: str, expected_task_type: str) -> Path:
-    """定位任务的 output 目录；任务类型不符时 404。
+def _output_root(job_id: str, expected_task_type: str, user: User) -> Path:
+    """定位任务的 output 目录；归属或任务类型不符时 404。
+
+    归属校验必须在任何文件存在性判断之前完成：否则非本人可以从 404/200 的差异
+    探测他人任务是否存在。非法 job_id 管理员也直接 404，避免拼出
+    ``output/v4/`` 之外的路径。
 
     任务类型的来源按优先级取：**内存**（本进程新建的任务）→ **磁盘 manifest**。
     进程重启后跑完的任务不在内存里（启动扫描只载入未完成的任务），修复前这里
@@ -60,6 +67,9 @@ def _output_root(job_id: str, expected_task_type: str) -> Path:
     目录没有 manifest）就不再校验类型：五类产物的文件名互不重名，下面每个下载
     接口按类型取的是各自的文件名，不存在把 A 类任务的产物当 B 类发出去的可能。
     """
+    if not is_valid_job_id(job_id):
+        raise HTTPException(status_code=404, detail='job not found')
+    require_job_access(job_id, user)
     base = get_output_root() / 'v4' / job_id
     job = job_manager.get_job(job_id)
     actual_task_type = job.task_type if job is not None else _manifest_task_type(base)
@@ -75,8 +85,8 @@ def _output_root(job_id: str, expected_task_type: str) -> Path:
 
 
 @router.get('/jobs/{job_id}/outputs/eoicd-xlsx')
-def download_eoicd_xlsx(job_id: str):
-    root = _output_root(job_id, "correctness")
+def download_eoicd_xlsx(job_id: str, user: User = Depends(current_user)):
+    root = _output_root(job_id, "correctness", user)
     f = root / V4_OUTPUT_FILES["eoicd_xlsx"]
     if not f.exists():
         raise HTTPException(status_code=404, detail='eoicd xlsx not generated (job may be running or failed)')
@@ -88,8 +98,8 @@ def download_eoicd_xlsx(job_id: str):
 
 
 @router.get('/jobs/{job_id}/outputs/consensus-docx')
-def download_consensus_docx(job_id: str):
-    root = _output_root(job_id, "correctness")
+def download_consensus_docx(job_id: str, user: User = Depends(current_user)):
+    root = _output_root(job_id, "correctness", user)
     f = root / V4_OUTPUT_FILES["consensus_docx"]
     if not f.exists():
         raise HTTPException(status_code=404, detail='consensus docx not generated (job may be running or failed)')
@@ -101,13 +111,15 @@ def download_consensus_docx(job_id: str):
 
 
 @router.get('/jobs/{job_id}/outputs/consistency/{model}')
-def download_consistency_docx(job_id: str, model: str):
+def download_consistency_docx(
+    job_id: str, model: str, user: User = Depends(current_user)
+):
     if model not in ALLOWED_MODELS:
         raise HTTPException(
             status_code=400,
             detail=f"invalid model: {model}; allowed: deepseek|minimax|qwen",
         )
-    root = _output_root(job_id, "correctness")
+    root = _output_root(job_id, "correctness", user)
     key = f"consistency_{model}_docx"
     if key not in V4_OUTPUT_FILES:
         raise HTTPException(status_code=400, detail=f"unknown output kind: {key}")
@@ -125,8 +137,8 @@ def download_consistency_docx(job_id: str, model: str):
 
 
 @router.get('/jobs/{job_id}/outputs/forward-xlsx')
-def download_forward_xlsx(job_id: str):
-    root = _output_root(job_id, "completeness")
+def download_forward_xlsx(job_id: str, user: User = Depends(current_user)):
+    root = _output_root(job_id, "completeness", user)
     f = root / FORWARD_OUTPUT_FILES["forward_xlsx"]
     if not f.exists():
         raise HTTPException(status_code=404, detail='forward xlsx not generated (job may be running or failed)')
@@ -138,8 +150,8 @@ def download_forward_xlsx(job_id: str):
 
 
 @router.get('/jobs/{job_id}/outputs/forward-docx')
-def download_forward_docx(job_id: str):
-    root = _output_root(job_id, "completeness")
+def download_forward_docx(job_id: str, user: User = Depends(current_user)):
+    root = _output_root(job_id, "completeness", user)
     f = root / FORWARD_OUTPUT_FILES["forward_docx"]
     if not f.exists():
         raise HTTPException(status_code=404, detail='forward docx not generated (job may be running or failed)')

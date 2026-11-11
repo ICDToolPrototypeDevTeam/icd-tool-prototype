@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from app.api.v4.runner import (
@@ -48,6 +48,9 @@ from app.api.v4.schemas import (
     V4HistoryOutputs,
     V4TokenUsage,
 )
+from app.auth.access import require_job_access
+from app.auth.deps import current_user
+from app.auth.models import User
 from app.job_log import LOG_FILE_NAME, job_log_store
 from app.job_manager import MANIFEST_NAME, Job, JobStatus, job_manager
 from app.v4.config import get_output_root
@@ -256,7 +259,7 @@ def _log_download_name(job_id: str, path: Path) -> str:
 
 
 @router.get('/jobs/{job_id}/logs/download')
-def download_job_log(job_id: str):
+def download_job_log(job_id: str, user: User = Depends(current_user)):
     """下载该次运行的 ``job.log``（stdout/stderr 全集，含失败堆栈与执行过程）。
 
     **磁盘口径**：不查内存登记表，因此进程重启后、任务失败 / 中断 / 被终止之后
@@ -264,8 +267,10 @@ def download_job_log(job_id: str):
     内存里的任务，重启后对这类任务直接 404）。日志由 Tee 逐行同步落盘，任务中途
     被 OOM 杀掉也已写到最后一行为止。
 
+    归属校验先于路径解析与文件存在性判断：非本人 / 未归属任务统一 404。
     日志文件不存在（任务从未真正开始、目录已被删）→ 404；job_id 非法 → 400。
     """
+    require_job_access(job_id, user)
     path = _resolve_job_dir(job_id) / LOG_FILE_NAME
     if not path.is_file():
         raise HTTPException(
@@ -280,7 +285,7 @@ def download_job_log(job_id: str):
 
 
 @router.get('/jobs/{job_id}/intermediates/reverse-matches')
-def view_reverse_matches(job_id: str):
+def view_reverse_matches(job_id: str, user: User = Depends(current_user)):
     """浏览器内查看反向匹配中间产物 ``output/reverse_matches.json``（Step 3 匹配明细）。
 
     ADR-001 D7 原本不暴露 JSON 中间产物，并预留了「新开子路由」的开放方式；本路由
@@ -288,9 +293,11 @@ def view_reverse_matches(job_id: str):
     仍不暴露。不传 ``filename``，因此不发 ``Content-Disposition``：浏览器在新标签页
     里直接按 JSON 渲染，需要留档时页内另存即可。
 
+    归属校验先于路径解析与文件存在性判断：非本人 / 未归属任务统一 404。
     文件不存在（正向任务、Step 3 未跑完、目录已被删）→ 404；job_id 非法 → 400
     （两道校验同日志下载，走同一个 ``_resolve_job_dir``）。
     """
+    require_job_access(job_id, user)
     path = _resolve_job_dir(job_id) / 'output' / _REVERSE_MATCHES_FILE
     if not path.is_file():
         raise HTTPException(

@@ -131,6 +131,8 @@ class V4JobListItem(BaseModel):
     created_at: str
     updated_at: str
     input_files: list[str] = []
+    # 任务归属账号（仅展示；权限判断仍用 Job.owner_id）
+    owner_username: Optional[str] = None
 
 
 # ============================================================================
