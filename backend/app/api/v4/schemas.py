@@ -248,6 +248,8 @@ class V4HistoryItem(BaseModel):
     """
 
     job_id: str
+    # 任务归属账号（仅展示；权限判断仍用 manifest 的 owner_id）
+    owner_username: Optional[str] = None
     task_type: str = ""
     # JobStatus 的取值；目录里没有可读 manifest（上传失败留下的残留目录）时为 "unknown"
     status: str = "unknown"
