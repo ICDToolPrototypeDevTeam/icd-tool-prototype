@@ -11,12 +11,14 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import unquote
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pymongo.errors import PyMongoError
 
 # 必须在导入 app.api.v4.router 之前加载 backend/.env：auth/backend.py 在导入期
 # 构造 auth_backend，需要 AUTH_JWT_SECRET 等环境变量。容器内由 compose env_file 注入。
@@ -92,7 +94,26 @@ async def lifespan(app: FastAPI):
     await close_db()
 
 
-app = FastAPI(title='ICD工具原型', lifespan=lifespan)
+# 交互式文档默认开启，便于开发；服务器部署通过 ICD_DOCS_ENABLED=0/false/no 关闭，
+# 避免把 /docs、/openapi.json 暴露在生产端口上（设计 D11）。
+_docs_enabled = (
+    os.getenv('ICD_DOCS_ENABLED', '1').strip().lower() not in ('0', 'false', 'no')
+)
+
+app = FastAPI(
+    title='ICD工具原型',
+    lifespan=lifespan,
+    docs_url='/docs' if _docs_enabled else None,
+    redoc_url='/redoc' if _docs_enabled else None,
+    openapi_url='/openapi.json' if _docs_enabled else None,
+)
+
+
+@app.exception_handler(PyMongoError)
+async def _mongo_unavailable_handler(request, exc: PyMongoError) -> JSONResponse:
+    """运行中 Mongo 失联时，认证依赖抛出的 PyMongoError 统一转 503，不返回 500 堆栈。"""
+    return JSONResponse(status_code=503, content={'detail': 'database unavailable'})
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -104,6 +125,26 @@ app.add_middleware(
 
 # V4: /api/v4/* 路由（V4 反向管线 + 3 类下载）
 app.include_router(v4_router, prefix='/api/v4')
+
+
+def _safe_static_candidate(static_dir: Path, full_path: str) -> Path | None:
+    """把请求路径解析到静态目录内；越界、含 `..` 段或文件不存在时返回 None。
+
+    服务器部署中 output/ 与 static/ 同级，SPA 兜底若直接拼接路径，可通过
+    `../output/...`（含 `%2e%2e` 编码形式）绕过 API 鉴权读取任务产物或 .env。
+    这里先解码、拒绝任何 `..` 段，再用 resolve + relative_to 做物理路径限定。
+    """
+    decoded = unquote(full_path)
+    if '..' in Path(decoded).parts:
+        return None
+    try:
+        resolved_dir = static_dir.resolve()
+        resolved = (resolved_dir / decoded).resolve()
+        resolved.relative_to(resolved_dir)
+    except (OSError, ValueError):
+        return None
+    return resolved if resolved.is_file() else None
+
 
 # 前端静态资源挂载 + SPA fallback，两种触发方式：
 #   1) 桌面打包：PyInstaller 运行时（sys.frozen=True），取可执行文件同级 static/；
@@ -122,7 +163,16 @@ if _static_env or getattr(sys, 'frozen', False):
 
         @app.get('/{full_path:path}', include_in_schema=False)
         async def _spa(full_path: str):
-            candidate = _static_dir / full_path
-            if candidate.is_file():
+            # /api 未匹配路由必须走 JSON 404，不能回落成前端 index.html。
+            if full_path == 'api' or full_path.startswith('api/'):
+                raise HTTPException(status_code=404, detail='Not Found')
+            # 文档关闭时，这几个路径也不能被 SPA 兜底接住。
+            if not _docs_enabled and full_path in ('docs', 'redoc', 'openapi.json'):
+                raise HTTPException(status_code=404, detail='Not Found')
+            candidate = _safe_static_candidate(_static_dir, full_path)
+            if candidate is not None:
                 return FileResponse(candidate)
-            return FileResponse(_static_dir / 'index.html')
+            index_file = _static_dir / 'index.html'
+            if index_file.is_file():
+                return FileResponse(index_file)
+            raise HTTPException(status_code=404, detail='Not Found')
