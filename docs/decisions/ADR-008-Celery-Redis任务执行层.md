@@ -1,11 +1,11 @@
-# ADR-007 Celery + Redis 任务执行层
+# ADR-008 Celery + Redis 任务执行层
 
 | 项目 | 内容 |
 | --- | --- |
 | 状态 | **已接受**（已实施，待服务器验收） |
 | 生效范围 | 后端任务执行层（反向管线）；前端上传与任务页；部署方式 |
 | 提议日期 | 2026-11-12 |
-| 关联 ADR | ADR-001（V4 后端接入策略）；不改变评分体系、输出文档格式与既有 API 路径 |
+| 关联 ADR | ADR-001（V4 后端接入策略）；ADR-007（用户登录与账号隔离，与本 ADR 合并发布）；不改变评分体系、输出文档格式与既有 API 路径 |
 
 ---
 
@@ -86,10 +86,10 @@ Worker 进程写 `job.log`；API 进程的日志接口按字节偏移增量读�
 
 ### 部署
 
-- 由「单后端容器」变为三个服务：`redis` + `backend`（API）+ `worker`；三者共享 `backend/output` 卷；
+- 由「单后端容器」变为 `redis` + `backend`（API）+ `worker` 三个服务；与 ADR-007 的 `mongo`（账号库）合并发布后，最终部署形态为四个容器，四者共享 `backend/output` 卷；
 - 新增环境变量：`JOB_EXECUTOR`、`CELERY_BROKER_URL`、`CELERY_QUEUE`（可选）、`FORWARD_PIPELINE_ENABLED`（可选）、`ICD_WORKER_CONCURRENCY`、`ICD_WORKER_MEM_LIMIT`、`ICD_WORKER_MEMSWAP_LIMIT`、`ICD_REDIS_MEM_LIMIT`；
-- 离线服务器需额外导入 `redis:7-alpine` 镜像；
-- 内存预算必须显式分配（API / Redis / Worker），否则 20 并发长任务可能触发 OOM（见部署说明 §5.4、§5.5）。
+- 离线服务器需额外导入 `redis:7-alpine` 镜像（与 ADR-007 的 `mongo-image.tar.gz` 一并导入）；
+- 内存预算必须显式分配（API / Worker / Redis / Mongo），否则 20 并发长任务可能触发 OOM（见部署说明 §5.4、§5.5）。
 
 ### 行为
 
@@ -108,7 +108,7 @@ Worker 进程写 `job.log`；API 进程的日志接口按字节偏移增量读�
 
 1. **扩大进程内线程池到 20**：改动最小，但状态仍在进程内存，API 重启即丢任务；GIL 下 20 个 CPU/IO 混合任务相互拖慢；无法多副本。否决。
 2. **RQ / Huey / Dramatiq**：能力接近，但用户明确选择 Celery，且 Celery 的 prefork 模型对「一子进程一长任务」更直接。否决。
-3. **Celery + 数据库结果后端**：引入数据库违背项目「暂不引入数据库」的边界（ADR-001 时代约束），且 result backend 不解决状态一致性问题——`job.json` 已足够。否决。
+3. **Celery + 数据库结果后端**：账号库引入 Mongo（ADR-007）不改变「任务结果不落数据库」的边界；且 result backend 不解决状态一致性问题——`job.json` 已足够。否决。
 4. **Kubernetes 一任务一 Pod**：运维复杂度远超原型阶段需要。否决。
 
 ## 状态

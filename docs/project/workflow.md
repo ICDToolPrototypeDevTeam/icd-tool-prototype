@@ -243,7 +243,7 @@ inline 模式（pytest / 回滚）继续使用 `job_scheduler.py` 进程内线�
 5. **追溯表预筛选（可选）**：仅 `enable_traceability_prefilter=true` 时走 `matching/traceability.py`，否则 `_match_reverse_with_trace` 跳过。
 6. **降级保护**：Step 4 的 `_judge_with_degradation()` 在每 case 前过滤 unhealthy provider，已熔断的 provider 不再发起 HTTP 调用。任务提交受信号量限流（`DEGRADATION_MAX_INFLIGHT`，默认 6），超限任务在 submit 前阻塞等待。超时的 provider 先补 error judgment 占位而不中断 case，任务本体转入后台线程池。Step 4.5 在总预算（`DEGRADATION_DRAIN_BUDGET`，默认 300s）内统一 join，drain 任务数受上限约束（`DEGRADATION_DRAIN_MAX_TASKS`，默认 60），超限任务被 cancel（未执行的取消，已执行的结果丢弃）。迟到的有效结果替换占位后进入 Step 5 共识。Step 4 失败兜底（JSON 解析失败 / API 错误 / 重试耗尽）统一归一为 `coverage_status="error"`。Step 5 的 `_apply_degradation_review()` 对 Review Agent 输出做后处理，不修改 `review_judgments()` 本身；Step 5.6 复查后重新应用降级约束。降级 star cap 与 5 星体系一致（0 存活 → 1★、1 存活 → ≤1★、2 存活 → ≤2★，3 存活不限）。
 7. **RPDU refine 后处理（可选 Step 3.5）**：仅 RPDU profile 启用（`profile.profile_id == "rpdu" and not no_refine`）。`refine/runner.run_pipeline_refined_stage()` 重建完整 ICD Block 索引后做无关过滤 + 精确补采 + 同义词补采，覆盖写盘 `reverse_matches.json` 后重建 cases。`refine=False` 或 `no_refine=True` 时跳过此步，行为与 refine 引入前字节一致；其他 profile（AMS/FGMC/HSCU）行为字节不变。
-8. **执行层不写死在路由**：任务投递、Worker 执行、控制面与失联巡检统一在 `backend/app/execution/`；`api/v4/*` 只调用其接口。Celery 模式只接入反向管线，正向入口保留但后端返回 503（ADR-007）。上传按 50MB/文件、200MB/请求限额流式落盘。
+8. **执行层不写死在路由**：任务投递、Worker 执行、控制面与失联巡检统一在 `backend/app/execution/`；`api/v4/*` 只调用其接口。Celery 模式只接入反向管线，正向入口保留但后端返回 503（ADR-008）。上传按 50MB/文件、200MB/请求限额流式落盘。
 
 ## 12. 异常处理
 
