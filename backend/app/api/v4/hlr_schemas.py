@@ -17,7 +17,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from app.api.v4.coverage import ALLOWED_CONTROLLER_PROFILES
 from app.api.v4.schemas import (
@@ -28,6 +28,8 @@ from app.api.v4.schemas import (
     V4HLRSchemaScanResponse,
     V4HLRSchemaUpdate,
 )
+from app.auth.deps import current_admin, current_user
+from app.auth.models import User
 from app.v4 import hlr_schema_store as store
 from app.v4.parsers.hlr_schema import (
     BuiltinTemplate,
@@ -123,8 +125,14 @@ async def _write_upload(file: UploadFile, path: Path) -> None:
 
 
 @router.get('/hlr-schemas', response_model=V4HLRSchemaListResponse)
-def list_hlr_schemas() -> V4HLRSchemaListResponse:
-    """内置模板在前（AMS/FGMC/HSCU/RPDU），自定义样式按创建时间在后。"""
+def list_hlr_schemas(
+    _user: User = Depends(current_user),
+) -> V4HLRSchemaListResponse:
+    """内置模板在前（AMS/FGMC/HSCU/RPDU），自定义样式按创建时间在后。
+
+    样式为全局共享资源：查看 / 扫描 / 试解析对全部登录用户开放，只有新建 /
+    更新 / 删除限管理员。
+    """
     try:
         schemas = [_item_from_builtin(tpl) for tpl in builtin_templates()]
     except ProfileLoadError as exc:
@@ -144,8 +152,10 @@ def list_hlr_schemas() -> V4HLRSchemaListResponse:
 @router.post(
     '/hlr-schemas', response_model=V4HLRSchemaItem, status_code=201
 )
-def create_hlr_schema(payload: V4HLRSchemaCreate) -> V4HLRSchemaItem:
-    """新建自定义样式；样式配置非法 422，名称冲突 409。"""
+def create_hlr_schema(
+    payload: V4HLRSchemaCreate, _user: User = Depends(current_admin)
+) -> V4HLRSchemaItem:
+    """新建自定义样式（仅管理员）；样式配置非法 422，名称冲突 409。"""
     try:
         schema = validate_schema_payload(payload.config)
         stored = store.create_custom_schema(payload.name, schema)
@@ -160,6 +170,7 @@ def create_hlr_schema(payload: V4HLRSchemaCreate) -> V4HLRSchemaItem:
 @router.post('/hlr-schemas/scan', response_model=V4HLRSchemaScanResponse)
 async def scan_hlr_schema(
     file: UploadFile = File(...),
+    _user: User = Depends(current_user),
 ) -> V4HLRSchemaScanResponse:
     """扫描上传 .docx 的表格结构；只做本地解析，不调用 LLM。"""
     _require_docx(file.filename)
@@ -181,6 +192,7 @@ async def preview_hlr_schema(
     file: UploadFile = File(...),
     schema: str = Form(...),
     controller_profile: str = Form(...),
+    _user: User = Depends(current_user),
 ) -> V4HLRSchemaPreviewResponse:
     """用指定样式试解析上传 .docx；只做本地解析，不调用 LLM。"""
     _require_docx(file.filename)
@@ -237,9 +249,11 @@ async def preview_hlr_schema(
 
 @router.put('/hlr-schemas/{schema_id}', response_model=V4HLRSchemaItem)
 def update_hlr_schema(
-    schema_id: str, payload: V4HLRSchemaUpdate
+    schema_id: str,
+    payload: V4HLRSchemaUpdate,
+    _user: User = Depends(current_admin),
 ) -> V4HLRSchemaItem:
-    """更新自定义样式；内置模板只读（403），未知 ID 404。"""
+    """更新自定义样式（仅管理员）；内置模板只读（403），未知 ID 404。"""
     try:
         schema = validate_schema_payload(payload.config)
         stored = store.update_custom_schema(schema_id, payload.name, schema)
@@ -255,8 +269,10 @@ def update_hlr_schema(
 
 
 @router.delete('/hlr-schemas/{schema_id}')
-def delete_hlr_schema(schema_id: str) -> dict:
-    """删除自定义样式；内置模板只读（403），未知 ID 404。"""
+def delete_hlr_schema(
+    schema_id: str, _user: User = Depends(current_admin)
+) -> dict:
+    """删除自定义样式（仅管理员）；内置模板只读（403），未知 ID 404。"""
     try:
         store.delete_custom_schema(schema_id)
     except store.SchemaReadOnlyError as exc:

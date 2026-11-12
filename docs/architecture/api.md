@@ -18,7 +18,13 @@ API 设计应遵守以下原则：
 
 | 接口                                             | 方法     | 说明                              |
 | ---------------------------------------------- | ------ | ------------------------------- |
-| `/api/v4/health`                               | `GET`  | 后端健康检查                          |
+| `/api/v4/health`                               | `GET`  | 后端健康检查（含 MongoDB 可用性；未登录可访问） |
+| `/api/v4/auth/login`                           | `POST` | 用户名 + 密码登录，下发 HttpOnly Cookie |
+| `/api/v4/auth/logout`                          | `POST` | 退出登录并清除 Cookie |
+| `/api/v4/auth/me`                              | `GET`  | 当前登录用户（`id` / `username` / `is_admin`） |
+| `/api/v4/admin/users`                          | `GET`  | 管理员查询全部账号 |
+| `/api/v4/admin/users`                          | `POST`  | 管理员创建账号（请求字段 `is_admin`） |
+| `/api/v4/admin/users/{user_id}`                | `PATCH` | 管理员重置密码 / 禁用启用 / 设置取消管理员（请求字段 `is_superuser`） |
 | `/api/v4/coverage-analysis`                    | `POST` | 上传输入文件并创建 V4 反向管线任务               |
 | `/api/v4/completeness-analysis`                | `POST` | 上传输入文件并创建 V4 正向完整性分析任务            |
 | `/api/v4/jobs`                                 | `GET`  | 查询未完成/中断任务列表（可选 `status`、`task_type` 过滤） |
@@ -47,17 +53,27 @@ API 设计应遵守以下原则：
 
 `{model}` ∈ `{deepseek, minimax, qwen}`。
 
+除 `GET /api/v4/health` 与 `POST /api/v4/auth/login` 外，本版所有接口都要求登录；任务级接口再按归属校验。完整权限矩阵、Cookie 参数与 401/403/404/503 语义见第 17 节。
+
 ## 3. 健康检查接口
 
 ```text
 GET /api/v4/health
 ```
 
-预期返回：
+预期返回（MongoDB 可用时）：
 
 ```json
-{ "status": "ok", "api_version": "v4" }
+{ "status": "ok", "api_version": "v4", "database": "ok" }
 ```
+
+MongoDB 不可用时返回 **503**：
+
+```json
+{ "detail": "database unavailable" }
+```
+
+该接口无需登录，供部署自检与前端连接状态展示使用。
 
 ## 4. 创建分析任务接口
 
@@ -65,6 +81,8 @@ GET /api/v4/health
 POST /api/v4/coverage-analysis
 Content-Type: multipart/form-data
 ```
+
+需登录（未登录 → 401）。创建成功后后端把当前登录用户写入任务归属（`owner_id` / `owner_username`），后续任务级接口按该归属校验。
 
 请求字段（multipart）：
 
@@ -120,6 +138,8 @@ Content-Type: multipart/form-data
 ```text
 GET /api/v4/jobs/{job_id}
 ```
+
+需登录；普通用户仅能访问 `owner_id` 属于自己的任务，管理员可访问全部。任务不存在、无归属或归属不是当前用户 → **404**（不区分“不存在”与“无权访问”，避免用状态码差异探测他人任务）。
 
 预期返回（V4JobStatusResponse）：
 
@@ -253,7 +273,7 @@ GET /api/v4/jobs/{job_id}/outputs/consensus-docx
 GET /api/v4/jobs/{job_id}/outputs/consistency/{model}
 ```
 
-`{model}` ∈ `{deepseek, minimax, qwen}`（白名单校验，非法 → 400）。
+需登录；下载前先按任务归属校验（普通用户仅本人，管理员全部），越权或任务不存在统一 404，不得先返回文件存在性差异。`{model}` ∈ `{deepseek, minimax, qwen}`（白名单校验，非法 → 400）。
 
 5 类文件命名（与 `backend/app/api/v4/runner.V4_OUTPUT_FILES` SSoT 一致）：
 
@@ -292,6 +312,10 @@ Content-Type：
 | 任务 `running` 时调 `/result` | 409 | `job not finished: status=...` |
 | 任务 `failed` 时调 `/result` | 409 | |
 | 任务不存在 | 404 | `job not found` |
+| 未登录访问受保护接口 | 401 | 登录状态与账号启用状态由 fastapi-users 判定 |
+| 普通用户访问管理员接口 | 403 | `/settings`、`/admin/users*`、历史删除、HLR 样式写入 |
+| 已登录访问他人任务 / 无归属任务 | 404 | 与任务不存在同一响应，不暴露任务是否存在 |
+| MongoDB 不可用 | 503 | `{"detail": "database unavailable"}` |
 
 ## 9. 输出路径布局
 
@@ -346,6 +370,8 @@ V4 `input/traceability/` 子目录用于 `enable_traceability_prefilter=true` �
 POST /api/v4/completeness-analysis
 Content-Type: multipart/form-data
 ```
+
+需登录（未登录 → 401）。创建成功后任务归属写入当前用户，与反向任务同一套归属 / 访问规则。
 
 请求字段（multipart）：
 
@@ -473,11 +499,14 @@ GET /api/v4/jobs?status=interrupted&task_type=correctness
     "message": "Step 4/6: Multi-agent judging",
     "created_at": "ISO-8601",
     "updated_at": "ISO-8601",
-    "input_files": ["HLR.docx", "Publisher.xlsx"]
+    "input_files": ["HLR.docx", "Publisher.xlsx"],
+    "owner_username": "<username> | null"
   }
 ]
 ```
 
+- `owner_username` 为任务归属账号，仅用于展示（管理员视角）；权限判断使用 manifest / Job 的 `owner_id`，该字段不参与鉴权。
+- 需登录。普通用户只返回 `owner_id` 等于自己的任务；管理员返回全部任务（含无归属的 CLI / 旧任务）。
 - 两个 query 参数均可选：`status` 按状态精确过滤，`task_type` 按任务类型过滤。
 - 内存中只保留本次进程创建的任务与启动时载入的 `interrupted` 任务，因此该接口不会返回历史 `completed` / `failed` 任务。`canceled` 同样**不在**启动载入范围内：被终止的任务只在**本次进程存活期间**可续跑 / 可放弃，容器重启后即从列表中消失（与 `completed` / `failed` 同待遇）。**看历史任务请用 `GET /api/v4/history`（第 14 节），那是磁盘口径的接口。**
 - `input_files` 取自 manifest 参数快照中的输入文件（仅文件名，不含路径）；CLI 等无 manifest 的任务为空数组。
@@ -552,6 +581,8 @@ POST /api/v4/jobs/{job_id}/abandon
   "schema_version": 1,
   "job_id": "<uuid>",
   "task_type": "correctness | completeness",
+  "owner_id": "<user _id> | null",
+  "owner_username": "<username> | null",
   "status": "pending | running | completed | failed | interrupted | abandoned | canceled",
   "message": "Step 1/6: Parsing input files",
   "created_at": "ISO-8601",
@@ -563,6 +594,8 @@ POST /api/v4/jobs/{job_id}/abandon
 ```
 
 `resumed` / `reuse` 为中断恢复可视化字段（见第 5 节）：恢复运行开始与每完成一条判定（反向按 case）时随 `_persist` 落盘，进程被杀后计数不丢；正向任务的 `reuse` 恒为 `{"reused": 0, "rerun": 0}`（新正向管线不产生该计数，见第 13.2 节）。旧 manifest 无这两键时按默认值（`false` / `null`）加载，无需迁移。
+
+`owner_id` / `owner_username` 为任务归属字段：`owner_id` 是权限判断键，`owner_username` 仅用于展示。创建任务时写入当前登录用户；续跑沿用原值，不允许修改。旧 manifest（升级前创建）与 CLI 任务没有这两键，按 `null`（未归属）加载——只有管理员可见、可下载、可删除，不做批量迁移。
 
 `params` 中的路径一律为相对 `job_dir` 的相对路径，保证输出目录整体搬迁后仍可恢复。不持久化任务结果（重跑时重新生成）。无 `job_dir` 的任务（如 CLI 直跑 `app/v4/cli.py`）不写 manifest，行为与本次改动前一致。
 
@@ -590,6 +623,7 @@ GET /api/v4/history
 [
   {
     "job_id": "<uuid>",
+    "owner_username": "<username> | null",
     "task_type": "correctness | completeness | \"\"",
     "status": "pending | running | completed | failed | interrupted | abandoned | canceled | unknown",
     "message": "Step 6/6: Generating report",
@@ -622,7 +656,8 @@ GET /api/v4/history
 - `size_bytes` 为该任务目录占用的字节数（**含 `input/` 里用户上传的原始文件**与全部中间产物），供删除前告知释放空间。
 - `mock` 含义同状态接口：模拟数据不可用于验收。
 - `token_usage` 读 manifest 的 `token_usage` 字段，口径同状态接口：累计总量；**旧任务无该键 → `null`**（前端不显示），新任务的 `0`（如 MOCK）照常显示。
-- 该接口不做鉴权（与其它接口一致），只读磁盘，不改变任何状态。
+- `owner_username` 为任务归属账号（仅管理员视角展示）；权限判断使用 manifest 的 `owner_id`，该字段不参与鉴权。
+- 需登录。普通用户只返回 `owner_id` 等于自己的目录；管理员返回全部目录。未归属目录（旧版本遗留 / manifest 损坏 / 无 manifest 的残留目录）只对管理员可见。该接口只读磁盘，不改变任何状态。
 
 ### 14.2 删除历史结果（硬删除）
 
@@ -633,7 +668,7 @@ Content-Type: application/json
 { "job_ids": ["<uuid>", "..."], "confirm": true }
 ```
 
-删除粒度是**整个任务目录** `output/v4/{job_id}/`（`shutil.rmtree`），**包括 `input/` 里用户上传的原始文件**与全部中间产物。不进回收站、没有撤销，因此设了三道关卡：
+仅管理员可调用（普通用户 → **403**）；管理员可删除任意账号的历史任务。删除粒度是**整个任务目录** `output/v4/{job_id}/`（`shutil.rmtree`），**包括 `input/` 里用户上传的原始文件**与全部中间产物。不进回收站、没有撤销，因此设了三道关卡：
 
 | 关卡 | 行为 |
 | --- | --- |
@@ -662,7 +697,7 @@ Content-Type: application/json
 GET /api/v4/jobs/{job_id}/logs/download
 ```
 
-返回任务输出目录下的 `job.log`（`output/v4/{job_id}/job.log`）：该任务的 stdout/stderr 全集，由 Tee **逐行同步落盘**（封顶 5 MB），包含失败堆栈与执行过程；任务中途被 OOM 杀掉也已写到最后一行为止。
+返回任务输出目录下的 `job.log`（`output/v4/{job_id}/job.log`）：该任务的 stdout/stderr 全集，由 Tee **逐行同步落盘**（封顶 5 MB），包含失败堆栈与执行过程；任务中途被 OOM 杀掉也已写到最后一行为止。需登录；下载前按任务归属校验（普通用户仅本人，管理员全部），越权或任务不存在统一 404。
 
 - `Content-Type: text/plain`；下载保存名 `job_{job_id 前 8 位}_{YYYYMMDD_HHMM}.log`（时刻取日志最后写入时刻、东八区，与第 7 节产物同规则：重复下载文件名稳定，任务号前缀让同批任务的日志区分得开）。
 - 与第 2 节概览里的 `/jobs/{job_id}/logs`（JSON 增量拉取，**只认内存里的任务**，进程重启后 404）互补：本接口走磁盘口径，不查内存登记表，因此任务失败 / 中断 / 被终止 / 进程重启之后照样下得动 —— 这些正是最需要日志的场景。
@@ -679,7 +714,7 @@ GET /api/v4/jobs/{job_id}/logs/download
 GET /api/v4/jobs/{job_id}/intermediates/reverse-matches
 ```
 
-返回任务输出目录下的 `reverse_matches.json`（`output/v4/{job_id}/output/reverse_matches.json`）：Step 3 匹配阶段的原始明细（每条 SWHLR 的 `match_type`、命中的 `matched_profile_keys`、匹配证据与全局统计），排查「某条 SWHLR 为什么没匹配上 / 匹配到了什么」时最直接的一手数据。
+返回任务输出目录下的 `reverse_matches.json`（`output/v4/{job_id}/output/reverse_matches.json`）：Step 3 匹配阶段的原始明细（每条 SWHLR 的 `match_type`、命中的 `matched_profile_keys`、匹配证据与全局统计），排查「某条 SWHLR 为什么没匹配上 / 匹配到了什么」时最直接的一手数据。需登录；查看前按任务归属校验（普通用户仅本人，管理员全部），越权或任务不存在统一 404。
 
 - **浏览器内查看**：`Content-Type: application/json` 且**不发** `Content-Disposition`（未带 `filename`），点击后在新标签页按 JSON 渲染，不落盘；需要留档时在页内另存即可。响应体即磁盘文件原文，不重新序列化（与同事参考文件 diff 时逐字节可比）。
 - 与第 7 节 `/outputs/*` 的分工：那是七类对外产物的**下载**；本接口是 JSON 中间产物的**只读查看**。按 ADR-001 D7 的口径，JSON 中间产物默认不暴露，`reverse_matches.json` 是按 D7 预留的「新开子路由」方式开放的**唯一例外**（第 10 节），其余 6 类仍不暴露。
@@ -696,13 +731,15 @@ GET /api/v4/jobs/{job_id}/intermediates/reverse-matches
 
 | 场景 | HTTP |
 | --- | --- |
+| 未登录 | 401 |
+| 普通用户调用删除（仅管理员） | 403 |
 | `job_ids` 为空，或缺 `confirm=true` | 400 |
 | `job_id` 非法（非 uuid / 越出 `output/v4/`） | 400 |
 | 批次内有任务正在运行 | 409 |
 
 ## 15. 运行时模型设置接口
 
-用于在服务器部署完成后，直接从前端修改三个模型名与思考模式开关，避免为改配置重新部署/重建容器。
+用于在服务器部署完成后，直接从前端修改三个模型名与思考模式开关，避免为改配置重新部署/重建容器。**仅管理员可读写**（普通用户 → 403）；模型设置是全局配置，不区分账号。
 
 ### 15.1 查询设置
 
@@ -776,6 +813,8 @@ Content-Type: application/json
 
 | 场景 | HTTP |
 | --- | --- |
+| 未登录 | 401 |
+| 普通用户访问（仅管理员） | 403 |
 | 模型名为空 / 超长 / 含控制字符 / 类型不对 | 422 |
 | 思考开关不是布尔值 | 422 |
 | 设置文件无法写入（权限、磁盘等） | 500 |
@@ -785,7 +824,7 @@ Content-Type: application/json
 自定义 HLR 表格样式用于适配不同控制器 / 不同文档中 SWHLR Word 需求表的行标签写法与需求表位置。样式只影响 Step 1 的 HLR 解析（行标签映射与需求表识别），不改变后续步骤的输入契约（下游只消费 `requirement_id` / `content` / 可选 `rationale`）。
 
 - **内置模板**：`builtin_ams` / `builtin_fgmc` / `builtin_hscu` / `builtin_rpdu`，由现有控制器 profile 派生，**只读**（`source=builtin`、`deletable=false`，修改 / 删除 → 403）；`usable_for_custom_style=false` 仅出现在 `builtin_rpdu`（RPDU 使用内置解析路径，不支持自定义表格样式）。
-- **自定义样式**：服务端持久化在 `OUTPUT_DIR/hlr_schemas.json`（Docker 中即挂载的 `./backend/output/hlr_schemas.json`），**全局共享**（所有用户 / 会话可见），当前无鉴权与用户隔离。
+- **自定义样式**：服务端持久化在 `OUTPUT_DIR/hlr_schemas.json`（Docker 中即挂载的 `./backend/output/hlr_schemas.json`），**全局共享**（所有登录用户可见，不按账号隔离）。权限：登录用户可查看、扫描、试解析；新建 / 更新 / 删除仅管理员（普通用户 → 403）。
 - **样式配置结构**（新建 / 更新请求中的 `config`，以及列表响应中的 `config`）：
 
 ```json
@@ -816,7 +855,7 @@ Content-Type: application/json
 GET /api/v4/hlr-schemas
 ```
 
-预期返回（`V4HLRSchemaListResponse`）：内置模板在前（`builtin_ams` → `builtin_fgmc` → `builtin_hscu` → `builtin_rpdu`），自定义样式按创建顺序在后。
+需登录（任意登录用户可查看）。预期返回（`V4HLRSchemaListResponse`）：内置模板在前（`builtin_ams` → `builtin_fgmc` → `builtin_hscu` → `builtin_rpdu`），自定义样式按创建顺序在后。
 
 ```json
 {
@@ -856,6 +895,8 @@ Content-Type: application/json
 { "name": "某型号需求表", "config": { "version": 1, "mode": "docx_vertical", "fields": {...}, "identify": {...} } }
 ```
 
+仅管理员可调用（普通用户 → 403）。
+
 - 成功 → **201** + 样式项（结构同 16.1 的列表项，`source=custom`、`deletable=true`）。
 - 名称去首尾空格后 1–50 字符、不含控制字符；与已有自定义样式或内置模板显示名重名（忽略大小写）→ **409**。
 - `config` 校验失败 → **422**。
@@ -869,6 +910,8 @@ Content-Type: application/json
 { "name": "...", "config": {...} }
 ```
 
+仅管理员可调用（普通用户 → 403）。
+
 - 全量替换名称与配置；成功 → **200** + 样式项。
 - 内置模板（`builtin_*`）→ **403**；未知 `schema_id` → **404**；名称冲突 → **409**；`config` 校验失败 → **422**。
 
@@ -878,7 +921,7 @@ Content-Type: application/json
 DELETE /api/v4/hlr-schemas/{schema_id}
 ```
 
-成功 → `{"deleted": true}`。内置模板 → **403**；未知 `schema_id` → **404**。
+仅管理员可调用（普通用户 → 403）。成功 → `{"deleted": true}`。内置模板 → **403**；未知 `schema_id` → **404**。
 
 ### 16.5 扫描文档表格
 
@@ -887,7 +930,7 @@ POST /api/v4/hlr-schemas/scan
 Content-Type: multipart/form-data
 ```
 
-请求字段：`file`（UploadFile，仅 `.docx`，非 `.docx` → 422）。本地解析，**不调用 LLM**。
+需登录（任意登录用户可调用）。请求字段：`file`（UploadFile，仅 `.docx`，非 `.docx` → 422）。本地解析，**不调用 LLM**。
 
 预期返回（`V4HLRSchemaScanResponse`）：
 
@@ -927,7 +970,7 @@ Content-Type: multipart/form-data
 | `schema` | str (form, JSON) | 是 | 样式引用，三种形式同第 4 节 `hlr_schema`（完整配置 / `template_id` / `schema_id`） |
 | `controller_profile` | str (form) | 是 | 系统类型 ∈ `{ams, fgmc, hscu, rpdu, generic}` |
 
-本地解析，**不调用 LLM**。预期返回（`V4HLRSchemaPreviewResponse`）：
+需登录（任意登录用户可调用）。本地解析，**不调用 LLM**。预期返回（`V4HLRSchemaPreviewResponse`）：
 
 ```json
 {
@@ -954,6 +997,8 @@ Content-Type: multipart/form-data
 
 | 场景 | HTTP |
 | --- | --- |
+| 未登录 | 401 |
+| 普通用户新建 / 更新 / 删除样式（仅管理员） | 403 |
 | 新建 / 更新时名称非法（空 / 超 50 字符 / 含控制字符、不可见格式字符或孤立代理项）或 `config` 校验失败 | 422 |
 | `scan` / `preview` 上传文件非 `.docx` | 422 |
 | `scan` / `preview` 上传文件超过 50 MB（分块读取，超限即拒绝） | 422（`文件过大`） |
@@ -963,3 +1008,142 @@ Content-Type: multipart/form-data
 | 修改 / 删除内置模板 | 403 |
 | `{schema_id}` 不存在（PUT / DELETE / `preview` 的 `schema_id` 引用） | 404 |
 | 内置控制器配置加载失败（部署包缺失或损坏 profile 目录）：GET 列表与 `preview` 映射为 422；`POST` / `PUT` 在名称唯一性检查中也会间接加载内置模板，部署包损坏时为 500 | 422 / 500 |
+
+## 17. 认证、账号管理与权限（阶段 A）
+
+登录与账号隔离的设计背景与决策见 ADR-007；本节是接口权限矩阵、认证接口与错误语义的唯一事实源。默认情况下，除 `GET /api/v4/health` 与 `POST /api/v4/auth/login` 外，所有接口都要求登录。
+
+### 17.1 权限矩阵
+
+| 资源 / 接口 | 未登录 | 普通用户 | 管理员 |
+| --- | --- | --- | --- |
+| `GET /api/v4/health` | 允许 | 允许 | 允许 |
+| `POST /api/v4/auth/login` | 允许 | 允许 | 允许 |
+| `POST /api/v4/auth/logout`、`GET /api/v4/auth/me` | 拒绝（401） | 本人 | 本人 |
+| `POST /api/v4/coverage-analysis`、`POST /api/v4/completeness-analysis` | 拒绝（401） | 允许 | 允许 |
+| `GET /api/v4/jobs` | 拒绝（401） | 仅本人 | 全部 |
+| `GET /api/v4/jobs/{job_id}`、`/result`、`/logs`、`/logs/download` | 拒绝（401） | 仅本人 | 全部 |
+| `POST /api/v4/jobs/{job_id}/resume`、`/abandon`、`/cancel`、`/force-cancel` | 拒绝（401） | 仅本人 | 全部 |
+| `/api/v4/jobs/{job_id}/outputs/*`、`/intermediates/reverse-matches` | 拒绝（401） | 仅本人 | 全部 |
+| `GET /api/v4/history` | 拒绝（401） | 仅本人 | 全部 |
+| `POST /api/v4/history/delete` | 拒绝（401） | 拒绝（403） | 允许 |
+| `GET /api/v4/settings`、`PUT /api/v4/settings` | 拒绝（401） | 拒绝（403） | 允许 |
+| `GET /api/v4/hlr-schemas`、`POST /api/v4/hlr-schemas/scan`、`POST /api/v4/hlr-schemas/preview` | 拒绝（401） | 允许 | 允许 |
+| `POST /api/v4/hlr-schemas`、`PUT/DELETE /api/v4/hlr-schemas/{schema_id}` | 拒绝（401） | 拒绝（403） | 允许 |
+| `/api/v4/admin/users*` | 拒绝（401） | 拒绝（403） | 允许 |
+
+约定：
+
+- **任务归属**：`owner_id`（`str(User._id)`）是权限判断键；`owner_username` 仅用于展示。任务不存在、无归属或归属不是当前用户时统一返回 **404**，不区分“不存在”与“无权访问”。
+- **未归属任务**：升级前已存在的任务目录、CLI 任务与 manifest 损坏的目录只对管理员可见、可下载、可删除。
+- **管理员**：可访问全部账号的任务与历史，包括无归属任务。
+- **MongoDB 不可用**：受保护接口返回 **503** `{"detail": "database unavailable"}`；`GET /health` 同样返回 503。
+
+### 17.2 登录 / 登出 / 当前用户
+
+```text
+POST /api/v4/auth/login
+Content-Type: application/x-www-form-urlencoded
+
+username=<用户名>&password=<密码>
+```
+
+- 成功 → **204**，响应 `Set-Cookie` 下发登录 Cookie；
+- 用户名或密码错误、账号被禁用 → **400**（fastapi-users 的登录失败响应，不区分具体原因）；
+- MongoDB 不可用 → **503** `{"detail": "database unavailable"}`；
+- 本接口不要求登录。
+
+Cookie 参数：
+
+| 参数 | 值 |
+| --- | --- |
+| 名称 | `AUTH_COOKIE_NAME`，默认 `icd_auth` |
+| `HttpOnly` | 是 |
+| `SameSite` | `Lax` |
+| `Path` | `/` |
+| 有效期 | `AUTH_TOKEN_TTL_SECONDS`，默认 28800 秒（8 小时） |
+| `Secure` | `AUTH_COOKIE_SECURE`，内网 HTTP 默认关闭；启用 TLS 后设为 `1` |
+
+`SameSite=Lax` + 同源部署下，跨站 POST 不携带 Cookie；本阶段不额外实现 CSRF Token。
+
+```text
+POST /api/v4/auth/logout
+```
+
+需登录；未登录 → **401**。清除登录 Cookie，成功 → **204**。
+
+```text
+GET /api/v4/auth/me
+```
+
+需登录；未登录 → **401**。预期返回：
+
+```json
+{ "id": "<user _id>", "username": "zhangsan", "is_admin": false }
+```
+
+- `username` 对应存储中的小写用户名；接口不暴露 `email`、密码哈希等内部字段；
+- 登录标识只支持用户名（大小写不敏感），不支持邮箱登录；
+- 账号被禁用后，下一次请求即被拒绝（401），不依赖 JWT 过期；
+- 本阶段不提供刷新 Token；JWT 过期后需重新登录；
+- 管理员重置密码不会使已签发的旧 Cookie 立即失效，最长 8 小时后自然过期（已知限制）。
+
+### 17.3 管理员账号管理
+
+以下接口仅管理员可用；普通用户 → **403**，未登录 → **401**。
+
+```text
+GET /api/v4/admin/users
+```
+
+按 `created_at` 升序返回全部账号（数组）。列表项字段：
+
+```json
+{
+  "id": "<user _id>",
+  "username": "zhangsan",
+  "is_active": true,
+  "is_superuser": false,
+  "created_at": "ISO-8601"
+}
+```
+
+```text
+POST /api/v4/admin/users
+Content-Type: application/json
+
+{ "username": "zhangsan", "password": "<至少 8 位>", "is_admin": false }
+```
+
+- 成功 → **201** + 账号项（结构同上）；
+- **创建请求使用 `is_admin`**（不是 `is_superuser`）；`username` 1–64 字符且不含空白，密码 8–128 字符；
+- 用户名重复（忽略大小写）→ **409**；
+- 用户名统一转小写存储；创建后不可修改。
+
+```text
+PATCH /api/v4/admin/users/{user_id}
+Content-Type: application/json
+
+{ "password": "<新密码，可选>", "is_active": false, "is_superuser": true }
+```
+
+- 三个字段均可选，只提交需要变更的字段；成功 → **200** + 账号项；
+- **更新请求使用 `is_superuser`**（与创建请求的 `is_admin` 不同，注意区分）；
+- 重置密码不需要旧密码；
+- 用户不存在或 `user_id` 非法 → **404**；
+- 禁用 / 降级最后一个活跃管理员 → **409**（系统必须始终保留至少一个活跃管理员）；
+- 本阶段**不提供删除账号接口**，只支持禁用；禁用后保留其历史任务归属。
+
+初始管理员：
+
+- 首次启动且用户集合为空时，从 `ICD_ADMIN_USERNAME` / `ICD_ADMIN_PASSWORD` 创建初始管理员；
+- 未配置这两个变量且用户集合为空 → 后端启动失败并打印明确日志；不存在默认密码；
+- 用户集合非空时忽略初始化变量，不会重置已有账号；
+- 唯一管理员忘记密码时，按部署说明中的 `mongosh` 命令手工恢复。
+
+### 17.4 文档端点与静态兜底
+
+- `ICD_DOCS_ENABLED` 控制 `/docs`、`/redoc`、`/openapi.json`：开发默认开启；取值 `0` / `false` / `no` 时关闭。服务器编排设置 `ICD_DOCS_ENABLED=0`。
+- `/api/*` 未匹配路由返回 JSON 404，不回落为前端 `index.html`。
+- SPA 静态兜底只返回解析后位于静态目录内的文件：请求路径先 URL 解码，含 `..` 段或解析后越界时返回 404，不回落 `index.html`（不做路径纠正）；未登录者不能通过 `/../output/v4/<job_id>/...`（含 `%2e%2e` 编码形式）读取任务产物、`job.json` 或 `.env`。
+- 静态目录本身可公开（登录页需要），但不得暴露静态目录以外的任何文件。

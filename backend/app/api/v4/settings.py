@@ -11,10 +11,12 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from app import runtime_settings
 from app.api.v4.schemas import V4ModelSettings, V4ModelSettingsUpdate
+from app.auth.deps import current_admin
+from app.auth.models import User
 
 
 router = APIRouter()
@@ -25,14 +27,19 @@ def _to_response(settings: runtime_settings.ModelSettings) -> V4ModelSettings:
 
 
 @router.get('/settings', response_model=V4ModelSettings)
-def get_settings() -> V4ModelSettings:
-    """返回当前生效值；未自定义时来自部署配置（.env）或 factory 默认值。"""
+def get_settings(user: User = Depends(current_admin)) -> V4ModelSettings:
+    """返回当前生效值；未自定义时来自部署配置（.env）或 factory 默认值。
+
+    模型设置是全局配置，读写都限管理员（普通用户 403）。
+    """
     return _to_response(runtime_settings.get_model_settings())
 
 
 @router.put('/settings', response_model=V4ModelSettings)
-def update_settings(payload: V4ModelSettingsUpdate) -> V4ModelSettings:
-    """校验并保存模型名与思考开关，立即应用到后续模型调用。"""
+def update_settings(
+    payload: V4ModelSettingsUpdate, user: User = Depends(current_admin)
+) -> V4ModelSettings:
+    """校验并保存模型名与思考开关，立即应用到后续模型调用（仅管理员）。"""
     try:
         updated = runtime_settings.update_model_settings(
             deepseek_model=payload.deepseek_model,

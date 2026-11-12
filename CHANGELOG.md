@@ -2,6 +2,19 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-11-12
+
+### Added
+
+- **用户登录与账号隔离（阶段 A，ADR-007）**：新增 `backend/app/auth/`（fastapi-users 13.0.0 + Beanie/Motor）与 `/api/v4/auth/login`、`/auth/logout`、`/auth/me`、`/admin/users*` 接口。账号为“用户名 + 密码”（用户名统一小写），管理员可创建账号、重置密码、禁用 / 启用、设置 / 取消管理员，不开放自注册，不提供账号删除，且禁止禁用或降级最后一个活跃管理员。登录态使用 HttpOnly Cookie（JWT，`SameSite=Lax`、`Path=/`、默认 8 小时，`Secure` 由 `AUTH_COOKIE_SECURE` 控制）。普通用户只能访问、下载、继续、终止、放弃自己的任务与结果（历史删除仅管理员）；管理员可访问全部任务与历史；升级前的旧任务与 CLI 任务无归属，只对管理员可见。前端新增登录页、登录守卫（`RequireAuth` / `RequireAdmin`）、管理员用户管理页，非管理员隐藏模型设置、用户管理、历史删除与 HLR 样式写入入口。
+- **MongoDB 账号库与离线交付**：`docker-compose.yml` / `docker-compose.server.yml` 新增独立 `mongo` 服务（`mongo:7.0.14`，命名卷 `mongo_data`，healthcheck，后端 `depends_on: service_healthy`）；服务器编排不映射 Mongo 宿主端口、设 `pull_policy: never` 与 `MONGO_MEM_LIMIT`（默认 1g）。`scripts/build-image.sh` 交付包新增 `mongo-image.tar.gz` 及 sha256，`BUILD_INFO` 增加 `mongo_image` / `mongo_archive` / `mongo_sha256` / `mongo_arch`；`backend/.env.example` 新增 `MONGO_URL` / `MONGO_DB` / `AUTH_JWT_SECRET` / `AUTH_TOKEN_TTL_SECONDS` / `AUTH_COOKIE_NAME` / `AUTH_COOKIE_SECURE` / `ICD_ADMIN_USERNAME` / `ICD_ADMIN_PASSWORD` / `ICD_DOCS_ENABLED` / `MONGO_MEM_LIMIT`。MongoDB 只存账号，不存任务与产物。
+- **统一访问校验与静态兜底加固**：所有按 `job_id` 访问的任务级接口经 `app/auth/access.py` 的 `require_job_access()` / `ensure_owner()` 按 `owner_id` 校验（`owner_username` 仅展示）；任务 / 历史列表按 `owner_id` 过滤；越权与任务不存在统一 404，未登录 401，普通用户访问管理员接口 403，Mongo 运行中失联返回 503。SPA 静态兜底改为 `unquote` + 拒绝 `..` + `resolve/relative_to` 限定静态目录，未匹配 `/api/*` 返回 JSON 404；`ICD_DOCS_ENABLED=0` 时关闭 `/docs` / `/redoc` / `/openapi.json`（服务器编排默认关闭）。
+
+### Changed
+
+- **权限变化**：`GET/PUT /api/v4/settings`、`POST /api/v4/history/delete`、HLR 表格样式新建 / 更新 / 删除改为仅管理员；HLR 样式列表 / 扫描 / 试解析对登录用户开放。`GET /jobs`、`GET /history`、任务状态 / 结果 / 日志 / 日志下载 / 产物下载 / 匹配中间产物查看 / 继续 / 放弃 / 终止均按归属过滤；`V4JobListItem` 与 `V4HistoryItem` 新增 `owner_username`（仅展示）。`GET /api/v4/health` 新增 `"database": "ok"`，Mongo 不可用时返回 503。未登录调用受保护接口由原先可用变为 401，属于预期行为变化。
+- **交付形态**：Windows 桌面打包（PyInstaller）本阶段暂停，只保证内网服务器 Docker 部署；任务与分析产物入库（阶段 B）不在本期范围。服务器内存预算需为 Mongo 预留（默认上限 1 GB），物理内存 < 8 GB 需按 `部署说明.md` 重新评估，1–2 GB 机器不满足本方案要求。该改动需**重建后端镜像 / 覆盖前端产物 / 重新导出交付包**才生效。
+
 ## [Unreleased] - 2026-11-10
 
 ### Changed

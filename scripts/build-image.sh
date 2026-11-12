@@ -9,9 +9,9 @@
 # 为什么不能只给一句 `docker compose build`：
 #   服务器形态是「一个后端容器同时提供接口与页面」（ICD_STATIC_DIR=/app/static），
 #   前端**不打成镜像**，而是把 `npm run build` 生成的 frontend/dist 挂进后端容器。
-#   所以一次可交付的构建 = 后端镜像归档 + 前端构建产物 + 编排文件 + 部署说明
-#   （与 更新说明.md），缺一不可。上一轮就踩过「重建了前端镜像，但服务器用的
-#   dist 没更新」。
+#   所以一次可交付的构建 = 后端镜像归档 + Mongo 镜像归档 + 前端构建产物 +
+#   编排文件 + 部署说明（与 更新说明.md），缺一不可。上一轮就踩过「重建了前端
+#   镜像，但服务器用的 dist 没更新」。
 #
 # 出包前置：先更新仓库根的 更新说明.md（本版相比上一版的部署层变化、需 root 的
 # 步骤、回滚方式——构建时会核对它的日期并提醒）。构建还会在包内版本末尾自动
@@ -22,9 +22,10 @@
 #   VERSION=4.1 bash scripts/build-image.sh           # 换镜像标签（需同步 compose 的 image）
 #   SKIP_FRONTEND=1 bash scripts/build-image.sh       # 前端产物没动过，只重建后端镜像
 #   PLATFORM=linux/amd64 bash scripts/build-image.sh  # 显式指定目标架构
+#   MONGO_IMAGE=mongo:7.0.14 bash scripts/build-image.sh  # 指定随包的 Mongo 镜像
 #   NO_TAR=1 bash scripts/build-image.sh              # 不额外打单文件包（只留目录）
 #
-# 产物：
+# 产物（交付目录内含后端镜像与 Mongo 镜像两个归档）：
 #   dist/icd-deploy-<日期>/          可直接拷到服务器的交付目录
 #   dist/icd-deploy-<日期>.tar       同一份内容的单文件形式（未压缩，内含镜像已压缩）
 # =============================================================================
@@ -36,6 +37,9 @@ IMAGE="icd-tool-backend-v${VERSION}"
 STAMP="${STAMP:-$(date +%Y%m%d)}"
 BUNDLE="$ROOT/dist/icd-deploy-${STAMP}"
 ARCHIVE_NAME="icd-tool-backend.tar.gz"
+# 随包提供的 Mongo 镜像：服务器离线 docker load；版本固定，避免构建机差异
+MONGO_IMAGE="${MONGO_IMAGE:-mongo:7.0.14}"
+MONGO_ARCHIVE_NAME="mongo-image.tar.gz"
 
 say() { printf '\n==> %s\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
@@ -81,7 +85,8 @@ emit_prev_diff() {
     done
   fi
   local out="$BUNDLE/更新说明.md"
-  local prev_time prev_src prev_sha cur_sha sha_line fh
+  local prev_time prev_src prev_sha cur_sha sha_line
+  local prev_mongo_sha cur_mongo_sha mongo_line fh
   {
     printf '\n---\n\n'
     printf '## 附：与上一版交付包的机械对比（构建时自动生成，请勿手改本节）\n\n'
@@ -101,6 +106,15 @@ emit_prev_diff() {
       else
         sha_line='已变化（一侧 BUILD_INFO 缺 sha256= 行）'
       fi
+      prev_mongo_sha="$(sed -n 's/^mongo_sha256=//p' "$prev/BUILD_INFO" | tr -d '\r')"
+      cur_mongo_sha="$(sed -n 's/^mongo_sha256=//p' "$BUNDLE/BUILD_INFO" | tr -d '\r')"
+      if [ -n "$prev_mongo_sha" ] && [ "$prev_mongo_sha" = "$cur_mongo_sha" ]; then
+        mongo_line='未变化'
+      elif [ -n "$prev_mongo_sha" ] && [ -n "$cur_mongo_sha" ]; then
+        mongo_line="已变化（${prev_mongo_sha:0:12}… → ${cur_mongo_sha:0:12}…）"
+      else
+        mongo_line='已变化（一侧 BUILD_INFO 缺 mongo_sha256= 行）'
+      fi
       if [ -d "$prev/frontend/dist" ] && [ -d "$BUNDLE/frontend/dist" ]; then
         if [ "$(tree_hash "$prev/frontend/dist")" = "$(tree_hash "$BUNDLE/frontend/dist")" ]; then
           fh='未变化'
@@ -112,6 +126,7 @@ emit_prev_diff() {
       fi
       printf '| 项目 | 结果 |\n| --- | --- |\n'
       printf '| 镜像归档 sha256 | %s |\n' "$sha_line"
+      printf '| Mongo 镜像归档 | %s |\n' "$mongo_line"
       printf '| docker-compose.server.yml | %s |\n' "$(compare_file "$prev/docker-compose.server.yml" "$BUNDLE/docker-compose.server.yml")"
       printf '| backend/.env.example | %s |\n' "$(compare_file "$prev/backend/.env.example" "$BUNDLE/backend/.env.example")"
       printf '| 部署说明.md | %s |\n' "$(compare_file "$prev/部署说明.md" "$BUNDLE/部署说明.md")"
@@ -145,9 +160,28 @@ fi
 
 # ---------------------------------------------------------------- 2. 后端镜像
 # 目标架构取本机 docker 的架构（交付镜像必须与服务器架构一致，
-# 部署时按 部署说明.md §5.1 用 uname -m 与 BUILD_INFO 的 arch= 复核）。
+# 部署时按 部署说明.md §5.1 用 uname -m 与 BUILD_INFO 的 arch= / mongo_arch= 复核）。
+# PLATFORM 显式给出时，Mongo 镜像也按同一平台拉取；未给出时保持原有默认流程。
+PLATFORM_WAS_SET="${PLATFORM:+1}"
 PLATFORM="${PLATFORM:-linux/$(docker version --format '{{.Server.Arch}}')}"
-say "[2/7] 构建后端镜像 $IMAGE（$PLATFORM）"
+say "[2/7] 准备 Mongo 镜像并构建后端镜像 $IMAGE（$PLATFORM）"
+# Mongo 镜像随包离线交付：本机没有时先拉取；离线构建机必须预先 docker pull。
+if docker image inspect "$MONGO_IMAGE" >/dev/null 2>&1; then
+  info "Mongo 镜像已存在：$MONGO_IMAGE"
+else
+  info "本机没有 $MONGO_IMAGE，尝试 docker pull"
+  if [ -n "$PLATFORM_WAS_SET" ]; then
+    docker pull --platform "$PLATFORM" "$MONGO_IMAGE" || die "拉取 Mongo 镜像 $MONGO_IMAGE（$PLATFORM）失败；离线构建机需预先 docker pull 该镜像后重试"
+  else
+    docker pull "$MONGO_IMAGE" || die "拉取 Mongo 镜像 $MONGO_IMAGE 失败；离线构建机需预先 docker pull 该镜像后重试"
+  fi
+fi
+MONGO_ARCH="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$MONGO_IMAGE")"
+info "Mongo 镜像 $MONGO_IMAGE（$MONGO_ARCH）"
+# 归档必须与后端同架构，否则服务器上启动即失败：这里直接停，避免把坏包发出去。
+if [ "$MONGO_ARCH" != "$PLATFORM" ]; then
+  die "Mongo 镜像架构（$MONGO_ARCH）与目标平台（$PLATFORM）不一致；请执行 docker pull --platform $PLATFORM $MONGO_IMAGE 后重试"
+fi
 info "构建上下文 backend/：.dockerignore 已排除 output/ 与 .env"
 docker build --platform "$PLATFORM" -t "$IMAGE" "$ROOT/backend"
 
@@ -156,7 +190,7 @@ IMAGE_ARCH="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE"
 info "镜像 $IMAGE_ID（$IMAGE_ARCH）"
 
 # ---------------------------------------------------------------- 3. 导出归档
-say "[3/7] 导出镜像归档 $ARCHIVE_NAME（大镜像压缩需要一两分钟）"
+say "[3/7] 导出镜像归档 $ARCHIVE_NAME 与 $MONGO_ARCHIVE_NAME（大镜像压缩需要一两分钟）"
 mkdir -p "$ROOT/dist"
 if [ -e "$BUNDLE" ]; then
   # 只覆盖本脚本生成的包：没有 BUILD_INFO 说明是别人放的东西，不擅自删
@@ -167,7 +201,10 @@ fi
 mkdir -p "$BUNDLE"
 docker save "$IMAGE" | compress_stream > "$BUNDLE/$ARCHIVE_NAME"
 ARCHIVE_SIZE="$(du -h "$BUNDLE/$ARCHIVE_NAME" | cut -f1)"
-info "归档大小：$ARCHIVE_SIZE"
+info "后端归档大小：$ARCHIVE_SIZE"
+docker save "$MONGO_IMAGE" | compress_stream > "$BUNDLE/$MONGO_ARCHIVE_NAME"
+MONGO_ARCHIVE_SIZE="$(du -h "$BUNDLE/$MONGO_ARCHIVE_NAME" | cut -f1)"
+info "Mongo 归档大小：$MONGO_ARCHIVE_SIZE"
 
 # ---------------------------------------------------------------- 4. 组装交付包
 say "[4/7] 组装交付包"
@@ -179,7 +216,7 @@ mkdir -p "$BUNDLE/frontend" "$BUNDLE/backend/output"
 cp -r "$ROOT/frontend/dist" "$BUNDLE/frontend/dist"
 # .env.example 随包给出（真 .env 含密钥，另行走单独渠道，绝不放进交付包）
 cp "$ROOT/backend/.env.example" "$BUNDLE/backend/.env.example"
-info "frontend/dist、backend/.env.example、docker-compose.server.yml、部署说明.md、更新说明.md 已就位"
+info "frontend/dist、backend/.env.example、docker-compose.server.yml、部署说明.md、更新说明.md 与两个镜像归档已就位"
 
 # 更新说明.md 日期核对：顶部日期（YYYY-MM-DD）应为出包当天，不符则提醒（不阻断构建）
 NOTE_DATE="$(sed -n '1s/.*\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\).*/\1/p' "$ROOT/更新说明.md" | tr -d '\r')"
@@ -194,8 +231,10 @@ say "[5/7] 写入 BUILD_INFO 与校验值"
 (
   cd "$BUNDLE"
   sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
+  sha256sum "$MONGO_ARCHIVE_NAME" > "$MONGO_ARCHIVE_NAME.sha256"
 )
 ARCHIVE_SHA="$(cut -d' ' -f1 < "$BUNDLE/$ARCHIVE_NAME.sha256")"
+MONGO_SHA="$(cut -d' ' -f1 < "$BUNDLE/$MONGO_ARCHIVE_NAME.sha256")"
 GIT_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if ! git -C "$ROOT" diff --quiet HEAD 2>/dev/null; then
   GIT_SHA="$GIT_SHA+（构建时工作区有未提交改动）"
@@ -210,14 +249,23 @@ ICD 工具原型 · 服务器交付包
 镜像架构：$IMAGE_ARCH
 归档文件：$ARCHIVE_NAME（$ARCHIVE_SIZE）
 归档 sha256：$ARCHIVE_SHA
+Mongo 镜像标签：$MONGO_IMAGE
+Mongo 镜像架构：$MONGO_ARCH
+Mongo 归档文件：$MONGO_ARCHIVE_NAME（$MONGO_ARCHIVE_SIZE）
+Mongo 归档 sha256：$MONGO_SHA
 
---- 机器可读区（部署核对用：arch= 供 uname -m 对照，sha256= 供手工校验），请勿改动以下行 ---
+--- 机器可读区（部署核对用：arch= / mongo_arch= 供 uname -m 对照，sha256= 供手工校验），请勿改动以下行 ---
 image=$IMAGE
 arch=$IMAGE_ARCH
 archive=$ARCHIVE_NAME
 sha256=$ARCHIVE_SHA
+mongo_image=$MONGO_IMAGE
+mongo_arch=$MONGO_ARCH
+mongo_archive=$MONGO_ARCHIVE_NAME
+mongo_sha256=$MONGO_SHA
 EOF
-info "sha256：$ARCHIVE_SHA"
+info "后端镜像 sha256：$ARCHIVE_SHA"
+info "Mongo 镜像 sha256：$MONGO_SHA"
 
 # ---------------------------------------------------------------- 6. 更新说明附录
 say "[6/7] 生成与上一版交付包的机械对比（追加到本包 更新说明.md）"
@@ -241,8 +289,12 @@ cat <<EOF
   1) 把交付目录（或单文件包）拷到服务器；
   2) 服务器上先读包内 更新说明.md（本版部署变化与需 root 的步骤），
      再按 部署说明.md §5 逐条手工执行（不执行任何随包脚本）：
-     sha256 校验 → docker load → 目录与 .env → 内存上限 → 启动自检；
-  3) 首次部署前确认 backend/.env 里的模型地址与密钥已填好。
+     sha256 校验 → 导入镜像 → 目录与 .env → 内存上限 → 启动自检；
+  3) 两个镜像归档都要导入：
+     docker load -i icd-tool-backend.tar.gz
+     docker load -i mongo-image.tar.gz
+  4) 首次部署前确认 backend/.env 里的模型地址、密钥与认证配置
+     （AUTH_JWT_SECRET、ICD_ADMIN_USERNAME、ICD_ADMIN_PASSWORD）已填好。
 
 详细说明见交付包内的 部署说明.md。
 EOF

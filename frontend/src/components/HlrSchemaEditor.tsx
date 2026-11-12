@@ -9,6 +9,7 @@ import {
   scanHlrSchema,
   updateHlrSchema,
 } from '../api'
+import { useAuth } from '../auth/AuthContext'
 import type {
   HlrSchemaConfig,
   HlrSchemaItem,
@@ -133,6 +134,10 @@ export default function HlrSchemaEditor({
   onChange,
   onCustomActiveChange,
 }: Props) {
+  const { user } = useAuth()
+  // 样式是全局共享资源：普通用户可用内置/已保存样式并扫描、试解析，
+  // 但新建、修改、删除样式仅管理员可用（后端同样会兜底 403）。
+  const isAdmin = user?.is_admin ?? false
   const [templates, setTemplates] = useState<HlrSchemaItem[]>([])
   // 挂载时若系统类型已是「其他系统」（例如清空后重挂载），直接进入自定义模式
   const [mode, setMode] = useState<Mode>(
@@ -1179,53 +1184,55 @@ export default function HlrSchemaEditor({
 
             {error && <p className="hlr-error">{error}</p>}
 
-            <div className="hlr-save">
-              <input
-                className="hlr-input hlr-input--name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="样式名称"
-                disabled={isBusy}
-                aria-label="样式名称"
-              />
-              {source.kind === 'saved' ? (
-                <>
+            {isAdmin && (
+              <div className="hlr-save">
+                <input
+                  className="hlr-input hlr-input--name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="样式名称"
+                  disabled={isBusy}
+                  aria-label="样式名称"
+                />
+                {source.kind === 'saved' ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn--secondary hlr-btn"
+                      onClick={handleUpdate}
+                      disabled={isBusy || !configured}
+                      title={
+                        configured
+                          ? undefined
+                          : '请先映射需求编号与需求正文'
+                      }
+                    >
+                      {busy === 'update' ? '保存中…' : '保存修改'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--danger hlr-btn"
+                      onClick={handleDelete}
+                      disabled={isBusy}
+                    >
+                      {busy === 'delete' ? '删除中…' : '删除'}
+                    </button>
+                  </>
+                ) : canSaveNew ? (
                   <button
                     type="button"
                     className="btn btn--secondary hlr-btn"
-                    onClick={handleUpdate}
+                    onClick={handleSaveNew}
                     disabled={isBusy || !configured}
                     title={
-                      configured
-                        ? undefined
-                        : '请先映射需求编号与需求正文'
+                      configured ? undefined : '请先映射需求编号与需求正文'
                     }
                   >
-                    {busy === 'update' ? '保存中…' : '保存修改'}
+                    {busy === 'save' ? '保存中…' : '保存为新样式'}
                   </button>
-                  <button
-                    type="button"
-                    className="btn btn--danger hlr-btn"
-                    onClick={handleDelete}
-                    disabled={isBusy}
-                  >
-                    {busy === 'delete' ? '删除中…' : '删除'}
-                  </button>
-                </>
-              ) : canSaveNew ? (
-                <button
-                  type="button"
-                  className="btn btn--secondary hlr-btn"
-                  onClick={handleSaveNew}
-                  disabled={isBusy || !configured}
-                  title={
-                    configured ? undefined : '请先映射需求编号与需求正文'
-                  }
-                >
-                  {busy === 'save' ? '保存中…' : '保存为新样式'}
-                </button>
-              ) : null}
-            </div>
+                ) : null}
+              </div>
+            )}
           </div>
 
           <footer className="hlr-dialog__foot">

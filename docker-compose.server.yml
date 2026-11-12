@@ -1,14 +1,18 @@
-# 服务器单端口交付形态：一个后端容器同时提供 API 与前端页面。
+# 服务器单端口交付形态：一个后端容器 + 一个 Mongo 容器（账号库）。
+# 对外只有一个端口 8182（后端同时提供 API 与前端页面）；Mongo 不映射宿主端口。
 #
 # 与本地开发用的 docker-compose.yml 的区别：
 #   - 无 build 段：镜像在外部构建后 docker load 进来，服务器无需联网构建；
 #   - 无前端容器：前端构建产物由后端同源托管（ICD_STATIC_DIR），对外只暴露 8182
-#     一个端口（映射到容器内 8000；容器内服务端口不变）。
+#     一个端口（映射到容器内 8000；容器内服务端口不变）；
+#   - Mongo 不映射宿主端口，只允许 compose 内部网络访问，并限制内存上限。
 #
 # 使用前提（与仓库目录结构保持一致，交付时请原样带过去）：
-#   frontend/dist/     前端构建产物（npm run build 生成）
-#   backend/.env       模型服务配置
-#   backend/output/    分析输出落盘目录
+#   frontend/dist/        前端构建产物（npm run build 生成）
+#   backend/.env          模型服务配置 + 认证配置（MONGO_URL / AUTH_JWT_SECRET 等）
+#   backend/output/       分析输出落盘目录
+#   根目录 .env           容器内存上限与镜像标签（ICD_MEM_LIMIT / ICD_MEMSWAP_LIMIT /
+#                         MONGO_MEM_LIMIT / MONGO_IMAGE）
 #
 # 部署步骤与验收方式见 部署说明.md。
 #
@@ -16,6 +20,33 @@
 name: icd-tool-server
 
 services:
+  mongo:
+    # 离线交付：镜像已随包提供（mongo-image.tar.gz），服务器上先 docker load。
+    # 变量 MONGO_IMAGE 默认与 scripts/build-image.sh 的默认值保持一致。
+    image: ${MONGO_IMAGE:-mongo:7.0.14}
+    # 内网服务器无外网出口：镜像缺失时直接报错，而不是尝试联网拉取
+    pull_policy: never
+    restart: unless-stopped
+    # 不映射宿主端口：只有 backend 容器能通过服务名 mongo 访问。
+    volumes:
+      - mongo_data:/data/db
+    # 账号库内存上限：默认 1 GB，从整机内存预算中扣除；按服务器内存调整时
+    # 写进部署目录根 .env（MONGO_MEM_LIMIT）。memswap_limit 与 mem_limit 相等
+    # = Mongo 容器不允许用 swap，避免内存压力下整机假死。
+    mem_limit: ${MONGO_MEM_LIMIT:-1g}
+    memswap_limit: ${MONGO_MEM_LIMIT:-1g}
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "db.adminCommand('ping').ok"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   backend:
     image: icd-tool-backend-v4.0
     # 内网服务器无外网出口：镜像缺失时直接报错，而不是尝试联网拉取
@@ -34,6 +65,13 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - ICD_STATIC_DIR=/app/static
+      # 容器内后端走 compose 网络的服务名；覆盖 backend/.env 的 localhost 默认值
+      - MONGO_URL=mongodb://mongo:27017/icd
+      # 服务器部署关闭 /docs、/redoc、/openapi.json
+      - ICD_DOCS_ENABLED=0
+    depends_on:
+      mongo:
+        condition: service_healthy
     restart: unless-stopped
     # 容器内存上限：取值按 部署说明.md §5.4 算好后写进本目录的 .env
     # （ICD_MEM_LIMIT / ICD_MEMSWAP_LIMIT）；下面 ${...:-10g} 是「未执行 §5.4、
@@ -50,3 +88,7 @@ services:
     # 按实际内存重算，否则上限形同虚设（把上限调到超过物理内存等于回到整机假死）。
     mem_limit: ${ICD_MEM_LIMIT:-10g}
     memswap_limit: ${ICD_MEMSWAP_LIMIT:-10g}
+
+volumes:
+  # 账号库持久化：删容器不丢账号；备份/恢复见 部署说明.md §7.5
+  mongo_data:

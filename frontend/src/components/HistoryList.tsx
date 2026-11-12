@@ -18,6 +18,7 @@ import {
   getReverseMatchesViewUrlV4,
   listHistoryV4,
 } from '../api'
+import { useAuth } from '../auth/AuthContext'
 import type { V4HistoryItem, V4HistoryOutputs } from '../types'
 
 const TASK_LABEL: Record<string, string> = {
@@ -120,6 +121,9 @@ function formatSize(bytes: number): string {
 }
 
 export default function HistoryList() {
+  const { user } = useAuth()
+  // 删除接口仅管理员可用；普通用户不渲染勾选与删除入口（后端仍会兜底 403）
+  const isAdmin = user?.is_admin ?? false
   const [items, setItems] = useState<V4HistoryItem[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [confirming, setConfirming] = useState(false)
@@ -194,14 +198,15 @@ export default function HistoryList() {
       <div className="history__header">
         <span className="history__title">历史结果（{items.length}）</span>
         <span className="history__hint">
-          结果保存在服务器上，共占用 {formatSize(totalBytes)}；可直接下载，也可删除以释放磁盘
+          结果保存在服务器上，共占用 {formatSize(totalBytes)}；
+          {isAdmin ? '可直接下载，也可删除以释放磁盘' : '可直接下载'}
         </span>
         <button className="btn btn--ghost" onClick={load} disabled={loading || busy}>
           <RefreshCw size={14} /> 刷新
         </button>
       </div>
 
-      {items.length > 0 && (
+      {isAdmin && items.length > 0 && (
         <div className="history__toolbar">
           <label className="history__check-all">
             <input
@@ -253,14 +258,19 @@ export default function HistoryList() {
           const available = downloadsFor(item.task_type).filter((s) => item.outputs[s.key])
           return (
             <div key={item.job_id} className="history__item">
-              <label className="history__pick" title={locked ? '任务正在分析，不能删除' : '选中以删除'}>
-                <input
-                  type="checkbox"
-                  checked={selected.has(item.job_id)}
-                  disabled={locked || busy}
-                  onChange={() => toggle(item.job_id)}
-                />
-              </label>
+              {isAdmin && (
+                <label
+                  className="history__pick"
+                  title={locked ? '任务正在分析，不能删除' : '选中以删除'}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected.has(item.job_id)}
+                    disabled={locked || busy}
+                    onChange={() => toggle(item.job_id)}
+                  />
+                </label>
+              )}
 
               <div className="history__info">
                 <div className="history__files">
@@ -275,6 +285,14 @@ export default function HistoryList() {
                   {formatTime(item.finished_at || item.created_at)} · {formatSize(item.size_bytes)}
                   {item.token_usage != null && (
                     <> · Token {item.token_usage.total_tokens.toLocaleString()}</>
+                  )}
+                  {isAdmin && (
+                    <>
+                      {' · 所属：'}
+                      <span className="history__owner">
+                        {item.owner_username || '未归属'}
+                      </span>
+                    </>
                   )}
                 </div>
 

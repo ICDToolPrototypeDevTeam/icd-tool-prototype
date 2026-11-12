@@ -51,6 +51,88 @@
 
 ## 3. 开发记录
 
+### 2026-11-12 用户登录与账号隔离（阶段 A，ADR-007）
+
+#### 任务目标
+
+为内网多账号使用增加登录与账号隔离：管理员创建 / 禁用账号并重置密码；普通用户只能访问自己的任务、历史、日志与产物，管理员可访问全部；堵住静态兜底路径穿越；不改变正反向分析管线与产物生成方式。MongoDB 仅作为账号库，任务与产物仍落本地任务目录；桌面打包本阶段暂停，产物入库（阶段 B）不在本期。
+
+#### 完成内容
+
+1. 新增 `backend/app/auth/`：认证配置、Mongo/Beanie 初始化、User 文档、请求/响应 schema、UserManager、JWT + Cookie 后端、初始管理员播种、`current_user` / `current_admin` 依赖、`/auth/*` 与 `/admin/users*` 路由、任务归属统一访问校验。
+2. `main.py` lifespan 初始化 Mongo 并播种管理员（Mongo 不可达 / 缺少初始管理员时启动失败）；SPA 静态兜底改为解析后限定在静态目录内；`/api/*` 未匹配返回 JSON 404；`ICD_DOCS_ENABLED` 控制交互式文档。
+3. `Job` / `job.json` 增加 `owner_id` / `owner_username`；反向与正向任务创建时写入当前登录用户；旧 manifest 与 CLI 任务按未归属处理（仅管理员可见）。
+4. V4 路由增加登录 / 管理员依赖与归属校验：任务列表、状态、结果、日志、日志下载、产物下载、匹配中间产物、继续 / 放弃 / 终止、历史列表按归属过滤；历史删除、模型设置、HLR 样式写入限管理员；列表项增加 `owner_username`（仅展示）。
+5. `/health` 增加 `database` 状态；Mongo 运行中失联时受保护接口与 `/health` 返回 503 `{"detail": "database unavailable"}`。
+6. 前端新增登录页、`AuthContext`、`RequireAuth` / `RequireAdmin` 守卫、管理员用户管理页；顶栏显示当前用户与退出；非管理员隐藏模型设置、用户管理、历史删除与 HLR 样式写入入口；管理员任务 / 历史列表显示“所属账号”列。
+7. 部署：开发与服务器 compose 增加 `mongo:7.0.14` 服务、命名卷与 healthcheck；服务器编排另设 `MONGO_MEM_LIMIT`、不映射 Mongo 宿主端口、`pull_policy: never`、关闭文档端点；`build-image.sh` 交付包增加 Mongo 镜像与校验信息；`backend/.env.example` 增加 Mongo / 认证变量；`部署说明.md` 与随包《更新说明》补充 Mongo 导入、备份、密码恢复、回滚、sudo 步骤与内存要求。
+8. 文档：新增 ADR-007，更新项目范围、业务流程、架构、API、README、CHANGELOG、本开发纪要与服务器部署验收清单。
+
+#### 修改文件
+
+1. `backend/app/auth/`（新增：`config.py` / `db.py` / `models.py` / `schemas.py` / `manager.py` / `backend.py` / `seed.py` / `deps.py` / `router.py` / `access.py`）
+2. `backend/app/main.py`
+3. `backend/app/job_manager.py`
+4. `backend/app/api/v4/{router,coverage,completeness,jobs,outputs,history,settings,hlr_schemas,schemas}.py`
+5. `backend/requirements.txt`、`backend/.env.example`
+6. `frontend/src/auth/AuthContext.tsx`、`frontend/src/components/RequireAuth.tsx`、`frontend/src/pages/LoginPage.tsx`、`frontend/src/pages/AdminUsersPage.tsx`
+7. `frontend/src/{api/index.ts,App.tsx,main.tsx,types.ts,index.css}`、`frontend/src/components/HistoryList.tsx`、`frontend/src/pages/SettingsPage.tsx` 等权限入口相关组件
+8. `docker-compose.yml`、`docker-compose.server.yml`
+9. `scripts/build-image.sh`、`部署说明.md`、`更新说明.md`
+10. `docs/decisions/ADR-007-用户登录与账号隔离.md`（新增）
+11. `docs/project/scope.md`、`docs/project/workflow.md`、`docs/architecture/current-architecture.md`、`docs/architecture/api.md`
+12. `README.md`、`CHANGELOG.md`、`docs/development/development-log.md`、`docs/testing/服务器部署验收清单.md`
+
+#### 验证方式
+
+1. `docker compose config -q`（开发编排）。
+2. `docker compose -f docker-compose.server.yml config -q`（服务器编排）。
+3. `git diff --check`。
+4. 按 `docs/testing/服务器部署验收清单.md` 的认证与隔离检查项做浏览器验收（后续验收任务）。
+5. 重新构建后端镜像与前端产物，按 `部署说明.md` 重新导出交付包并在服务器 / 本地 Docker 完整启动（后续验收任务）。
+
+#### 验证结果
+
+1. `docker compose config -q`：通过。
+2. `docker compose -f docker-compose.server.yml config -q`：通过。
+3. `git diff --check`：通过。
+4. 手动浏览器验收（登录、账号隔离、禁用账号、管理员删除、静态穿越、Mongo 故障）：**尚未验证**（计划由后续验收任务按验收清单执行）。
+5. 真实 Docker 构建与运行（含 Mongo 镜像导入、首次管理员初始化、运行中停 Mongo）：**尚未验证**（计划由后续验收任务执行）。
+6. 本次文档整理未修改应用代码，也未重新执行后端 / 前端构建；上述浏览器与 Docker 验证均未执行。
+
+#### 遗留问题
+
+1. 登录、隔离与权限行为的手动浏览器验收留到上线前按验收清单人工执行；服务器 compose 容器形态与 Mongo 故障已实测，但目标服务器上的 `docker load` 交付包完整启动仍需在部署时执行。
+2. 重置密码不会使已签发的旧 JWT 立即失效，最长 8 小时后自然过期；本阶段接受该限制。
+3. 内网 HTTP 下密码与 Cookie 明文传输；`AUTH_COOKIE_SECURE` 默认关闭，启用 TLS 后需改为 `1`。
+4. HLR 表格样式仍为全局共享资源，普通用户只读；按账号维护样式不在本阶段。
+5. 服务器内存要求已写入部署说明：Mongo 默认上限 1 GB，物理内存 < 8 GB 需重新评估，1–2 GB 机器不满足本方案；未改写既有容量数字。
+6. Windows 桌面打包本阶段暂停，恢复时需单独设计内嵌 Mongo 或桌面鉴权模式。
+
+#### 下一步建议
+
+1. 上线前按 `docs/testing/服务器部署验收清单.md` 完成浏览器验收，并记录实际结果。
+2. 在目标服务器执行一次完整交付包流程（`docker load` 后端与 Mongo 镜像、首次启动、`/health`、Mongo 故障恢复）。
+3. 若后续要求密码重置立即踢出旧会话，增加 `token_version` 并在认证依赖中比对。
+4. 阶段 B（任务 / 产物入库）另行设计，不复用本阶段的账号库。
+
+#### Task 12 端到端验证补记（2026-11-12）
+
+本地验证环境：Windows + Python 3.12；Mongo 由开发编排 `docker compose up -d mongo` 启动（mongo:7.0.14，127.0.0.1:27017）；后端以 uvicorn 起在 127.0.0.1:8182，测试环境变量为 `MONGO_DB=icd_e2e_task12`、`AUTH_JWT_SECRET`（32 字符）、`ICD_ADMIN_USERNAME` / `ICD_ADMIN_PASSWORD`、`OUTPUT_DIR=C:\tmp\task12\outputs`、`USE_MOCK_LLM=1`、`ICD_STATIC_DIR=frontend/dist`、`ICD_DOCS_ENABLED=0`，未改动 `backend/.env`。
+
+1. 认证 / 隔离脚本：`cd backend && py -3.12 tests/auth/test_auth_foundation.py`、`test_auth_routes.py`、`test_admin_users.py`、`test_job_owner_fields.py`、`test_job_isolation.py`、`test_history_permissions.py`、`test_static_security.py` → 7 个脚本退出码均为 0，末尾均打印 `... PASSED`（**已验证**）。
+2. 真实 API 反向隔离（`backend/tests/auth/test_e2e_isolation.py`）：管理员创建 A / B；A 上传 AMS 样例反向任务（`use_mock_llm=true`）→ `completed`，用时 **405.9s**（脚本轮询口径；任务简报的 5–8s 预期不成立 —— 该样例产生 558 个判官 case，判官阶段与 review 阶段各约 169s，属样例规模导致的耗时，不是失败）。首次运行因脚本自身 240s 轮询超时中止，放宽到 900s 后复跑通过；超时属验证脚本参数，不是任务失败；A 的列表 / 历史 / 结果 / 日志 / 日志下载 / 中间产物均 200，`eoicd-xlsx` 3,430,155 字节、`consensus-docx` 101,926 字节；B 用 A 的 job_id 访问状态、结果、日志、日志下载、产物、中间产物 → 全部 404；管理员下载同一产物 → 200（**已验证**）。
+3. 禁用 / 启用与密码重置：管理员禁用 B 后，B 已有 Cookie 的 `/api/v4/auth/me` 与 `/api/v4/jobs` 均 401；重新启用后 200；重置密码后旧密码登录 400、新密码 204（**已验证**）。
+4. 正向（完整性）任务验证：**不在本阶段验证范围（用户明确要求跳过）**。E2E 脚本的一次完整运行中该段曾实际执行（250.2s，正向下载与跨用户 404 均通过），但按用户指示**不计入本阶段验收**，本记录不给出通过 / 失败结论。
+5. 静态穿越与 API 兜底（uvicorn + `ICD_STATIC_DIR=frontend/dist`）：未登录 `curl --path-as-is` 请求 `/../output/v4/<id>/output/...`、`/%2e%2e/%2e%2e/etc/passwd`、`/..%2f..%2fbackend/.env`、`/%2e%2e/%2e%2e/backend/.env` → 当时均回落 413 字节 `index.html`（与 `frontend/dist/index.html` 同尺寸）；按设计 D11 复核后已修正为穿越请求一律 404（不回落 `index.html`），2026-11-12 以 uvicorn 重新验证三条穿越请求均 404，响应中无 xlsx / `.env` / `passwd` 内容；`/api/v4/does-not-exist` → JSON 404；`/openapi.json` → 404；未登录 `/api/v4/{history,jobs,auth/me,settings}` → 401，`/api/v4/health` → 200（**已验证**）。
+6. Mongo 运行中故障：停止 mongo 容器后 `/api/v4/health`、带管理员 Cookie 的 `/api/v4/jobs`、登录接口均 503 `{"detail":"database unavailable"}`；恢复 mongo 后 health 200 且 `database: ok`，受保护接口 200（**已验证**）。
+7. Mongo 启动期故障：停止 mongo 后启动后端 → 退出码 3，日志 `[auth] init failed: ServerSelectionTimeoutError: ...` 与 `ERROR: Application startup failed. Exiting.`；恢复 mongo 后后端正常启动（**已验证**）。
+8. 重启持久性：重启后端后，管理员 `/api/v4/history` 见 4 条（含无归属 legacy 目录）；A（`e2e_alice_47116`）只看到自己的 1 条 `completed`，`owner_username` 正确；legacy 任务的日志下载与中间产物管理员 200、A 404；重启后内存 `/api/v4/jobs` 为空（已完成任务不载入内存，属既有设计）（**已验证**）。
+9. 前端构建：`cd frontend && npm run build` → 退出码 0（`tsc && vite build`，约 2.5s，仅既有 chunk > 500 kB 提示）（**已验证**）。
+10. 手工浏览器验收（验收清单第 1–13 行，以及第 14–20 行中的页面跳转、刷新保持登录、入口隐藏等 UI 行为）：**待上线前人工验收**（用户决定留到上线前按验收清单人工执行；本次未打开浏览器 UI）。
+11. 服务器 compose / 镜像形态（`docker-compose.server.yml` + `docker build -t icd-tool-backend-v4.0 backend` + `mongo:7.0.14`）：**已验证**。首次启动由空账号库播种管理员，`admin` 登录 204、`/auth/me` 返回 `is_admin=true`；未登录受保护接口 401；`/api/v4/does-not-exist`、`/api`、`/openapi.json`、`/docs` 均 JSON 404；穿越路径（`/../output/...`、`/%2e%2e/%2e%2e/etc/passwd`、`/..%2f..%2fbackend/.env`、`/%2e%2e/%2e%2e/backend/.env`）均 404 且无文件内容；`/`、`/jobs/abc`、`/history` 返回 200 `index.html`。运行中停 Mongo：`/health`、受保护接口、登录均 503 `{"detail":"database unavailable"}`，恢复 Mongo 后 `/health` 200 `database: ok`、受保护接口 200。Mongo 停机时重启 backend：容器反复重启（exit 3），日志 `ServerSelectionTimeoutError` 与 `ERROR: Application startup failed. Exiting.`；恢复 Mongo 后容器自动恢复，`/health` 200。验证后已 `docker compose down -v` 清理容器与测试卷。
+12. 复核中发现并修复一处设计偏差：SPA 兜底对路径穿越原为回落 `index.html`（200，未泄露文件），按设计 D11「一律 404，不做纠正」改为 404（`backend/app/main.py` + 文档 + 本地测试），并以 uvicorn 与服务器容器两种形态复验通过。除此之外未发现需要修复的代码或文档缺陷。
+
 ### 2026-11-10 模型设置：三家 LLM 思考模式前端可开关（仅反向管线）
 
 #### 任务目标
