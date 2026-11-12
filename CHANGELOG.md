@@ -2,6 +2,24 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-11-12
+
+### Added
+
+- **任务执行层升级为 Celery + Redis，支撑 20 账号并发与 24 小时+ 长任务**：此前任务由 API 进程内的 `job_scheduler.py` 线程池执行（默认 2 线程），状态只存内存，进程重启任务即丢。本次新增 `backend/app/execution/`：`config.py`（`JOB_EXECUTOR` 模式解析）、`celery_app.py`（Celery 应用，无 result backend，`acks_late`、`worker_prefetch_multiplier=1`、`worker_max_tasks_per_child=1`、30 天 visibility timeout、队列 `icd.reverse`）、`dispatcher.py`（投递 / revoke）、`tasks.py`（Worker 侧认领、心跳、执行反向管线）、`control.py`（Redis 控制面：每任务 hash `icd:job:{id}:ctl` + 活跃 zset，Lua 原子占用 / 心跳 / 取消 / 强制 / 放弃 / 释放）、`reaper.py`（每 60 秒巡检心跳超过 300 秒的任务）。API 变为生产者：上传落盘 → 写 `job.json`（`pending`）→ 投递 Redis → 返回；Worker prefork 默认 **20** 并发（`ICD_WORKER_CONCURRENCY`），一子进程一任务。`job.json` 为唯一权威状态，API 每次查询回读并叠加控制面快照；API 重启不丢排队任务，Worker 崩溃由巡检标为 `interrupted` 并可续跑。取消 / 强制终止 / 放弃在跨进程下按「控制意图 + Worker 检查点 / revoke」执行。**只接入反向管线**：Celery 模式下正向创建与续跑返回 503（入口保留），inline 模式行为不变（pytest / 回滚路径）。新增依赖 `celery[redis]>=5.4,<6` 与 `redis>=6.1,<7`（kombu 5.7 要求 redis-py ≥ 6.1）。该改动需**重建后端镜像**，并把部署形态升为 redis / backend / worker 三服务（见 `部署说明.md`）。
+- **跨进程任务日志与状态同步**：Worker 写 `job.log`，API 的 `/jobs/{id}/logs` 按字节偏移增量同步（只消费完整行，二进制追加避免 CRLF 字节错位），24 小时+ 任务不会把整份日志反复读入内存；manifest 新增 `run_token` / `result` / token 字段回读，补全跨进程结果与 token 展示。
+- **上传并发加固**：上传按 1MB 分块流式写 `.part` 临时文件、完成后 `os.replace` 原子改名；单文件 50MB、单请求 200MB 预算，超限 413；HLR 表格自动识别等 CPU 型探测移入线程池，不阻塞事件循环。
+
+### Changed
+
+- **Docker Compose 部署形态改为三服务**：新增 `redis`（AOF、`maxmemory-policy noeviction`、healthcheck、独立数据卷 `icd-redis-data`）与 `worker`（同一后端镜像，Celery `-c ${ICD_WORKER_CONCURRENCY:-20} -Ofair`）服务；`backend` 设置 `JOB_EXECUTOR=celery`、`CELERY_BROKER_URL=redis://redis:6379/0`、`FORWARD_PIPELINE_ENABLED=0`。`docker-compose.server.yml` 新增 Redis/Worker 内存上限变量（`ICD_REDIS_MEM_LIMIT` / `ICD_WORKER_MEM_LIMIT` / `ICD_WORKER_MEMSWAP_LIMIT`）与 Worker `stop_grace_period: 30s`。交付包需额外离线提供 `redis:7-alpine` 镜像；`scripts/build-image.sh` 已同步导出 `redis-7-alpine.tar.gz` 并写入 `BUILD_INFO`。
+- **部署说明改为三服务部署**：§1 部署形态、§2 内存/CPU 建议、§3 交付物、§4 目录、§5.2 镜像导入、§5.4 内存与 Worker 并发分配公式（API 20%、Redis 512MB、其余给 Worker，并发按每路 ≥1GB 自动调小）、§5.5 启动、§5.6 验收（Redis PING / Worker concurrency / 三容器内存上限）、§6 命令速查、§7 运维、§8 更新、§9 常见问题、§10 注意事项同步更新。
+- **API 文档补充 Celery 模式语义**：新增 `api.md` 第 17 节，说明执行模型、跨进程状态/日志同步、取消 / 强制终止 / 放弃 / 续跑的 409/503 语义、故障恢复与正向 503；第 5、13 节的启动扫描与队列描述按执行模式区分。接口路径与请求/响应字段不变。
+
+### Fixed
+
+- **Celery Worker 无法启动（`kombu.exceptions.VersionMismatch`）**：kombu 5.7 的 Redis transport 要求 redis-py ≥ 6.1，原依赖 `redis>=5.0,<6` 会安装 5.3.1，Worker 启动即报 `Redis transport requires redis-py versions 6.1.0 or later`。已改为 `redis>=6.1,<7`。该问题在 2026-11-12 本地 Docker 实测定位。
+
 ## [Unreleased] - 2026-11-10
 
 ### Changed

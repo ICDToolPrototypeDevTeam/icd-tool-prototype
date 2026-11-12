@@ -18,6 +18,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.v4.router import router as v4_router
+from app.execution.config import (
+    config_snapshot,
+    use_celery,
+    validate_celery_runtime,
+)
 from app.job_log import install_log_tee, set_config_lines
 from app.job_manager import job_manager
 from app.runtime_settings import load_persisted_settings
@@ -30,33 +35,6 @@ from app.v4.config import get_output_root
 install_log_tee()
 
 
-def _config_snapshot() -> list[str]:
-    """启动配置自检：只报「有没有」，绝不打印 key 内容。
-
-    依据：实测中曾因「本地容器未关闭」误判 mock 生效情况，无从核对运行配置。
-    本行会写进每个任务的日志头部，让「跑的是哪个模式 / 哪份配置」在 UI 上始终可见。
-    """
-    key_state = ' '.join(
-        f'{name}={"yes" if (os.getenv(f"{name}_API_KEY") or "").strip() else "no"}'
-        for name in ('DEEPSEEK', 'MINIMAX', 'QWEN')
-    )
-    models = ' / '.join(
-        f'{name}={os.getenv(f"{name}_MODEL") or "(未配置)"}'
-        for name in ('DEEPSEEK', 'MINIMAX', 'QWEN')
-    )
-    return [
-        '[config] USE_MOCK_LLM={} (容器配置) | {} | JUDGE_PROVIDERS={} | '
-        'OUTPUT_DIR={} | STATIC_DIR={}'.format(
-            os.getenv('USE_MOCK_LLM', '0'),
-            key_state,
-            os.getenv('JUDGE_PROVIDERS', '(默认)'),
-            get_output_root(),
-            os.getenv('ICD_STATIC_DIR', '(未设置)'),
-        ),
-        f'[config] MODELS {models}',
-    ]
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 先回读前端保存的模型设置，使其覆盖 .env 并体现在下面的配置自检里。
@@ -65,15 +43,33 @@ async def lifespan(app: FastAPI):
         load_persisted_settings()
     except Exception as e:  # noqa: BLE001
         print(f'[settings] load failed: {type(e).__name__}: {e}', file=sys.stderr)
-    # 启动扫描：把上一个进程遗留的未完成任务标记为 interrupted，供前端选择
-    # 继续 / 放弃。任何异常都不得影响启动。
+    # Celery 模式自检：缺依赖只告警（history 等只读接口仍可用），
+    # 真正提交任务时 dispatcher 会返回 503 并在任务日志里说明原因。
+    if use_celery():
+        problems = validate_celery_runtime()
+        if problems:
+            for problem in problems:
+                print(f'[execution] {problem}', file=sys.stderr)
+        else:
+            print('[execution] celery mode enabled; broker config loaded')
+    # 启动扫描：把上一个进程遗留的未完成任务按执行模式处理（见方法 docstring），
+    # 供前端选择继续 / 放弃。任何异常都不得影响启动。
     try:
         job_manager.load_interrupted(get_output_root() / 'v4')
     except Exception as e:  # noqa: BLE001
         print(f'[job] interrupted-job scan failed: {type(e).__name__}: {e}', file=sys.stderr)
     # 启动配置自检：写进全局日志缓冲，并在每个任务日志开头重复
-    set_config_lines(_config_snapshot())
+    set_config_lines(config_snapshot())
+
+    # Celery 模式：API 侧巡检失联 Worker（inline 模式没有跨进程任务，不需要）
+    reaper_stop = None
+    if use_celery():
+        from app.execution.reaper import start_reaper
+
+        reaper_stop = start_reaper(get_output_root() / 'v4')
     yield
+    if reaper_stop is not None:
+        reaper_stop.set()
 
 
 app = FastAPI(title='ICD工具原型', lifespan=lifespan)

@@ -19,6 +19,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from app.execution import config as execution_config
 from app.job_log import current_job
 
 
@@ -75,6 +76,51 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def _parse_dt(raw, fallback):
+    if not isinstance(raw, str) or not raw:
+        return fallback
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return fallback
+
+
+def _restore_token_usage(job: 'Job', raw_token_usage) -> None:
+    """把 manifest 的 token_usage 恢复到 Job（兼容旧式裸数字 / 布尔值）。
+
+    旧 manifest 没有该键 → 不标记为已统计（前端/报告显示为空）；
+    新 manifest 即使是 0 也标记（MOCK 的 0 是有效值）。
+    """
+    job.token_usage_tracked = True
+    raw_by_provider = None
+    if isinstance(raw_token_usage, dict):
+        raw_total = raw_token_usage.get('total_tokens')
+        raw_by_provider = raw_token_usage.get('by_provider')
+    elif isinstance(raw_token_usage, bool):
+        raw_total = None
+    elif isinstance(raw_token_usage, (int, float)):
+        raw_total = raw_token_usage
+    else:
+        raw_total = None
+    try:
+        job.total_tokens = max(0, int(raw_total)) if raw_total is not None else 0
+    except (TypeError, ValueError):
+        job.total_tokens = 0
+    # 旧 manifest 只有 total_tokens：分项为空，单模型报告回落到 0。
+    restored: dict[str, int] = {}
+    if isinstance(raw_by_provider, dict):
+        for key, value in raw_by_provider.items():
+            if not isinstance(key, str) or not key.strip() or isinstance(value, bool):
+                continue
+            try:
+                amount = int(value)
+            except (TypeError, ValueError):
+                continue
+            if amount > 0:
+                restored[key.strip()] = amount
+    job.tokens_by_provider = restored
+
+
 class Job:
     def __init__(self, task_type: str = "correctness"):
         self.job_id: str = str(uuid.uuid4())
@@ -120,6 +166,10 @@ class Job:
         # 不一致说明这张票已被「终止后又继续」的重新入队取代，跳过执行 ——
         # 防止同一任务被两张票跑两遍（见 app/job_scheduler.py）
         self.queue_token: Optional[object] = None
+        # 跨进程运行代次票据（Celery 模式）：每次 launch / 续跑生成新的随机值，
+        # 随 manifest 落盘。队列里的旧消息、旧 Worker 的心跳都按它识别并丢弃，
+        # 防止「终止后又继续」的任务被上一轮消息再跑一遍。
+        self.run_token: str = ""
         # 节流窗口的起点取「构造时刻」：若取 0.0，首条进度必然满足
         # ``now - 0.0 >= 5.0``（time.monotonic 是系统运行时长），
         # 于是每个任务的第一次上报都会写盘，节流对首个 case 形同虚设。
@@ -169,6 +219,10 @@ class Job:
                     'task_type': self.task_type,
                     'status': self.status.value,
                     'message': self.message,
+                    # 结果必须落盘：Celery 模式下 API 与 Worker 不在同一进程，
+                    # 结果页只能从共享卷重建（计数无法从 87.9MB 的中间 JSON 反读）。
+                    'result': self.result,
+                    'run_token': self.run_token,
                     'created_at': self.created_at.isoformat(),
                     'updated_at': self.updated_at.isoformat(),
                     'params': self.params,
@@ -437,6 +491,67 @@ class Job:
         self.hard_killed = False
         self._persist()
 
+    def apply_manifest_state(self, data: dict, control: Optional[dict] = None) -> None:
+        """用共享卷上的 manifest（以及 Redis 控制意图）覆盖本进程内的快照。
+
+        只在 Celery 模式下、API 进程读取任务时调用。Worker 是 manifest 的唯一
+        写入者，API 端这里只读不写，避免两个进程互相覆盖。
+
+        ``control`` 是 Redis 控制面快照：用于把「已请求终止 / 放弃」但 Worker
+        还没来得及写 manifest 的短暂窗口如实展示出来。
+        """
+        if not isinstance(data, dict):
+            return
+        try:
+            status = JobStatus(str(data.get('status', self.status.value)))
+        except ValueError:
+            status = self.status
+
+        self.message = data.get('message', self.message)
+        self.updated_at = _parse_dt(data.get('updated_at'), self.updated_at)
+        if 'result' in data:
+            raw_result = data.get('result')
+            self.result = raw_result if isinstance(raw_result, dict) else None
+        raw_progress = data.get('progress')
+        self.progress = raw_progress if isinstance(raw_progress, dict) else None
+        raw_error = data.get('error')
+        self.error = raw_error if isinstance(raw_error, dict) else None
+        self.mock = bool(data.get('mock', self.mock))
+        self.resumed = bool(data.get('resumed', self.resumed))
+        raw_reuse = data.get('reuse')
+        self.reuse = raw_reuse if isinstance(raw_reuse, dict) else None
+        self.finished_at = _parse_dt(data.get('finished_at'), None)
+        if 'run_token' in data:
+            self.run_token = str(data.get('run_token') or '')
+        if 'token_usage' in data and data.get('token_usage') is not None:
+            _restore_token_usage(self, data.get('token_usage'))
+        self.cancel_requested = bool(data.get('cancel_requested', False))
+
+        if control:
+            if control.get('abandon'):
+                status = JobStatus.ABANDONED
+            elif control.get('force') and status in (
+                JobStatus.PENDING, JobStatus.RUNNING,
+            ):
+                status = JobStatus.CANCELED
+            elif (
+                control.get('cancel')
+                and status == JobStatus.PENDING
+                and not control.get('claimed_token')
+            ):
+                # 排队中且没有 Worker 占用：Worker 永远不会消费这条消息了
+                status = JobStatus.CANCELED
+            if (
+                control.get('cancel')
+                or control.get('force')
+                or control.get('abandon')
+            ):
+                self.cancel_requested = True
+
+        self.status = status
+        if status.value in _TERMINAL_STATUSES and self.finished_at is None:
+            self.finished_at = self.updated_at
+
     @classmethod
     def from_manifest(cls, data: dict, job_dir: Path) -> 'Job':
         """按 manifest 重建 Job；字段缺失 / 格式非法时抛异常，由调用方跳过。"""
@@ -448,6 +563,9 @@ class Job:
         job.updated_at = datetime.fromisoformat(data['updated_at'])
         job.job_dir = Path(job_dir)
         job.params = data.get('params') or {}
+        job.run_token = str(data.get('run_token') or '')
+        raw_result = data.get('result')
+        job.result = raw_result if isinstance(raw_result, dict) else None
         job.resumed = bool(data.get('resumed', False))
         raw_reuse = data.get('reuse')
         job.reuse = raw_reuse if isinstance(raw_reuse, dict) else None
@@ -460,34 +578,7 @@ class Job:
         # 新 manifest 即使是 0 也标记（MOCK 的 0 是有效值）。
         raw_token_usage = data.get('token_usage')
         if raw_token_usage is not None:
-            job.token_usage_tracked = True
-            raw_by_provider = None
-            if isinstance(raw_token_usage, dict):
-                raw_total = raw_token_usage.get('total_tokens')
-                raw_by_provider = raw_token_usage.get('by_provider')
-            elif isinstance(raw_token_usage, bool):
-                raw_total = None
-            elif isinstance(raw_token_usage, (int, float)):
-                raw_total = raw_token_usage
-            else:
-                raw_total = None
-            try:
-                job.total_tokens = max(0, int(raw_total)) if raw_total is not None else 0
-            except (TypeError, ValueError):
-                job.total_tokens = 0
-            # 旧 manifest 只有 total_tokens：分项为空，单模型报告回落到 0。
-            if isinstance(raw_by_provider, dict):
-                restored: dict[str, int] = {}
-                for key, value in raw_by_provider.items():
-                    if not isinstance(key, str) or not key.strip() or isinstance(value, bool):
-                        continue
-                    try:
-                        amount = int(value)
-                    except (TypeError, ValueError):
-                        continue
-                    if amount > 0:
-                        restored[key.strip()] = amount
-                job.tokens_by_provider = restored
+            _restore_token_usage(job, raw_token_usage)
         raw_finished = data.get('finished_at')
         job.finished_at = datetime.fromisoformat(raw_finished) if raw_finished else None
         # 刻意不恢复「已请求取消」：重启后新进程应从干净状态开始
@@ -547,11 +638,44 @@ class JobManager:
         self._jobs[job.job_id] = job
         return job
 
+    def _refresh_from_manifest(self, job: Job) -> None:
+        """Celery 模式：把 Worker 写下的 manifest 合并进本进程的内存快照。"""
+        if job.job_dir is None:
+            return
+        try:
+            data = json.loads(
+                (Path(job.job_dir) / MANIFEST_NAME).read_text(encoding='utf-8')
+            )
+        except Exception:  # noqa: BLE001 — 读不到就保持当前内存状态
+            return
+        if not isinstance(data, dict):
+            return
+        ctl = None
+        if data.get('status') in (
+            JobStatus.PENDING.value, JobStatus.RUNNING.value,
+        ):
+            # 控制面只在任务尚未落终态时有意义；Redis 不可达时返回 None，
+            # apply_manifest_state 不会据此改状态。
+            from app.execution import control
+
+            try:
+                ctl = control.snapshot(job.job_id)
+            except Exception:  # noqa: BLE001
+                ctl = None
+        job.apply_manifest_state(data, ctl)
+
     def get_job(self, job_id: str) -> Optional[Job]:
-        return self._jobs.get(job_id)
+        job = self._jobs.get(job_id)
+        if job is not None and execution_config.use_celery():
+            self._refresh_from_manifest(job)
+        return job
 
     def list_jobs(self) -> list[Job]:
-        return list(self._jobs.values())
+        jobs = list(self._jobs.values())
+        if execution_config.use_celery():
+            for job in jobs:
+                self._refresh_from_manifest(job)
+        return jobs
 
     def forget(self, job_id: str) -> bool:
         """把任务从内存登记表摘掉（历史结果被硬删除后调用）。
@@ -564,21 +688,39 @@ class JobManager:
         return self._jobs.pop(job_id, None) is not None
 
     def load_interrupted(self, v4_root: Path) -> int:
-        """启动扫描：把磁盘上未跑完的任务标记为 interrupted 并载入内存。
+        """启动扫描：载入磁盘上未跑完的任务。
 
-        进程启动时调用一次。内存状态已随上一个进程消失，因此任何仍处于
-        pending / running 的 manifest 都必然来自上次进程 → 判定为被中断。
+        inline 模式（历史行为）：内存状态随上一个进程消失，仍处于 pending /
+        running 的 manifest 必然来自上次进程 → 全部标记 interrupted。
+
+        Celery 模式不能这样判断：Redis 队列在 API 重启后仍然存在，Worker 可能
+        正在跑或即将执行任务。规则改为：
+
+        - ``pending``：保持 pending（消息还在 Redis 队列里，Worker 会消费）；
+        - ``running`` 且心跳新鲜：保持 running；
+        - ``running`` 且心跳超时：按控制面意图落 canceled / abandoned，否则
+          interrupted（可续跑）；
+        - Redis 不可达：**不做判断**，保留 running，等 reaper 恢复后再收尾。
+
         ``updated_at`` 保留为最后一次进度时间（不刷新为扫描时刻），前端据此展示
         「中断前的进度」。
 
         已标记为 interrupted 的 manifest 同样载入（不再重复写盘）：用户可能在
         未处理中断任务的情况下再次关闭程序，若此处跳过，任务会从列表中永久消失。
 
-        只载入 interrupted 任务；completed / failed 不载入（本期不提供历史任务
-        列表）。目录不存在或 manifest 损坏时跳过，绝不影响启动。
+        只载入未完成任务；completed / failed 不载入（历史结果走 /api/v4/history）。
+        目录不存在或 manifest 损坏时跳过，绝不影响启动。
         """
         if not v4_root.is_dir():
             return 0
+
+        celery = execution_config.use_celery()
+        redis_ok = False
+        control_mod = None
+        if celery:
+            from app.execution import control as control_mod
+
+            redis_ok = control_mod.ping()
 
         count = 0
         for manifest in sorted(v4_root.glob(f'*/{MANIFEST_NAME}')):
@@ -597,6 +739,48 @@ class JobManager:
                     file=sys.stderr,
                 )
                 continue
+
+            if celery:
+                if job.status == JobStatus.PENDING:
+                    # 消息仍在 Redis 队列；API 重启不影响 Worker 执行
+                    self._jobs[job.job_id] = job
+                    count += 1
+                    continue
+                if job.status == JobStatus.RUNNING:
+                    ctl = None
+                    if redis_ok:
+                        try:
+                            ctl = control_mod.snapshot(job.job_id)
+                        except Exception:  # noqa: BLE001
+                            ctl = None
+                    if ctl is not None and control_mod.is_fresh(ctl):
+                        job.apply_manifest_state(data, ctl)
+                        self._jobs[job.job_id] = job
+                        count += 1
+                        continue
+                    if ctl is None:
+                        # 控制面不可达：无法区分「Worker 还活着」与「刚失联」
+                        self._jobs[job.job_id] = job
+                        count += 1
+                        continue
+                    if ctl.get('abandon'):
+                        job.status = JobStatus.ABANDONED
+                        job.message = 'Worker 已失联，任务按用户先前的放弃请求收尾'
+                        job.finished_at = datetime.now(timezone.utc)
+                    elif ctl.get('cancel') or ctl.get('force'):
+                        job.status = JobStatus.CANCELED
+                        job.message = 'Worker 已失联，任务按用户先前的终止请求收尾'
+                        job.finished_at = datetime.now(timezone.utc)
+                    else:
+                        job.status = JobStatus.INTERRUPTED
+                        job.message = (
+                            '进程重启时任务未跑完，已标记为中断，可继续执行'
+                        )
+                    job._persist()
+                    self._jobs[job.job_id] = job
+                    count += 1
+                    continue
+
             if job.status != JobStatus.INTERRUPTED:
                 job.status = JobStatus.INTERRUPTED
                 job._persist()
@@ -604,7 +788,7 @@ class JobManager:
             count += 1
 
         if count:
-            print(f'[job] {count} interrupted job(s) restored from {v4_root}')
+            print(f'[job] {count} unfinished job(s) restored from {v4_root}')
         return count
 
 

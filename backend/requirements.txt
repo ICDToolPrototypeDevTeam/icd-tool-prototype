@@ -7,3 +7,8 @@ openpyxl>=3.1
 python-dotenv>=1.0.0
 requests>=2.31.0
 pyyaml>=6.0
+# 任务执行层（JOB_EXECUTOR=celery）：broker + 控制面。inline 模式不 import 它们。
+celery[redis]>=5.4,<6
+# kombu 5.7 的 Redis transport 要求 redis-py >= 6.1；用 5.x 会 VersionMismatch，
+# Worker 直接起不来（2026-11-12 本地 Docker 实测）。
+redis>=6.1,<7

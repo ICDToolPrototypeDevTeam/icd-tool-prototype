@@ -18,10 +18,13 @@ import os
 import re
 import sys
 import traceback
+import uuid
 from pathlib import Path
 from typing import Optional
 
 from app import job_scheduler
+from app.execution import config as execution_config
+from app.execution import dispatcher
 from app.forward import artifacts as forward_artifacts
 from app.forward.adapter import ForwardJobParams, run_forward_job
 from app.job_log import (
@@ -64,6 +67,10 @@ V4_INTERMEDIATE_JSON = {
 }
 
 MOCK_ONLY_PROVIDERS = {"minimax", "qwen"}
+
+
+class ForwardPipelineDisabled(RuntimeError):
+    """当前部署未启用正向管线（Celery 模式默认关闭，入口保留但返回 503）。"""
 
 # 参数快照中被视为「上传文件」的 key（用于任务列表展示 + 恢复前存在性校验）
 _INPUT_FILE_PARAM_KEYS = (
@@ -557,6 +564,45 @@ def run_v4_pipeline_thread(
             os.environ["JUDGE_PROVIDERS"] = saved_judge_providers
 
 
+def build_reverse_run_kwargs(job: Job, job_dir: Path) -> dict:
+    """按 manifest 参数快照重建反向管线入参（跨进程执行用）。
+
+    调用方（Celery Worker）没有请求对象，路径只能从 ``job.params`` 还原；
+    文件缺失时抛 FileNotFoundError，由路由或任务入口转成可读错误。
+    """
+    params = job.params or {}
+    hlr_path = _require_file(job_dir, params.get("hlr_path"))
+    publisher_path = _require_file(job_dir, params.get("publisher_path"))
+    subscriber_path = _require_file(job_dir, params.get("subscriber_path"))
+    if hlr_path is None or (publisher_path is None and subscriber_path is None):
+        raise FileNotFoundError("manifest missing required input paths")
+
+    trace_dir = _abs_path(job_dir, params.get("trace_dir"))
+    if trace_dir is not None and not trace_dir.is_dir():
+        raise FileNotFoundError(str(trace_dir))
+
+    return {
+        "hlr_path": hlr_path,
+        "publisher_path": publisher_path,
+        "subscriber_path": subscriber_path,
+        "trace_dir": trace_dir,
+        "judge_providers": list(params.get("judge_providers") or []),
+        "use_mock_llm": params.get("use_mock_llm"),
+        "controller_profile": params.get("controller_profile", "ams"),
+        "no_refine": bool(params.get("no_refine", False)),
+        "hlr_schema": params.get("hlr_schema"),
+    }
+
+
+def execute_reverse_job(job: Job, job_dir: Path) -> None:
+    """Worker 进程入口：按 manifest 重建参数后复用 API 进程同一条管线线程函数。
+
+    跨进程执行不能依赖请求上下文，因此这里只做「参数重建 + 调用」；状态写入、
+    取消检查、失败分类都沿用 :func:`run_v4_pipeline_thread`，两种模式行为一致。
+    """
+    run_v4_pipeline_thread(job, job_dir, **build_reverse_run_kwargs(job, job_dir))
+
+
 def launch_v4_pipeline(
     job: Job,
     job_dir: Path,
@@ -570,12 +616,18 @@ def launch_v4_pipeline(
     no_refine: bool = False,
     hlr_schema: Optional[dict] = None,
 ) -> None:
-    """工厂：落盘参数快照 + 登记，然后把任务交给进程内队列（job_scheduler）。
+    """工厂：落盘参数快照 + 登记，然后按执行模式入队。
 
-    并发上限由 ``MAX_CONCURRENT_JOBS`` 控制（默认 2）。此前是「登记后立即起
-    daemon 线程」——单个任务没问题，批量提交会把部署机（2C2G）同时压上多个
-    300~500MB 的管线。返回值恒为 None（三个调用方均不使用）。
+    - ``inline``：交给进程内队列（``job_scheduler``，并发上限
+      ``MAX_CONCURRENT_JOBS``，默认 2，历史行为）；
+    - ``celery``：先落 Redis 控制面票据，再发 Celery 消息；Worker 进程按
+      manifest 重建参数执行。
+
+    返回值恒为 None（三个调用方均不使用）。
     """
+    # 每次运行生成新的代次票据：续跑不能复用旧 token，否则 Celery 的 revoked
+    # 集合会把上一次被终止的任务 id 当成「已撤销」而拒绝执行新任务。
+    job.run_token = uuid.uuid4().hex
     # 落盘参数快照（供进程重启后按原参数继续执行）；必须在入队之前完成，
     # 保证 POST 返回时 manifest 已存在。
     job.set_dir(job_dir, {
@@ -592,6 +644,20 @@ def launch_v4_pipeline(
     # 登记即「已承诺运行」：在此之前失败的上传请求不会留下 pending 幽灵任务
     # （见 JobManager.new_job）。
     job_manager.register(job)
+
+    if execution_config.use_celery():
+        try:
+            dispatcher.submit_reverse(job)
+        except dispatcher.QueueUnavailable as exc:
+            # 入队失败 ≠ 任务失败：输入已保存，队列恢复后用户可点「继续」。
+            # 落 interrupted（可续跑态），而不是 failed（终态）。
+            job.update(
+                JobStatus.INTERRUPTED,
+                f'任务队列不可用，未开始执行，可稍后继续：{exc}',
+            )
+            raise
+        return
+
     job_scheduler.submit(job, functools.partial(
         run_v4_pipeline_thread,
         job, job_dir, hlr_path, publisher_path, subscriber_path, trace_dir,
@@ -608,15 +674,24 @@ def relaunch_from_manifest(job: Job, job_dir: Path) -> None:
     排队提示，任务真正开跑要等队列出空位，由管线线程入口落 running）。
     """
     params = job.params or {}
-    hlr_path = _require_file(job_dir, params.get("hlr_path"))
-    publisher_path = _require_file(job_dir, params.get("publisher_path"))
-    subscriber_path = _require_file(job_dir, params.get("subscriber_path"))
-    if hlr_path is None or (publisher_path is None and subscriber_path is None):
-        raise FileNotFoundError("manifest missing required input paths")
+    forward = job.task_type == "completeness"
 
-    trace_dir = _abs_path(job_dir, params.get("trace_dir"))
-    if trace_dir is not None and not trace_dir.is_dir():
-        raise FileNotFoundError(str(trace_dir))
+    # —— 先校验，再改状态：校验失败时任务必须保持原样（仍是 interrupted/canceled）——
+    if forward:
+        if not execution_config.forward_enabled():
+            raise ForwardPipelineDisabled(
+                '正向完整性分析在当前部署中未启用（仅启用反向管线）'
+            )
+        hlr_path = _require_file(job_dir, params.get("hlr_path"))
+        publisher_path = _require_file(job_dir, params.get("publisher_path"))
+        subscriber_path = _require_file(job_dir, params.get("subscriber_path"))
+        if hlr_path is None or (
+            publisher_path is None and subscriber_path is None
+        ):
+            raise FileNotFoundError("manifest missing required input paths")
+    else:
+        # 反向：统一从快照重建入参（文件/追溯目录存在性在这里一并校验）
+        run_kwargs = build_reverse_run_kwargs(job, job_dir)
 
     # 复位取消标志：同一进程内续跑一个已终止的任务时，Job 仍带着上次取消置位
     # 的 Event（``from_manifest`` 的复位只在进程重启重建 Job 时发生）。不复位
@@ -626,11 +701,11 @@ def relaunch_from_manifest(job: Job, job_dir: Path) -> None:
     job.resumed = True
     job.reuse = {"reused": 0, "rerun": 0}
     # 刻意**不**重置 total_tokens：续跑口径是「累计整个任务」，新任务才从 0 开始。
-    # 不在此处预置 RUNNING：入队由 job_scheduler.submit 统一落 pending + 排队提示，
+    # 不在此处预置 RUNNING：入队由 job_scheduler/celery 统一落 pending + 排队提示，
     # 排队期间前端如实显示「等待开始 / 任务已排队…」；真正开跑由管线线程入口
     # 落 running + Step 1/N（否则排队等待时会被显示成「正在分析」）。
 
-    if job.task_type == "completeness":
+    if forward:
         return launch_forward_pipeline(
             job=job,
             job_dir=job_dir,
@@ -643,19 +718,7 @@ def relaunch_from_manifest(job: Job, job_dir: Path) -> None:
             controller_profile=params.get("controller_profile"),
         )
 
-    return launch_v4_pipeline(
-        job=job,
-        job_dir=job_dir,
-        hlr_path=hlr_path,
-        publisher_path=publisher_path,
-        subscriber_path=subscriber_path,
-        trace_dir=trace_dir,
-        judge_providers=list(params.get("judge_providers") or []),
-        use_mock_llm=params.get("use_mock_llm"),
-        controller_profile=params.get("controller_profile", "ams"),
-        no_refine=bool(params.get("no_refine", False)),
-        hlr_schema=params.get("hlr_schema"),
-    )
+    return launch_v4_pipeline(job=job, job_dir=job_dir, **run_kwargs)
 
 
 # ============================================================
@@ -742,7 +805,14 @@ def launch_forward_pipeline(
     controller_profile（Issue #119 系统类型下拉）；追溯表为单字段多文件
     ``trace_files`` 列表（EPS 4 层链需 3 张表），旧快照双键由
     :func:`_trace_paths_from_params` 兼容读取。
+
+    正向尚未接入 Celery Worker：Celery 部署下默认关闭（``FORWARD_PIPELINE_ENABLED``
+    未设置即关闭），这里再做一次防御性拦截，避免其它调用点绕过路由直接启动。
     """
+    if not execution_config.forward_enabled():
+        raise ForwardPipelineDisabled(
+            '正向完整性分析在当前部署中未启用（仅启用反向管线）'
+        )
     params = ForwardJobParams(
         hlr_path=hlr_path,
         publisher_path=publisher_path,

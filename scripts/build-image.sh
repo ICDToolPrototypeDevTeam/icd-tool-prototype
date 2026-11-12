@@ -7,11 +7,12 @@
 # 本机（Windows 的 Git Bash）与 Linux 均可运行，需要 docker 与 node/npm。
 #
 # 为什么不能只给一句 `docker compose build`：
-#   服务器形态是「一个后端容器同时提供接口与页面」（ICD_STATIC_DIR=/app/static），
-#   前端**不打成镜像**，而是把 `npm run build` 生成的 frontend/dist 挂进后端容器。
-#   所以一次可交付的构建 = 后端镜像归档 + 前端构建产物 + 编排文件 + 部署说明
-#   （与 更新说明.md），缺一不可。上一轮就踩过「重建了前端镜像，但服务器用的
-#   dist 没更新」。
+#   服务器形态是「backend（API + 前端页面，ICD_STATIC_DIR=/app/static）+ worker
+#   （Celery）+ redis 三个容器」，前端**不打成镜像**，而是把 `npm run build`
+#   生成的 frontend/dist 挂进 backend 容器。服务器无外网，Redis 镜像也必须
+#   随包离线提供。所以一次可交付的构建 = 后端镜像归档 + Redis 镜像归档 +
+#   前端构建产物 + 编排文件 + 部署说明（与 更新说明.md），缺一不可。上一轮就
+#   踩过「重建了前端镜像，但服务器用的 dist 没更新」。
 #
 # 出包前置：先更新仓库根的 更新说明.md（本版相比上一版的部署层变化、需 root 的
 # 步骤、回滚方式——构建时会核对它的日期并提醒）。构建还会在包内版本末尾自动
@@ -36,6 +37,9 @@ IMAGE="icd-tool-backend-v${VERSION}"
 STAMP="${STAMP:-$(date +%Y%m%d)}"
 BUNDLE="$ROOT/dist/icd-deploy-${STAMP}"
 ARCHIVE_NAME="icd-tool-backend.tar.gz"
+# 服务器无外网，Redis 镜像需与后端镜像一起离线交付（编排文件 pull_policy: never）
+REDIS_IMAGE="${REDIS_IMAGE:-redis:7-alpine}"
+REDIS_ARCHIVE_NAME="redis-7-alpine.tar.gz"
 
 say() { printf '\n==> %s\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
@@ -111,7 +115,8 @@ emit_prev_diff() {
         fh='无法比对（一侧缺目录）'
       fi
       printf '| 项目 | 结果 |\n| --- | --- |\n'
-      printf '| 镜像归档 sha256 | %s |\n' "$sha_line"
+      printf '| 后端镜像归档 sha256 | %s |\n' "$sha_line"
+      printf '| Redis 镜像归档 | %s |\n' "$(compare_file "$prev/$REDIS_ARCHIVE_NAME" "$BUNDLE/$REDIS_ARCHIVE_NAME")"
       printf '| docker-compose.server.yml | %s |\n' "$(compare_file "$prev/docker-compose.server.yml" "$BUNDLE/docker-compose.server.yml")"
       printf '| backend/.env.example | %s |\n' "$(compare_file "$prev/backend/.env.example" "$BUNDLE/backend/.env.example")"
       printf '| 部署说明.md | %s |\n' "$(compare_file "$prev/部署说明.md" "$BUNDLE/部署说明.md")"
@@ -156,7 +161,7 @@ IMAGE_ARCH="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE"
 info "镜像 $IMAGE_ID（$IMAGE_ARCH）"
 
 # ---------------------------------------------------------------- 3. 导出归档
-say "[3/7] 导出镜像归档 $ARCHIVE_NAME（大镜像压缩需要一两分钟）"
+say "[3/7] 导出镜像归档（后端 + Redis；大镜像压缩需要一两分钟）"
 mkdir -p "$ROOT/dist"
 if [ -e "$BUNDLE" ]; then
   # 只覆盖本脚本生成的包：没有 BUILD_INFO 说明是别人放的东西，不擅自删
@@ -165,9 +170,20 @@ if [ -e "$BUNDLE" ]; then
   rm -rf "$BUNDLE"
 fi
 mkdir -p "$BUNDLE"
+
 docker save "$IMAGE" | compress_stream > "$BUNDLE/$ARCHIVE_NAME"
 ARCHIVE_SIZE="$(du -h "$BUNDLE/$ARCHIVE_NAME" | cut -f1)"
-info "归档大小：$ARCHIVE_SIZE"
+info "后端归档大小：$ARCHIVE_SIZE"
+
+# Redis 镜像：本机没有就先按目标架构拉取。服务器无外网，必须随包提供，
+# 否则编排文件（pull_policy: never）会直接报 image not found。
+if ! docker image inspect "$REDIS_IMAGE" >/dev/null 2>&1; then
+  info "本机无 $REDIS_IMAGE，先拉取（$PLATFORM）"
+  docker pull --platform "$PLATFORM" "$REDIS_IMAGE"
+fi
+docker save "$REDIS_IMAGE" | compress_stream > "$BUNDLE/$REDIS_ARCHIVE_NAME"
+REDIS_ARCHIVE_SIZE="$(du -h "$BUNDLE/$REDIS_ARCHIVE_NAME" | cut -f1)"
+info "Redis 归档大小：$REDIS_ARCHIVE_SIZE"
 
 # ---------------------------------------------------------------- 4. 组装交付包
 say "[4/7] 组装交付包"
@@ -179,7 +195,7 @@ mkdir -p "$BUNDLE/frontend" "$BUNDLE/backend/output"
 cp -r "$ROOT/frontend/dist" "$BUNDLE/frontend/dist"
 # .env.example 随包给出（真 .env 含密钥，另行走单独渠道，绝不放进交付包）
 cp "$ROOT/backend/.env.example" "$BUNDLE/backend/.env.example"
-info "frontend/dist、backend/.env.example、docker-compose.server.yml、部署说明.md、更新说明.md 已就位"
+info "两个镜像归档、frontend/dist、backend/.env.example、docker-compose.server.yml、部署说明.md、更新说明.md 已就位"
 
 # 更新说明.md 日期核对：顶部日期（YYYY-MM-DD）应为出包当天，不符则提醒（不阻断构建）
 NOTE_DATE="$(sed -n '1s/.*\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\).*/\1/p' "$ROOT/更新说明.md" | tr -d '\r')"
@@ -194,8 +210,10 @@ say "[5/7] 写入 BUILD_INFO 与校验值"
 (
   cd "$BUNDLE"
   sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
+  sha256sum "$REDIS_ARCHIVE_NAME" > "$REDIS_ARCHIVE_NAME.sha256"
 )
 ARCHIVE_SHA="$(cut -d' ' -f1 < "$BUNDLE/$ARCHIVE_NAME.sha256")"
+REDIS_ARCHIVE_SHA="$(cut -d' ' -f1 < "$BUNDLE/$REDIS_ARCHIVE_NAME.sha256")"
 GIT_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if ! git -C "$ROOT" diff --quiet HEAD 2>/dev/null; then
   GIT_SHA="$GIT_SHA+（构建时工作区有未提交改动）"
@@ -210,12 +228,18 @@ ICD 工具原型 · 服务器交付包
 镜像架构：$IMAGE_ARCH
 归档文件：$ARCHIVE_NAME（$ARCHIVE_SIZE）
 归档 sha256：$ARCHIVE_SHA
+Redis 镜像：$REDIS_IMAGE
+Redis 归档：$REDIS_ARCHIVE_NAME（$REDIS_ARCHIVE_SIZE）
+Redis 归档 sha256：$REDIS_ARCHIVE_SHA
 
 --- 机器可读区（部署核对用：arch= 供 uname -m 对照，sha256= 供手工校验），请勿改动以下行 ---
 image=$IMAGE
 arch=$IMAGE_ARCH
 archive=$ARCHIVE_NAME
 sha256=$ARCHIVE_SHA
+redis_image=$REDIS_IMAGE
+redis_archive=$REDIS_ARCHIVE_NAME
+redis_sha256=$REDIS_ARCHIVE_SHA
 EOF
 info "sha256：$ARCHIVE_SHA"
 
@@ -241,7 +265,8 @@ cat <<EOF
   1) 把交付目录（或单文件包）拷到服务器；
   2) 服务器上先读包内 更新说明.md（本版部署变化与需 root 的步骤），
      再按 部署说明.md §5 逐条手工执行（不执行任何随包脚本）：
-     sha256 校验 → docker load → 目录与 .env → 内存上限 → 启动自检；
+     sha256 校验 → docker load（后端 + Redis 两个镜像）→ 目录与 .env →
+     内存上限与 Worker 并发 → 启动自检；
   3) 首次部署前确认 backend/.env 里的模型地址与密钥已填好。
 
 详细说明见交付包内的 部署说明.md。

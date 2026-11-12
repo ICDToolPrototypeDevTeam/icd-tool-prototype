@@ -52,6 +52,30 @@ class LogBuffer:
         self._file_bytes = 0
         self._lock = threading.Lock()
 
+    @property
+    def path(self) -> Optional[Path]:
+        return self._path
+
+    def bind_path(self, path: Path) -> None:
+        """补绑日志文件路径（buffer 可能先被无路径地创建，见 register）。
+
+        Worker 进程启动时可能先打印了几行（例如设置加载失败），这些行只进了
+        内存 buffer、还没落盘。补绑时如果 buffer 已有内容，就从文件当前末尾
+        继续增量读，避免把旧文件内容插到新行前面；buffer 为空则正常恢复尾部。
+        """
+        with self._lock:
+            if self._path is not None:
+                return
+            self._path = Path(path)
+            has_lines = bool(self._lines)
+        if has_lines:
+            try:
+                self._file_bytes = self._path.stat().st_size
+            except OSError:
+                self._file_bytes = 0
+            return
+        self.restore_from_file()
+
     def append(self, text: str, level: str = 'info') -> None:
         if not text.strip():
             return
@@ -101,15 +125,60 @@ class LogBuffer:
         except Exception:  # noqa: BLE001 — 恢复失败不得影响服务启动
             pass
 
+    def sync_from_file(self) -> None:
+        """增量读取 job.log 自上次位置之后的新行（跨进程日志追平）。
+
+        Celery 模式下日志由 Worker 进程写入 ``job.log``，API 进程内存里的
+        buffer 看不到。每次读取日志接口前调用：只消费到最后一个换行符为止，
+        写了一半的行留给下一次，避免把半行文本当作完整日志展示。
+        """
+        with self._lock:
+            path = self._path
+            if path is None:
+                return
+            offset = self._file_bytes
+            try:
+                size = path.stat().st_size
+            except OSError:
+                return
+            # 日志文件只追加、且有 5MB 上限；变小说明被外部替换/清空，
+            # 此时不重读（重读会让前端 offset 语义错乱），等待后续追加。
+            if size <= offset:
+                return
+            try:
+                with path.open('rb') as f:
+                    f.seek(offset)
+                    raw = f.read()
+            except OSError:
+                return
+            end = raw.rfind(b'\n')
+            if end < 0:
+                return
+            chunk = raw[:end + 1].decode('utf-8', errors='replace')
+            for line in chunk.splitlines():
+                if not line.strip():
+                    continue
+                if len(self._lines) == self._lines.maxlen:
+                    self._truncated = True
+                self._seq += 1
+                self._lines.append(
+                    {'seq': self._seq, 'ts': '', 'level': 'info', 'text': line}
+                )
+            self._file_bytes = offset + end + 1
+
     def _persist(self, text: str, level: str) -> None:
         """同步追加到 job.log；任何 I/O 异常都不得影响任务本身。"""
         if self._path is None or self._file_bytes >= LOG_FILE_MAX_BYTES:
             return
         try:
             line = f'{_now_iso()} [{level}] {text}\n'
-            with self._path.open('a', encoding='utf-8') as f:
-                f.write(line)
-            self._file_bytes += len(line.encode('utf-8'))
+            # 必须按字节追加：Windows 文本模式会把 ``\n`` 写成 ``\r\n``，
+            # 而 ``_file_bytes`` 按 UTF-8 字节数记账，两者不一致会让跨进程
+            # 增量读取（sync_from_file）从半行中间开始，读出残片。
+            data = line.encode('utf-8')
+            with self._path.open('ab') as f:
+                f.write(data)
+            self._file_bytes += len(data)
         except Exception:  # noqa: BLE001 — 磁盘满 / 权限不足时静默降级为「仅内存」
             pass
 
@@ -127,14 +196,22 @@ class JobLogStore:
         return self._global
 
     def register(self, job_id: str, log_path: Optional[Path] = None) -> LogBuffer:
-        """绑定（或复用）job 的 buffer；首次创建且有 log_path 时从磁盘尾部恢复。"""
+        """绑定（或复用）job 的 buffer；首次创建且有 log_path 时从磁盘尾部恢复。
+
+        已有 buffer 但当初创建时没有路径（例如 Worker 在 ``_begin_job_run``
+        之前打印了内容）：补绑路径，保证后续日志能落盘、也能从文件追平。
+        """
+        path = Path(log_path) if log_path is not None else None
         with self._lock:
             buf = self._buffers.get(job_id)
-            if buf is not None:
-                return buf
-            buf = LogBuffer(path=Path(log_path) if log_path is not None else None)
-            self._buffers[job_id] = buf
-        buf.restore_from_file()
+            created = buf is None
+            if created:
+                buf = LogBuffer(path=path)
+                self._buffers[job_id] = buf
+        if created:
+            buf.restore_from_file()
+        elif path is not None:
+            buf.bind_path(path)
         return buf
 
     def read(self, job_id: str, offset: int = 0, limit: int = 500) -> dict:
@@ -143,6 +220,13 @@ class JobLogStore:
         if buf is None:
             return {'lines': [], 'next_offset': offset, 'truncated': False}
         return buf.read(offset=offset, limit=limit)
+
+    def sync(self, job_id: str) -> None:
+        """把 job.log 中由其它进程（Worker）追加的新行读进内存 buffer。"""
+        with self._lock:
+            buf = self._buffers.get(job_id)
+        if buf is not None:
+            buf.sync_from_file()
 
     def forget(self, job_id: str) -> None:
         """丢弃某任务的 buffer（其输出目录被硬删除后调用）。
@@ -296,10 +380,20 @@ _installed = False
 
 
 def install_log_tee() -> None:
-    """把 sys.stdout / sys.stderr 换成 Tee。幂等，重复调用无副作用。"""
+    """把 sys.stdout / sys.stderr 换成 Tee。幂等，重复调用无副作用。
+
+    逐流判断而不是只看 ``_installed``：Celery / uvicorn 可能在别处替换掉其中
+    一个流，此时需要补装；两个都已经是 Tee 时直接返回，避免重复包装导致同一
+    行日志被写入 buffer 两次。
+    """
     global _installed
-    if _installed:
-        return
+    if not isinstance(sys.stdout, _Tee):
+        sys.stdout = _Tee(sys.stdout, 'info')     # type: ignore[assignment]
+    if not isinstance(sys.stderr, _Tee):
+        sys.stderr = _Tee(sys.stderr, 'error')    # type: ignore[assignment]
     _installed = True
-    sys.stdout = _Tee(sys.stdout, 'info')     # type: ignore[assignment]
-    sys.stderr = _Tee(sys.stderr, 'error')    # type: ignore[assignment]
+
+
+def ensure_log_tee() -> None:
+    """Worker 任务入口调用：确保当前进程的 stdout/stderr 都被 Tee 采集。"""
+    install_log_tee()

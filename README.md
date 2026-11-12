@@ -122,7 +122,15 @@ JUDGE_PROVIDERS=deepseek,minimax,qwen
 docker compose up -d --build
 ```
 
-> **Windows 免 Docker 方式**：可打包为单目录桌面程序 `dist/ICDTool/ICDTool.exe`（双击启动后端并自动打开浏览器，同源访问 `/api/v4`）。构建与使用详见 `packaging/README.md`（决策见 `docs/decisions/ADR-005-Windows单目录桌面打包.md`）。
+该命令启动三个服务：`redis`（任务队列 + 控制面）、`backend`（API + 前端页面）、`worker`（Celery，默认 20 个并行子进程执行反向分析）。首次构建后 Worker 拉起 20 个子进程需要数秒，可用下面的命令确认：
+
+```bash
+docker compose logs worker | grep concurrency   # 期望：concurrency: 20 (prefork)
+```
+
+并发数与内存上限可用环境变量调整：`ICD_WORKER_CONCURRENCY`（默认 20）、`ICD_WORKER_MEM_LIMIT`（默认 10g）。20 路并行的内存预算与服务器部署步骤见 `部署说明.md` §5.4。
+
+> **Windows 免 Docker 方式**：可打包为单目录桌面程序 `dist/ICDTool/ICDTool.exe`（双击启动后端并自动打开浏览器，同源访问 `/api/v4`）。桌面形态走 inline 执行（单进程线程池，`MAX_CONCURRENT_JOBS` 默认 2），不依赖 Redis / Worker；构建与使用详见 `packaging/README.md`（决策见 `docs/decisions/ADR-005-Windows单目录桌面打包.md`）。
 
 ### 4.4 访问
 
@@ -232,6 +240,7 @@ icd-tool-prototype/
 | `docs/architecture/api.md` | API 接口定义 |
 | `docs/decisions/ADR-001-V4后端接入策略.md` | V4 后端工程化集成关键决策（Partially Superseded） |
 | `docs/decisions/ADR-002-移除V3.md` | 移除 V3 旧版代码决策 |
+| `docs/decisions/ADR-007-Celery-Redis任务执行层.md` | Celery + Redis 任务执行层决策 |
 | `docs/development/development-log.md` | 开发纪要 |
 | `docs/development/debug-log.md` | 问题排查记录 |
 | `.claude/rules/context-rules.md` | Claude Code 上下文读取规则 |
@@ -246,7 +255,8 @@ icd-tool-prototype/
 | 后端框架 | Python、FastAPI、Pydantic |
 | 文件处理 | openpyxl、python-docx、PyYAML、python-dotenv |
 | AI/LLM | DeepSeek、MiniMax、Qwen / DashScope |
-| 部署 | Docker Compose |
+| 任务执行 | Celery（prefork，默认 20 并发）+ Redis（队列 + 跨进程控制面） |
+| 部署 | Docker Compose（redis / backend / worker 三服务） |
 
 ## 8. 当前阶段
 

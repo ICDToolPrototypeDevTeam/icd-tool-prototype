@@ -23,6 +23,7 @@ from app.api.v4.runner import (
     derive_forward_summary,
     derive_mock_models,
     derive_outputs,
+    ForwardPipelineDisabled,
     job_input_filenames,
     relaunch_from_manifest,
     V4_INTERMEDIATE_JSON,
@@ -40,6 +41,9 @@ from app.api.v4.schemas import (
     V4JobStatusResponse,
     V4TokenUsage,
 )
+from app.execution import config as execution_config
+from app.execution import control as job_control
+from app.execution import dispatcher
 from app.job_log import LOG_FILE_NAME, job_log_store
 from app.job_manager import JobStatus, job_manager
 from app.v4.config import get_output_root
@@ -56,6 +60,17 @@ def _get_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail='job not found')
     return job
+
+
+def _control_or_503(job_id: str) -> dict:
+    """读取 Redis 控制面；不可用返回 503（不能假装任务可操作）。"""
+    try:
+        return job_control.snapshot_or_raise(job_id)
+    except job_control.RedisUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f'任务控制服务不可用：{exc}',
+        )
 
 
 def _parse_token_usage(raw) -> Optional[V4TokenUsage]:
@@ -278,6 +293,28 @@ def resume_v4_job(job_id: str):
             status_code=409,
             detail=f'job not resumable: status={job.status.value}',
         )
+    if job.task_type == "completeness" and not execution_config.forward_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail='正向完整性分析在当前部署中未启用（仅启用反向管线）',
+        )
+
+    if execution_config.use_celery():
+        ctl = _control_or_503(job_id)
+        if ctl.get('claimed_token'):
+            if job_control.is_fresh(ctl):
+                # Worker 正在收尾上一个运行；此时换票会让两个代次短暂并存
+                raise HTTPException(
+                    status_code=409,
+                    detail='worker still stopping the previous run; retry shortly',
+                )
+            # 失联 Worker 的旧租约：清掉后再入队，否则新任务会被 claim 拒绝
+            try:
+                job_control.clear(job_id)
+            except job_control.RedisUnavailable as exc:
+                raise HTTPException(
+                    status_code=503, detail=f'任务控制服务不可用：{exc}',
+                )
 
     job_dir = get_output_root() / 'v4' / job_id
     try:
@@ -287,6 +324,10 @@ def resume_v4_job(job_id: str):
             status_code=409,
             detail=f'cannot resume, input or trace file missing: {e}',
         )
+    except ForwardPipelineDisabled as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except dispatcher.QueueUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     return V4AnalyzeResponse(
         job_id=job.job_id,
@@ -321,6 +362,28 @@ def abandon_v4_job(job_id: str):
             detail=f'job not abandonable: status={job.status.value}',
         )
 
+    if execution_config.use_celery():
+        ctl = _control_or_503(job_id)
+        if ctl.get('claimed_token') and not job_control.is_fresh(ctl):
+            # 失联 Worker 的旧租约：不先清掉的话 Lua 会一直认为「有人在跑」
+            try:
+                job_control.clear(job_id)
+            except job_control.RedisUnavailable as exc:
+                raise HTTPException(
+                    status_code=503, detail=f'任务控制服务不可用：{exc}',
+                )
+        try:
+            recorded = job_control.request_abandon(job_id)
+        except job_control.RedisUnavailable as exc:
+            raise HTTPException(
+                status_code=503, detail=f'任务控制服务不可用：{exc}',
+            )
+        if not recorded:
+            raise HTTPException(
+                status_code=409,
+                detail='job is running; cancel it before abandoning',
+            )
+
     job.update(JobStatus.ABANDONED, '用户已放弃继续')
     return V4AnalyzeResponse(
         job_id=job.job_id,
@@ -352,6 +415,30 @@ def cancel_v4_job(job_id: str):
         raise HTTPException(
             status_code=409,
             detail=f'job not cancelable: status={job.status.value}',
+        )
+
+    if execution_config.use_celery():
+        try:
+            claimed = job_control.request_cancel(job_id)
+        except job_control.RedisUnavailable as exc:
+            raise HTTPException(
+                status_code=503, detail=f'任务控制服务不可用：{exc}',
+            )
+        if claimed:
+            # Worker 已占用：只写控制面，由心跳/管线检查点消费；manifest 由
+            # Worker 落 canceled。内存标记让本进程的响应立即显示「正在终止」。
+            job.cancel_requested = True
+            return V4AnalyzeResponse(
+                job_id=job.job_id,
+                status=job.status.value,
+                message='已请求终止，任务将在当前步骤/Case 边界停止（已产出文件保留）',
+            )
+        # 未被占用：消息还在队列里，Worker 的 claim 会因 cancel 标志被拒绝
+        job.update(JobStatus.CANCELED, '任务已被用户终止（排队等待期间，未开始执行）')
+        return V4AnalyzeResponse(
+            job_id=job.job_id,
+            status=job.status.value,
+            message='任务尚未开始执行，已直接终止（已产出文件保留）',
         )
 
     job.request_cancel()
@@ -396,6 +483,32 @@ def force_cancel_v4_job(job_id: str):
             detail=f'job not force-cancelable: status={job.status.value}',
         )
 
+    if execution_config.use_celery():
+        try:
+            claimed = job_control.request_force(job_id)
+        except job_control.RedisUnavailable as exc:
+            raise HTTPException(
+                status_code=503, detail=f'任务控制服务不可用：{exc}',
+            )
+        if claimed:
+            # 快速路径：让 Celery 直接 SIGKILL 当前 Worker 子进程；
+            # 控制面的 force 是兜底（广播丢失时心跳仍会让子进程退出）。
+            dispatcher.revoke_reverse(job)
+        # force 已原子写入：之后 Worker 的 claim 会被拒绝，不会有新执行。
+        job.update(
+            JobStatus.CANCELED,
+            '已强制终止：Worker 已收到终止指令（已产出文件保留，不支持续跑）',
+        )
+        return V4AnalyzeResponse(
+            job_id=job.job_id,
+            status=job.status.value,
+            message=(
+                '已强制终止：已通知 Worker 立即结束任务（已产出文件保留，不支持续跑）'
+                if claimed
+                else '已强制终止：任务在队列中，已标记终止（已产出文件保留）'
+            ),
+        )
+
     injected = job.force_cancel()
     return V4AnalyzeResponse(
         job_id=job.job_id,
@@ -420,5 +533,8 @@ def get_v4_job_logs(job_id: str, offset: int = 0, limit: int = 500):
     safe_limit = max(1, min(limit, 2000))
     safe_offset = max(0, offset)
     buf = job_log_store.register(job_id, _job_log_path(job))
+    # Celery 模式下日志由 Worker 进程追加：先把文件里的新行读进当前进程的
+    # buffer，否则前端只能看到 API 进程自己写的那几行（或者重启前的旧日志）。
+    job_log_store.sync(job_id)
     data = buf.read(offset=safe_offset, limit=safe_limit)
     return V4JobLogsResponse(job_id=job_id, **data)
