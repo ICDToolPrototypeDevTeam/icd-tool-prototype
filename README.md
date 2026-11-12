@@ -128,6 +128,7 @@ ICD_ADMIN_USERNAME=<初始管理员用户名>
 ICD_ADMIN_PASSWORD=<初始管理员密码，至少 8 位>
 ```
 
+- `MONGO_URL` 仅在本机直接用 uvicorn 连宿主 Mongo 时使用；用 compose 启动时由编排注入 `mongodb://mongo:27017/icd`，无需在 `.env` 中写。
 - `AUTH_JWT_SECRET` 缺失或短于 32 字符时后端拒绝启动；不得使用示例值上线。
 - 首次启动且用户集合为空时，用 `ICD_ADMIN_USERNAME` / `ICD_ADMIN_PASSWORD` 创建初始管理员；未配置且用户集合为空 → 后端启动失败。用户集合非空后，这两个变量不再生效，不会重置已有账号。
 - 首次登录后建议在管理员页面重置一次初始密码；唯一管理员忘记密码时按 `部署说明.md` 的 `mongosh` 命令手工恢复。
