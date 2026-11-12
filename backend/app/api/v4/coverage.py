@@ -17,11 +17,13 @@ from typing import Optional
 
 import openpyxl
 from docx import Document
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from starlette.concurrency import run_in_threadpool
 
 from app.api.v4.runner import launch_v4_pipeline
 from app.api.v4.schemas import V4AnalyzeResponse
+from app.auth.deps import current_user
+from app.auth.models import User
 from app.job_manager import job_manager
 from app.v4.config import get_output_root
 from app.v4.hlr_schema_store import (
@@ -262,6 +264,8 @@ async def coverage_analysis(
     controller_profile: Optional[str] = Form(None),
     no_refine: bool = Form(False),
     hlr_schema: Optional[str] = Form(None),
+    # 未登录由 fastapi-users 返回 401；归属写入创建的任务（后续任务按 owner_id 隔离）
+    user: User = Depends(current_user),
 ):
     # —— 字段校验 ——
     _hlr_ext = Path(hlr_word_file.filename or "").suffix.lower()
@@ -330,7 +334,11 @@ async def coverage_analysis(
     # 此刻**不登记**进任务列表：下面的保存上传与自动识别都可能抛错（413/422/500），
     # 那样请求就结束了、线程不会启动，登记了就是一条永远停在「等待开始」的幽灵任务。
     # 登记推迟到 launch_v4_pipeline（JobManager.new_job 有详细说明）。
-    job = job_manager.new_job(task_type="correctness")
+    job = job_manager.new_job(
+        task_type="correctness",
+        owner_id=str(user.id),
+        owner_username=user.email,
+    )
     job_dir = get_output_root() / 'v4' / job.job_id
     input_dir = job_dir / 'input'
     input_dir.mkdir(parents=True, exist_ok=True)

@@ -121,10 +121,25 @@ def _restore_token_usage(job: 'Job', raw_token_usage) -> None:
     job.tokens_by_provider = restored
 
 
+def _clean_owner(value: object) -> Optional[str]:
+    """归属字段只接受字符串；缺失 / 非法类型一律归一为 None（未归属）。"""
+    return value if isinstance(value, str) else None
+
+
 class Job:
-    def __init__(self, task_type: str = "correctness"):
+    def __init__(
+        self,
+        task_type: str = "correctness",
+        owner_id: str | None = None,
+        owner_username: str | None = None,
+    ):
         self.job_id: str = str(uuid.uuid4())
         self.task_type: str = task_type          # "correctness" | "completeness"
+        # —— 归属（创建时由登录用户写入；随 manifest 持久化）——
+        # owner_id 是权限判断键；owner_username 冗余保存，仅用于展示。
+        # 旧 manifest / CLI 场景没有归属 → None（未归属，后续按管理员可见处理）。
+        self.owner_id: Optional[str] = _clean_owner(owner_id)
+        self.owner_username: Optional[str] = _clean_owner(owner_username)
         self.status: JobStatus = JobStatus.PENDING
         self.message: Optional[str] = None
         self.created_at: datetime = datetime.now(timezone.utc)
@@ -217,6 +232,8 @@ class Job:
                     'schema_version': MANIFEST_SCHEMA_VERSION,
                     'job_id': self.job_id,
                     'task_type': self.task_type,
+                    'owner_id': self.owner_id,
+                    'owner_username': self.owner_username,
                     'status': self.status.value,
                     'message': self.message,
                     # 结果必须落盘：Celery 模式下 API 与 Worker 不在同一进程，
@@ -554,8 +571,16 @@ class Job:
 
     @classmethod
     def from_manifest(cls, data: dict, job_dir: Path) -> 'Job':
-        """按 manifest 重建 Job；字段缺失 / 格式非法时抛异常，由调用方跳过。"""
-        job = cls(task_type=data.get('task_type', 'correctness'))
+        """按 manifest 重建 Job；字段缺失 / 格式非法时抛异常，由调用方跳过。
+
+        例外：归属字段缺失 / 非法不抛异常 —— 升级前的旧 manifest 没有
+        ``owner_id`` / ``owner_username``，必须能按「未归属」正常恢复。
+        """
+        job = cls(
+            task_type=data.get('task_type', 'correctness'),
+            owner_id=_clean_owner(data.get('owner_id')),
+            owner_username=_clean_owner(data.get('owner_username')),
+        )
         job.job_id = data['job_id']
         job.status = JobStatus(data.get('status', 'pending'))
         job.message = data.get('message')
@@ -621,7 +646,12 @@ class JobManager:
         self._jobs[job.job_id] = job
         return job
 
-    def new_job(self, task_type: str = "correctness") -> Job:
+    def new_job(
+        self,
+        task_type: str = "correctness",
+        owner_id: str | None = None,
+        owner_username: str | None = None,
+    ) -> Job:
         """构造一个**尚未登记**的任务（不进任务列表）。
 
         上传接口按此创建：请求还要经过「保存上传文件」与「自动识别系统类型」
@@ -631,7 +661,7 @@ class JobManager:
         门槛 —— 用户只能看着它，没有任何操作能去掉它。登记因此推迟到真正要启动
         线程的 :meth:`register`（由 ``launch_*_pipeline`` 调用）。
         """
-        return Job(task_type=task_type)
+        return Job(task_type=task_type, owner_id=owner_id, owner_username=owner_username)
 
     def register(self, job: Job) -> Job:
         """把任务登记进任务列表（幂等）。"""

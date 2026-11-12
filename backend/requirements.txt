@@ -12,3 +12,7 @@ celery[redis]>=5.4,<6
 # kombu 5.7 的 Redis transport 要求 redis-py >= 6.1；用 5.x 会 VersionMismatch，
 # Worker 直接起不来（2026-11-12 本地 Docker 实测）。
 redis>=6.1,<7
+# 登录与账号隔离：认证框架 + MongoDB ODM/驱动
+fastapi-users[beanie,jwt]==13.0.0
+beanie==1.26.0
+motor==3.6.0

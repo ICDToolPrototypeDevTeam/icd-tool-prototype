@@ -1,9 +1,12 @@
-# 服务器单端口交付形态：一个后端容器提供 API 与前端页面，另加 Redis + Worker。
+# 服务器单端口交付形态：一个后端容器提供 API 与前端页面，另加 Redis + Worker
+# （任务执行层）与 Mongo（账号库）。
+# 对外只有一个端口 8182（后端同时提供 API 与前端页面）；Mongo 不映射宿主端口。
 #
 # 与本地开发用的 docker-compose.yml 的区别：
 #   - 无 build 段：镜像在外部构建后 docker load 进来，服务器无需联网构建；
 #   - 无前端容器：前端构建产物由后端同源托管（ICD_STATIC_DIR），对外只暴露 8182
-#     一个端口（映射到容器内 8000；容器内服务端口不变）。
+#     一个端口（映射到容器内 8000；容器内服务端口不变）；
+#   - Mongo 不映射宿主端口，只允许 compose 内部网络访问，并限制内存上限。
 #
 # 执行模型（自本版起）：
 #   API（backend）    接请求、保存上传、写 job.json、把反向任务放进 Redis 队列；
@@ -14,10 +17,14 @@
 #   用户可在页面上「继续」（从已落盘产物 + LLM 缓存续跑）。
 #
 # 使用前提（与仓库目录结构保持一致，交付时请原样带过去）：
-#   frontend/dist/     前端构建产物（npm run build 生成）
-#   backend/.env       模型服务配置
-#   backend/output/    分析输出落盘目录
-#   Redis 镜像         redis:7-alpine（服务器无外网，需随后端镜像一起离线载入）
+#   frontend/dist/        前端构建产物（npm run build 生成）
+#   backend/.env          模型服务配置 + 认证配置（MONGO_URL / AUTH_JWT_SECRET 等）
+#   backend/output/       分析输出落盘目录
+#   Redis 镜像            redis:7-alpine（服务器无外网，需随后端镜像一起离线载入）
+#   Mongo 镜像            mongo:7.0.14（账号库，同样随包离线载入）
+#   根目录 .env           容器内存上限与镜像标签（ICD_MEM_LIMIT / ICD_MEMSWAP_LIMIT /
+#                         ICD_WORKER_MEM_LIMIT / ICD_WORKER_MEMSWAP_LIMIT /
+#                         ICD_REDIS_MEM_LIMIT / MONGO_MEM_LIMIT / MONGO_IMAGE）
 #
 # 部署步骤与验收方式见 部署说明.md。
 #
@@ -48,6 +55,33 @@ services:
     mem_limit: ${ICD_REDIS_MEM_LIMIT:-512m}
     memswap_limit: ${ICD_REDIS_MEM_LIMIT:-512m}
 
+  mongo:
+    # 离线交付：镜像已随包提供（mongo-image.tar.gz），服务器上先 docker load。
+    # 变量 MONGO_IMAGE 默认与 scripts/build-image.sh 的默认值保持一致。
+    image: ${MONGO_IMAGE:-mongo:7.0.14}
+    # 内网服务器无外网出口：镜像缺失时直接报错，而不是尝试联网拉取
+    pull_policy: never
+    restart: unless-stopped
+    # 不映射宿主端口：只有 backend 容器能通过服务名 mongo 访问。
+    volumes:
+      - mongo_data:/data/db
+    # 账号库内存上限：默认 1 GB，从整机内存预算中扣除；按服务器内存调整时
+    # 写进部署目录根 .env（MONGO_MEM_LIMIT）。memswap_limit 与 mem_limit 相等
+    # = Mongo 容器不允许用 swap，避免内存压力下整机假死。
+    mem_limit: ${MONGO_MEM_LIMIT:-1g}
+    memswap_limit: ${MONGO_MEM_LIMIT:-1g}
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "db.adminCommand('ping').ok"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   backend:
     image: icd-tool-backend-v4.0
     # 内网服务器无外网出口：镜像缺失时直接报错，而不是尝试联网拉取
@@ -71,8 +105,14 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       # 正向尚未接入 Celery：入口保留，后端返回 503
       - FORWARD_PIPELINE_ENABLED=0
+      # 容器内后端走 compose 网络的服务名；覆盖 backend/.env 的 localhost 默认值
+      - MONGO_URL=mongodb://mongo:27017/icd
+      # 服务器部署关闭 /docs、/redoc、/openapi.json
+      - ICD_DOCS_ENABLED=0
     depends_on:
       redis:
+        condition: service_healthy
+      mongo:
         condition: service_healthy
     restart: unless-stopped
     # 容器内存上限：取值按 部署说明.md §5.4 算好后写进本目录的 .env
@@ -136,3 +176,5 @@ services:
 
 volumes:
   icd-redis-data:
+  # 账号库持久化：删容器不丢账号；备份/恢复见 部署说明.md §7.5
+  mongo_data:

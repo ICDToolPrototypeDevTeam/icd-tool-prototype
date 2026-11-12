@@ -24,13 +24,12 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from app.api.v4.runner import (
@@ -48,6 +47,9 @@ from app.api.v4.schemas import (
     V4HistoryOutputs,
     V4TokenUsage,
 )
+from app.auth.access import is_valid_job_id, require_job_access
+from app.auth.deps import current_admin, current_user
+from app.auth.models import User
 from app.job_log import LOG_FILE_NAME, job_log_store
 from app.job_manager import MANIFEST_NAME, Job, JobStatus, job_manager
 from app.v4.config import get_output_root
@@ -58,12 +60,10 @@ router = APIRouter()
 # 容器时区常为 UTC；固定东八区偏移，与 outputs.py 的产物命名规则一致
 _CN_TZ = timezone(timedelta(hours=8))
 
-# job_id 白名单：只接受 uuid4 的文本形式。删除动的是 ``shutil.rmtree``，路径必须
-# 先被这道正则挡住（``..`` / 路径分隔符 / 通配符全都匹配不上），落到磁盘前再做一次
-# 「解析后必须正好在 output/v4/ 下面」的归属校验，两道一起才动手。
-_JOB_ID_RE = re.compile(
-    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-)
+# job_id 白名单复用 ``access.is_valid_job_id``（与归属校验同一份规则）。删除动的
+# 是 ``shutil.rmtree``，路径必须先被这道白名单挡住（``..`` / 路径分隔符 / 通配符
+# 全都匹配不上），落到磁盘前再做一次「解析后必须正好在 output/v4/ 下面」的归属
+# 校验，两道一起才动手。
 
 # 反向匹配中间产物（Step 3 输出，文件名 SSoT 在 runner.V4_INTERMEDIATE_JSON）。
 # ADR-001 D7 原本不暴露 JSON 中间产物，并预留了「新开子路由」的开放方式；本模块
@@ -82,7 +82,7 @@ def _resolve_job_dir(job_id: str) -> Path:
     先被这两道挡住（``..`` / 路径分隔符 / 通配符匹配不上正则；软链指向别处被
     「解析后父目录必须正好是 output/v4/」挡住）。
     """
-    if not _JOB_ID_RE.match(job_id or ''):
+    if not is_valid_job_id(job_id):
         raise HTTPException(status_code=400, detail=f'invalid job_id: {job_id!r}')
     root = _v4_root().resolve()
     job_dir = (root / job_id).resolve()
@@ -149,8 +149,12 @@ def _mtime(path: Path) -> datetime:
         return datetime.now(timezone.utc)
 
 
-def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime]:
-    """把一个任务目录组装成历史记录，并返回其排序用的时间。
+def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime, str | None]:
+    """把一个任务目录组装成历史记录，返回「记录 / 排序时间 / 归属 owner_id」。
+
+    第三项供 ``list_history`` 做归属过滤：只认 ``owner_id``（``str(User.id)``），
+    ``owner_username`` 仅用于展示。manifest 缺失 / 损坏时 owner_id 为 ``None``
+    （未归属，仅管理员可见）。
 
     manifest 缺失 / 损坏时退化为「只剩目录」的记录：上传失败会留下这类残留目录，
     它们不出现在任何列表里，却照样占磁盘 —— 只有在这里能看到并清理掉。
@@ -186,14 +190,18 @@ def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime]:
                 has_reverse_matches=has_reverse_matches,
             ),
             fallback,
+            None,
         )
 
+    owner_id = data.get('owner_id')
+    owner_username = data.get('owner_username')
     created = _parse_iso(data.get('created_at')) or fallback
     updated = _parse_iso(data.get('updated_at')) or created
     finished = _parse_iso(data.get('finished_at'))
     return (
         V4HistoryItem(
             job_id=str(data.get('job_id') or job_dir.name),
+            owner_username=owner_username if isinstance(owner_username, str) else None,
             task_type=str(data.get('task_type') or ''),
             status=str(data.get('status') or 'unknown'),
             message=data.get('message'),
@@ -209,6 +217,7 @@ def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime]:
             token_usage=_parse_token_usage(data.get('token_usage')),
         ),
         created,
+        owner_id if isinstance(owner_id, str) else None,
     )
 
 
@@ -230,19 +239,24 @@ def _is_running(job: Optional[Job]) -> bool:
 
 
 @router.get('/history', response_model=list[V4HistoryItem])
-def list_history():
-    """列出服务器上保留的全部历史结果，按创建时间倒序（新→旧）。
+def list_history(user: User = Depends(current_user)):
+    """列出当前账号可见的历史结果，按创建时间倒序（新→旧）。
 
-    扫的是 ``output/v4/*/`` 目录本身，不是内存登记表：跑完的任务在进程重启后
-    不会被启动扫描载入，只有磁盘上的 ``job.json`` 知道它存在过。
+    管理员返回全部；普通用户只返回 ``owner_id == str(user.id)`` 的目录，
+    未归属目录（旧版本遗留 / manifest 损坏）仅管理员可见。扫的是
+    ``output/v4/*/`` 目录本身，不是内存登记表：跑完的任务在进程重启后不会被
+    启动扫描载入，只有磁盘上的 ``job.json`` 知道它存在过。
     """
     root = _v4_root()
     if not root.is_dir():
         return []
 
     entries = [_history_item(child) for child in root.iterdir() if child.is_dir()]
-    entries.sort(key=lambda pair: pair[1], reverse=True)
-    return [item for item, _ in entries]
+    if not user.is_superuser:
+        user_id = str(user.id)
+        entries = [entry for entry in entries if entry[2] == user_id]
+    entries.sort(key=lambda entry: entry[1], reverse=True)
+    return [item for item, _, _ in entries]
 
 
 def _log_download_name(job_id: str, path: Path) -> str:
@@ -256,7 +270,7 @@ def _log_download_name(job_id: str, path: Path) -> str:
 
 
 @router.get('/jobs/{job_id}/logs/download')
-def download_job_log(job_id: str):
+def download_job_log(job_id: str, user: User = Depends(current_user)):
     """下载该次运行的 ``job.log``（stdout/stderr 全集，含失败堆栈与执行过程）。
 
     **磁盘口径**：不查内存登记表，因此进程重启后、任务失败 / 中断 / 被终止之后
@@ -264,8 +278,10 @@ def download_job_log(job_id: str):
     内存里的任务，重启后对这类任务直接 404）。日志由 Tee 逐行同步落盘，任务中途
     被 OOM 杀掉也已写到最后一行为止。
 
+    归属校验先于路径解析与文件存在性判断：非本人 / 未归属任务统一 404。
     日志文件不存在（任务从未真正开始、目录已被删）→ 404；job_id 非法 → 400。
     """
+    require_job_access(job_id, user)
     path = _resolve_job_dir(job_id) / LOG_FILE_NAME
     if not path.is_file():
         raise HTTPException(
@@ -280,7 +296,7 @@ def download_job_log(job_id: str):
 
 
 @router.get('/jobs/{job_id}/intermediates/reverse-matches')
-def view_reverse_matches(job_id: str):
+def view_reverse_matches(job_id: str, user: User = Depends(current_user)):
     """浏览器内查看反向匹配中间产物 ``output/reverse_matches.json``（Step 3 匹配明细）。
 
     ADR-001 D7 原本不暴露 JSON 中间产物，并预留了「新开子路由」的开放方式；本路由
@@ -288,9 +304,11 @@ def view_reverse_matches(job_id: str):
     仍不暴露。不传 ``filename``，因此不发 ``Content-Disposition``：浏览器在新标签页
     里直接按 JSON 渲染，需要留档时页内另存即可。
 
+    归属校验先于路径解析与文件存在性判断：非本人 / 未归属任务统一 404。
     文件不存在（正向任务、Step 3 未跑完、目录已被删）→ 404；job_id 非法 → 400
     （两道校验同日志下载，走同一个 ``_resolve_job_dir``）。
     """
+    require_job_access(job_id, user)
     path = _resolve_job_dir(job_id) / 'output' / _REVERSE_MATCHES_FILE
     if not path.is_file():
         raise HTTPException(
@@ -301,12 +319,15 @@ def view_reverse_matches(job_id: str):
 
 
 @router.post('/history/delete', response_model=V4HistoryDeleteResponse)
-def delete_history(req: V4HistoryDeleteRequest):
+def delete_history(
+    req: V4HistoryDeleteRequest, user: User = Depends(current_admin)
+):
     """硬删除历史结果：整目录 ``rmtree``，**含 ``input/`` 里用户上传的原文件**。
 
-    不可恢复，因此按顺序设了三道关卡：显式 ``confirm`` → job_id 白名单 + 路径
-    归属校验 → 批次内无运行中任务。单目录删除失败（权限、文件被占用）计入
-    ``failed``，不影响同批其它任务；返回体里带上每个任务释放的字节数。
+    仅管理员可调用（普通用户 403）：删除是全局清理动作，且要能清掉未归属的
+    遗留任务。不可恢复，因此按顺序设了三道关卡：显式 ``confirm`` → job_id
+    白名单 + 路径归属校验 → 批次内无运行中任务。单目录删除失败（权限、文件被
+    占用）计入 ``failed``，不影响同批其它任务；返回体里带上每个任务释放的字节数。
     """
     if not req.confirm:
         raise HTTPException(status_code=400, detail='confirm=true is required: deletion is irreversible')

@@ -18,9 +18,10 @@ ICD工具原型采用前后端分离架构。
 ```text
 用户浏览器
     ↓
-React + TypeScript 前端
+React + TypeScript 前端（登录页 + 登录守卫）
     ↓
-FastAPI 后端（/api/v4）——任务生产者：上传、落盘、登记、投递
+FastAPI 后端（/api/v4）—— 登录鉴权 + 任务编排/生产者：上传、落盘、登记、投递
+    ├── 账号库 ──> MongoDB（独立容器，仅存账号；不存任务与产物）
     ↓  任务消息（Celery）
 Redis（broker + 跨进程控制面）
     ↓
@@ -37,7 +38,7 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
   Celery 模式下正向入口保留但后端返回 503，尚未接入 Worker）
 ```
 
-当前部署方式为 Docker Compose 三服务：`redis` + `backend`（API）+ `worker`（Celery），三者共享 `backend/output` 卷。任务状态以任务目录内的 `job.json` 为唯一权威。执行层设计见 `docs/decisions/ADR-007-Celery-Redis任务执行层.md`。
+当前部署方式为 Docker Compose：本地开发编排为 `frontend` + `backend` + `mongo` + `redis` + `worker` 五个服务；服务器交付为 `backend` + `mongo` + `redis` + `worker` 四个容器（前端静态产物由后端同源托管）。`backend` 与 `worker` 共享 `backend/output` 卷，任务状态以任务目录内的 `job.json` 为唯一权威。MongoDB 是登录与账号管理的硬依赖，任务归属与产物仍按任务目录（`backend/output/v4/{job_id}/`）落盘。执行层设计见 `docs/decisions/ADR-008-Celery-Redis任务执行层.md`。
 
 `JOB_EXECUTOR=inline`（pytest / 回滚路径）时，API 进程内用 `job_scheduler.py` 线程池执行任务，不依赖 Redis 与 Worker；生产部署固定使用 `JOB_EXECUTOR=celery`。
 
@@ -47,15 +48,18 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 
 前端主要职责包括：
 
-1. 提供文件上传页面；
-2. 支持上传 HLR Word 文件（必填）；
-3. 支持上传 EoICD Publisher / Subscriber PubSub Excel（二选一）；
-4. 支持上传一个或多个追溯 Excel（可选）；
-5. 调用后端 `/api/v4/coverage-analysis` 创建任务；
-6. 展示任务处理状态（六步进度）；
-7. 展示处理结果摘要（统计卡片 + 星级分布）；
-8. 提供输出文档预览与下载入口；
-9. 提供模型设置页面，运行时修改三个模型名称与思考模式开关（无需重启服务）。
+1. 提供登录页、登录状态维持与退出登录；
+2. 提供路由守卫（`RequireAuth` / `RequireAdmin`），未登录跳转登录页，非管理员不能进入管理员页面；
+3. 提供文件上传页面；
+4. 支持上传 HLR Word 文件（必填）；
+5. 支持上传 EoICD Publisher / Subscriber PubSub Excel（二选一）；
+6. 支持上传一个或多个追溯 Excel（可选）；
+7. 调用后端 `/api/v4/coverage-analysis` 创建任务；
+8. 展示任务处理状态（六步进度）；
+9. 展示处理结果摘要（统计卡片 + 星级分布）；
+10. 提供输出文档预览与下载入口；管理员在任务 / 历史列表可看到“所属账号”列；
+11. 提供管理员用户管理页（创建账号、重置密码、禁用 / 启用、设置 / 取消管理员）；
+12. 提供管理员模型设置页面，运行时修改三个模型名称与思考模式开关（无需重启服务）；非管理员隐藏该入口。
 
 前端不负责：
 
@@ -73,14 +77,15 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 后端主要职责包括：
 
 1. 接收前端上传的输入文件；
-2. 创建并维护本地分析任务；
-3. 解析 HLR Word 文件与 EoICD PubSub Excel；
-4. 用 DeepSeek 对每条 HLR 做 AI 标注；
-5. 执行反向匹配（含追溯表预筛选）；
-6. 编排多智能体裁判（DeepSeek / MiniMax / Qwen）与降级保护；
-7. 执行 Review Agent 共识复核与星级评分；
-8. 生成 1 份 xlsx + 4 份 docx 报告；
-9. 提供任务状态查询和结果下载接口。
+2. 提供登录 / 登出 / 当前用户接口，管理员创建账号、重置密码、禁用 / 启用账号（MongoDB 账号库）；
+3. 创建并维护本地分析任务，创建时写入当前登录用户的归属；
+4. 解析 HLR Word 文件与 EoICD PubSub Excel；
+5. 用 DeepSeek 对每条 HLR 做 AI 标注；
+6. 执行反向匹配（含追溯表预筛选）；
+7. 编排多智能体裁判（DeepSeek / MiniMax / Qwen）与降级保护；
+8. 执行 Review Agent 共识复核与星级评分；
+9. 生成 1 份 xlsx + 4 份 docx 报告；
+10. 提供任务状态查询和结果下载接口，并按任务归属做统一访问校验。
 
 ## 5. 后端模块划分
 
@@ -88,12 +93,13 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 
 | 模块             | 职责                            |
 | -------------- | ----------------------------- |
-| `main.py`      | FastAPI 应用入口，仅 CORS + `/api/v4` 路由装载 |
-| `job_manager.py` | 任务状态管理（`JobStatus` / `Job` / `JobManager`）；持有任务累计 token（`total_tokens`）与 manifest 持久化。Celery 模式下 manifest（`job.json`）是唯一权威状态，`get_job` / `list_jobs` 每次回读并叠加控制面快照；启动扫描按「pending 存活 / 心跳新鲜存活 / 心跳过期按意图收尾 / Redis 不可达不判断」恢复 |
+| `main.py`      | FastAPI 应用入口：CORS + `/api/v4` 路由装载；lifespan 初始化 MongoDB / Beanie 并播种初始管理员、执行 Celery 自检、启动扫描与失联巡检；SPA 静态兜底限定在静态目录内（`unquote` + `resolve` + `relative_to`，拒绝 `..`）；`ICD_DOCS_ENABLED` 控制 `/docs` / `/redoc` / `/openapi.json` |
+| `auth/`        | 认证与账号模块：`config.py`（认证 env 读取与校验）、`db.py`（Motor + Beanie 初始化 / ping）、`models.py`（User 文档）、`schemas.py`（请求 / 响应模型）、`manager.py`（用户名小写化、密码哈希、重复创建保护）、`backend.py`（JWTStrategy + CookieTransport + FastAPIUsers）、`seed.py`（初始管理员播种）、`deps.py`（`current_user` / `current_admin`）、`router.py`（`/auth/*`、`/admin/users*`）、`access.py`（任务归属统一访问校验） |
+| `job_manager.py` | 任务状态管理（`JobStatus` / `Job` / `JobManager`）；持有任务累计 token（`total_tokens`）与 manifest 持久化；任务归属字段 `owner_id` / `owner_username` 随 Job 与 `job.json` 持久化。Celery 模式下 manifest（`job.json`）是唯一权威状态，`get_job` / `list_jobs` 每次回读并叠加控制面快照；启动扫描按「pending 存活 / 心跳新鲜存活 / 心跳过期按意图收尾 / Redis 不可达不判断」恢复 |
 | `token_usage.py` | 反向 LLM token 采集：解析 OpenAI 兼容 `usage` 的三种形状，并从线程绑定的 Job 累加（只 import `job_log`，不 import `job_manager`，避免循环依赖） |
 | `job_log.py`   | 任务日志缓冲、stdout/stderr Tee、线程归属与 job.log 落盘；Celery 模式下 API 进程按字节偏移从 `job.log` 增量同步 Worker 日志（只消费完整行，二进制追加避免 CRLF 字节错位）；不依赖任何 `app.*` 业务模块 |
 | `job_scheduler.py` | **inline 模式**的进程内任务队列：固定 `MAX_CONCURRENT_JOBS`（默认 2）个常驻工作线程领取任务（新任务 FIFO，续跑任务插队首，不抢占执行中任务）；出队时做票据比对（同一任务的旧条目丢弃）与跳过裁决（排队期间被终止 / 放弃的任务不执行，原因写入该任务日志）。Celery 模式下不使用 |
-| `execution/` | 任务执行层（ADR-007）：`config.py`（执行模式与 env 解析）、`celery_app.py`（Celery 应用与长任务参数）、`dispatcher.py`（投递 / revoke）、`tasks.py`（Worker 侧入口：认领、心跳、执行反向管线）、`control.py`（Redis 控制面与 Lua 原子操作）、`reaper.py`（失联 Worker 巡检）；只被 `api/v4/runner.py`、`api/v4/jobs.py`、`main.py` 调用，不反向依赖路由层 |
+| `execution/` | 任务执行层（ADR-008）：`config.py`（执行模式与 env 解析）、`celery_app.py`（Celery 应用与长任务参数）、`dispatcher.py`（投递 / revoke）、`tasks.py`（Worker 侧入口：认领、心跳、执行反向管线）、`control.py`（Redis 控制面与 Lua 原子操作）、`reaper.py`（失联 Worker 巡检）；只被 `api/v4/runner.py`、`api/v4/jobs.py`、`main.py` 调用，不反向依赖路由层 |
 | `runtime_settings.py` | 运行时模型设置：三个模型名与三个思考开关原子落盘到 `OUTPUT_DIR/settings.json`，保存时写入 `os.environ`，启动时回读；不依赖任何业务管线 |
 | `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（经 `job_scheduler` 入队 + 7 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` / `settings.py` |
 | `api/v4/hlr_schemas.py` | HLR 表格样式管理与辅助接口：样式列表 / 新建 / 更新 / 删除、文档表格扫描与试解析（扫描与试解析均不调用 LLM）；内置模板只读（403），未知样式 404、重名 409、配置非法 422 |
@@ -117,6 +123,35 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | `output/`      | 运行时生成的输出文件存放目录                |
 
 **HLR 表格样式与 controller profile 的分工**：自定义样式只覆盖解析器的 `field_map`（行标签映射）与 `requirement_scan`（需求表识别与 `id_pattern` 校验）；controller profile 继续负责匹配关键词、追溯表配置、AI 标注示例与 preprocess hook —— `build_profile_with_schema` 只替换 `hlr_parser` 配置，profile 的其余配置原样保留。内置模板由各 profile 的 `config.yaml` 派生，未修改的模板按该控制器的原生解析路径执行（native），因此默认行为与样式能力引入前一致。下游管线只消费 `requirement_id` + `content`（可选 `rationale`），样式变化不影响 Step 2 及之后的输入与产物结构。
+
+### 5.1 认证与账号隔离（阶段 A，ADR-007）
+
+`backend/app/auth/` 是认证与账号管理的唯一入口，V4 路由不在 `main.py` 内直接实现鉴权逻辑：
+
+```text
+backend/app/auth/
+├── config.py    # MONGO_URL / MONGO_DB / AUTH_JWT_SECRET / AUTH_TOKEN_TTL_SECONDS /
+│                # AUTH_COOKIE_NAME / AUTH_COOKIE_SECURE / ICD_ADMIN_* / ICD_DOCS_ENABLED
+├── db.py        # AsyncIOMotorClient + init_beanie + ping_db；启动不可达即失败
+├── models.py    # User（集合 users；email 字段承载小写用户名；is_active / is_superuser）
+├── schemas.py   # UserCreateRequest（is_admin）/ UserUpdateRequest（is_superuser）/ UserRead / MeResponse
+├── manager.py   # UserManager：用户名小写化、密码哈希、重复创建与唯一索引竞态保护
+├── backend.py   # JWTStrategy + CookieTransport（HttpOnly / SameSite=Lax / Path=/）+ FastAPIUsers
+├── seed.py      # 用户集合为空时按 ICD_ADMIN_* 创建初始管理员
+├── deps.py      # current_user / current_admin
+├── router.py    # /auth/login、/auth/logout、/auth/me、/admin/users*
+└── access.py    # get_job_owner / ensure_owner / require_job_access / is_valid_job_id
+```
+
+关键边界：
+
+1. **Mongo 只存账号**：`mongo` 为 compose 独立服务（命名卷 `mongo_data`），后端容器通过服务名访问；服务器编排不映射宿主端口。任务与产物仍落 `backend/output/v4/{job_id}/`，设置与 HLR 样式仍落 `backend/output/*.json`。
+2. **任务归属**：`Job` 与 `job.json` 增加 `owner_id`（`str(User.id)`，权限键）与 `owner_username`（冗余展示）。创建任务时写入当前登录用户；续跑沿用原归属；CLI 与旧 manifest 无归属 → 仅管理员可见。
+3. **统一访问校验**：所有按 `job_id` 的任务接口（内存 / 磁盘）统一走 `app/auth/access.py` 的 `require_job_access()` / `ensure_owner()`；内存任务先查 `Job.owner_id`，磁盘任务读 manifest，归属不匹配或任务不存在统一 404，管理员放行全部；任务 / 历史列表按 `owner_id` 过滤。`outputs.py` 先校验归属再判断文件存在性，避免通过 404/200 差异探测他人任务。普通用户访问管理员接口 → 403。
+4. **历史与全局配置**：`GET /history` 按 manifest 的 `owner_id` 过滤（管理员全部）；`POST /history/delete`、`GET/PUT /settings`、HLR 样式新建 / 更新 / 删除限管理员；HLR 样式列表 / 扫描 / 试解析对登录用户开放。
+5. **失败语义**：未登录 401；Mongo 运行中失联 → 受保护接口 503 `{"detail": "database unavailable"}`；启动时 Mongo 不可达 → 启动失败并打印明确日志。
+6. **静态兜底加固**：SPA 兜底只返回解析后位于静态目录内的文件；含 `..`（含编码形式）或越界的请求返回 404，不回落 `index.html`（不做路径纠正）；`/api/*` 未匹配路由返回 JSON 404；`ICD_DOCS_ENABLED=0` 时 `/docs` / `/redoc` / `/openapi.json` 也不被兜底接住。
+7. **正向代码树未改**：`backend/forward/` 业务实现与产物生成方式不变，正向适配层只在 API 入口增加登录与归属校验；正反向仍互不 import 业务模块。
 
 ## 6. 前端模块划分
 
@@ -280,13 +315,13 @@ backend/output/v4/{job_id}/
 
 当前架构服务于本地演示原型，存在以下限制：
 
-1. 任务状态以任务目录内的 `job.json` 为准，不引入独立状态服务；
-2. 暂不引入数据库；
-3. 暂不实现用户认证和权限管理；
-4. 暂不实现按用户隔离 / 配额的多用户任务管理：Celery 提供的是全局 Worker 并发（默认 20），没有账号体系；
-5. 暂不实现云端部署和容器编排平台（Kubernetes 等）的运维能力；
-6. 任务执行层已由 Celery + Redis 承担（ADR-007）：单队列 `icd.reverse`、固定 Worker 并发（默认 20）、FIFO，无多级优先级、无抢占、无按用户配额、无公平调度；`job_scheduler.py` 仅保留为 inline 测试 / 回滚路径。
-7. Celery 模式下正向管线未接入 Worker（创建与续跑返回 503），需待正向测试通过后另行接入。
+1. 任务状态以任务目录内的 `job.json` 为准，不引入独立任务状态服务；MongoDB 仅用于账号库，任务与分析产物不入库（阶段 B 后续设计）。
+2. 已实现登录与账号隔离，但无细粒度角色、操作审计、自助注册、邮箱验证与找回密码。
+3. 暂不实现按账号的资源配额 / 多租户配额管理：Celery 提供的是全局 Worker 并发（默认 20），无按用户配额与公平调度。
+4. 暂不实现云端部署和容器编排平台（Kubernetes 等）的运维能力。
+5. 任务执行层已由 Celery + Redis 承担（ADR-008）：单队列 `icd.reverse`、固定 Worker 并发（默认 20）、FIFO，无多级优先级、无抢占；`job_scheduler.py` 仅保留为 inline 测试 / 回滚路径。
+6. Celery 模式下正向管线未接入 Worker（创建与续跑返回 503），需待正向测试通过后另行接入。
+7. Windows 桌面打包版本阶段暂停交付，只保证内网服务器 Docker 部署（ADR-007）。
 
 如后续需要扩展上述能力，应通过新的 Issue 或 ADR 明确设计后再实施。
 
@@ -306,11 +341,12 @@ backend/output/v4/{job_id}/
 
 ```text
 backend/app/
-├── main.py                 # 顶层 FastAPI 入口（仅 CORS + V4 router 装载）
-├── job_manager.py          # 共享 Job / JobManager（JobStatus 唯一来源）
+├── main.py                 # 顶层 FastAPI 入口（CORS + V4 router 装载 + lifespan 初始化 Mongo/管理员 + 静态兜底加固）
+├── auth/                   # 认证与账号管理（config / db / models / schemas / manager / backend / seed / deps / router / access）
+├── job_manager.py          # 共享 Job / JobManager（JobStatus 唯一来源；owner_id / owner_username 随 manifest 持久化）
 ├── job_log.py              # 进程级日志缓冲 / stdout-stderr Tee / job.log 落盘与恢复（不 import app.*）
 ├── job_scheduler.py        # inline 模式进程内队列（常驻工作线程 + 票据 + 出队跳过裁决；并发上限 MAX_CONCURRENT_JOBS）
-├── execution/              # 任务执行层（ADR-007）：执行模式配置 / Celery 应用 / 投递与 revoke /
+├── execution/              # 任务执行层（ADR-008）：执行模式配置 / Celery 应用 / 投递与 revoke /
 │                           #   Worker 任务入口 / Redis 控制面 / 失联巡检（不 import api/v4）
 ├── token_usage.py          # 反向 token 采集（usage 解析 + 绑定 Job 累加；不 import job_manager）
 ├── runtime_settings.py     # 运行时模型设置：output/settings.json 持久化 + os.environ 热应用

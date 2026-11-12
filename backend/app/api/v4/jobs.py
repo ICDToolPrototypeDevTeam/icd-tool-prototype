@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Optional, Union
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.v4.runner import (
     _merged_progress,
@@ -41,11 +41,14 @@ from app.api.v4.schemas import (
     V4JobStatusResponse,
     V4TokenUsage,
 )
+from app.auth.access import ensure_owner
+from app.auth.deps import current_user
+from app.auth.models import User
 from app.execution import config as execution_config
 from app.execution import control as job_control
 from app.execution import dispatcher
 from app.job_log import LOG_FILE_NAME, job_log_store
-from app.job_manager import JobStatus, job_manager
+from app.job_manager import Job, JobStatus, job_manager
 from app.v4.config import get_output_root
 
 import json
@@ -55,10 +58,12 @@ from pathlib import Path
 router = APIRouter()
 
 
-def _get_job(job_id: str):
+def _get_job(job_id: str, user: User) -> Job:
+    """取内存中的任务并校验归属；任务不存在或不属于当前用户一律 404。"""
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail='job not found')
+    ensure_owner(job.owner_id, user)
     return job
 
 
@@ -115,13 +120,20 @@ def _job_log_path(job) -> Path:
 
 
 @router.get('/jobs', response_model=list[V4JobListItem])
-def list_v4_jobs(status: Optional[str] = None, task_type: Optional[str] = None):
+def list_v4_jobs(
+    status: Optional[str] = None,
+    task_type: Optional[str] = None,
+    user: User = Depends(current_user),
+):
     """任务列表（内存中的任务：本进程新建 + 启动扫描恢复的中断任务）。
 
     按创建时间倒序。典型用法：`?status=interrupted&task_type=correctness`
-    取出待用户选择「继续 / 放弃」的任务。
+    取出待用户选择「继续 / 放弃」的任务。普通用户只看得到自己的任务；
+    管理员看全部（未归属的遗留任务也包含在内）。
     """
     jobs = job_manager.list_jobs()
+    if not user.is_superuser:
+        jobs = [j for j in jobs if j.owner_id == str(user.id)]
     if status:
         jobs = [j for j in jobs if j.status.value == status]
     if task_type:
@@ -136,14 +148,15 @@ def list_v4_jobs(status: Optional[str] = None, task_type: Optional[str] = None):
             created_at=j.created_at.isoformat(),
             updated_at=j.updated_at.isoformat(),
             input_files=job_input_filenames(j),
+            owner_username=j.owner_username,
         )
         for j in jobs
     ]
 
 
 @router.get('/jobs/{job_id}', response_model=V4JobStatusResponse)
-def get_v4_job_status(job_id: str):
-    job = _get_job(job_id)
+def get_v4_job_status(job_id: str, user: User = Depends(current_user)):
+    job = _get_job(job_id, user)
     # 优先用 pipeline 上报的结构化进度；老 manifest 没有该字段时回落到
     # 从 message 正则解析（保证向后兼容，行为与改动前一致）。
     progress = _merged_progress(job)
@@ -265,9 +278,9 @@ def _forward_result(job, base_outputs_dir: Path) -> V4ForwardJobResultResponse:
 
 
 @router.get('/jobs/{job_id}/result', response_model=Union[V4JobResultResponse, V4ForwardJobResultResponse])
-def get_v4_job_result(job_id: str):
+def get_v4_job_result(job_id: str, user: User = Depends(current_user)):
     """共用结果接口：按 job.task_type 分发到正确性 / 完整性两种响应 schema。"""
-    job = _get_job(job_id)
+    job = _get_job(job_id, user)
     if job.status != JobStatus.COMPLETED:
         raise HTTPException(status_code=409, detail=f'job not finished: status={job.status.value}')
 
@@ -279,7 +292,7 @@ def get_v4_job_result(job_id: str):
 
 
 @router.post('/jobs/{job_id}/resume', response_model=V4AnalyzeResponse)
-def resume_v4_job(job_id: str):
+def resume_v4_job(job_id: str, user: User = Depends(current_user)):
     """继续一个被中断或被用户终止的任务。
 
     按 manifest 中落盘的参数快照重新执行整条管线（已上传的输入文件直接复用，
@@ -287,7 +300,7 @@ def resume_v4_job(job_id: str):
     输入文件缺失 → 409，且任务状态保持不变。续跑前由 ``relaunch_from_manifest``
     复位取消标志，否则第一个检查点会立刻再次取消。
     """
-    job = _get_job(job_id)
+    job = _get_job(job_id, user)
     if job.status not in (JobStatus.INTERRUPTED, JobStatus.CANCELED):
         raise HTTPException(
             status_code=409,
@@ -337,7 +350,7 @@ def resume_v4_job(job_id: str):
 
 
 @router.post('/jobs/{job_id}/abandon', response_model=V4AnalyzeResponse)
-def abandon_v4_job(job_id: str):
+def abandon_v4_job(job_id: str, user: User = Depends(current_user)):
     """放弃一个被中断或被用户终止的任务；只改状态，不删除输入与中间产物。
 
     ``abandoned`` 是这套状态机里的**终态**：任务被中断/终止后，用户要么续跑，
@@ -352,7 +365,7 @@ def abandon_v4_job(job_id: str):
     从未启动。放弃与工作线程出队之间没有锁，存在毫秒级竞态窗口（出队裁决刚通过
     即被放弃），此时任务会照常跑完并落 completed，无数据损坏。
     """
-    job = _get_job(job_id)
+    job = _get_job(job_id, user)
     queued_unstarted = (
         job.status == JobStatus.PENDING and job.thread_ident is None
     )
@@ -393,7 +406,7 @@ def abandon_v4_job(job_id: str):
 
 
 @router.post('/jobs/{job_id}/cancel', response_model=V4AnalyzeResponse)
-def cancel_v4_job(job_id: str):
+def cancel_v4_job(job_id: str, user: User = Depends(current_user)):
     """终止一个任务（协作式）。
 
     运行中的任务：只置取消标志，管线在下一个检查点（步骤开头 / 每个 case）抛出
@@ -410,7 +423,7 @@ def cancel_v4_job(job_id: str):
     排队任务立即终止后的 ``canceled``），不是虚构的 ``canceling``：前端靠
     ``cancel_requested`` 展示「正在终止…」，避免再出现「同一个词表示两件事」的歧义。
     """
-    job = _get_job(job_id)
+    job = _get_job(job_id, user)
     if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
         raise HTTPException(
             status_code=409,
@@ -462,7 +475,7 @@ def cancel_v4_job(job_id: str):
 
 
 @router.post('/jobs/{job_id}/force-cancel', response_model=V4AnalyzeResponse)
-def force_cancel_v4_job(job_id: str):
+def force_cancel_v4_job(job_id: str, user: User = Depends(current_user)):
     """强制终止一个运行中的任务（不等待检查点）。
 
     与 ``/cancel`` 的区别：``/cancel`` 只置标志，管线要跑到检查点才停；本接口
@@ -476,7 +489,7 @@ def force_cancel_v4_job(job_id: str):
     排队等待中的任务同样可强制终止：无绑定线程可注入，直接落 ``canceled`` 终态，
     工作线程出队时跳过执行。
     """
-    job = _get_job(job_id)
+    job = _get_job(job_id, user)
     if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
         raise HTTPException(
             status_code=409,
@@ -522,14 +535,19 @@ def force_cancel_v4_job(job_id: str):
 
 
 @router.get('/jobs/{job_id}/logs', response_model=V4JobLogsResponse)
-def get_v4_job_logs(job_id: str, offset: int = 0, limit: int = 500):
+def get_v4_job_logs(
+    job_id: str,
+    offset: int = 0,
+    limit: int = 500,
+    user: User = Depends(current_user),
+):
     """任务日志增量拉取。
 
     ``offset`` 传上一次返回的 ``next_offset``（首次传 0）。内存 buffer 为空
     （进程重启后）时，``register`` 会从输出目录的 job.log 尾部恢复，因此
     服务器重启后仍能看到重启前的日志。
     """
-    job = _get_job(job_id)
+    job = _get_job(job_id, user)
     safe_limit = max(1, min(limit, 2000))
     safe_offset = max(0, offset)
     buf = job_log_store.register(job_id, _job_log_path(job))

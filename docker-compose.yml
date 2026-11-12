@@ -20,6 +20,28 @@ services:
       retries: 20
     restart: unless-stopped
 
+  mongo:
+    # 固定小版本，避免不同构建机拉到不同镜像；可用 MONGO_IMAGE 覆盖
+    image: ${MONGO_IMAGE:-mongo:7.0.14}
+    restart: unless-stopped
+    # 仅绑定本机回环地址：方便在宿主机直接跑 uvicorn 调试（backend/.env 默认
+    # MONGO_URL=mongodb://127.0.0.1:27017/icd）；容器内后端通过服务名 mongo 访问。
+    ports:
+      - '127.0.0.1:27017:27017'
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "db.adminCommand('ping').ok"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   backend:
     image: icd-tool-backend-v4.0
     build:
@@ -38,8 +60,12 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       # 正向尚未接入 Celery；入口保留，后端返回 503
       - FORWARD_PIPELINE_ENABLED=0
+      # 容器内后端走 compose 网络的服务名；覆盖 backend/.env 的 localhost 默认值
+      - MONGO_URL=mongodb://mongo:27017/icd
     depends_on:
       redis:
+        condition: service_healthy
+      mongo:
         condition: service_healthy
 
   worker:
@@ -91,3 +117,4 @@ services:
 
 volumes:
   icd-redis-data:
+  mongo_data:

@@ -24,11 +24,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from app.api.v4.coverage import _RequestBudget, _save_upload
 from app.api.v4.runner import launch_forward_pipeline
 from app.api.v4.schemas import V4AnalyzeResponse
+from app.auth.deps import current_user
+from app.auth.models import User
 from app.execution import config as execution_config
 from app.job_manager import job_manager
 from app.v4.config import get_output_root
@@ -47,6 +49,8 @@ async def completeness_analysis(
     controller_profile: Optional[str] = Form(None),
     # Mock 仅由 .env 的 USE_MOCK_LLM 控制；此字段仅作显式覆盖（None = 不动 env）
     use_mock_llm: Optional[bool] = Form(None),
+    # 未登录由 fastapi-users 返回 401；归属写入创建的任务（后续任务按 owner_id 隔离）
+    user: User = Depends(current_user),
 ):
     # 正向尚未接入 Celery Worker：当前部署保留入口，但提交直接 503。
     if not execution_config.forward_enabled():
@@ -87,7 +91,11 @@ async def completeness_analysis(
     # —— 创建 Job 与目录（正向与反向共用 output/v4/{job_id}/ 结构）——
     # 不登记：保存上传可能抛错（413/422），登记了就会留下停在「等待开始」的
     # 幽灵任务。登记推迟到 launch_forward_pipeline（见 JobManager.new_job）。
-    job = job_manager.new_job(task_type="completeness")
+    job = job_manager.new_job(
+        task_type="completeness",
+        owner_id=str(user.id),
+        owner_username=user.email,
+    )
     job_dir = get_output_root() / 'v4' / job.job_id
     input_dir = job_dir / 'input'
     input_dir.mkdir(parents=True, exist_ok=True)
