@@ -51,6 +51,71 @@
 
 ## 3. 开发记录
 
+### 2026-11-12 用户登录与账号隔离（阶段 A，ADR-007）
+
+#### 任务目标
+
+为内网多账号使用增加登录与账号隔离：管理员创建 / 禁用账号并重置密码；普通用户只能访问自己的任务、历史、日志与产物，管理员可访问全部；堵住静态兜底路径穿越；不改变正反向分析管线与产物生成方式。MongoDB 仅作为账号库，任务与产物仍落本地任务目录；桌面打包本阶段暂停，产物入库（阶段 B）不在本期。
+
+#### 完成内容
+
+1. 新增 `backend/app/auth/`：认证配置、Mongo/Beanie 初始化、User 文档、请求/响应 schema、UserManager、JWT + Cookie 后端、初始管理员播种、`current_user` / `current_admin` 依赖、`/auth/*` 与 `/admin/users*` 路由、任务归属统一访问校验。
+2. `main.py` lifespan 初始化 Mongo 并播种管理员（Mongo 不可达 / 缺少初始管理员时启动失败）；SPA 静态兜底改为解析后限定在静态目录内；`/api/*` 未匹配返回 JSON 404；`ICD_DOCS_ENABLED` 控制交互式文档。
+3. `Job` / `job.json` 增加 `owner_id` / `owner_username`；反向与正向任务创建时写入当前登录用户；旧 manifest 与 CLI 任务按未归属处理（仅管理员可见）。
+4. V4 路由增加登录 / 管理员依赖与归属校验：任务列表、状态、结果、日志、日志下载、产物下载、匹配中间产物、继续 / 放弃 / 终止、历史列表按归属过滤；历史删除、模型设置、HLR 样式写入限管理员；列表项增加 `owner_username`（仅展示）。
+5. `/health` 增加 `database` 状态；Mongo 运行中失联时受保护接口与 `/health` 返回 503 `{"detail": "database unavailable"}`。
+6. 前端新增登录页、`AuthContext`、`RequireAuth` / `RequireAdmin` 守卫、管理员用户管理页；顶栏显示当前用户与退出；非管理员隐藏模型设置、用户管理、历史删除与 HLR 样式写入入口；管理员任务 / 历史列表显示“所属账号”列。
+7. 部署：开发与服务器 compose 增加 `mongo:7.0.14` 服务、命名卷与 healthcheck；服务器编排另设 `MONGO_MEM_LIMIT`、不映射 Mongo 宿主端口、`pull_policy: never`、关闭文档端点；`build-image.sh` 交付包增加 Mongo 镜像与校验信息；`backend/.env.example` 增加 Mongo / 认证变量；`部署说明.md` 与随包《更新说明》补充 Mongo 导入、备份、密码恢复、回滚、sudo 步骤与内存要求。
+8. 文档：新增 ADR-007，更新项目范围、业务流程、架构、API、README、CHANGELOG、本开发纪要与服务器部署验收清单。
+
+#### 修改文件
+
+1. `backend/app/auth/`（新增：`config.py` / `db.py` / `models.py` / `schemas.py` / `manager.py` / `backend.py` / `seed.py` / `deps.py` / `router.py` / `access.py`）
+2. `backend/app/main.py`
+3. `backend/app/job_manager.py`
+4. `backend/app/api/v4/{router,coverage,completeness,jobs,outputs,history,settings,hlr_schemas,schemas}.py`
+5. `backend/requirements.txt`、`backend/.env.example`
+6. `frontend/src/auth/AuthContext.tsx`、`frontend/src/components/RequireAuth.tsx`、`frontend/src/pages/LoginPage.tsx`、`frontend/src/pages/AdminUsersPage.tsx`
+7. `frontend/src/{api/index.ts,App.tsx,main.tsx,types.ts,index.css}`、`frontend/src/components/HistoryList.tsx`、`frontend/src/pages/SettingsPage.tsx` 等权限入口相关组件
+8. `docker-compose.yml`、`docker-compose.server.yml`
+9. `scripts/build-image.sh`、`部署说明.md`、`更新说明.md`
+10. `docs/decisions/ADR-007-用户登录与账号隔离.md`（新增）
+11. `docs/project/scope.md`、`docs/project/workflow.md`、`docs/architecture/current-architecture.md`、`docs/architecture/api.md`
+12. `README.md`、`CHANGELOG.md`、`docs/development/development-log.md`、`docs/testing/服务器部署验收清单.md`
+
+#### 验证方式
+
+1. `docker compose config -q`（开发编排）。
+2. `docker compose -f docker-compose.server.yml config -q`（服务器编排）。
+3. `git diff --check`。
+4. 按 `docs/testing/服务器部署验收清单.md` 的认证与隔离检查项做浏览器验收（后续验收任务）。
+5. 重新构建后端镜像与前端产物，按 `部署说明.md` 重新导出交付包并在服务器 / 本地 Docker 完整启动（后续验收任务）。
+
+#### 验证结果
+
+1. `docker compose config -q`：通过。
+2. `docker compose -f docker-compose.server.yml config -q`：通过。
+3. `git diff --check`：通过。
+4. 手动浏览器验收（登录、账号隔离、禁用账号、管理员删除、静态穿越、Mongo 故障）：**尚未验证**（计划由后续验收任务按验收清单执行）。
+5. 真实 Docker 构建与运行（含 Mongo 镜像导入、首次管理员初始化、运行中停 Mongo）：**尚未验证**（计划由后续验收任务执行）。
+6. 本次文档整理未修改应用代码，也未重新执行后端 / 前端构建；上述浏览器与 Docker 验证均未执行。
+
+#### 遗留问题
+
+1. 登录、隔离与权限行为尚未做手动浏览器验收；真实 Docker 构建 / 运行与服务器交付包也未验证。
+2. 重置密码不会使已签发的旧 JWT 立即失效，最长 8 小时后自然过期；本阶段接受该限制。
+3. 内网 HTTP 下密码与 Cookie 明文传输；`AUTH_COOKIE_SECURE` 默认关闭，启用 TLS 后需改为 `1`。
+4. HLR 表格样式仍为全局共享资源，普通用户只读；按账号维护样式不在本阶段。
+5. 服务器内存要求已写入部署说明：Mongo 默认上限 1 GB，物理内存 < 8 GB 需重新评估，1–2 GB 机器不满足本方案；未改写既有容量数字。
+6. Windows 桌面打包本阶段暂停，恢复时需单独设计内嵌 Mongo 或桌面鉴权模式。
+
+#### 下一步建议
+
+1. 按 `docs/testing/服务器部署验收清单.md` 完成浏览器验收，并记录实际结果。
+2. 在本机与目标服务器分别执行一次完整 Docker 构建、`docker load`、首次启动与 Mongo 故障恢复演练。
+3. 若后续要求密码重置立即踢出旧会话，增加 `token_version` 并在认证依赖中比对。
+4. 阶段 B（任务 / 产物入库）另行设计，不复用本阶段的账号库。
+
 ### 2026-11-10 模型设置：三家 LLM 思考模式前端可开关（仅反向管线）
 
 #### 任务目标

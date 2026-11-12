@@ -11,6 +11,7 @@ ICD工具原型Ver4.1是一个面向EoICD源文件和软件高层需求（HLR）
 
 ## 1. 主要功能
 
+- **用户登录与账号隔离**：用户名 + 密码登录，账号由管理员创建、重置密码、禁用 / 启用，不开放自注册；普通用户只能查看、下载、继续、终止、放弃自己的任务与结果（历史删除仅管理员），管理员可管理全部账号的任务与历史。账号保存在 MongoDB，任务与产物仍落本地任务目录（详见 [ADR-007](docs/decisions/ADR-007-用户登录与账号隔离.md)）。
 - **HLR→EoICD 可追溯性分析**：从软件高层需求（HLR）出发，逐条验证每条 HLR 需求是否能在 EoICD 接口定义中找到对应项，从而判断 HLR 到 EoICD 的追溯与覆盖情况。
 - **输入解析与 HLR 标注**：解析 HLR Word 和 EoICD PubSub Excel，得到结构化的 HLR 需求列表与 EoICD 接口清单；用 DeepSeek 为每条 HLR 需求标注总线类型、Label 号、关联设备、信号关键词，作为匹配线索。
 - **反向匹配（含追溯表预筛选）**：根据标注线索为每条 HLR 需求寻找最可能对应的 EoICD 接口定义（Block）；支持上传追溯表预先缩小匹配范围，匹配失败时自动回退到全量匹配。
@@ -116,24 +117,51 @@ JUDGE_PROVIDERS=deepseek,minimax,qwen
 
 > **规则**：`JUDGE_PROVIDERS` 中列出的每个模型都必须有对应 API Key，否则任务会报错。配了几个模型，就只写几个模型名。
 
-### 4.3 启动
-在项目根目录中启动
+#### 认证配置与初始管理员（必填）
+
+本版起登录是硬依赖，`backend/.env` 还必须配置：
+
 ```bash
+MONGO_URL=mongodb://127.0.0.1:27017/icd
+AUTH_JWT_SECRET=<至少 32 字符的随机串>
+ICD_ADMIN_USERNAME=<初始管理员用户名>
+ICD_ADMIN_PASSWORD=<初始管理员密码，至少 8 位>
+```
+
+- `AUTH_JWT_SECRET` 缺失或短于 32 字符时后端拒绝启动；不得使用示例值上线。
+- 首次启动且用户集合为空时，用 `ICD_ADMIN_USERNAME` / `ICD_ADMIN_PASSWORD` 创建初始管理员；未配置且用户集合为空 → 后端启动失败。用户集合非空后，这两个变量不再生效，不会重置已有账号。
+- 首次登录后建议在管理员页面重置一次初始密码；唯一管理员忘记密码时按 `部署说明.md` 的 `mongosh` 命令手工恢复。
+- 内网 HTTP 默认 `AUTH_COOKIE_SECURE=0`；启用 TLS 后改为 `1`。Cookie 名、有效期等其余变量见 `backend/.env.example`。
+
+### 4.3 启动
+
+在项目根目录中启动（先单独拉起 MongoDB 账号库，再构建并启动后端 / 前端）：
+
+```bash
+docker compose up -d mongo
 docker compose up -d --build
 ```
 
-> **Windows 免 Docker 方式**：可打包为单目录桌面程序 `dist/ICDTool/ICDTool.exe`（双击启动后端并自动打开浏览器，同源访问 `/api/v4`）。构建与使用详见 `packaging/README.md`（决策见 `docs/decisions/ADR-005-Windows单目录桌面打包.md`）。
+> MongoDB 是登录与账号管理的硬依赖：`mongo` 未就绪时后端不会启动。账号数据保存在命名卷 `mongo_data`，容器重建不丢；备份与恢复见 `部署说明.md`。
+
+> **桌面版**：Windows 桌面打包（PyInstaller 单目录）本阶段**暂停交付**，只保证内网服务器 Docker 部署（见 [ADR-007](docs/decisions/ADR-007-用户登录与账号隔离.md)）。
 
 ### 4.4 访问
 
 | 地址 | 说明 |
 |------|------|
-| `http://localhost:3000` | 前端界面 |
-| `http://localhost:8000/api/v4/health` | 后端健康检查 |
+| `http://localhost:3000` | 前端界面（未登录会跳转登录页） |
+| `http://localhost:8000/api/v4/health` | 后端健康检查（含 MongoDB 状态） |
+
+首次访问使用 `ICD_ADMIN_USERNAME` / `ICD_ADMIN_PASSWORD` 配置的初始管理员登录；登录后可在「用户管理」创建普通账号。普通账号只能看到自己的任务与历史，管理员可看到全部任务与历史并管理账号。
 
 ### 4.5 使用演示
 
 启动完成后，打开 `http://localhost:3000`，按以下步骤操作。
+
+#### 步骤 0：登录
+
+首次访问会跳转登录页，使用 `ICD_ADMIN_USERNAME` / `ICD_ADMIN_PASSWORD` 配置的初始管理员登录。登录后顶栏显示当前用户名与「退出」；管理员可在「用户管理」页创建普通账号。普通账号看不到「模型设置」「用户管理」以及历史删除等管理员入口。
 
 #### 步骤 1：打开前端界面
 
@@ -187,6 +215,7 @@ icd-tool-prototype/
 ├── backend/                      # 后端工程
 │   ├── app/
 │   │   ├── api/v4/               # V4 API 路由（router / schemas / runner / coverage / jobs / outputs）
+│   │   ├── auth/                 # 登录 / 账号管理 / 任务归属校验（MongoDB 账号库）
 │   │   ├── forward/              # 正向适配层（配置构建 / MOCK 服务 / 子进程执行 / 产物收集；编排与翻译，零业务算法）
 │   │   ├── v4/                   # V4 反向业务模块
 │   │   │   ├── comparison/       #   多模型裁判 + Review Agent 共识 + 一星复查 + 报告生成
@@ -246,6 +275,7 @@ icd-tool-prototype/
 | 后端框架 | Python、FastAPI、Pydantic |
 | 文件处理 | openpyxl、python-docx、PyYAML、python-dotenv |
 | AI/LLM | DeepSeek、MiniMax、Qwen / DashScope |
+| 账号库 | MongoDB 7.0（独立容器，仅存账号；任务与产物仍落本地任务目录） |
 | 部署 | Docker Compose |
 
 ## 8. 当前阶段
@@ -254,7 +284,8 @@ icd-tool-prototype/
 
 - **V4.0**：已完成 HLR→EoICD 可追溯性分析全流程（6 步），三模型并行裁判 + 星级评分共识，输出 5 份产物。DeepSeek 为必填（同时用于 HLR 标注和 Review Agent），MiniMax / Qwen 为可选（未配置时从 `JUDGE_PROVIDERS` 中移除即可）。
 - **V4.1 正向完整性分析**：已完成 EoICD→HLR 完整性分析全流程（多 judge 一致性管线：阶段1 共享解析 → 各 judge 并行判定 → 共识复核（仲裁 + 复查）→ 生成报告），输出 1 份 Word 报告 + 1 份 Excel 明细。
-- **前端**：默认使用 V4.0 界面。
+- **用户登录与账号隔离（阶段 A）**：已完成登录、账号管理、任务归属与访问隔离，MongoDB 作为独立账号库随交付包部署。任务与产物不入库（阶段 B 后续设计）；Windows 桌面打包本阶段暂停交付（见 [ADR-007](docs/decisions/ADR-007-用户登录与账号隔离.md)）。
+- **前端**：默认使用 V4.0 界面（含登录页、管理员用户管理页）。
 - **V3.0 旧版代码**：已移除（见 [ADR-002](docs/decisions/ADR-002-移除V3.md)）。
 
 ## 9. 贡献者

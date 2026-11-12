@@ -18,9 +18,9 @@ ICD工具原型采用前后端分离架构。
 ```text
 用户浏览器
     ↓
-React + TypeScript 前端
+React + TypeScript 前端（登录页 + 登录守卫）
     ↓
-FastAPI 后端（/api/v4）
+FastAPI 后端（/api/v4，登录鉴权 + 任务编排） ── 账号库 ──> MongoDB（独立容器，仅存账号；不存任务与产物）
     ↓
 V4 反向管线 pipeline（6 步）
     ↓
@@ -32,7 +32,7 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 （正向代码树 backend/forward/ 按任务复制到任务目录内运行）
 ```
 
-当前部署方式优先采用 Docker Compose，在本地同时启动前端服务和后端服务。
+当前部署方式优先采用 Docker Compose：开发编排为 `frontend` + `backend` + `mongo` 三个服务；服务器交付为 `backend` + `mongo` 两个容器，前端静态产物由后端同源托管。MongoDB 是登录与账号管理的硬依赖，任务归属与产物仍按任务目录（`backend/output/v4/{job_id}/`）落盘。
 
 ## 3. 前端职责
 
@@ -40,15 +40,18 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 
 前端主要职责包括：
 
-1. 提供文件上传页面；
-2. 支持上传 HLR Word 文件（必填）；
-3. 支持上传 EoICD Publisher / Subscriber PubSub Excel（二选一）；
-4. 支持上传一个或多个追溯 Excel（可选）；
-5. 调用后端 `/api/v4/coverage-analysis` 创建任务；
-6. 展示任务处理状态（六步进度）；
-7. 展示处理结果摘要（统计卡片 + 星级分布）；
-8. 提供输出文档预览与下载入口；
-9. 提供模型设置页面，运行时修改三个模型名称与思考模式开关（无需重启服务）。
+1. 提供登录页、登录状态维持与退出登录；
+2. 提供路由守卫（`RequireAuth` / `RequireAdmin`），未登录跳转登录页，非管理员不能进入管理员页面；
+3. 提供文件上传页面；
+4. 支持上传 HLR Word 文件（必填）；
+5. 支持上传 EoICD Publisher / Subscriber PubSub Excel（二选一）；
+6. 支持上传一个或多个追溯 Excel（可选）；
+7. 调用后端 `/api/v4/coverage-analysis` 创建任务；
+8. 展示任务处理状态（六步进度）；
+9. 展示处理结果摘要（统计卡片 + 星级分布）；
+10. 提供输出文档预览与下载入口；管理员在任务 / 历史列表可看到“所属账号”列；
+11. 提供管理员用户管理页（创建账号、重置密码、禁用 / 启用、设置 / 取消管理员）；
+12. 提供管理员模型设置页面，运行时修改三个模型名称与思考模式开关（无需重启服务）；非管理员隐藏该入口。
 
 前端不负责：
 
@@ -66,14 +69,15 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 后端主要职责包括：
 
 1. 接收前端上传的输入文件；
-2. 创建并维护本地分析任务；
-3. 解析 HLR Word 文件与 EoICD PubSub Excel；
-4. 用 DeepSeek 对每条 HLR 做 AI 标注；
-5. 执行反向匹配（含追溯表预筛选）；
-6. 编排多智能体裁判（DeepSeek / MiniMax / Qwen）与降级保护；
-7. 执行 Review Agent 共识复核与星级评分；
-8. 生成 1 份 xlsx + 4 份 docx 报告；
-9. 提供任务状态查询和结果下载接口。
+2. 提供登录 / 登出 / 当前用户接口，管理员创建账号、重置密码、禁用 / 启用账号（MongoDB 账号库）；
+3. 创建并维护本地分析任务，创建时写入当前登录用户的归属；
+4. 解析 HLR Word 文件与 EoICD PubSub Excel；
+5. 用 DeepSeek 对每条 HLR 做 AI 标注；
+6. 执行反向匹配（含追溯表预筛选）；
+7. 编排多智能体裁判（DeepSeek / MiniMax / Qwen）与降级保护；
+8. 执行 Review Agent 共识复核与星级评分；
+9. 生成 1 份 xlsx + 4 份 docx 报告；
+10. 提供任务状态查询和结果下载接口，并按任务归属做统一访问校验。
 
 ## 5. 后端模块划分
 
@@ -81,8 +85,9 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 
 | 模块             | 职责                            |
 | -------------- | ----------------------------- |
-| `main.py`      | FastAPI 应用入口，仅 CORS + `/api/v4` 路由装载 |
-| `job_manager.py` | 内存任务状态管理（`JobStatus` / `Job` / `JobManager`）；持有任务累计 token（`total_tokens`）与 manifest 持久化 |
+| `main.py`      | FastAPI 应用入口：CORS + `/api/v4` 路由装载；lifespan 初始化 MongoDB / Beanie 并播种初始管理员；SPA 静态兜底限定在静态目录内（`unquote` + `resolve` + `relative_to`，拒绝 `..`）；`ICD_DOCS_ENABLED` 控制 `/docs` / `/redoc` / `/openapi.json` |
+| `auth/`        | 认证与账号模块：`config.py`（认证 env 读取与校验）、`db.py`（Motor + Beanie 初始化 / ping）、`models.py`（User 文档）、`schemas.py`（请求 / 响应模型）、`manager.py`（用户名小写化、密码哈希、重复创建保护）、`backend.py`（JWTStrategy + CookieTransport + FastAPIUsers）、`seed.py`（初始管理员播种）、`deps.py`（`current_user` / `current_admin`）、`router.py`（`/auth/*`、`/admin/users*`）、`access.py`（任务归属统一访问校验） |
+| `job_manager.py` | 内存任务状态管理（`JobStatus` / `Job` / `JobManager`）；持有任务累计 token（`total_tokens`）与 manifest 持久化；任务归属字段 `owner_id` / `owner_username` 随 Job 与 `job.json` 持久化 |
 | `token_usage.py` | 反向 LLM token 采集：解析 OpenAI 兼容 `usage` 的三种形状，并从线程绑定的 Job 累加（只 import `job_log`，不 import `job_manager`，避免循环依赖） |
 | `job_log.py`   | 进程级任务日志缓冲、stdout/stderr Tee、线程归属与 job.log 落盘；不依赖任何 `app.*` 模块 |
 | `job_scheduler.py` | 进程内任务队列：固定 `MAX_CONCURRENT_JOBS`（默认 2）个常驻工作线程领取任务（新任务 FIFO，续跑任务插队首，不抢占执行中任务）；出队时做票据比对（同一任务的旧条目丢弃）与跳过裁决（排队期间被终止 / 放弃的任务不执行，原因写入该任务日志） |
@@ -109,6 +114,35 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | `output/`      | 运行时生成的输出文件存放目录                |
 
 **HLR 表格样式与 controller profile 的分工**：自定义样式只覆盖解析器的 `field_map`（行标签映射）与 `requirement_scan`（需求表识别与 `id_pattern` 校验）；controller profile 继续负责匹配关键词、追溯表配置、AI 标注示例与 preprocess hook —— `build_profile_with_schema` 只替换 `hlr_parser` 配置，profile 的其余配置原样保留。内置模板由各 profile 的 `config.yaml` 派生，未修改的模板按该控制器的原生解析路径执行（native），因此默认行为与样式能力引入前一致。下游管线只消费 `requirement_id` + `content`（可选 `rationale`），样式变化不影响 Step 2 及之后的输入与产物结构。
+
+### 5.1 认证与账号隔离（阶段 A，ADR-007）
+
+`backend/app/auth/` 是认证与账号管理的唯一入口，V4 路由不在 `main.py` 内直接实现鉴权逻辑：
+
+```text
+backend/app/auth/
+├── config.py    # MONGO_URL / MONGO_DB / AUTH_JWT_SECRET / AUTH_TOKEN_TTL_SECONDS /
+│                # AUTH_COOKIE_NAME / AUTH_COOKIE_SECURE / ICD_ADMIN_* / ICD_DOCS_ENABLED
+├── db.py        # AsyncIOMotorClient + init_beanie + ping_db；启动不可达即失败
+├── models.py    # User（集合 users；email 字段承载小写用户名；is_active / is_superuser）
+├── schemas.py   # UserCreateRequest（is_admin）/ UserUpdateRequest（is_superuser）/ UserRead / MeResponse
+├── manager.py   # UserManager：用户名小写化、密码哈希、重复创建与唯一索引竞态保护
+├── backend.py   # JWTStrategy + CookieTransport（HttpOnly / SameSite=Lax / Path=/）+ FastAPIUsers
+├── seed.py      # 用户集合为空时按 ICD_ADMIN_* 创建初始管理员
+├── deps.py      # current_user / current_admin
+├── router.py    # /auth/login、/auth/logout、/auth/me、/admin/users*
+└── access.py    # get_job_owner / ensure_owner / require_job_access / is_valid_job_id
+```
+
+关键边界：
+
+1. **Mongo 只存账号**：`mongo` 为 compose 独立服务（命名卷 `mongo_data`），后端容器通过服务名访问；服务器编排不映射宿主端口。任务与产物仍落 `backend/output/v4/{job_id}/`，设置与 HLR 样式仍落 `backend/output/*.json`。
+2. **任务归属**：`Job` 与 `job.json` 增加 `owner_id`（`str(User.id)`，权限键）与 `owner_username`（冗余展示）。创建任务时写入当前登录用户；续跑沿用原归属；CLI 与旧 manifest 无归属 → 仅管理员可见。
+3. **统一访问校验**：所有按 `job_id` 的任务接口（内存 / 磁盘）统一走 `app/auth/access.py` 的 `require_job_access()` / `ensure_owner()`；内存任务先查 `Job.owner_id`，磁盘任务读 manifest，归属不匹配或任务不存在统一 404，管理员放行全部；任务 / 历史列表按 `owner_id` 过滤。`outputs.py` 先校验归属再判断文件存在性，避免通过 404/200 差异探测他人任务。普通用户访问管理员接口 → 403。
+4. **历史与全局配置**：`GET /history` 按 manifest 的 `owner_id` 过滤（管理员全部）；`POST /history/delete`、`GET/PUT /settings`、HLR 样式新建 / 更新 / 删除限管理员；HLR 样式列表 / 扫描 / 试解析对登录用户开放。
+5. **失败语义**：未登录 401；Mongo 运行中失联 → 受保护接口 503 `{"detail": "database unavailable"}`；启动时 Mongo 不可达 → 启动失败并打印明确日志。
+6. **静态兜底加固**：SPA 兜底只返回解析后位于静态目录内的文件；含 `..`（含编码形式）或越界的请求不会返回静态目录外的文件（按 SPA 规则回落 `index.html`）；`/api/*` 未匹配路由返回 JSON 404；`ICD_DOCS_ENABLED=0` 时 `/docs` / `/redoc` / `/openapi.json` 也不被兜底接住。
+7. **正向代码树未改**：`backend/forward/` 业务实现与产物生成方式不变，正向适配层只在 API 入口增加登录与归属校验；正反向仍互不 import 业务模块。
 
 ## 6. 前端模块划分
 
@@ -270,11 +304,12 @@ backend/output/v4/{job_id}/
 当前架构服务于本地演示原型，存在以下限制：
 
 1. 任务状态可优先采用内存或本地文件方式管理；
-2. 暂不引入数据库；
-3. 暂不实现用户认证和权限管理；
-4. 暂不实现多用户并发任务管理；
+2. MongoDB 仅用于账号库；任务与分析产物不入库（阶段 B 后续设计）；
+3. 已实现登录与账号隔离，但无细粒度角色、操作审计、自助注册、邮箱验证与找回密码；
+4. 暂不实现按账号的资源配额 / 多租户配额管理，任务队列仍使用全局并发上限；
 5. 暂不实现云端部署和生产环境运维能力；
-6. 暂不实现复杂任务队列 —— 当前仅有单进程内的队列 + 并发上限 + 一条简单的优先级规则「续跑任务插队首」（`job_scheduler.py`，见第 5 节），无通用多级优先级、无抢占、无持久化、无跨进程调度。
+6. 暂不实现复杂任务队列 —— 当前仅有单进程内的队列 + 并发上限 + 一条简单的优先级规则「续跑任务插队首」（`job_scheduler.py`，见第 5 节），无通用多级优先级、无抢占、无持久化、无跨进程调度；
+7. Windows 桌面打包版本阶段暂停交付，只保证内网服务器 Docker 部署（ADR-007）。
 
 如后续需要扩展上述能力，应通过新的 Issue 或 ADR 明确设计后再实施。
 
@@ -294,8 +329,9 @@ backend/output/v4/{job_id}/
 
 ```text
 backend/app/
-├── main.py                 # 顶层 FastAPI 入口（仅 CORS + V4 router 装载）
-├── job_manager.py          # 共享 Job / JobManager（JobStatus 唯一来源）
+├── main.py                 # 顶层 FastAPI 入口（CORS + V4 router 装载 + lifespan 初始化 Mongo/管理员 + 静态兜底加固）
+├── auth/                   # 认证与账号管理（config / db / models / schemas / manager / backend / seed / deps / router / access）
+├── job_manager.py          # 共享 Job / JobManager（JobStatus 唯一来源；owner_id / owner_username 随 manifest 持久化）
 ├── job_log.py              # 进程级日志缓冲 / stdout-stderr Tee / job.log 落盘与恢复（不 import app.*）
 ├── job_scheduler.py        # 进程内任务队列（常驻工作线程 + 票据 + 出队跳过裁决；并发上限 MAX_CONCURRENT_JOBS）
 ├── token_usage.py          # 反向 token 采集（usage 解析 + 绑定 Job 累加；不 import job_manager）
