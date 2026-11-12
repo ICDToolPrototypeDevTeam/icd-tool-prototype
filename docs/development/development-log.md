@@ -116,6 +116,22 @@
 3. 若后续要求密码重置立即踢出旧会话，增加 `token_version` 并在认证依赖中比对。
 4. 阶段 B（任务 / 产物入库）另行设计，不复用本阶段的账号库。
 
+#### Task 12 端到端验证补记（2026-11-12）
+
+本地验证环境：Windows + Python 3.12；Mongo 由开发编排 `docker compose up -d mongo` 启动（mongo:7.0.14，127.0.0.1:27017）；后端以 uvicorn 起在 127.0.0.1:8182，测试环境变量为 `MONGO_DB=icd_e2e_task12`、`AUTH_JWT_SECRET`（32 字符）、`ICD_ADMIN_USERNAME` / `ICD_ADMIN_PASSWORD`、`OUTPUT_DIR=C:\tmp\task12\outputs`、`USE_MOCK_LLM=1`、`ICD_STATIC_DIR=frontend/dist`、`ICD_DOCS_ENABLED=0`，未改动 `backend/.env`。
+
+1. 认证 / 隔离脚本：`cd backend && py -3.12 tests/auth/test_auth_foundation.py`、`test_auth_routes.py`、`test_admin_users.py`、`test_job_owner_fields.py`、`test_job_isolation.py`、`test_history_permissions.py`、`test_static_security.py` → 7 个脚本退出码均为 0，末尾均打印 `... PASSED`（**已验证**）。
+2. 真实 API 反向隔离（`backend/tests/auth/test_e2e_isolation.py`）：管理员创建 A / B；A 上传 AMS 样例反向任务（`use_mock_llm=true`）→ `completed`，用时 **405.9s**（脚本轮询口径；任务简报的 5–8s 预期不成立 —— 该样例产生 558 个判官 case，判官阶段与 review 阶段各约 169s，属样例规模导致的耗时，不是失败）；A 的列表 / 历史 / 结果 / 日志 / 日志下载 / 中间产物均 200，`eoicd-xlsx` 3,430,155 字节、`consensus-docx` 101,926 字节；B 用 A 的 job_id 访问状态、结果、日志、日志下载、产物、中间产物 → 全部 404；管理员下载同一产物 → 200（**已验证**）。
+3. 禁用 / 启用与密码重置：管理员禁用 B 后，B 已有 Cookie 的 `/api/v4/auth/me` 与 `/api/v4/jobs` 均 401；重新启用后 200；重置密码后旧密码登录 400、新密码 204（**已验证**）。
+4. 正向（完整性）任务验证：**不在本阶段验证范围（用户明确要求跳过）**，本记录不给出通过 / 失败结论。
+5. 静态穿越与 API 兜底（uvicorn + `ICD_STATIC_DIR=frontend/dist`）：未登录 `curl --path-as-is` 请求 `/../output/v4/<id>/output/...`、`/%2e%2e/%2e%2e/etc/passwd`、`/..%2f..%2fbackend/.env`、`/%2e%2e/%2e%2e/backend/.env` → 均回落 413 字节 `index.html`（与 `frontend/dist/index.html` 同尺寸），响应中无 xlsx / `.env` / `passwd` 内容；`/api/v4/does-not-exist` → JSON 404；`/openapi.json` → 404；未登录 `/api/v4/{history,jobs,auth/me,settings}` → 401，`/api/v4/health` → 200（**已验证**）。
+6. Mongo 运行中故障：停止 mongo 容器后 `/api/v4/health`、带管理员 Cookie 的 `/api/v4/jobs`、登录接口均 503 `{"detail":"database unavailable"}`；恢复 mongo 后 health 200 且 `database: ok`，受保护接口 200（**已验证**）。
+7. Mongo 启动期故障：停止 mongo 后启动后端 → 退出码 3，日志 `[auth] init failed: ServerSelectionTimeoutError: ...` 与 `ERROR: Application startup failed. Exiting.`；恢复 mongo 后后端正常启动（**已验证**）。
+8. 重启持久性：重启后端后，管理员 `/api/v4/history` 见 4 条（含无归属 legacy 目录）；A（`e2e_alice_47116`）只看到自己的 1 条 `completed`，`owner_username` 正确；legacy 任务的日志下载与中间产物管理员 200、A 404；重启后内存 `/api/v4/jobs` 为空（已完成任务不载入内存，属既有设计）（**已验证**）。
+9. 前端构建：`cd frontend && npm run build` → 退出码 0（`tsc && vite build`，约 2.5s，仅既有 chunk > 500 kB 提示）（**已验证**）。
+10. 手工浏览器验收（验收清单第 1–13 行，以及第 14–20 行中的页面跳转、刷新保持登录、入口隐藏等 UI 行为）：**尚未验证**（本次未打开浏览器 UI）。服务器 compose / 镜像形态（`docker-compose.server.yml`、`docker load`、真实服务器）同样**尚未验证**；本次以本地 uvicorn + 开发编排 mongo 替代。
+11. 验证期间未发现需要修复的代码或文档缺陷，未修改应用代码。
+
 ### 2026-11-10 模型设置：三家 LLM 思考模式前端可开关（仅反向管线）
 
 #### 任务目标
