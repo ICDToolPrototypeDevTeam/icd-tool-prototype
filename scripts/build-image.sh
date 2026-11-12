@@ -160,7 +160,9 @@ fi
 
 # ---------------------------------------------------------------- 2. 后端镜像
 # 目标架构取本机 docker 的架构（交付镜像必须与服务器架构一致，
-# 部署时按 部署说明.md §5.1 用 uname -m 与 BUILD_INFO 的 arch= 复核）。
+# 部署时按 部署说明.md §5.1 用 uname -m 与 BUILD_INFO 的 arch= / mongo_arch= 复核）。
+# PLATFORM 显式给出时，Mongo 镜像也按同一平台拉取；未给出时保持原有默认流程。
+PLATFORM_WAS_SET="${PLATFORM:+1}"
 PLATFORM="${PLATFORM:-linux/$(docker version --format '{{.Server.Arch}}')}"
 say "[2/7] 准备 Mongo 镜像并构建后端镜像 $IMAGE（$PLATFORM）"
 # Mongo 镜像随包离线交付：本机没有时先拉取；离线构建机必须预先 docker pull。
@@ -168,7 +170,17 @@ if docker image inspect "$MONGO_IMAGE" >/dev/null 2>&1; then
   info "Mongo 镜像已存在：$MONGO_IMAGE"
 else
   info "本机没有 $MONGO_IMAGE，尝试 docker pull"
-  docker pull "$MONGO_IMAGE" || die "拉取 Mongo 镜像 $MONGO_IMAGE 失败；离线构建机需预先 docker pull 该镜像后重试"
+  if [ -n "$PLATFORM_WAS_SET" ]; then
+    docker pull --platform "$PLATFORM" "$MONGO_IMAGE" || die "拉取 Mongo 镜像 $MONGO_IMAGE（$PLATFORM）失败；离线构建机需预先 docker pull 该镜像后重试"
+  else
+    docker pull "$MONGO_IMAGE" || die "拉取 Mongo 镜像 $MONGO_IMAGE 失败；离线构建机需预先 docker pull 该镜像后重试"
+  fi
+fi
+MONGO_ARCH="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$MONGO_IMAGE")"
+info "Mongo 镜像 $MONGO_IMAGE（$MONGO_ARCH）"
+# 归档必须与后端同架构，否则服务器上启动即失败：这里直接停，避免把坏包发出去。
+if [ "$MONGO_ARCH" != "$PLATFORM" ]; then
+  die "Mongo 镜像架构（$MONGO_ARCH）与目标平台（$PLATFORM）不一致；请执行 docker pull --platform $PLATFORM $MONGO_IMAGE 后重试"
 fi
 info "构建上下文 backend/：.dockerignore 已排除 output/ 与 .env"
 docker build --platform "$PLATFORM" -t "$IMAGE" "$ROOT/backend"
@@ -176,12 +188,6 @@ docker build --platform "$PLATFORM" -t "$IMAGE" "$ROOT/backend"
 IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
 IMAGE_ARCH="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")"
 info "镜像 $IMAGE_ID（$IMAGE_ARCH）"
-MONGO_ARCH="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$MONGO_IMAGE")"
-info "Mongo 镜像 $MONGO_IMAGE（$MONGO_ARCH）"
-if [ "$MONGO_ARCH" != "$IMAGE_ARCH" ]; then
-  info "注意：Mongo 镜像架构与后端镜像（$IMAGE_ARCH）不一致，服务器上将无法启动；"
-  info "      请先用 --platform 预拉取对应架构的 $MONGO_IMAGE 再重新构建"
-fi
 
 # ---------------------------------------------------------------- 3. 导出归档
 say "[3/7] 导出镜像归档 $ARCHIVE_NAME 与 $MONGO_ARCHIVE_NAME（大镜像压缩需要一两分钟）"
@@ -244,15 +250,17 @@ ICD 工具原型 · 服务器交付包
 归档文件：$ARCHIVE_NAME（$ARCHIVE_SIZE）
 归档 sha256：$ARCHIVE_SHA
 Mongo 镜像标签：$MONGO_IMAGE
+Mongo 镜像架构：$MONGO_ARCH
 Mongo 归档文件：$MONGO_ARCHIVE_NAME（$MONGO_ARCHIVE_SIZE）
 Mongo 归档 sha256：$MONGO_SHA
 
---- 机器可读区（部署核对用：arch= 供 uname -m 对照，sha256= 供手工校验），请勿改动以下行 ---
+--- 机器可读区（部署核对用：arch= / mongo_arch= 供 uname -m 对照，sha256= 供手工校验），请勿改动以下行 ---
 image=$IMAGE
 arch=$IMAGE_ARCH
 archive=$ARCHIVE_NAME
 sha256=$ARCHIVE_SHA
 mongo_image=$MONGO_IMAGE
+mongo_arch=$MONGO_ARCH
 mongo_archive=$MONGO_ARCHIVE_NAME
 mongo_sha256=$MONGO_SHA
 EOF
