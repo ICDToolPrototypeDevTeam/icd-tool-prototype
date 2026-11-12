@@ -99,6 +99,8 @@ export interface V4JobListItem {
   created_at: string
   updated_at: string
   input_files: string[]
+  /** 任务归属账号（仅展示；权限判断仍由后端按 owner_id 执行） */
+  owner_username?: string | null
 }
 
 export interface V4JobResultResponse {
@@ -178,6 +180,8 @@ export interface V4HistoryOutputs {
  */
 export interface V4HistoryItem {
   job_id: string
+  /** 任务归属账号（仅展示；权限判断仍由后端按 manifest 的 owner_id 执行） */
+  owner_username?: string | null
   /** 'correctness' | 'completeness'；目录里没有可读 manifest 时为空串 */
   task_type: string
   /** V4JobStatus 取值；目录里没有可读 manifest 时为 'unknown' */
@@ -295,4 +299,22 @@ export interface AdminUser {
   is_active: boolean
   is_superuser: boolean
   created_at: string
+}
+
+/**
+ * POST /api/v4/admin/users 请求体。
+ * 注意：创建接口用 `is_admin`（后端 UserCreateRequest），
+ * 更新接口用 `is_superuser`（后端 UserUpdateRequest），两者字段名不同。
+ */
+export interface AdminUserCreatePayload {
+  username: string
+  password: string
+  is_admin: boolean
+}
+
+/** PATCH /api/v4/admin/users/{id} 请求体；只提交需要变更的字段。 */
+export interface AdminUserUpdatePayload {
+  password?: string
+  is_active?: boolean
+  is_superuser?: boolean
 }

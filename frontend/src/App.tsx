@@ -10,20 +10,7 @@ import CompletenessPage from './pages/CompletenessPage'
 import HistoryPage from './pages/HistoryPage'
 import SettingsPage from './pages/SettingsPage'
 import LoginPage from './pages/LoginPage'
-
-/** Task 9 前的占位页：只保证管理员路由与导航可用，不含用户管理功能。 */
-function AdminUsersPlaceholder() {
-  return (
-    <div className="settings-card">
-      <div className="settings-card__header">
-        <div className="settings-card__heading">
-          <div className="settings-card__title">用户管理</div>
-          <div className="settings-card__subtitle">账号管理功能将在后续任务中提供。</div>
-        </div>
-      </div>
-    </div>
-  )
-}
+import AdminUsersPage from './pages/AdminUsersPage'
 
 /** 受保护的页面外壳：顶栏、MOCK 提示、页脚与嵌套路由出口。 */
 function AppShell() {
@@ -199,7 +186,7 @@ export default function App() {
           path="/admin/users"
           element={
             <RequireAdmin>
-              <AdminUsersPlaceholder />
+              <AdminUsersPage />
             </RequireAdmin>
           }
         />

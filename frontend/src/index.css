@@ -3388,3 +3388,180 @@ body {
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+/* ===== 管理员用户管理页 ===== */
+.admin-users__create {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px;
+  padding: 18px 0 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-users__create-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+  flex: 1 1 200px;
+}
+
+.admin-users__create-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.admin-users__input {
+  width: 100%;
+  padding: 9px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.admin-users__input:hover {
+  border-color: #cbd5e1;
+}
+
+.admin-users__input:focus {
+  outline: none;
+  background: var(--white);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.12);
+}
+
+.admin-users__check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 10px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.admin-users__check input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+
+.admin-users__create .btn {
+  padding: 9px 20px;
+  font-size: 13px;
+  border-radius: var(--radius-sm);
+}
+
+.admin-users__table-wrap {
+  margin-top: 18px;
+  overflow-x: auto;
+}
+
+.admin-users__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.admin-users__table th {
+  padding: 10px 12px;
+  text-align: left;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-light);
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-users__table td {
+  padding: 12px;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-users__table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.admin-users__table tbody tr:hover {
+  background: var(--bg-light);
+}
+
+.admin-users__username {
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.admin-users__time {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.admin-users__badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.admin-users__badge--admin {
+  background: rgba(0, 102, 204, 0.1);
+  color: var(--primary);
+}
+
+.admin-users__badge--user {
+  background: var(--bg-light);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.admin-users__badge--active {
+  background: rgba(16, 185, 129, 0.14);
+  color: #047857;
+}
+
+.admin-users__badge--inactive {
+  background: rgba(239, 68, 68, 0.12);
+  color: #b91c1c;
+}
+
+.admin-users__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-users__actions .btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+}
+
+/* 管理员历史列表中的任务归属账号 */
+.history__owner {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+@media (max-width: 600px) {
+  .admin-users__create {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-users__check {
+    padding-bottom: 0;
+  }
+}

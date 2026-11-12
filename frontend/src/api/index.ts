@@ -18,6 +18,9 @@ import type {
   HlrSchemaPreviewResult,
   HlrSchemaPayload,
   AuthUser,
+  AdminUser,
+  AdminUserCreatePayload,
+  AdminUserUpdatePayload,
 } from '../types'
 
 // ========== V4 API ==========
@@ -85,6 +88,45 @@ export async function getMeV4(): Promise<AuthUser | null> {
   // 裸 fetch：未登录是正常状态，不应触发全局未登录事件
   const res = await fetch(`${API_V4_BASE}/auth/me`, { credentials: 'same-origin' })
   if (res.status === 401) return null
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+// ========== 管理员用户管理 ==========
+
+/** 全部账号（仅管理员；按创建时间升序）。 */
+export async function listAdminUsersV4(): Promise<AdminUser[]> {
+  const res = await apiFetch(`${API_V4_BASE}/admin/users`)
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+/** 创建账号；用户名重复时后端返回 409（detail = 用户名已存在）。 */
+export async function createAdminUserV4(
+  payload: AdminUserCreatePayload,
+): Promise<AdminUser> {
+  const res = await apiFetch(`${API_V4_BASE}/admin/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+/**
+ * 更新账号：重置密码、启用/禁用、设置/取消管理员。
+ * 最后一个活跃管理员被禁用或降级时后端返回 409。
+ */
+export async function updateAdminUserV4(
+  id: string,
+  payload: AdminUserUpdatePayload,
+): Promise<AdminUser> {
+  const res = await apiFetch(`${API_V4_BASE}/admin/users/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }
