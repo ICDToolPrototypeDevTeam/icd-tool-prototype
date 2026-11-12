@@ -141,7 +141,7 @@ backend/app/auth/
 3. **统一访问校验**：所有按 `job_id` 的任务接口（内存 / 磁盘）统一走 `app/auth/access.py` 的 `require_job_access()` / `ensure_owner()`；内存任务先查 `Job.owner_id`，磁盘任务读 manifest，归属不匹配或任务不存在统一 404，管理员放行全部；任务 / 历史列表按 `owner_id` 过滤。`outputs.py` 先校验归属再判断文件存在性，避免通过 404/200 差异探测他人任务。普通用户访问管理员接口 → 403。
 4. **历史与全局配置**：`GET /history` 按 manifest 的 `owner_id` 过滤（管理员全部）；`POST /history/delete`、`GET/PUT /settings`、HLR 样式新建 / 更新 / 删除限管理员；HLR 样式列表 / 扫描 / 试解析对登录用户开放。
 5. **失败语义**：未登录 401；Mongo 运行中失联 → 受保护接口 503 `{"detail": "database unavailable"}`；启动时 Mongo 不可达 → 启动失败并打印明确日志。
-6. **静态兜底加固**：SPA 兜底只返回解析后位于静态目录内的文件；含 `..`（含编码形式）或越界的请求不会返回静态目录外的文件（按 SPA 规则回落 `index.html`）；`/api/*` 未匹配路由返回 JSON 404；`ICD_DOCS_ENABLED=0` 时 `/docs` / `/redoc` / `/openapi.json` 也不被兜底接住。
+6. **静态兜底加固**：SPA 兜底只返回解析后位于静态目录内的文件；含 `..`（含编码形式）或越界的请求返回 404，不回落 `index.html`（不做路径纠正）；`/api/*` 未匹配路由返回 JSON 404；`ICD_DOCS_ENABLED=0` 时 `/docs` / `/redoc` / `/openapi.json` 也不被兜底接住。
 7. **正向代码树未改**：`backend/forward/` 业务实现与产物生成方式不变，正向适配层只在 API 入口增加登录与归属校验；正反向仍互不 import 业务模块。
 
 ## 6. 前端模块划分

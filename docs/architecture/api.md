@@ -1145,5 +1145,5 @@ Content-Type: application/json
 
 - `ICD_DOCS_ENABLED` 控制 `/docs`、`/redoc`、`/openapi.json`：开发默认开启；取值 `0` / `false` / `no` 时关闭。服务器编排设置 `ICD_DOCS_ENABLED=0`。
 - `/api/*` 未匹配路由返回 JSON 404，不回落为前端 `index.html`。
-- SPA 静态兜底只返回解析后位于静态目录内的文件：请求路径先 URL 解码，含 `..` 段或解析后越界时不返回该文件（回落 `index.html`）；未登录者不能通过 `/../output/v4/<job_id>/...`（含 `%2e%2e` 编码形式）读取任务产物、`job.json` 或 `.env`。
+- SPA 静态兜底只返回解析后位于静态目录内的文件：请求路径先 URL 解码，含 `..` 段或解析后越界时返回 404，不回落 `index.html`（不做路径纠正）；未登录者不能通过 `/../output/v4/<job_id>/...`（含 `%2e%2e` 编码形式）读取任务产物、`job.json` 或 `.env`。
 - 静态目录本身可公开（登录页需要），但不得暴露静态目录以外的任何文件。

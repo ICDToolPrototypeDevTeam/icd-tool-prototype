@@ -127,22 +127,29 @@ app.add_middleware(
 app.include_router(v4_router, prefix='/api/v4')
 
 
-def _safe_static_candidate(static_dir: Path, full_path: str) -> Path | None:
-    """把请求路径解析到静态目录内；越界、含 `..` 段或文件不存在时返回 None。
+def _static_path_is_unsafe(static_dir: Path, full_path: str) -> bool:
+    """解码后的路径含 `..` 段，或解析后越出静态目录时为 True。
 
     服务器部署中 output/ 与 static/ 同级，SPA 兜底若直接拼接路径，可通过
     `../output/...`（含 `%2e%2e` 编码形式）绕过 API 鉴权读取任务产物或 .env。
-    这里先解码、拒绝任何 `..` 段，再用 resolve + relative_to 做物理路径限定。
+    设计 D11 要求这类请求直接 404，不做路径纠正（不回落 index.html）。
     """
     decoded = unquote(full_path)
     if '..' in Path(decoded).parts:
-        return None
+        return True
     try:
         resolved_dir = static_dir.resolve()
-        resolved = (resolved_dir / decoded).resolve()
-        resolved.relative_to(resolved_dir)
+        (resolved_dir / decoded).resolve().relative_to(resolved_dir)
     except (OSError, ValueError):
+        return True
+    return False
+
+
+def _safe_static_candidate(static_dir: Path, full_path: str) -> Path | None:
+    """把请求路径解析到静态目录内；越界、含 `..` 段或文件不存在时返回 None。"""
+    if _static_path_is_unsafe(static_dir, full_path):
         return None
+    resolved = (static_dir.resolve() / unquote(full_path)).resolve()
     return resolved if resolved.is_file() else None
 
 
@@ -168,6 +175,9 @@ if _static_env or getattr(sys, 'frozen', False):
                 raise HTTPException(status_code=404, detail='Not Found')
             # 文档关闭时，这几个路径也不能被 SPA 兜底接住。
             if not _docs_enabled and full_path in ('docs', 'redoc', 'openapi.json'):
+                raise HTTPException(status_code=404, detail='Not Found')
+            # 穿越 / 越界请求一律 404，不能回落 index.html（设计 D11「不做纠正」）。
+            if _static_path_is_unsafe(_static_dir, full_path):
                 raise HTTPException(status_code=404, detail='Not Found')
             candidate = _safe_static_candidate(_static_dir, full_path)
             if candidate is not None:
