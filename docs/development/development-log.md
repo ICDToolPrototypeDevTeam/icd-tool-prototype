@@ -51,6 +51,55 @@
 
 ## 3. 开发记录
 
+### 2026-11-13 会话吊销与 Token 版本号（ADR-009）
+
+#### 任务目标
+
+补齐阶段 A 的会话吊销缺口：管理员重置密码或禁用账号后，该账号所有已签发的登录 Cookie 在下一次请求时立即失效，而不是等 8 小时 JWT 自然过期；重新启用账号不恢复旧会话。不引入单设备下线、Refresh Token 或“强制下线”按钮。
+
+#### 完成内容
+
+1. `User` 文档新增内部字段 `token_version`（默认 0，不下发到任何 API 响应）。
+2. 新增 `VersionedJWTStrategy`：登录签发 JWT 时携带 claim `ver`；每次读取 Token 时与用户当前 `token_version` 比较，不一致即视为未登录。旧 Token 无 `ver` 按 0 处理，旧用户文档无该字段同样按 0 处理，升级部署不会踢掉现有会话。
+3. 管理员 `PATCH /api/v4/admin/users/{user_id}` 改为 Mongo 原子更新：重置密码、或 `is_active` 由 true 改为 false 时，在同一次 `$set` + `$inc` 中递增 `token_version`；启用账号、设置 / 取消管理员不递增，避免误吊销。
+4. 前端无需改动：旧 Cookie 下一次请求返回 401 后，现有登录守卫按未登录处理并跳转登录页。
+5. 文档同步：ADR-009（新增）、ADR-007（关联 ADR 与已知限制）、API 文档、架构文档、CHANGELOG、本纪要、服务器部署验收清单与《更新说明》。
+
+#### 修改文件
+
+1. `backend/app/auth/models.py`
+2. `backend/app/auth/backend.py`
+3. `backend/app/auth/router.py`
+4. `docs/decisions/ADR-009-会话吊销与Token版本号.md`（新增）
+5. `docs/decisions/ADR-007-用户登录与账号隔离.md`
+6. `docs/architecture/api.md`、`docs/architecture/current-architecture.md`
+7. `CHANGELOG.md`、`docs/development/development-log.md`
+8. `docs/testing/服务器部署验收清单.md`、`更新说明.md`
+9. 本地验证脚本（`backend/tests/` 为 gitignored，不随仓库提交）：`backend/tests/auth/test_token_version.py`（新增）、`backend/tests/auth/test_e2e_isolation.py`（补“重新启用后旧 Cookie 仍 401、重新登录”断言）
+
+#### 验证方式
+
+1. `cd backend && py -3.12 tests/auth/test_token_version.py`（RED→GREEN：先看到 `ver` 缺失与版本未递增的失败，再通过）。
+2. 认证回归脚本：`test_auth_foundation.py`、`test_auth_routes.py`、`test_admin_users.py`、`test_job_owner_fields.py`、`test_job_isolation.py`、`test_history_permissions.py`、`test_static_security.py`。
+3. 端到端回归（需本地 uvicorn 服务与 MOCK 环境）：`py -3.12 tests/auth/test_e2e_isolation.py`。
+
+#### 验证结果
+
+1. `test_token_version.py`：通过（`test_token_version PASSED`）。覆盖：JWT 含 `ver=0`、`/auth/me` 不暴露 `token_version`、DB 版本改为 1 后旧 Cookie 401 且改回 0 后恢复 200、无 `ver` 旧 Token 在版本 0 可用 / 版本 1 失效；管理员重置密码、禁用、重新启用、重复禁用、设置 / 取消管理员、最后一个管理员 409、管理员重置自己密码等场景。
+2. 其余 7 个认证回归脚本：全部通过（8/8）。
+3. 端到端脚本已更新断言，但**尚未执行**（需要启动本地服务与 MOCK 环境）。
+
+#### 遗留问题
+
+1. 仅支持整账号吊销：无单设备下线、无“强制下线”按钮（本阶段确认不做）。
+2. 未重置 / 未禁用期间被窃取的 Cookie 仍在 8 小时 TTL 内有效。
+3. 端到端回归与浏览器验收尚未执行，上线前需按验收清单第 19 行实测“禁用—启用后旧 Cookie 仍 401”。
+
+#### 下一步建议
+
+1. 在本地或服务器上执行端到端回归与验收清单第 19 行。
+2. 如需按设备管理会话，后续可考虑在 Token 中加入 `jti` 并维护吊销表（本阶段不实现）。
+
 ### 2026-11-12 用户登录与账号隔离（阶段 A，ADR-007）
 
 #### 任务目标

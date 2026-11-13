@@ -94,7 +94,7 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | 模块             | 职责                            |
 | -------------- | ----------------------------- |
 | `main.py`      | FastAPI 应用入口：CORS + `/api/v4` 路由装载；lifespan 初始化 MongoDB / Beanie 并播种初始管理员、执行 Celery 自检、启动扫描与失联巡检；SPA 静态兜底限定在静态目录内（`unquote` + `resolve` + `relative_to`，拒绝 `..`）；`ICD_DOCS_ENABLED` 控制 `/docs` / `/redoc` / `/openapi.json` |
-| `auth/`        | 认证与账号模块：`config.py`（认证 env 读取与校验）、`db.py`（Motor + Beanie 初始化 / ping）、`models.py`（User 文档）、`schemas.py`（请求 / 响应模型）、`manager.py`（用户名小写化、密码哈希、重复创建保护）、`backend.py`（JWTStrategy + CookieTransport + FastAPIUsers）、`seed.py`（初始管理员播种）、`deps.py`（`current_user` / `current_admin`）、`router.py`（`/auth/*`、`/admin/users*`）、`access.py`（任务归属统一访问校验） |
+| `auth/`        | 认证与账号模块：`config.py`（认证 env 读取与校验）、`db.py`（Motor + Beanie 初始化 / ping）、`models.py`（User 文档，含 `token_version`）、`schemas.py`（请求 / 响应模型）、`manager.py`（用户名小写化、密码哈希、重复创建保护）、`backend.py`（VersionedJWTStrategy + CookieTransport + FastAPIUsers）、`seed.py`（初始管理员播种）、`deps.py`（`current_user` / `current_admin`）、`router.py`（`/auth/*`、`/admin/users*`）、`access.py`（任务归属统一访问校验） |
 | `job_manager.py` | 任务状态管理（`JobStatus` / `Job` / `JobManager`）；持有任务累计 token（`total_tokens`）与 manifest 持久化；任务归属字段 `owner_id` / `owner_username` 随 Job 与 `job.json` 持久化。Celery 模式下 manifest（`job.json`）是唯一权威状态，`get_job` / `list_jobs` 每次回读并叠加控制面快照；启动扫描按「pending 存活 / 心跳新鲜存活 / 心跳过期按意图收尾 / Redis 不可达不判断」恢复 |
 | `token_usage.py` | 反向 LLM token 采集：解析 OpenAI 兼容 `usage` 的三种形状，并从线程绑定的 Job 累加（只 import `job_log`，不 import `job_manager`，避免循环依赖） |
 | `job_log.py`   | 任务日志缓冲、stdout/stderr Tee、线程归属与 job.log 落盘；Celery 模式下 API 进程按字节偏移从 `job.log` 增量同步 Worker 日志（只消费完整行，二进制追加避免 CRLF 字节错位）；不依赖任何 `app.*` 业务模块 |
@@ -133,10 +133,10 @@ backend/app/auth/
 ├── config.py    # MONGO_URL / MONGO_DB / AUTH_JWT_SECRET / AUTH_TOKEN_TTL_SECONDS /
 │                # AUTH_COOKIE_NAME / AUTH_COOKIE_SECURE / ICD_ADMIN_* / ICD_DOCS_ENABLED
 ├── db.py        # AsyncIOMotorClient + init_beanie + ping_db；启动不可达即失败
-├── models.py    # User（集合 users；email 字段承载小写用户名；is_active / is_superuser）
+├── models.py    # User（集合 users；email 字段承载小写用户名；is_active / is_superuser / token_version）
 ├── schemas.py   # UserCreateRequest（is_admin）/ UserUpdateRequest（is_superuser）/ UserRead / MeResponse
 ├── manager.py   # UserManager：用户名小写化、密码哈希、重复创建与唯一索引竞态保护
-├── backend.py   # JWTStrategy + CookieTransport（HttpOnly / SameSite=Lax / Path=/）+ FastAPIUsers
+├── backend.py   # VersionedJWTStrategy（Token 版本号校验）+ CookieTransport（HttpOnly / SameSite=Lax / Path=/）+ FastAPIUsers
 ├── seed.py      # 用户集合为空时按 ICD_ADMIN_* 创建初始管理员
 ├── deps.py      # current_user / current_admin
 ├── router.py    # /auth/login、/auth/logout、/auth/me、/admin/users*
@@ -152,6 +152,7 @@ backend/app/auth/
 5. **失败语义**：未登录 401；Mongo 运行中失联 → 受保护接口 503 `{"detail": "database unavailable"}`；启动时 Mongo 不可达 → 启动失败并打印明确日志。
 6. **静态兜底加固**：SPA 兜底只返回解析后位于静态目录内的文件；含 `..`（含编码形式）或越界的请求返回 404，不回落 `index.html`（不做路径纠正）；`/api/*` 未匹配路由返回 JSON 404；`ICD_DOCS_ENABLED=0` 时 `/docs` / `/redoc` / `/openapi.json` 也不被兜底接住。
 7. **正向代码树未改**：`backend/forward/` 业务实现与产物生成方式不变，正向适配层只在 API 入口增加登录与归属校验；正反向仍互不 import 业务模块。
+8. **会话吊销**：`User.token_version` 随登录写入 JWT claim `ver`；重置密码或账号由启用改为禁用时递增，该账号所有已签发 JWT 下一次请求即 401；重新启用不恢复旧会话。旧 Token 无 `ver` 按 0 处理。
 
 ## 6. 前端模块划分
 

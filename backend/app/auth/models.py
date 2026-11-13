@@ -24,6 +24,7 @@ class User(Document):
     is_active: bool = True
     is_superuser: bool = False
     is_verified: bool = True
+    token_version: int = 0
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
