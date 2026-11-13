@@ -10,6 +10,7 @@ ADR-001 Issue A：
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,7 @@ from typing import Optional
 import openpyxl
 from docx import Document
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from app.api.v4.runner import launch_v4_pipeline
 from app.api.v4.schemas import V4AnalyzeResponse
@@ -54,6 +56,32 @@ _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._\-一-龥\s()（）\[\]【】]")
 MAX_FILE_BYTES = 50 * 1024 * 1024          # 50 MB 单文件
 MAX_REQUEST_BYTES = 200 * 1024 * 1024      # 200 MB 总
 
+# 流式写盘分块：20 并发上传时不能每个请求都把 50MB 一次性读进内存
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+class _RequestBudget:
+    """单次请求所有上传文件的总字节预算。
+
+    FastAPI 的 multipart 解析本身也会落盘/占内存，这里至少保证业务层不再
+    额外把整份文件读进内存，并把「单请求总量」限制在 ``MAX_REQUEST_BYTES``。
+    """
+
+    def __init__(self, limit: int = MAX_REQUEST_BYTES) -> None:
+        self._limit = int(limit)
+        self.used = 0
+
+    def add(self, size: int) -> None:
+        self.used += int(size)
+        if self.used > self._limit:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"request too large: uploaded files exceed "
+                    f"{self._limit} bytes"
+                ),
+            )
+
 
 def _safe_filename(name: str) -> str:
     base = Path(name).name
@@ -72,15 +100,46 @@ def _safe_filename(name: str) -> str:
     return cleaned
 
 
-async def _save_upload(file: UploadFile, dest_dir: Path) -> Path:
+async def _save_upload(
+    file: UploadFile, dest_dir: Path, budget: Optional[_RequestBudget] = None
+) -> Path:
+    """流式保存上传文件：1MB 分块，不在内存里保留整份文件。
+
+    先写 ``.part`` 临时文件，成功后再 ``os.replace`` 原子替换；中途超限 /
+    客户端断开时删除临时文件，不会留下半份可被管线读到的输入。
+    """
     if not file.filename:
         raise HTTPException(status_code=422, detail="uploaded file has no filename")
     safe = _safe_filename(file.filename)
     dest = dest_dir / safe
-    content = await file.read()
-    if len(content) > MAX_FILE_BYTES:
-        raise HTTPException(status_code=413, detail=f"file too large: {safe} ({len(content)} > {MAX_FILE_BYTES})")
-    dest.write_bytes(content)
+    tmp = dest.with_name(f".{dest.name}.part")
+    total = 0
+    try:
+        with tmp.open("wb") as out:
+            while True:
+                chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_FILE_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"file too large: {safe} "
+                            f"({total} > {MAX_FILE_BYTES})"
+                        ),
+                    )
+                if budget is not None:
+                    budget.add(len(chunk))
+                out.write(chunk)
+        os.replace(tmp, dest)
+    finally:
+        # 成功时 tmp 已被 os.replace 移走（missing_ok 吞掉）；失败/客户端断开时
+        # 清理半份文件，避免管线读到不完整输入。finally 也覆盖 BaseException。
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
     return dest
 
 
@@ -284,10 +343,17 @@ async def coverage_analysis(
     input_dir = job_dir / 'input'
     input_dir.mkdir(parents=True, exist_ok=True)
 
-    # —— 保存上传文件到 input/ ——
-    hlr_path = await _save_upload(hlr_word_file, input_dir)
-    pub_path = await _save_upload(eoicd_publisher_file, input_dir) if eoicd_publisher_file else None
-    sub_path = await _save_upload(eoicd_subscriber_file, input_dir) if eoicd_subscriber_file else None
+    # —— 保存上传文件到 input/（1MB 分块流式写盘 + 单请求总预算）——
+    budget = _RequestBudget()
+    hlr_path = await _save_upload(hlr_word_file, input_dir, budget)
+    pub_path = (
+        await _save_upload(eoicd_publisher_file, input_dir, budget)
+        if eoicd_publisher_file else None
+    )
+    sub_path = (
+        await _save_upload(eoicd_subscriber_file, input_dir, budget)
+        if eoicd_subscriber_file else None
+    )
 
     trace_dir: Optional[Path] = None
     if enable_traceability_prefilter and traceability_files:
@@ -296,7 +362,7 @@ async def coverage_analysis(
         for tf in traceability_files:
             if not tf.filename.lower().endswith(".xlsx"):
                 raise HTTPException(status_code=422, detail=f"traceability file {tf.filename} must be .xlsx")
-            await _save_upload(tf, trace_dir)
+            await _save_upload(tf, trace_dir, budget)
 
     # 自定义样式快照落盘（供追溯与续跑；未传样式时不写，任务目录内容不变）
     if resolved_schema is not None:
@@ -306,7 +372,9 @@ async def coverage_analysis(
 
     # —— 自动识别或校验 controller_profile ——
     if controller_profile is None:
-        detected = _detect_system_type(hlr_path)
+        # 读 docx/xlsx 是同步阻塞的；放线程池，避免 20 并发上传时卡住事件循环
+        # （卡住期间所有轮询任务状态的请求也会一起变慢）。
+        detected = await run_in_threadpool(_detect_system_type, hlr_path)
         controller_profile = detected
         print(f"自动识别系统类型: {controller_profile}")
     else:

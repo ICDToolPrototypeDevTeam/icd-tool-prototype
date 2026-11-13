@@ -26,7 +26,7 @@ API 设计应遵守以下原则：
 | `/api/v4/admin/users`                          | `POST`  | 管理员创建账号（请求字段 `is_admin`） |
 | `/api/v4/admin/users/{user_id}`                | `PATCH` | 管理员重置密码 / 禁用启用 / 设置取消管理员（请求字段 `is_superuser`） |
 | `/api/v4/coverage-analysis`                    | `POST` | 上传输入文件并创建 V4 反向管线任务               |
-| `/api/v4/completeness-analysis`                | `POST` | 上传输入文件并创建 V4 正向完整性分析任务            |
+| `/api/v4/completeness-analysis`                | `POST` | 上传输入文件并创建 V4 正向完整性分析任务（Celery 模式下 503，见第 18 节） |
 | `/api/v4/jobs`                                 | `GET`  | 查询未完成/中断任务列表（可选 `status`、`task_type` 过滤） |
 | `/api/v4/jobs/{job_id}`                        | `GET`  | 查询任务状态                          |
 | `/api/v4/jobs/{job_id}/logs`                   | `GET`  | 任务日志增量拉取（`offset` 取上次返回的 `next_offset`，首次 0；`limit` 默认 500、上限 2000；进程重启后可从 `job.log` 尾部恢复；**只认内存里的任务**） |
@@ -54,6 +54,8 @@ API 设计应遵守以下原则：
 `{model}` ∈ `{deepseek, minimax, qwen}`。
 
 除 `GET /api/v4/health` 与 `POST /api/v4/auth/login` 外，本版所有接口都要求登录；任务级接口再按归属校验。完整权限矩阵、Cookie 参数与 401/403/404/503 语义见第 17 节。
+
+任务执行模式由后端环境变量 `JOB_EXECUTOR` 决定（`celery` 为生产部署，`inline` 仅测试/回滚）。Celery 模式下同一套接口路径与请求/响应字段不变，但任务由独立 Worker 进程执行，新增的 503（控制面/队列不可用、正向未启用）与 409（Worker 仍在执行）语义见第 18 节。
 
 ## 3. 健康检查接口
 
@@ -100,6 +102,8 @@ Content-Type: multipart/form-data
 | `hlr_schema` | str (form, JSON) | 否（默认不启用） | 自定义 HLR 表格样式引用（见下）；仅 `.docx` 且必须同时提供 `controller_profile` |
 
 文件名校验：`[^A-Za-z0-9._\-一-龥]` 之外字符会被替换为 `_`；`safe_filename()`。
+
+上传并发加固：文件按 1MB 分块流式写入 `.part` 临时文件，完成后原子改名；单文件上限 50MB、单请求全部文件合计上限 200MB（含 `/completeness-analysis`、`/hlr-schemas/scan`、`/hlr-schemas/preview`），超限返回 413。HLR 表格自动识别等 CPU 型探测在线程池执行，不阻塞事件循环。
 
 `judge_providers` 任一不在白名单 → 422。
 
@@ -184,7 +188,12 @@ GET /api/v4/jobs/{job_id}
 
 `canceled` 表示运行中的任务被用户主动终止（`POST /api/v4/jobs/{job_id}/cancel`，见第 2 节）；它与 `abandoned` 语义不同：`abandoned` 指任务被中断 / 被终止后由用户放弃，是**终态**，`canceled` 指**仍在运行**的任务被终止，**不是终态** —— 被终止的任务可 `resume` 续跑（按参数快照重跑，续跑前复位取消标志）或 `abandon` 收尾。两者都不删除任何文件；终止是协作式的，`status` 会保持 `running` / `pending` 直至管线在检查点停止，接口不返回虚构的中间状态。
 
-**任务队列（多输入批量并行）**：任务不直接各起线程，而是统一进入**进程内队列**（`backend/app/job_scheduler.py`），由固定 `MAX_CONCURRENT_JOBS`（默认 2，见 `backend/.env.example`）个常驻工作线程领取执行；超出部分在队列中等待。新任务按入队先后 FIFO；`resume` 续跑的任务**插到队首**（它是用户「已经在做、被打断」的工作，不排在刚提交的新任务后面重新等队尾），插队只作用于等待队列、不抢占正在执行的任务。排队中的任务 `status` 为 `pending`、`message` 为「任务已排队，等待空闲执行槽位（并发上限 N）」；排队期间被终止 / 放弃的任务**不会被执行**（出队时跳过，跳过原因写入该任务日志，可在 `/logs` 与日志面板读到「排队等待期间…跳过执行」）。对排队任务的 `cancel` 立即生效（直接落 `canceled`，不等前面的任务跑完），随后照常可 `abandon`（排队中也可**直接**放弃，不必先终止）或 `resume`（重新入队后与首次提交一样如实落 `pending` + 排队提示，被工作线程领走才翻为 `running`）。队列本身不跨进程持久化；排队中的任务已落盘 manifest，容器重启后由启动扫描一并标记为 `interrupted`（可 `resume` 重新入队 / `abandon`），与运行中任务同待遇。
+**任务执行模式**：由 `JOB_EXECUTOR` 决定，接口行为随之不同（详见第 18 节）。
+
+- **Celery 模式（生产）**：任务落盘 manifest 后投递到 Redis 队列 `icd.reverse`，由独立 Worker 进程执行；并发数由部署参数 `ICD_WORKER_CONCURRENCY`（默认 20）决定，超出部分在 Redis 队列中等待（FIFO，不区分新任务/续跑）。排队中的任务 `status` 为 `pending`、`message` 为「任务已排队，等待 Worker 执行…」。Redis 队列持久化，**API 重启不影响排队任务**（仍是 `pending`，Worker 会执行）；Worker 崩溃/重启由心跳巡检收尾为 `interrupted`（或按控制意图 `canceled` / `abandoned`），可 `resume` 续跑。每个 API 实例都能读到同一份 manifest，多副本部署时状态一致。
+- **inline 模式（pytest / 回滚）**：任务进入**进程内队列**（`backend/app/job_scheduler.py`），由固定 `MAX_CONCURRENT_JOBS`（默认 2，见 `backend/.env.example`）个常驻工作线程领取执行。新任务 FIFO；`resume` 续跑任务**插到队首**，插队只作用于等待队列、不抢占正在执行的任务。排队中的任务 `status` 为 `pending`、`message` 为「任务已排队，等待空闲执行槽位（并发上限 N）」；排队期间被终止 / 放弃的任务**不会被执行**（出队时跳过，原因写入任务日志）。队列本身不跨进程持久化；容器重启后启动扫描把 `pending` / `running` 一并标记为 `interrupted`（可 `resume` / `abandon`）。
+
+对排队 / `pending` 任务的 `cancel` 在两种模式下都立即生效（直接落 `canceled`）；已开始执行的任务在检查点协作式停止。`abandon` 在任务已开始执行但尚未收尾时返回 409。
 
 `error` 为结构化失败信息，仅在任务 `failed` 或 `canceled` 时非空，运行中与成功时为 `null`：
 
@@ -480,7 +489,14 @@ GET /api/v4/jobs/{job_id}/outputs/forward-docx
 
 ## 13. 任务中断恢复接口
 
-任务元数据随每步进度持久化到 `backend/output/v4/{job_id}/job.json`（manifest）。进程启动时扫描一次：仍为 `pending` / `running` 的 manifest 必然来自上一个已退出的进程 → 标记为 `interrupted`（保留原 `updated_at` 作为「中断前的最后进度时间」）并载入内存。已为 `interrupted` 的 manifest 同样载入，因此反复重启不会丢失中断任务。输入文件与各阶段中间产物均已落盘，无需重新上传。
+任务元数据随每步进度持久化到 `backend/output/v4/{job_id}/job.json`（manifest）。输入文件与各阶段中间产物均已落盘，续跑无需重新上传。
+
+进程启动时的扫描（`load_interrupted`）按执行模式区分：
+
+- **inline 模式**：仍为 `pending` / `running` 的 manifest 必然来自上一个已退出的进程 → 标记为 `interrupted`（保留原 `updated_at` 作为「中断前的最后进度时间」）并载入内存。
+- **Celery 模式**：`pending` 保持 `pending`（Redis 中的任务消息仍在，Worker 会执行）；`running` 且心跳新鲜（< 300 秒）保持 `running`；心跳过期则按 Redis 控制意图收尾为 `canceled` / `abandoned`，否则 `interrupted`；**Redis 不可达时不做任何判断**（不能把「暂时连不上控制面」当成「Worker 已死」）。
+
+已为 `interrupted` 的 manifest 同样载入，因此反复重启不会丢失中断任务。
 
 ### 13.1 查询任务列表
 
@@ -517,7 +533,9 @@ GET /api/v4/jobs?status=interrupted&task_type=correctness
 POST /api/v4/jobs/{job_id}/resume
 ```
 
-可继续的任务状态为 `interrupted`（进程中断）与 `canceled`（用户终止）；其余状态一律 409。续跑前会先**复位取消标志**（`cancel_requested` 与内部取消事件）—— 同一进程内被终止的任务仍带着上次置位的取消标志，不复位则第一个检查点会立即再次取消。
+可继续的任务状态为 `interrupted`（进程中断）与 `canceled`（用户终止）；其余状态一律 409。续跑前会先**复位取消标志**（`cancel_requested` 与内部取消事件）—— 被终止的任务仍带着上次置位的取消标志，不复位则第一个检查点会立即再次取消。
+
+Celery 模式下续跑额外校验 Worker 租约：控制面仍显示该任务被 Worker 占用且心跳新鲜（< 300 秒）→ **409**（任务可能还在跑，不允许重复启动）；租约已过期/不存在 → 清理旧租约后以新 `run_token` 重新投递。控制面不可达 → **503**。旧队列消息因 `run_token` 不匹配会被 Worker 丢弃，续跑不会被执行两次。正向任务续跑在 Celery 模式下 → **503**（第 18 节）。
 
 按 manifest 中的参数快照（`judge_providers` / `use_mock_llm` / `controller_profile` / `no_refine` / `analysis_mode` / 追溯表等）重跑，走与新建任务完全相同的启动路径。前端不接受也不传递任何覆盖参数。
 
@@ -553,7 +571,9 @@ POST /api/v4/jobs/{job_id}/resume
 POST /api/v4/jobs/{job_id}/abandon
 ```
 
-只把状态标记为 `abandoned`，**不删除任何输入或输出文件**（磁盘清理不在本期范围）。可放弃的任务为 `interrupted` 与 `canceled`（与 `resume` 同一门槛），**外加排队中 / 从未启动的 `pending`**（`thread_ident is None`，即没有任何线程在跑 —— 排队中的任务已入队但工作线程尚未领取；从未启动的幽灵任务连 `job_dir` 都没有）。放弃是这套状态机里的终态：被终止的任务需要一个收尾方式；排队中的任务出队时会被跳过执行（见第 5 节），一步放弃即可，不必先 `cancel` 再 `abandon` 两步走。门槛统一为「**没有任何线程在跑**」——`running` 的任务总有线程，只能先 `cancel`。放弃与工作线程出队之间没有锁，存在毫秒级竞态窗口（出队裁决刚通过即被放弃），此时任务会照常跑完并落 `completed`，无数据损坏。
+只把状态标记为 `abandoned`，**不删除任何输入或输出文件**（磁盘清理不在本期范围）。可放弃的任务为 `interrupted` 与 `canceled`（与 `resume` 同一门槛），**外加尚未被 Worker 领取的 `pending`**。放弃是这套状态机里的终态：被终止的任务需要一个收尾方式；排队中的任务被 Worker 取到时会校验 `abandon` 标志并跳过执行（见第 18 节），一步放弃即可，不必先 `cancel` 再 `abandon` 两步走。门槛统一为「**没有任何执行单元在跑**」——正在运行的 `running` 任务只能先 `cancel`。
+
+Celery 模式下：`pending` 且未被领取 → 标记控制面 `abandon` 并直接落 `abandoned`；已领取且心跳新鲜 → **409**；控制面不可达 → **503**。
 
 配套的不变量是「**登记即承诺运行**」：创建任务的接口用 `JobManager.new_job()` 只构造、不登记，由 `launch_*_pipeline` 在入队（起线程）前 `register()`。上传接口还有保存文件与识别系统类型两步，任一步失败请求就结束了、线程不会启动，若在创建时就登记，失败的上传会在列表里留下永远停在 `pending` 的空记录（既无进度也无日志，且当时无法放弃）。
 
@@ -571,6 +591,9 @@ POST /api/v4/jobs/{job_id}/abandon
 | `resume` 的任务状态不是 `interrupted` / `canceled`（如 `completed` / `running` / `abandoned`） | 409 |
 | `abandon` 的任务既不是 `interrupted` / `canceled`，也不是「没有任何线程在跑」的 `pending`（如 `running`、`completed`、`abandoned`） | 409 |
 | `resume` 时 manifest 记录的输入文件或追溯目录已不存在 | 409 |
+| `resume` 时 Worker 租约仍新鲜（任务可能还在执行） | 409 |
+| Celery 模式下控制面 / 队列不可达（`resume` / `abandon` / `cancel` / 强制终止） | 503 |
+| Celery 模式下创建或续跑正向任务（功能未接入 Worker） | 503 |
 
 ### 13.5 manifest 字段说明
 
@@ -1147,3 +1170,45 @@ Content-Type: application/json
 - `/api/*` 未匹配路由返回 JSON 404，不回落为前端 `index.html`。
 - SPA 静态兜底只返回解析后位于静态目录内的文件：请求路径先 URL 解码，含 `..` 段或解析后越界时返回 404，不回落 `index.html`（不做路径纠正）；未登录者不能通过 `/../output/v4/<job_id>/...`（含 `%2e%2e` 编码形式）读取任务产物、`job.json` 或 `.env`。
 - 静态目录本身可公开（登录页需要），但不得暴露静态目录以外的任何文件。
+
+## 18. 任务执行层语义（Celery 模式）
+
+本节只描述 `JOB_EXECUTOR=celery`（生产部署）相对 inline 模式的差异；接口路径、请求字段、响应结构均不变。设计背景见 `docs/decisions/ADR-008-Celery-Redis任务执行层.md`。
+
+### 18.1 执行模型
+
+- API 进程（FastAPI）只做生产者：保存上传文件 → 写 manifest（`pending`）→ 投递 Redis 队列 `icd.reverse` → 返回。管线在独立 Celery Worker 进程中执行。
+- Worker 默认并发 20（`ICD_WORKER_CONCURRENCY`），prefork 子进程，一子进程同一时刻只执行一个任务；`worker_max_tasks_per_child=1`，任务结束后子进程退出重建。
+- `job.json` 是唯一权威状态；API 每次查询回读 manifest 并叠加 Redis 控制面快照。因此任务状态与「请求打到哪个 API 实例」无关。
+
+### 18.2 状态与跨进程同步
+
+- `GET /jobs/{id}` / `GET /jobs`：Celery 模式下从 manifest 刷新后再返回；`pending`、`running`、`completed` 等状态语义与 inline 模式一致。
+- 日志：Worker 写 `job.log`；`GET /jobs/{id}/logs` 在返回前按字节偏移把新行同步进 API 进程 buffer，只消费完整行。`/logs/download` 直接读磁盘，行为不变。
+- token 用量、结果摘要（`/result`）、输出下载均从 manifest 与任务目录读取，语义不变。
+
+### 18.3 控制操作
+
+| 操作 | Celery 模式行为 | 错误 |
+| --- | --- | --- |
+| `cancel`（任务未被执行） | 写控制面 `cancel` 并把 manifest 置 `canceled`；Worker 取到后跳过 | 控制面不可达 → 503 |
+| `cancel`（任务已执行） | 只写控制面 `cancel`；Worker 在检查点停止并落 `canceled`；API 立即返回 200 且 `status` 保持 `running`、`cancel_requested=true` | 控制面不可达 → 503 |
+| 强制终止（`force=true`） | 写控制面 `force` + 向 Worker 发 revoke（SIGKILL）；manifest 置 `canceled`；Worker 收到强制标志后最多 10 秒宽限即退出 | 控制面不可达 → 503 |
+| `abandon` | 未被领取的 `pending`：写 `abandon` 并置 `abandoned`；已领取且心跳新鲜 → 409 | 控制面不可达 → 503 |
+| `resume` | 租约新鲜 → 409；否则清理旧租约、生成新 `run_token` 重新投递 | 队列/控制面不可达 → 503 |
+| 创建 / 续跑正向任务 | 不投递，直接拒绝 | 503（`当前部署未启用正向完整性分析`） |
+
+取消 / 强制终止 / 放弃是**协作式**的：接口不等待 Worker 实际停止；最终状态以 Worker 或巡检线程写入的 manifest 为准。
+
+### 18.4 故障恢复
+
+- **API 重启**：排队任务保持 `pending`；运行中任务按心跳判断（见第 13 节）。
+- **Worker 崩溃 / 被杀**：心跳停止；最长 300 秒后由 API 侧巡检线程（每 60 秒一次）按控制意图收尾为 `canceled` / `abandoned`，否则 `interrupted`；之后可 `resume`。
+- **Redis 不可达**：控制操作返回 503；启动扫描与巡检不做任何状态判断，避免把暂时故障误判成任务失败。任务本身在 Worker 中继续执行（Worker 与 Redis 断连时 Celery 会重连）。
+- **超长任务**：Redis `visibility_timeout` 设为 30 天，覆盖 24 小时+ 任务，避免消息被重复投递。
+
+### 18.5 正向管线
+
+Celery 模式下正向完整性分析未接入 Worker：`POST /completeness-analysis` 与正向任务的 `resume` 返回 503，前端入口保留可见。
+
+`FORWARD_PIPELINE_ENABLED=1` 可显式放开该拦截，但**当前部署不要设置**：放开后正向任务仍走 API 进程内的 `job_scheduler` 线程池（不经 Redis / Worker），会占用 API 进程资源，与「20 并发长任务在 Worker 执行」的部署假设冲突。inline 模式下未配置该变量时正向默认可用，与历史行为一致。

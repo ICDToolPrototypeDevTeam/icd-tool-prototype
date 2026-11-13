@@ -26,11 +26,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
-from app.api.v4.coverage import _save_upload
+from app.api.v4.coverage import _RequestBudget, _save_upload
 from app.api.v4.runner import launch_forward_pipeline
 from app.api.v4.schemas import V4AnalyzeResponse
 from app.auth.deps import current_user
 from app.auth.models import User
+from app.execution import config as execution_config
 from app.job_manager import job_manager
 from app.v4.config import get_output_root
 
@@ -51,6 +52,13 @@ async def completeness_analysis(
     # 未登录由 fastapi-users 返回 401；归属写入创建的任务（后续任务按 owner_id 隔离）
     user: User = Depends(current_user),
 ):
+    # 正向尚未接入 Celery Worker：当前部署保留入口，但提交直接 503。
+    if not execution_config.forward_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail='正向完整性分析在当前部署中未启用（仅启用反向管线）',
+        )
+
     # —— 字段校验 ——
     # V4.1 正向树支持 .docx / .xlsx 两种 HLR 需求文件；字段名沿用 hlr_word_file
     # 以保持既有前端/API 契约不变。
@@ -92,14 +100,21 @@ async def completeness_analysis(
     input_dir = job_dir / 'input'
     input_dir.mkdir(parents=True, exist_ok=True)
 
-    # —— 保存上传文件到 input/ ——
-    hlr_path = await _save_upload(hlr_word_file, input_dir)
-    pub_path = await _save_upload(eoicd_publisher_file, input_dir) if eoicd_publisher_file else None
-    sub_path = await _save_upload(eoicd_subscriber_file, input_dir) if eoicd_subscriber_file else None
+    # —— 保存上传文件到 input/（与反向同一套流式写盘 + 总预算）——
+    budget = _RequestBudget()
+    hlr_path = await _save_upload(hlr_word_file, input_dir, budget)
+    pub_path = (
+        await _save_upload(eoicd_publisher_file, input_dir, budget)
+        if eoicd_publisher_file else None
+    )
+    sub_path = (
+        await _save_upload(eoicd_subscriber_file, input_dir, budget)
+        if eoicd_subscriber_file else None
+    )
 
     trace_paths: list[Path] = []
     for tf in trace_files:
-        trace_paths.append(await _save_upload(tf, input_dir))
+        trace_paths.append(await _save_upload(tf, input_dir, budget))
 
     # —— 后台线程跑正向管线 ——
     launch_forward_pipeline(

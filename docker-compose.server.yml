@@ -1,4 +1,5 @@
-# 服务器单端口交付形态：一个后端容器 + 一个 Mongo 容器（账号库）。
+# 服务器单端口交付形态：一个后端容器提供 API 与前端页面，另加 Redis + Worker
+# （任务执行层）与 Mongo（账号库）。
 # 对外只有一个端口 8182（后端同时提供 API 与前端页面）；Mongo 不映射宿主端口。
 #
 # 与本地开发用的 docker-compose.yml 的区别：
@@ -7,12 +8,23 @@
 #     一个端口（映射到容器内 8000；容器内服务端口不变）；
 #   - Mongo 不映射宿主端口，只允许 compose 内部网络访问，并限制内存上限。
 #
+# 执行模型（自本版起）：
+#   API（backend）    接请求、保存上传、写 job.json、把反向任务放进 Redis 队列；
+#   Redis             队列 + 任务控制面（取消/终止/心跳租约），AOF 持久化；
+#   Worker（worker）  独立容器，默认 20 个子进程并行跑反向管线；
+#   共享卷            ./backend/output —— job.json / job.log / 产物。
+#   API 重启不会丢队列；Worker 被 OOM 杀掉的任务由 API 侧 reaper 标为 interrupted，
+#   用户可在页面上「继续」（从已落盘产物 + LLM 缓存续跑）。
+#
 # 使用前提（与仓库目录结构保持一致，交付时请原样带过去）：
 #   frontend/dist/        前端构建产物（npm run build 生成）
 #   backend/.env          模型服务配置 + 认证配置（MONGO_URL / AUTH_JWT_SECRET 等）
 #   backend/output/       分析输出落盘目录
+#   Redis 镜像            redis:7-alpine（服务器无外网，需随后端镜像一起离线载入）
+#   Mongo 镜像            mongo:7.0.14（账号库，同样随包离线载入）
 #   根目录 .env           容器内存上限与镜像标签（ICD_MEM_LIMIT / ICD_MEMSWAP_LIMIT /
-#                         MONGO_MEM_LIMIT / MONGO_IMAGE）
+#                         ICD_WORKER_MEM_LIMIT / ICD_WORKER_MEMSWAP_LIMIT /
+#                         ICD_REDIS_MEM_LIMIT / MONGO_MEM_LIMIT / MONGO_IMAGE）
 #
 # 部署步骤与验收方式见 部署说明.md。
 #
@@ -20,6 +32,29 @@
 name: icd-tool-server
 
 services:
+  redis:
+    image: redis:7-alpine
+    # 内网服务器无外网出口：镜像缺失时直接报错，而不是尝试联网拉取
+    pull_policy: never
+    command:
+      - redis-server
+      # AOF：API/Worker/Redis 一起重启后，队列里的任务仍在
+      - --appendonly
+      - 'yes'
+      # 任务队列不允许被内存淘汰策略静默删除；内存不足时宁可写入失败
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - icd-redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    mem_limit: ${ICD_REDIS_MEM_LIMIT:-512m}
+    memswap_limit: ${ICD_REDIS_MEM_LIMIT:-512m}
+
   mongo:
     # 离线交付：镜像已随包提供（mongo-image.tar.gz），服务器上先 docker load。
     # 变量 MONGO_IMAGE 默认与 scripts/build-image.sh 的默认值保持一致。
@@ -57,7 +92,7 @@ services:
     volumes:
       # 前端产物只读挂载，后端按 ICD_STATIC_DIR 同源托管
       - ./frontend/dist:/app/static:ro
-      # 分析输出落宿主机，容器重建不丢
+      # 分析输出落宿主机，容器重建不丢（Worker 容器挂同一个目录）
       - ./backend/output:/app/output
     env_file:
       - path: ./backend/.env
@@ -65,11 +100,18 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - ICD_STATIC_DIR=/app/static
+      # 执行层：API 只入队，反向管线在 worker 容器执行
+      - JOB_EXECUTOR=celery
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      # 正向尚未接入 Celery：入口保留，后端返回 503
+      - FORWARD_PIPELINE_ENABLED=0
       # 容器内后端走 compose 网络的服务名；覆盖 backend/.env 的 localhost 默认值
       - MONGO_URL=mongodb://mongo:27017/icd
       # 服务器部署关闭 /docs、/redoc、/openapi.json
       - ICD_DOCS_ENABLED=0
     depends_on:
+      redis:
+        condition: service_healthy
       mongo:
         condition: service_healthy
     restart: unless-stopped
@@ -86,9 +128,53 @@ services:
     #
     # 注意：10 GB 默认值面向内存 ≥ 10 GB 的机器；物理内存更小时必须执行 §5.4
     # 按实际内存重算，否则上限形同虚设（把上限调到超过物理内存等于回到整机假死）。
+    #
+    # 本版新增 Worker 容器后，**两个容器的上限之和**不能超过物理内存：
+    # API（轻负载，上传解析 + 轮询）与 Worker（重负载，20 个并行管线）分开限额。
     mem_limit: ${ICD_MEM_LIMIT:-10g}
     memswap_limit: ${ICD_MEMSWAP_LIMIT:-10g}
 
+  worker:
+    image: icd-tool-backend-v4.0
+    pull_policy: never
+    volumes:
+      # 与 API 共享输出卷：job.json / job.log / 全部产物
+      - ./backend/output:/app/output
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      - PYTHONUNBUFFERED=1
+      - JOB_EXECUTOR=celery
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - FORWARD_PIPELINE_ENABLED=0
+    # -c = 同时执行的反向任务数（每个子进程一个任务，不是线程）。
+    # 默认 20；服务器核数/内存不足时在部署目录 .env 里调小
+    # （ICD_WORKER_CONCURRENCY=8 等），不要直接改本文件。
+    command:
+      - celery
+      - -A
+      - app.execution.celery_app
+      - worker
+      - -Q
+      - icd.reverse
+      - -c
+      - '${ICD_WORKER_CONCURRENCY:-20}'
+      - -Ofair
+      - --loglevel=INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    # 收到 docker stop 时给正在跑的任务留一点收尾时间；超时后 SIGKILL，
+    # 未完成任务会被 API 侧 reaper 标为 interrupted，可继续。
+    stop_grace_period: 30s
+    # Worker 内存上限：必须与并发数一起算（见 部署说明.md §5.4）。
+    # 20 个并行大任务的总峰值可能远超单任务，默认 10g 只是「未配置」时的兜底。
+    mem_limit: ${ICD_WORKER_MEM_LIMIT:-10g}
+    memswap_limit: ${ICD_WORKER_MEMSWAP_LIMIT:-10g}
+
 volumes:
+  icd-redis-data:
   # 账号库持久化：删容器不丢账号；备份/恢复见 部署说明.md §7.5
   mongo_data:

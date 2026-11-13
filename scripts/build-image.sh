@@ -7,11 +7,12 @@
 # 本机（Windows 的 Git Bash）与 Linux 均可运行，需要 docker 与 node/npm。
 #
 # 为什么不能只给一句 `docker compose build`：
-#   服务器形态是「一个后端容器同时提供接口与页面」（ICD_STATIC_DIR=/app/static），
-#   前端**不打成镜像**，而是把 `npm run build` 生成的 frontend/dist 挂进后端容器。
-#   所以一次可交付的构建 = 后端镜像归档 + Mongo 镜像归档 + 前端构建产物 +
-#   编排文件 + 部署说明（与 更新说明.md），缺一不可。上一轮就踩过「重建了前端
-#   镜像，但服务器用的 dist 没更新」。
+#   服务器形态是「backend（API + 前端页面，ICD_STATIC_DIR=/app/static）+ worker
+#   （Celery）+ redis + mongo 四个容器」，前端**不打成镜像**，而是把 `npm run build`
+#   生成的 frontend/dist 挂进 backend 容器。服务器无外网，Redis 与 Mongo 镜像也必须
+#   随包离线提供。所以一次可交付的构建 = 后端镜像归档 + Redis 镜像归档 +
+#   Mongo 镜像归档 + 前端构建产物 + 编排文件 + 部署说明（与 更新说明.md），
+#   缺一不可。上一轮就踩过「重建了前端镜像，但服务器用的 dist 没更新」。
 #
 # 出包前置：先更新仓库根的 更新说明.md（本版相比上一版的部署层变化、需 root 的
 # 步骤、回滚方式——构建时会核对它的日期并提醒）。构建还会在包内版本末尾自动
@@ -25,7 +26,7 @@
 #   MONGO_IMAGE=mongo:7.0.14 bash scripts/build-image.sh  # 指定随包的 Mongo 镜像
 #   NO_TAR=1 bash scripts/build-image.sh              # 不额外打单文件包（只留目录）
 #
-# 产物（交付目录内含后端镜像与 Mongo 镜像两个归档）：
+# 产物（交付目录内含后端镜像、Redis 镜像与 Mongo 镜像三个归档）：
 #   dist/icd-deploy-<日期>/          可直接拷到服务器的交付目录
 #   dist/icd-deploy-<日期>.tar       同一份内容的单文件形式（未压缩，内含镜像已压缩）
 # =============================================================================
@@ -37,6 +38,9 @@ IMAGE="icd-tool-backend-v${VERSION}"
 STAMP="${STAMP:-$(date +%Y%m%d)}"
 BUNDLE="$ROOT/dist/icd-deploy-${STAMP}"
 ARCHIVE_NAME="icd-tool-backend.tar.gz"
+# 服务器无外网，Redis 镜像需与后端镜像一起离线交付（编排文件 pull_policy: never）
+REDIS_IMAGE="${REDIS_IMAGE:-redis:7-alpine}"
+REDIS_ARCHIVE_NAME="redis-7-alpine.tar.gz"
 # 随包提供的 Mongo 镜像：服务器离线 docker load；版本固定，避免构建机差异
 MONGO_IMAGE="${MONGO_IMAGE:-mongo:7.0.14}"
 MONGO_ARCHIVE_NAME="mongo-image.tar.gz"
@@ -125,7 +129,8 @@ emit_prev_diff() {
         fh='无法比对（一侧缺目录）'
       fi
       printf '| 项目 | 结果 |\n| --- | --- |\n'
-      printf '| 镜像归档 sha256 | %s |\n' "$sha_line"
+      printf '| 后端镜像归档 sha256 | %s |\n' "$sha_line"
+      printf '| Redis 镜像归档 | %s |\n' "$(compare_file "$prev/$REDIS_ARCHIVE_NAME" "$BUNDLE/$REDIS_ARCHIVE_NAME")"
       printf '| Mongo 镜像归档 | %s |\n' "$mongo_line"
       printf '| docker-compose.server.yml | %s |\n' "$(compare_file "$prev/docker-compose.server.yml" "$BUNDLE/docker-compose.server.yml")"
       printf '| backend/.env.example | %s |\n' "$(compare_file "$prev/backend/.env.example" "$BUNDLE/backend/.env.example")"
@@ -190,7 +195,7 @@ IMAGE_ARCH="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE"
 info "镜像 $IMAGE_ID（$IMAGE_ARCH）"
 
 # ---------------------------------------------------------------- 3. 导出归档
-say "[3/7] 导出镜像归档 $ARCHIVE_NAME 与 $MONGO_ARCHIVE_NAME（大镜像压缩需要一两分钟）"
+say "[3/7] 导出镜像归档（后端 + Redis + Mongo；大镜像压缩需要一两分钟）"
 mkdir -p "$ROOT/dist"
 if [ -e "$BUNDLE" ]; then
   # 只覆盖本脚本生成的包：没有 BUILD_INFO 说明是别人放的东西，不擅自删
@@ -199,9 +204,21 @@ if [ -e "$BUNDLE" ]; then
   rm -rf "$BUNDLE"
 fi
 mkdir -p "$BUNDLE"
+
 docker save "$IMAGE" | compress_stream > "$BUNDLE/$ARCHIVE_NAME"
 ARCHIVE_SIZE="$(du -h "$BUNDLE/$ARCHIVE_NAME" | cut -f1)"
 info "后端归档大小：$ARCHIVE_SIZE"
+
+# Redis 镜像：本机没有就先按目标架构拉取。服务器无外网，必须随包提供，
+# 否则编排文件（pull_policy: never）会直接报 image not found。
+if ! docker image inspect "$REDIS_IMAGE" >/dev/null 2>&1; then
+  info "本机无 $REDIS_IMAGE，先拉取（$PLATFORM）"
+  docker pull --platform "$PLATFORM" "$REDIS_IMAGE"
+fi
+docker save "$REDIS_IMAGE" | compress_stream > "$BUNDLE/$REDIS_ARCHIVE_NAME"
+REDIS_ARCHIVE_SIZE="$(du -h "$BUNDLE/$REDIS_ARCHIVE_NAME" | cut -f1)"
+info "Redis 归档大小：$REDIS_ARCHIVE_SIZE"
+
 docker save "$MONGO_IMAGE" | compress_stream > "$BUNDLE/$MONGO_ARCHIVE_NAME"
 MONGO_ARCHIVE_SIZE="$(du -h "$BUNDLE/$MONGO_ARCHIVE_NAME" | cut -f1)"
 info "Mongo 归档大小：$MONGO_ARCHIVE_SIZE"
@@ -216,7 +233,7 @@ mkdir -p "$BUNDLE/frontend" "$BUNDLE/backend/output"
 cp -r "$ROOT/frontend/dist" "$BUNDLE/frontend/dist"
 # .env.example 随包给出（真 .env 含密钥，另行走单独渠道，绝不放进交付包）
 cp "$ROOT/backend/.env.example" "$BUNDLE/backend/.env.example"
-info "frontend/dist、backend/.env.example、docker-compose.server.yml、部署说明.md、更新说明.md 与两个镜像归档已就位"
+info "三个镜像归档、frontend/dist、backend/.env.example、docker-compose.server.yml、部署说明.md、更新说明.md 已就位"
 
 # 更新说明.md 日期核对：顶部日期（YYYY-MM-DD）应为出包当天，不符则提醒（不阻断构建）
 NOTE_DATE="$(sed -n '1s/.*\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\).*/\1/p' "$ROOT/更新说明.md" | tr -d '\r')"
@@ -231,9 +248,11 @@ say "[5/7] 写入 BUILD_INFO 与校验值"
 (
   cd "$BUNDLE"
   sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
+  sha256sum "$REDIS_ARCHIVE_NAME" > "$REDIS_ARCHIVE_NAME.sha256"
   sha256sum "$MONGO_ARCHIVE_NAME" > "$MONGO_ARCHIVE_NAME.sha256"
 )
 ARCHIVE_SHA="$(cut -d' ' -f1 < "$BUNDLE/$ARCHIVE_NAME.sha256")"
+REDIS_ARCHIVE_SHA="$(cut -d' ' -f1 < "$BUNDLE/$REDIS_ARCHIVE_NAME.sha256")"
 MONGO_SHA="$(cut -d' ' -f1 < "$BUNDLE/$MONGO_ARCHIVE_NAME.sha256")"
 GIT_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if ! git -C "$ROOT" diff --quiet HEAD 2>/dev/null; then
@@ -249,6 +268,9 @@ ICD 工具原型 · 服务器交付包
 镜像架构：$IMAGE_ARCH
 归档文件：$ARCHIVE_NAME（$ARCHIVE_SIZE）
 归档 sha256：$ARCHIVE_SHA
+Redis 镜像：$REDIS_IMAGE
+Redis 归档：$REDIS_ARCHIVE_NAME（$REDIS_ARCHIVE_SIZE）
+Redis 归档 sha256：$REDIS_ARCHIVE_SHA
 Mongo 镜像标签：$MONGO_IMAGE
 Mongo 镜像架构：$MONGO_ARCH
 Mongo 归档文件：$MONGO_ARCHIVE_NAME（$MONGO_ARCHIVE_SIZE）
@@ -259,6 +281,9 @@ image=$IMAGE
 arch=$IMAGE_ARCH
 archive=$ARCHIVE_NAME
 sha256=$ARCHIVE_SHA
+redis_image=$REDIS_IMAGE
+redis_archive=$REDIS_ARCHIVE_NAME
+redis_sha256=$REDIS_ARCHIVE_SHA
 mongo_image=$MONGO_IMAGE
 mongo_arch=$MONGO_ARCH
 mongo_archive=$MONGO_ARCHIVE_NAME
@@ -289,9 +314,11 @@ cat <<EOF
   1) 把交付目录（或单文件包）拷到服务器；
   2) 服务器上先读包内 更新说明.md（本版部署变化与需 root 的步骤），
      再按 部署说明.md §5 逐条手工执行（不执行任何随包脚本）：
-     sha256 校验 → 导入镜像 → 目录与 .env → 内存上限 → 启动自检；
-  3) 两个镜像归档都要导入：
+     sha256 校验 → docker load（后端 + Redis + Mongo 三个镜像）→ 目录与 .env →
+     内存上限与 Worker 并发 → 启动自检；
+  3) 三个镜像归档都要导入：
      docker load -i icd-tool-backend.tar.gz
+     docker load -i redis-7-alpine.tar.gz
      docker load -i mongo-image.tar.gz
   4) 首次部署前确认 backend/.env 里的模型地址、密钥与认证配置
      （AUTH_JWT_SECRET、ICD_ADMIN_USERNAME、ICD_ADMIN_PASSWORD）已填好。

@@ -1,4 +1,25 @@
+# 本地开发 / 功能测试编排（Windows + Docker Desktop 即用）。
+#
+# 执行模式固定为 celery：API 只接请求与入队，反向管线在 worker 容器的子进程里跑。
+# 单元测试仍走 inline（pytest 不启动 Redis，见 app/execution/config.py）。
 services:
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - 'yes'
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - icd-redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
   mongo:
     # 固定小版本，避免不同构建机拉到不同镜像；可用 MONGO_IMAGE 覆盖
     image: ${MONGO_IMAGE:-mongo:7.0.14}
@@ -35,11 +56,52 @@ services:
         required: false
     environment:
       - PYTHONUNBUFFERED=1
+      - JOB_EXECUTOR=celery
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      # 正向尚未接入 Celery；入口保留，后端返回 503
+      - FORWARD_PIPELINE_ENABLED=0
       # 容器内后端走 compose 网络的服务名；覆盖 backend/.env 的 localhost 默认值
       - MONGO_URL=mongodb://mongo:27017/icd
     depends_on:
+      redis:
+        condition: service_healthy
       mongo:
         condition: service_healthy
+
+  worker:
+    image: icd-tool-backend-v4.0
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    volumes:
+      # 与 API 共享输出卷：job.json / job.log / 产物都落在这里
+      - ./backend/output:/app/output
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      - PYTHONUNBUFFERED=1
+      - JOB_EXECUTOR=celery
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - FORWARD_PIPELINE_ENABLED=0
+    # 一个子进程一次只跑一个任务；-c 20 = 最多 20 个分析任务并行。
+    # 本机内存较小时先在 .env 里把 ICD_WORKER_CONCURRENCY 调小。
+    command:
+      - celery
+      - -A
+      - app.execution.celery_app
+      - worker
+      - -Q
+      - icd.reverse
+      - -c
+      - '${ICD_WORKER_CONCURRENCY:-20}'
+      - -Ofair
+      - --loglevel=INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+    # 收到 docker stop 时给正在跑的任务留一点收尾时间（默认 10s 太短）
+    stop_grace_period: 30s
 
   frontend:
     image: icd-tool-frontend-v4.0
@@ -54,4 +116,5 @@ services:
       - VITE_PROXY_TARGET=http://backend:8000
 
 volumes:
+  icd-redis-data:
   mongo_data:

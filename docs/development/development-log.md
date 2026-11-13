@@ -4587,3 +4587,32 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   4. 已有 / 续跑任务的 `<job_dir>/forward/` 是旧代码副本，思考开关对它们不生效；需新建任务。
   5. Issue 编号待用户回填。
 - **下一步建议**：1) 用户提交分支并重建镜像 / 前端产物；2) 服务器上用真实 key 各跑一条正向任务（开关开 / 关各一次），确认 token 与时延变化符合预期、请求不被网关拒绝；3) 后续同步上游 V5 前，把本组补丁并入 `_sync_forward_v5.py`，避免被整树覆盖丢失。
+
+## 2026-11-12 任务执行层接入 Celery + Redis（20 并发 / 24h+ 长任务，改动未提交）
+
+- **背景（用户提出）**：工具即将开放给约 20 个账号并发使用，包含「20 人轮询状态 + 20 人同时上传 + 最多 20 个任务同时运行」；真实大文件任务可能持续 24 小时以上。原实现为 API 进程内 `job_scheduler.py` 线程池（默认 2 线程），状态只在内存，进程重启即丢任务，无法满足容量与恢复要求。用户明确选择 Celery + Redis 技术栈，并要求：只接入反向管线、正向预留（入口可见但后端 503）、Worker 并发默认直接设为 20、上传并发加固纳入范围、inline 模式仅保留为 pytest / 回滚路径、本地用 Docker Compose 测试、不做 PyInstaller。
+- **实现方式**：
+  1. 新增 `backend/app/execution/`：`config.py`（`JOB_EXECUTOR` / broker / 队列 / 心跳 / 租约参数与校验）、`celery_app.py`（无 result backend；`acks_late=True`、`worker_prefetch_multiplier=1`、`worker_max_tasks_per_child=1`、`task_reject_on_worker_lost=False`、30 天 visibility timeout）、`dispatcher.py`（`submit_reverse` / `revoke_reverse`，task id 为 `{job_id}:{run_token}`）、`tasks.py`（Worker 侧：校验 run_token、认领、心跳、执行 `execute_reverse_job`、异常/取消收尾、释放租约）、`control.py`（Redis hash `icd:job:{id}:ctl` + zset `icd:active`，Lua 原子占用/心跳/取消/强制/放弃/释放）、`reaper.py`（每 60 秒巡检，心跳 > 300 秒按意图收尾）。
+  2. API 改为生产者：上传落盘 → 写 manifest（`pending`）→ 投递 Redis → 返回；Celery 模式 `get_job` / `list_jobs` 每次从 `job.json` 回读并叠加控制面快照；启动扫描按「pending 存活 / 心跳新鲜存活 / 心跳过期按意图收尾 / Redis 不可达不判断」处理。
+  3. 控制语义：取消已占用任务只写意图、由 Worker 在检查点停止；未占用直接 `canceled`；强制终止写 `force` + revoke（Worker 侧 SIGKILL）；`abandon` 仅对未被领取的任务生效；`resume` 校验租约，租约新鲜 409，否则清理旧租约并以新 `run_token` 重新投递，旧消息被 Worker 丢弃。
+  4. 跨进程日志：`job_log.py` 增加路径绑定、按字节偏移 `sync_from_file`（只消费完整行）、二进制追加（避免 Windows CRLF 字节错位）；`/logs` 返回前同步 Worker 日志。
+  5. 上传加固：`coverage.py` 新增 `_RequestBudget` 与 `_save_upload`，1MB 分块写 `.part` 后 `os.replace`，单文件 50MB / 单请求 200MB，超限 413；HLR 自动识别改走 `run_in_threadpool`；`completeness.py` 同步。
+  6. 正向：`runner.py` / `completeness.py` 在 Celery 模式抛 `ForwardPipelineDisabled` → 503，入口保留；`FORWARD_PIPELINE_ENABLED` 未显式配置时 inline 默认允许、celery 默认禁止。
+  7. 部署：`docker-compose.yml` / `docker-compose.server.yml` 增加 `redis`（AOF、noeviction、healthcheck、数据卷）与 `worker`（同一镜像，`-c ${ICD_WORKER_CONCURRENCY:-20} -Ofair`，`stop_grace_period: 30s`）；`build-image.sh` 增加导出 `redis-7-alpine.tar.gz` 并写入 `BUILD_INFO`。
+- **修改文件**：`backend/app/api/v4/completeness.py`、`coverage.py`、`jobs.py`、`runner.py`、`backend/app/job_log.py`、`backend/app/job_manager.py`、`backend/app/main.py`、`backend/requirements.txt`、`docker-compose.yml`、`docker-compose.server.yml`、`scripts/build-image.sh`、`CHANGELOG.md`、`README.md`、`docs/architecture/api.md`、`docs/architecture/current-architecture.md`、`docs/project/workflow.md`、`docs/testing/服务器部署验收清单.md`、`部署说明.md`、`更新说明.md`、本 log。
+- **新增文件**：`backend/app/execution/__init__.py`、`config.py`、`celery_app.py`、`dispatcher.py`、`tasks.py`、`control.py`、`reaper.py`；`docs/decisions/ADR-008-Celery-Redis任务执行层.md`；本地测试（`backend/tests/` 被 .gitignore 排除，不入库）：`test_execution_config.py`（12）、`test_remote_job_state.py`（9）、`test_log_sync.py`（6）、`test_celery_dispatch.py`（14）、`test_reaper.py`（7）。
+- **删除文件**：无。
+- **文档**：新增 ADR-008；更新架构（总体架构三服务、`execution/` 模块表、模块边界、限制 6/7）、API（上传限额、两种执行模式、启动扫描、resume/abandon 语义、新增第 18 节）、workflow（状态表补 `interrupted`/`canceled`/`abandoned`、新增 10.1 跨进程执行与恢复、约束 8）、部署说明（三服务、Redis 镜像、内存/并发公式、验收、运维、FAQ、注意事项）、验收清单（API 重启任务继续、Worker 重启中断、排队、取消/强制、三容器检查、413）、README、CHANGELOG、更新说明。
+- **验证方式与结果**：
+  1. 新增单测 5 个文件（54 个用例，含参数化展开）全部通过（**已验证**）。
+  2. 全量回归 `python -m pytest tests -q --continue-on-collection-errors` → **398 passed / 7 failed / 1 skipped / 10 个既有收集错误**；7 项失败与既有基线逐项一致（`test_hlr_word_parser_adaptivity::test_t12`、`test_job_api_ext`、`test_job_cancel`、`test_job_orphan`×2、`test_parse_artifact_reuse`、`test_runner_cancel`），10 个收集错误与基线同集（**已验证**）。
+  3. Docker Compose（redis + backend + worker）端到端（**已验证**）：Worker 启动为 `concurrency: 20 (prefork)`；单任务从排队到完成；4 个任务同时执行（ForkPoolWorker 13/21/17/1，约 21 秒全部完成）；20 个并发状态轮询全部 HTTP 200；API 重启后 `pending` 任务保留并完成；排队中任务终止立即生效；运行中任务取消在检查点停止；`resume` 续跑完成；强制终止 Worker 日志出现 `Terminating ... (9)` 且任务保持 `canceled`；SIGKILL Worker 后 `reap_once(now+301)` 将任务标为 `interrupted`，续跑后完成；上传 51MB 文件返回 413。
+  4. 首次 Docker 构建 Worker 无法启动：`kombu.exceptions.VersionMismatch`（kombu 5.7 要求 redis-py ≥ 6.1，原约束装到 5.3.1）；改为 `redis>=6.1,<7` 后重建镜像恢复正常（**已验证**）。
+- **遗留问题**：
+  1. 改动未提交；需**重建后端镜像**，并新增离线导入 `redis:7-alpine`，按新版 `docker-compose.server.yml` 三服务部署。
+  2. **20 路重任务并发压测未执行**：本地 Docker 虚拟机内存 11.6GB，跑满 20 个大任务有 OOM 风险；已用「Worker prefork 20 配置 + 4 路并行实测 + 20 并发轮询」证明并发能力，20 路峰值内存需在目标服务器验收。
+  3. 交付包**尚未重建**；`scripts/build-image.sh` 已能导出 Redis 镜像，但未实际出包验证。
+  4. Celery 模式下正向不可用（创建与续跑 503），需待正向测试通过后另行接入 Worker。
+  5. 任务队列为单队列 FIFO、无按用户配额与公平调度；20 个用户同时提交时先到先得。
+  6. Issue 编号待用户回填。
+- **下一步建议**：1) 用户提交分支并重建镜像 / 出包；2) 在目标服务器按新版部署说明完成三服务部署，重点验收 §5.4 内存分配、Worker 并发与 20 路峰值；3) 用一条真实 24h 级大任务观察心跳、日志增量与内存曲线；4) 正向接入 Worker 单独立项。

@@ -143,6 +143,14 @@ docker compose up -d mongo
 docker compose up -d --build
 ```
 
+该命令启动 `redis`（任务队列 + 控制面）、`mongo`（账号库）、`backend`（API + 前端页面）、`worker`（Celery，默认 20 个并行子进程执行反向分析）以及本地开发用的 `frontend`。首次构建后 Worker 拉起 20 个子进程需要数秒，可用下面的命令确认：
+
+```bash
+docker compose logs worker | grep concurrency   # 期望：concurrency: 20 (prefork)
+```
+
+并发数与内存上限可用环境变量调整：`ICD_WORKER_CONCURRENCY`（默认 20）、`ICD_WORKER_MEM_LIMIT`（默认 10g）。20 路并行的内存预算与服务器部署步骤见 `部署说明.md` §5.4。
+
 > MongoDB 是登录与账号管理的硬依赖：`mongo` 未就绪时后端不会启动。账号数据保存在命名卷 `mongo_data`，容器重建不丢；备份与恢复见 `部署说明.md`。
 
 > **桌面版**：Windows 桌面打包（PyInstaller 单目录）本阶段**暂停交付**，只保证内网服务器 Docker 部署（见 [ADR-007](docs/decisions/ADR-007-用户登录与账号隔离.md)）。
@@ -262,6 +270,7 @@ icd-tool-prototype/
 | `docs/architecture/api.md` | API 接口定义 |
 | `docs/decisions/ADR-001-V4后端接入策略.md` | V4 后端工程化集成关键决策（Partially Superseded） |
 | `docs/decisions/ADR-002-移除V3.md` | 移除 V3 旧版代码决策 |
+| `docs/decisions/ADR-008-Celery-Redis任务执行层.md` | Celery + Redis 任务执行层决策 |
 | `docs/development/development-log.md` | 开发纪要 |
 | `docs/development/debug-log.md` | 问题排查记录 |
 | `.claude/rules/context-rules.md` | Claude Code 上下文读取规则 |
@@ -276,8 +285,9 @@ icd-tool-prototype/
 | 后端框架 | Python、FastAPI、Pydantic |
 | 文件处理 | openpyxl、python-docx、PyYAML、python-dotenv |
 | AI/LLM | DeepSeek、MiniMax、Qwen / DashScope |
+| 任务执行 | Celery（prefork，默认 20 并发）+ Redis（队列 + 跨进程控制面） |
 | 账号库 | MongoDB 7.0（独立容器，仅存账号；任务与产物仍落本地任务目录） |
-| 部署 | Docker Compose |
+| 部署 | Docker Compose（redis / backend / worker / mongo 四服务） |
 
 ## 8. 当前阶段
 
