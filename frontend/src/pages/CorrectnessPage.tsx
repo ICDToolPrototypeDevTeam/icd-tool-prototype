@@ -32,6 +32,8 @@ export default function CorrectnessPage() {
   const [publisherFile, setPublisherFile] = useState<FileItem | null>(null)
   const [subscriberFile, setSubscriberFile] = useState<FileItem | null>(null)
   const [traceabilityFiles, setTraceabilityFiles] = useState<FileItem[]>([])
+  // 任务附件：只保存、不参与分析（仅管理员可在历史结果页下载）
+  const [attachmentFiles, setAttachmentFiles] = useState<FileItem[]>([])
   const [selectedPreviewFile, setSelectedPreviewFile] = useState<FileItem | null>(null)
   // Reverse-pipeline only: AMS / FGMC / HSCU / RPDU / generic controller profile.
   // Forward (Completeness) analysis does not use this selector.
@@ -94,6 +96,11 @@ export default function CorrectnessPage() {
       formData.append('enable_traceability_prefilter', 'true')
     }
 
+    // 附件只随任务保存，后端不会把它们交给管线。
+    attachmentFiles.forEach((f) => {
+      if (f.file) formData.append('attachment_files', f.file)
+    })
+
     job.start(
       () => analyzeFilesV4(formData),
       (id) => getJobResultV4(id),
@@ -106,6 +113,7 @@ export default function CorrectnessPage() {
     setPublisherFile(null)
     setSubscriberFile(null)
     setTraceabilityFiles([])
+    setAttachmentFiles([])
     setSelectedPreviewFile(null)
     setHlrSchemaPayload(null)
     setHlrCustomActive(false)
@@ -158,6 +166,7 @@ export default function CorrectnessPage() {
             eoicdPublisherFile={publisherFile}
             eoicdSubscriberFile={subscriberFile}
             traceabilityFiles={traceabilityFiles}
+            attachmentFiles={attachmentFiles}
             selectedPreviewFile={selectedPreviewFile}
             onHlrWordChange={(f) => { setHlrWordFile(f); if (f) setSelectedPreviewFile(f) }}
             onEoicdPublisherChange={(f) => { setPublisherFile(f); if (f) setSelectedPreviewFile(f) }}
@@ -166,6 +175,7 @@ export default function CorrectnessPage() {
               setTraceabilityFiles(files)
               if (files.length > 0) setSelectedPreviewFile(files[files.length - 1])
             }}
+            onAttachmentChange={setAttachmentFiles}
             onPreviewSelect={setSelectedPreviewFile}
           />
           {/* 解析规则：系统类型与表格样式合并在同一张卡片内选择。
