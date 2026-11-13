@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
+  ChevronDown,
   ClipboardList,
   FileJson,
   FileSpreadsheet,
   FileText,
+  Paperclip,
   RefreshCw,
   ScrollText,
   Trash2,
@@ -12,6 +14,7 @@ import {
 import {
   ApiError,
   deleteHistoryV4,
+  getAttachmentDownloadUrlV4,
   getDownloadUrlV4,
   getForwardDownloadUrlV4,
   getJobLogDownloadUrlV4,
@@ -19,7 +22,7 @@ import {
   listHistoryV4,
 } from '../api'
 import { useAuth } from '../auth/AuthContext'
-import type { V4HistoryItem, V4HistoryOutputs } from '../types'
+import type { V4HistoryAttachment, V4HistoryItem, V4HistoryOutputs } from '../types'
 
 const TASK_LABEL: Record<string, string> = {
   correctness: '正确性分析',
@@ -118,6 +121,63 @@ function formatSize(bytes: number): string {
     unit += 1
   }
   return `${unit === 0 || value >= 10 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`
+}
+
+/**
+ * 管理员专用上传文件下载菜单：一个「上传文件」按钮 + 下拉清单。
+ * 普通用户后端下发的 attachments 恒为空数组，因此这里也只按 isAdmin 渲染。
+ */
+function AttachmentMenu({
+  jobId,
+  attachments,
+}: {
+  jobId: string
+  attachments: V4HistoryAttachment[]
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    function onDocClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [open])
+
+  return (
+    <div className="history__attach" ref={ref}>
+      <button
+        type="button"
+        className="history__download history__attach-toggle"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+      >
+        <Paperclip size={14} />
+        上传文件
+        <ChevronDown size={12} />
+      </button>
+      {open && (
+        <div className="history__attach-menu" role="menu">
+          {attachments.map((a) => (
+            <a
+              key={a.index}
+              className="history__attach-item"
+              href={getAttachmentDownloadUrlV4(jobId, a.index)}
+              download
+              role="menuitem"
+              title={`下载 ${a.name}`}
+            >
+              <span className="history__attach-name">{a.name}</span>
+              <span className="history__attach-size">{formatSize(a.size)}</span>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function HistoryList() {
@@ -256,6 +316,8 @@ export default function HistoryList() {
         {items.map((item) => {
           const locked = UNDELETABLE.has(item.status)
           const available = downloadsFor(item.task_type).filter((s) => item.outputs[s.key])
+          // 附件仅管理员可见（后端对普通用户已置空，双保险）
+          const showAttachments = isAdmin && item.attachments.length > 0
           return (
             <div key={item.job_id} className="history__item">
               {isAdmin && (
@@ -300,7 +362,7 @@ export default function HistoryList() {
                     正是用户唯一能拿到、也唯一想看的东西（出错原因与执行过程）；
                     匹配中间产物（reverse_matches）是「查看」而非下载——新标签页
                     打开、浏览器直接按 JSON 渲染，排查匹配问题时不必先把文件下走。 */}
-                {available.length > 0 || item.has_reverse_matches || item.has_log ? (
+                {available.length > 0 || item.has_reverse_matches || item.has_log || showAttachments ? (
                   <div className="history__downloads">
                     {available.map((spec) => (
                       <a key={spec.key} className="history__download" href={spec.url(item.job_id)} download>
@@ -325,6 +387,9 @@ export default function HistoryList() {
                         <ScrollText size={14} />
                         运行日志
                       </a>
+                    )}
+                    {showAttachments && (
+                      <AttachmentMenu jobId={item.job_id} attachments={item.attachments} />
                     )}
                   </div>
                 ) : (

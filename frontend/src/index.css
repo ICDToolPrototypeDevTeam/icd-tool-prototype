@@ -1674,6 +1674,58 @@ body {
   color: var(--primary);
 }
 
+/* 附件下拉菜单（仅管理员）：按钮沿用 .history__download 外观 */
+.history__attach {
+  position: relative;
+}
+
+.history__attach-toggle {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.history__attach-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  min-width: 220px;
+  max-width: 360px;
+  padding: 4px;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+}
+
+.history__attach-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.history__attach-item:hover {
+  background: var(--bg-light);
+  color: var(--primary);
+}
+
+.history__attach-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history__attach-size {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
 .history__missing {
   margin-top: 8px;
   font-size: 12px;

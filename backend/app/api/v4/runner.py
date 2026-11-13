@@ -668,6 +668,7 @@ def launch_v4_pipeline(
     controller_profile: str = "ams",
     no_refine: bool = False,
     hlr_schema: Optional[dict] = None,
+    attachment_files: Optional[list[dict]] = None,
 ) -> None:
     """工厂：落盘参数快照 + 登记，然后按执行模式入队。
 
@@ -676,11 +677,22 @@ def launch_v4_pipeline(
     - ``celery``：先落 Redis 控制面票据，再发 Celery 消息；Worker 进程按
       manifest 重建参数执行。
 
+    ``attachment_files`` 是只存储、不参与分析的附件快照（``path`` 相对
+    ``job_dir`` / 原始 ``name`` / ``size``）。续跑时调用方不传该参数，函数会
+    从 ``job.params`` 原样带回 —— 否则 ``set_dir`` 重写快照会把附件元数据清空，
+    历史页就再也列不出/下不动这些文件。
+
     返回值恒为 None（三个调用方均不使用）。
     """
     # 每次运行生成新的代次票据：续跑不能复用旧 token，否则 Celery 的 revoked
     # 集合会把上一次被终止的任务 id 当成「已撤销」而拒绝执行新任务。
     job.run_token = uuid.uuid4().hex
+    # 续跑（attachment_files=None）保留 manifest 里已有的附件记录；新任务
+    # 由 coverage.py 显式传入本次上传的清单。
+    if attachment_files is not None:
+        attachments_snapshot = list(attachment_files)
+    else:
+        attachments_snapshot = list(job.params.get("attachment_files") or [])
     # 落盘参数快照（供进程重启后按原参数继续执行）；必须在入队之前完成，
     # 保证 POST 返回时 manifest 已存在。
     job.set_dir(job_dir, {
@@ -693,6 +705,7 @@ def launch_v4_pipeline(
         "controller_profile": controller_profile,
         "no_refine": no_refine,
         "hlr_schema": hlr_schema,
+        "attachment_files": attachments_snapshot,
     })
     # 登记即「已承诺运行」：在此之前失败的上传请求不会留下 pending 幽灵任务
     # （见 JobManager.new_job）。

@@ -31,6 +31,7 @@ API 设计应遵守以下原则：
 | `/api/v4/jobs/{job_id}`                        | `GET`  | 查询任务状态                          |
 | `/api/v4/jobs/{job_id}/logs`                   | `GET`  | 任务日志增量拉取（`offset` 取上次返回的 `next_offset`，首次 0；`limit` 默认 500、上限 2000；进程重启后可从 `job.log` 尾部恢复；**只认内存里的任务**） |
 | `/api/v4/jobs/{job_id}/logs/download`          | `GET`  | 下载运行日志 `job.log`（**磁盘口径**：任务失败 / 中断 / 被终止 / 进程重启后仍可下载，供排查出错原因与执行过程） |
+| `/api/v4/jobs/{job_id}/attachments/{index}`    | `GET`  | 下载任务附件（上传时只保存、不参与分析；**仅管理员**） |
 | `/api/v4/jobs/{job_id}/resume`                 | `POST` | 继续被中断 / 被终止的任务（按 manifest 参数快照重跑，已完成的 LLM 判定与已落盘的解析产物复用缓存） |
 | `/api/v4/jobs/{job_id}/abandon`                | `POST` | 放弃被中断 / 被终止 / 排队中的任务（门槛 = 没有任何线程在跑；仅标记，不删除文件） |
 | `/api/v4/jobs/{job_id}/cancel`                 | `POST` | 终止运行中 / 排队中的任务（`running` / `pending` → 200，其余状态 → 409；排队中（尚未绑定管线线程）的任务**立即**落 `canceled`、不等出队，运行中的任务在检查点停止；不删除任何文件，任务最终以 `canceled` 结束） |
@@ -94,6 +95,7 @@ Content-Type: multipart/form-data
 | `eoicd_publisher_file` | UploadFile (.xlsx) | 二选一 | EoICD Publisher PubSub Excel |
 | `eoicd_subscriber_file` | UploadFile (.xlsx) | 二选一 | EoICD Subscriber PubSub Excel |
 | `traceability_files` | list[UploadFile] (.xlsx) | 否 | 0-N 追溯 Excel；启用预筛选时必传 |
+| `attachment_files` | list[UploadFile] (任意类型) | 否 | 0-N 其他支撑材料（前端展示名，如 DD 表；接口内部称「任务附件」）：只存储、**不参与任何解析或分析**；所有登录用户可上传，仅管理员可在历史结果页下载 |
 | `use_mock_llm` | bool (form) | 否（默认不覆盖） | 显式覆盖 mock 开关；未提供时以 `.env` 的 `USE_MOCK_LLM` 为准（当前前端总是显式提交本字段） |
 | `judge_providers` | list[str] (form) | 否（默认 `["deepseek"]`） | 多模型 panel provider 白名单 ∈ `{deepseek, minimax, qwen}` |
 | `enable_traceability_prefilter` | bool (form) | 否（默认 false） | 是否启用追溯预筛选 |
@@ -102,6 +104,8 @@ Content-Type: multipart/form-data
 | `hlr_schema` | str (form, JSON) | 否（默认不启用） | 自定义 HLR 表格样式引用（见下）；仅 `.docx` 且必须同时提供 `controller_profile` |
 
 文件名校验：`[^A-Za-z0-9._\-一-龥]` 之外字符会被替换为 `_`；`safe_filename()`。
+
+`attachment_files` 为任务附件（任意类型，单文件 / 单请求大小限制同下）。文件保存在 `input/attachment/` 独立子目录，落盘名重名时自动追加 `_1` / `_2` 序号，不覆盖；**不会传给反向管线**，也不进入 `input_files` 列表。每个附件在 manifest 中记录 `{path, name, size}`（`path` 为相对 `job_dir` 的路径，`name` 为上传时的原始文件名），续跑重写 manifest 时保留该清单。
 
 上传并发加固：文件按 1MB 分块流式写入 `.part` 临时文件，完成后原子改名；单文件上限 50MB、单请求全部文件合计上限 200MB（含 `/completeness-analysis`、`/hlr-schemas/scan`、`/hlr-schemas/preview`），超限返回 413。HLR 表格自动识别等 CPU 型探测在线程池执行，不阻塞事件循环。
 
@@ -625,11 +629,11 @@ Celery 模式下：`pending` 且未被领取 → 标记控制面 `abandon` 并�
 
 `owner_id` / `owner_username` 为任务归属字段：`owner_id` 是权限判断键，`owner_username` 仅用于展示。创建任务时写入当前登录用户；续跑沿用原值，不允许修改。旧 manifest（升级前创建）与 CLI 任务没有这两键，按 `null`（未归属）加载——只有管理员可见、可下载、可删除，不做批量迁移。
 
-`params` 中的路径一律为相对 `job_dir` 的相对路径，保证输出目录整体搬迁后仍可恢复。不持久化任务结果（重跑时重新生成）。无 `job_dir` 的任务（如 CLI 直跑 `app/v4/cli.py`）不写 manifest，行为与本次改动前一致。
+`params` 中的路径一律为相对 `job_dir` 的相对路径，保证输出目录整体搬迁后仍可恢复。`params.attachment_files` 保存任务附件清单（`[{path, name, size}]`，见第 4 节）；续跑重写 manifest 时原样保留，不随管线参数丢失。不持久化任务结果（重跑时重新生成）。无 `job_dir` 的任务（如 CLI 直跑 `app/v4/cli.py`）不写 manifest，行为与本次改动前一致。
 
 **部署前提（Docker）**：本能力依赖 `output/` 跨进程存活。`docker-compose.yml` 已把 `./backend/output` 以 bind mount 挂到容器内 `/app/output`（且未设置 `OUTPUT_DIR`），因此 `docker compose restart` / `down` + `up` 后 manifest 仍在、中断任务不丢。若把该卷去掉、改为匿名 volume 或设置 `OUTPUT_DIR` 指向容器内非挂载路径，本能力会静默失效（重启后任务列表为空）。
 
-## 14. 历史结果接口（列表 / 删除 / 日志下载 / 匹配中间产物查看）
+## 14. 历史结果接口（列表 / 删除 / 日志下载 / 匹配中间产物查看 / 附件下载）
 
 第 13 节的 `/jobs` 是**内存口径**（本进程新建 + 启动载入的中断任务），跑完的任务重启后即从内存消失；历史结果走**磁盘口径**：直接扫 `backend/output/v4/*/`，因此重启后仍能看到并下载以前的结果。前端入口是顶栏「历史结果」页。
 
@@ -672,7 +676,10 @@ GET /api/v4/history
     "has_log": true,
     "has_reverse_matches": true,
     "mock": false,
-    "token_usage": { "total_tokens": 123456 }
+    "token_usage": { "total_tokens": 123456 },
+    "attachments": [
+      { "index": 0, "name": "接口附件.pdf", "size": 123456 }
+    ]
   }
 ]
 ```
@@ -685,6 +692,7 @@ GET /api/v4/history
 - `mock` 含义同状态接口：模拟数据不可用于验收。
 - `token_usage` 读 manifest 的 `token_usage` 字段，口径同状态接口：累计总量；**旧任务无该键 → `null`**（前端不显示），新任务的 `0`（如 MOCK）照常显示。
 - `owner_username` 为任务归属账号（仅管理员视角展示）；权限判断使用 manifest 的 `owner_id`，该字段不参与鉴权。
+- `attachments` 为任务附件清单（上传时只保存、不参与分析）：每项 `{index, name, size}`，`index` 是在 manifest `params.attachment_files` 中的下标，下载接口用它定位文件。**仅管理员可见**：普通用户（即使是任务所有者）的列表项由后端置为空数组，文件名也不下发。
 - 需登录。普通用户只返回 `owner_id` 等于自己的目录；管理员返回全部目录。未归属目录（旧版本遗留 / manifest 损坏 / 无 manifest 的残留目录）只对管理员可见。该接口只读磁盘，不改变任何状态。
 
 ### 14.2 删除历史结果（硬删除）
@@ -755,7 +763,19 @@ GET /api/v4/jobs/{job_id}/intermediates/reverse-matches
 | 文件不存在（正向任务、Step 3 未跑完、目录已被删） | 404 |
 | `job_id` 非法（非 uuid / 越出 `output/v4/`） | 400 |
 
-### 14.5 历史结果错误响应（列表 / 删除）
+### 14.5 下载任务附件（仅管理员）
+
+```text
+GET /api/v4/jobs/{job_id}/attachments/{index}
+```
+
+下载创建任务时通过 `attachment_files` 上传的附件（落在 `input/attachment/` 下）。**仅管理员可调用**：未登录 → 401，普通用户（含任务所有者）→ 403 —— 与历史列表里 `attachments` 恒为空数组一致，普通用户连文件名都拿不到。
+
+- `index` 是附件在 manifest `params.attachment_files` 列表中的下标（即历史列表项 `attachments[].index`），不把文件名拼进 URL；文件路径从 manifest 读取并解析到任务目录内，越出 `output/v4/{job_id}/` 一律 404（防目录穿越）。
+- `Content-Type: application/octet-stream`，带 `Content-Disposition: attachment`；保存名取上传时的原始文件名（中文按 RFC 5987 百分号编码）。
+- manifest 不存在、`index` 越界、清单项没有有效路径、文件已被删除 → 统一 404。
+
+### 14.6 历史结果错误响应（列表 / 删除）
 
 | 场景 | HTTP |
 | --- | --- |
@@ -764,6 +784,8 @@ GET /api/v4/jobs/{job_id}/intermediates/reverse-matches
 | `job_ids` 为空，或缺 `confirm=true` | 400 |
 | `job_id` 非法（非 uuid / 越出 `output/v4/`） | 400 |
 | 批次内有任务正在运行 | 409 |
+| 普通用户调用附件下载（仅管理员） | 403 |
+| 附件下载的 `index` 越界 / 文件已删除 | 404 |
 
 ## 15. 运行时模型设置接口
 
@@ -1053,7 +1075,8 @@ Content-Type: multipart/form-data
 | `GET /api/v4/jobs/{job_id}`、`/result`、`/logs`、`/logs/download` | 拒绝（401） | 仅本人 | 全部 |
 | `POST /api/v4/jobs/{job_id}/resume`、`/abandon`、`/cancel`、`/force-cancel` | 拒绝（401） | 仅本人 | 全部 |
 | `/api/v4/jobs/{job_id}/outputs/*`、`/intermediates/reverse-matches` | 拒绝（401） | 仅本人 | 全部 |
-| `GET /api/v4/history` | 拒绝（401） | 仅本人 | 全部 |
+| `GET /api/v4/history` | 拒绝（401） | 仅本人（`attachments` 恒为空） | 全部（含附件清单） |
+| `GET /api/v4/jobs/{job_id}/attachments/{index}` | 拒绝（401） | 拒绝（403） | 允许 |
 | `POST /api/v4/history/delete` | 拒绝（401） | 拒绝（403） | 允许 |
 | `GET /api/v4/settings`、`PUT /api/v4/settings` | 拒绝（401） | 拒绝（403） | 允许 |
 | `GET /api/v4/hlr-schemas`、`POST /api/v4/hlr-schemas/scan`、`POST /api/v4/hlr-schemas/preview` | 拒绝（401） | 允许 | 允许 |
