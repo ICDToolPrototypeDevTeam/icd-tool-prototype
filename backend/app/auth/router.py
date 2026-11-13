@@ -120,18 +120,29 @@ async def update_user(
                 detail='系统必须至少保留一个活跃管理员',
             )
 
-    changed = False
+    set_fields: dict[str, object] = {}
+    revoke = False
+
     if payload.password is not None:
-        user.hashed_password = user_manager.password_helper.hash(payload.password)
-        changed = True
+        set_fields["hashed_password"] = user_manager.password_helper.hash(
+            payload.password
+        )
+        revoke = True
     if payload.is_active is not None:
-        user.is_active = payload.is_active
-        changed = True
+        if user.is_active and payload.is_active is False:
+            revoke = True
+        set_fields["is_active"] = payload.is_active
     if payload.is_superuser is not None:
-        user.is_superuser = payload.is_superuser
-        changed = True
-    if changed:
-        user.updated_at = datetime.now(timezone.utc)
-        await user.save()
+        set_fields["is_superuser"] = payload.is_superuser
+
+    if set_fields:
+        set_fields["updated_at"] = datetime.now(timezone.utc)
+        update: dict[str, dict[str, object]] = {"$set": set_fields}
+        if revoke:
+            update["$inc"] = {"token_version": 1}
+        await user.update(update)
+        refreshed = await User.get(object_id)
+        if refreshed is not None:
+            user = refreshed
 
     return _to_user_read(user)
