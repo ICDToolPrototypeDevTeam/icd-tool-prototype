@@ -1073,7 +1073,8 @@ username=<用户名>&password=<密码>
 ```
 
 - 成功 → **204**，响应 `Set-Cookie` 下发登录 Cookie；
-- 用户名或密码错误、账号被禁用 → **400**（fastapi-users 的登录失败响应，不区分具体原因）；
+- 用户名不存在或密码错误 → **400** `{"detail": "LOGIN_BAD_CREDENTIALS"}`；
+- 密码正确但账号被禁用 → **400** `{"detail": "LOGIN_USER_NOT_ACTIVE"}`，前端提示“账号已被禁用，请联系管理员”；
 - MongoDB 不可用 → **503** `{"detail": "database unavailable"}`；
 - 本接口不要求登录。
 

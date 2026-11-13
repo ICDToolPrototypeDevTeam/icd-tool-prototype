@@ -51,6 +51,92 @@
 
 ## 3. 开发记录
 
+### 2026-11-13 登录状态过期提示
+
+#### 任务目标
+
+会话失效后跳回登录页时明确告知用户原因，避免用户误以为自己未登录或页面出错；同时不能把首次访问、主动退出或网络异常误报为“登录过期”。
+
+#### 完成内容
+
+1. `AuthContext` 新增 `sessionExpired` 状态，并在 `sessionStorage` 维护按标签页隔离的 `icd_had_session` 标记。
+2. 登录成功或 `getMe` 成功恢复会话时写入标记并清除过期状态；主动退出时清除标记与过期状态。
+3. 页面内受保护接口收到 401（会话过期、重置密码、禁用等）且本标签页存在标记时，置为过期状态。
+4. 刷新页面后 `getMe` 返回 401（Cookie 已失效）且存在标记时，同样置为过期状态；`getMe` 因网络 / 服务异常抛错时只按未登录处理，不标记过期。
+5. 登录页显示“登录状态已失效，请重新登录”，并新增 `.login-notice` 样式。
+
+#### 修改文件
+
+1. `frontend/src/auth/AuthContext.tsx`
+2. `frontend/src/pages/LoginPage.tsx`
+3. `frontend/src/index.css`
+4. `CHANGELOG.md`、`docs/development/development-log.md`、`更新说明.md`
+
+#### 验证方式
+
+1. `cd frontend && npm run build`（TypeScript 与产物构建）。
+2. 手工场景：登录后等待会话过期或由管理员重置 / 禁用该账号，页面内触发请求，应回到登录页并显示过期提示。
+3. 手工场景：会话失效后刷新页面，应显示过期提示；首次打开页面、主动退出后不应显示。
+
+#### 验证结果
+
+1. 前端构建：通过（vite 5.4.21，2257 modules transformed）。
+2. 手工场景：尚未验证，原因是本机无运行中的服务与可等待 8 小时的会话；需上线前在浏览器实测。
+
+#### 遗留问题
+
+1. 多个标签页各自维护标记：某标签页主动退出后，其他仍打开且曾登录的标签页在后续 401 时可能提示“登录状态已失效”，属于轻微误报。
+2. 关掉标签页后新开视为首次访问，不提示过期（有意为之，避免隔天首次打开被误报）。
+3. 过期提示与登录失败提示可能同时出现（例如会话失效后使用被禁用账号登录），文案不冲突。
+
+#### 下一步建议
+
+1. 在本地或服务器启动完整服务，按上述手工场景逐项验证。
+2. 出包时随前端产物一起覆盖 `frontend/dist`，无需重建后端镜像。
+
+### 2026-11-13 禁用账号的登录提示区分
+
+#### 任务目标
+
+账号被禁用后，用户登录时不再得到“用户名或密码错误”这一误导性提示，而是明确提示账号已被禁用。
+
+#### 完成内容
+
+1. `POST /api/v4/auth/login` 改为自定义登录路由：先校验用户名与密码，密码正确但 `is_active=false` 时返回 400 `LOGIN_USER_NOT_ACTIVE`；用户名不存在或密码错误仍返回 `LOGIN_BAD_CREDENTIALS`。
+2. 内置 fastapi-users 认证路由仅保留 `/logout`，避免登录路由重复注册。
+3. 前端登录页把 `LOGIN_USER_NOT_ACTIVE` 映射为“账号已被禁用，请联系管理员”。
+4. 同步 API 文档、CHANGELOG、本纪要与《更新说明》。
+
+#### 修改文件
+
+1. `backend/app/auth/router.py`
+2. `frontend/src/pages/LoginPage.tsx`
+3. `docs/architecture/api.md`、`CHANGELOG.md`、`docs/development/development-log.md`、`更新说明.md`
+4. 本地验证脚本（gitignored）：`backend/tests/auth/test_admin_users.py` 增加错误码断言
+
+#### 验证方式
+
+1. `cd backend && py -3.12 tests/auth/test_admin_users.py`（RED→GREEN：先看到禁用登录仍返回 `LOGIN_BAD_CREDENTIALS` 的失败，再通过）。
+2. 8 个认证回归脚本。
+3. `cd frontend && npm run build`（TypeScript 与产物构建）。
+
+#### 验证结果
+
+1. `test_admin_users.py`：通过；密码错误仍为 `LOGIN_BAD_CREDENTIALS`，账号禁用为 `LOGIN_USER_NOT_ACTIVE`。
+2. 8 个认证回归脚本：全部通过。
+3. 前端构建：通过。
+4. 浏览器实际提示文案：尚未验证（需启动服务后手工登录禁用账号）。
+
+#### 遗留问题
+
+1. 该错误码会向“已知道正确密码”的调用方暴露账号禁用状态；对内网分配账号的场景可接受。
+2. 登录接口其余错误语义（账号未验证等）未变化。
+
+#### 下一步建议
+
+1. 在浏览器用被禁用账号登录一次，确认页面文案。
+2. 出包时随本版一起重建后端镜像与前端产物。
+
 ### 2026-11-13 会话吊销与 Token 版本号（ADR-009）
 
 #### 任务目标

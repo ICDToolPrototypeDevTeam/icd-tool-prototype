@@ -14,6 +14,7 @@ function describeLoginError(error: unknown): string {
       const body = JSON.parse(error.message) as { detail?: unknown }
       if (typeof body.detail === 'string') {
         if (body.detail === 'LOGIN_BAD_CREDENTIALS') return '用户名或密码错误'
+        if (body.detail === 'LOGIN_USER_NOT_ACTIVE') return '账号已被禁用，请联系管理员'
         if (body.detail === 'LOGIN_USER_NOT_VERIFIED') return '账号未验证，请联系管理员'
         return body.detail
       }
@@ -26,7 +27,7 @@ function describeLoginError(error: unknown): string {
 }
 
 export default function LoginPage() {
-  const { user, loading, login } = useAuth()
+  const { user, loading, sessionExpired, login } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const from = (location.state as LoginLocationState | null)?.from || '/'
@@ -72,6 +73,12 @@ export default function LoginPage() {
             <div className="login-card__subtitle">请使用分配给你的账号登录</div>
           </div>
         </div>
+
+        {sessionExpired && (
+          <div className="login-notice" role="status">
+            登录状态已失效，请重新登录
+          </div>
+        )}
 
         <form className="login-form" onSubmit={handleSubmit}>
           <label className="login-field">
