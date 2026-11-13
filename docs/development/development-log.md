@@ -51,6 +51,49 @@
 
 ## 3. 开发记录
 
+### 2026-11-13 禁用账号的登录提示区分
+
+#### 任务目标
+
+账号被禁用后，用户登录时不再得到“用户名或密码错误”这一误导性提示，而是明确提示账号已被禁用。
+
+#### 完成内容
+
+1. `POST /api/v4/auth/login` 改为自定义登录路由：先校验用户名与密码，密码正确但 `is_active=false` 时返回 400 `LOGIN_USER_NOT_ACTIVE`；用户名不存在或密码错误仍返回 `LOGIN_BAD_CREDENTIALS`。
+2. 内置 fastapi-users 认证路由仅保留 `/logout`，避免登录路由重复注册。
+3. 前端登录页把 `LOGIN_USER_NOT_ACTIVE` 映射为“账号已被禁用，请联系管理员”。
+4. 同步 API 文档、CHANGELOG、本纪要与《更新说明》。
+
+#### 修改文件
+
+1. `backend/app/auth/router.py`
+2. `frontend/src/pages/LoginPage.tsx`
+3. `docs/architecture/api.md`、`CHANGELOG.md`、`docs/development/development-log.md`、`更新说明.md`
+4. 本地验证脚本（gitignored）：`backend/tests/auth/test_admin_users.py` 增加错误码断言
+
+#### 验证方式
+
+1. `cd backend && py -3.12 tests/auth/test_admin_users.py`（RED→GREEN：先看到禁用登录仍返回 `LOGIN_BAD_CREDENTIALS` 的失败，再通过）。
+2. 8 个认证回归脚本。
+3. `cd frontend && npm run build`（TypeScript 与产物构建）。
+
+#### 验证结果
+
+1. `test_admin_users.py`：通过；密码错误仍为 `LOGIN_BAD_CREDENTIALS`，账号禁用为 `LOGIN_USER_NOT_ACTIVE`。
+2. 8 个认证回归脚本：全部通过。
+3. 前端构建：通过。
+4. 浏览器实际提示文案：尚未验证（需启动服务后手工登录禁用账号）。
+
+#### 遗留问题
+
+1. 该错误码会向“已知道正确密码”的调用方暴露账号禁用状态；对内网分配账号的场景可接受。
+2. 登录接口其余错误语义（账号未验证等）未变化。
+
+#### 下一步建议
+
+1. 在浏览器用被禁用账号登录一次，确认页面文案。
+2. 出包时随本版一起重建后端镜像与前端产物。
+
 ### 2026-11-13 会话吊销与 Token 版本号（ADR-009）
 
 #### 任务目标

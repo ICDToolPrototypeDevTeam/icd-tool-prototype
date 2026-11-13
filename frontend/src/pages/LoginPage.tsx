@@ -14,6 +14,7 @@ function describeLoginError(error: unknown): string {
       const body = JSON.parse(error.message) as { detail?: unknown }
       if (typeof body.detail === 'string') {
         if (body.detail === 'LOGIN_BAD_CREDENTIALS') return '用户名或密码错误'
+        if (body.detail === 'LOGIN_USER_NOT_ACTIVE') return '账号已被禁用，请联系管理员'
         if (body.detail === 'LOGIN_USER_NOT_VERIFIED') return '账号未验证，请联系管理员'
         return body.detail
       }

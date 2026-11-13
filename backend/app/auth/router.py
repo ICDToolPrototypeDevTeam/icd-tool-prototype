@@ -9,10 +9,12 @@ from datetime import datetime, timezone
 
 from beanie import PydanticObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.security import OAuth2PasswordRequestForm
 from fastapi_users.exceptions import UserAlreadyExists
+from fastapi_users.router.common import ErrorCode
 
-from app.auth.backend import auth_backend, fastapi_users
+from app.auth.backend import auth_backend, fastapi_users, get_jwt_strategy
 from app.auth.deps import current_admin, current_user
 from app.auth.manager import user_manager
 from app.auth.models import User
@@ -26,7 +28,35 @@ from app.auth.schemas import (
 
 router = APIRouter()
 
-router.include_router(fastapi_users.get_auth_router(auth_backend), prefix='/auth')
+# 内置登录路由把“密码错误”和“账号被禁用”统一为 LOGIN_BAD_CREDENTIALS；
+# 本模块提供自定义登录路由以区分二者，内置路由只保留 /logout。
+_auth_router = fastapi_users.get_auth_router(auth_backend)
+_auth_router.routes = [
+    route for route in _auth_router.routes if getattr(route, 'path', None) != '/login'
+]
+router.include_router(_auth_router, prefix='/auth')
+
+
+@router.post('/auth/login', name='auth:cookie.login')
+async def login(
+    request: Request,
+    credentials: OAuth2PasswordRequestForm = Depends(),
+):
+    """用户名 + 密码登录；密码正确但账号被禁用时返回独立错误码。"""
+    user = await user_manager.authenticate(credentials)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ErrorCode.LOGIN_BAD_CREDENTIALS,
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='LOGIN_USER_NOT_ACTIVE',
+        )
+    response = await auth_backend.login(get_jwt_strategy(), user)
+    await user_manager.on_after_login(user, request, response)
+    return response
 
 
 @router.get('/auth/me', response_model=MeResponse)
