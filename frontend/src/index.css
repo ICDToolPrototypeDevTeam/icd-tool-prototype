@@ -3294,6 +3294,17 @@ body {
   color: var(--text-secondary);
 }
 
+.login-notice {
+  margin-bottom: 18px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(0, 102, 204, 0.08);
+  border: 1px solid rgba(0, 102, 204, 0.3);
+  color: var(--primary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .login-form {
   display: flex;
   flex-direction: column;

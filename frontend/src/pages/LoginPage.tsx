@@ -27,7 +27,7 @@ function describeLoginError(error: unknown): string {
 }
 
 export default function LoginPage() {
-  const { user, loading, login } = useAuth()
+  const { user, loading, sessionExpired, login } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const from = (location.state as LoginLocationState | null)?.from || '/'
@@ -73,6 +73,12 @@ export default function LoginPage() {
             <div className="login-card__subtitle">请使用分配给你的账号登录</div>
           </div>
         </div>
+
+        {sessionExpired && (
+          <div className="login-notice" role="status">
+            登录状态已失效，请重新登录
+          </div>
+        )}
 
         <form className="login-form" onSubmit={handleSubmit}>
           <label className="login-field">
