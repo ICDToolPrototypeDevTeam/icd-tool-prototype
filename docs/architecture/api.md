@@ -352,6 +352,8 @@ V4 `input/traceability/` 子目录用于 `enable_traceability_prefilter=true` �
 - `hlr_labels.json`
 - `llm_cache.jsonl`（内容寻址 LLM 缓存，见第 13.2 节）
 
+**已完成反向任务的清理**：反向任务（正确性管线）**成功完成**后，`eoicd_requirements.json`、`eoicd_side_pairs.json`、`llm_cache.jsonl` 会在完成状态落盘后自动删除。三者只在续跑时被读取，而 `completed` 任务不可续跑（13.2）；失败 / 中断 / 被终止的任务原样保留，供续跑与排查。清理为 best-effort，失败不会把已完成任务转为失败。需要保留已完成任务的这些文件时（如本地 e2e 反读），设置环境变量 `ICD_KEEP_JOB_ARTIFACTS=1`。其余中间产物（`hlr_requirements.json`、`hlr_labels.json`、`reverse_matches.json`、`reverse_report.json`、`multi_judge_results.json`、`consensus_results.json`、`re_review_results.json`）不受影响。
+
 如前端需要看这些数据，**不**通过 `GET /api/v4/jobs/{id}/outputs/{name}`；应走 ADR-001 D7 预留的两条路径之一：`Accept: application/json` 内容协商，或新开独立子路由（`reverse_matches.json` 即按后者开放，见 14.4）。
 
 ## 11. API 变更原则
@@ -555,6 +557,8 @@ Celery 模式下续跑额外校验 Worker 租约：控制面仍显示该任务�
 - Step 4（多模型判定）、Step 5（共识）、Step 5.5（1★/2★ 复查）的**已完成的单条 LLM 判定结果**按内容寻址复用，只有未完成的才真正调用模型，结果随完成进度增量写入 `output/llm_cache.jsonl`。因此中断越晚、继续时省下的调用越多；
 - Step 3/6 等确定性步骤（匹配、报告生成）本就很快，仍然全量重跑。
 - Step 1 的解析复用不计入 `reuse` 计数：那是文件解析、不是模型调用，两个计数仍严格等于模型调用次数。
+
+> **已完成任务不适用**：上述解析产物与 `llm_cache.jsonl` 只在失败 / 中断 / 被终止的任务中保留；成功完成的反向任务会在完成状态落盘后删除它们（见第 10 节）。`completed` 任务本就不可 `resume`，因此不影响本接口。
 
 重跑成本说明（正向/完整性管线）：
 

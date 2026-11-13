@@ -51,6 +51,52 @@
 
 ## 3. 开发记录
 
+### 2026-11-13 已完成反向任务中间产物清理
+
+#### 任务目标
+
+控制 `backend/output/v4` 的磁盘膨胀。评估确认 `output/eoicd_requirements.json`（单任务实测可达 169MB）等三个中间产物只在续跑时读取，而 `completed` 任务不可续跑，因此可在任务成功完成并落盘状态后删除，且不得影响续跑、结果展示、历史列表与报告生成。
+
+#### 完成内容
+
+1. `backend/app/api/v4/runner.py` 新增 `COMPLETED_ONLY_ARTIFACTS`（`eoicd_requirements.json`、`eoicd_side_pairs.json`、`llm_cache.jsonl`）、`KEEP_ARTIFACTS_ENV`（`ICD_KEEP_JOB_ARTIFACTS`）与 `cleanup_completed_outputs()`。
+2. 在 `run_v4_pipeline_thread` 的 `job.update(JobStatus.COMPLETED, ...)` 之后调用清理；先落完成状态再删文件，避免「可续跑但解析产物已丢失」的半状态。函数内再校验 `job.status == COMPLETED`，失败 / 中断 / 被终止任务一律不动。
+3. 清理为 best-effort：单文件缺失跳过、删除失败只写 stderr，不影响任务完成与其它文件。
+4. 调试开关 `ICD_KEEP_JOB_ARTIFACTS=1` 时保留全部产物（本地 e2e / 探针脚本反读用）；接入方式为进程环境变量，部署无需默认配置。
+5. 仅反向管线；正向管线、`reverse_report.json` / `re_review_results.json` 及已有历史存量均未改动。
+
+#### 修改文件
+
+1. `backend/app/api/v4/runner.py`
+2. `docs/architecture/api.md`（第 10 节清理说明、第 13.2 节续跑依赖说明）
+3. `CHANGELOG.md`
+4. `docs/development/development-log.md`
+5. `backend/.env.example`（补充 `ICD_KEEP_JOB_ARTIFACTS` 说明）
+6. 本地验证脚本（gitignored，未提交）：`backend/tests/test_artifact_cleanup.py`、`backend/tests/test_artifact_cleanup_integration.py`
+
+#### 验证方式
+
+1. `cd backend && py -3.12 tests/test_artifact_cleanup.py`（函数级：只删三个目标；其它中间产物与对外产物保留；interrupted / canceled / failed 全保留；开关生效；缺失文件与重复调用安全）。
+2. `cd backend && py -3.12 tests/test_artifact_cleanup_integration.py`（走真实 `Job` 与 `run_v4_pipeline_thread` 外壳，仅把 `run_reverse_pipeline` 换成桩：completed 删除、canceled / failed 保留、开关生效、`job.result` 计数正常）。
+3. `cd backend && py -3.12 -m py_compile app/api/v4/runner.py tests/test_artifact_cleanup.py tests/test_artifact_cleanup_integration.py`。
+
+#### 验证结果
+
+1. 函数级脚本：`ALL PASSED`。
+2. 集成脚本：`ALL PASSED`（completed 路径日志显示三个文件被删除，canceled / failed 路径无删除）。
+3. `py_compile`：通过。
+4. 真实完整反向管线（含真实 `run_reverse_pipeline` 写盘）的端到端重跑：尚未验证；本次只在桩管线 + 真实线程外壳上验证。生产镜像尚未重建。
+
+#### 遗留问题
+
+1. 已有历史存量未清理：97 个已完成任务约 6.45GB，另有 161 个无 manifest 的遗留目录约 14.5GB；本次按用户决定不处理。
+2. 正向管线成功收尾自有 `runs/` 清理逻辑，本次未改；已完成反向任务不再保留 `eoicd_requirements.json` / `eoicd_side_pairs.json` / `llm_cache.jsonl`，若后续需要反读这些文件做离线分析，需在任务运行前设置 `ICD_KEEP_JOB_ARTIFACTS=1`。
+
+#### 下一步建议
+
+1. 出包时在真实样本上跑一次完整反向任务，确认完成日志出现 `[cleanup] removed ...`，结果页、下载、历史列表正常。
+2. 视需要再评估历史存量清理脚本（单独 Issue）。
+
 ### 2026-11-13 登录状态过期提示
 
 #### 任务目标

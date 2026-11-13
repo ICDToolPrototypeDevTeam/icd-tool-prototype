@@ -68,6 +68,18 @@ V4_INTERMEDIATE_JSON = {
 
 MOCK_ONLY_PROVIDERS = {"minimax", "qwen"}
 
+# 已完成反向任务可以立即删除的中间产物：它们只在续跑时被读取，而 completed
+# 任务不可续跑（resume 仅接受 interrupted / canceled）。单任务
+# eoicd_requirements.json 可达 169MB，是 output/v4 膨胀的主要原因。
+COMPLETED_ONLY_ARTIFACTS = (
+    V4_INTERMEDIATE_JSON["eoicd_requirements"],
+    "eoicd_side_pairs.json",
+    "llm_cache.jsonl",
+)
+
+# 调试开关：设为 1 时保留上述中间产物（本地 e2e / 探针脚本需要反读时使用）
+KEEP_ARTIFACTS_ENV = "ICD_KEEP_JOB_ARTIFACTS"
+
 
 class ForwardPipelineDisabled(RuntimeError):
     """当前部署未启用正向管线（Celery 模式默认关闭，入口保留但返回 503）。"""
@@ -433,6 +445,45 @@ def _resolve_runtime_profile(
     )
 
 
+def _env_flag(name: str) -> bool:
+    """解析 1/true/yes/on 形式的布尔环境变量（大小写不敏感）。"""
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def cleanup_completed_outputs(job: Job, output_dir: Path) -> None:
+    """删除已完成反向任务不再需要的中间产物（best-effort，绝不抛异常）。
+
+    这些文件只在续跑时被读取，而 ``completed`` 任务不可续跑
+    （``resume_v4_job`` 只接受 interrupted / canceled）。因此只在
+    ``job.status == COMPLETED`` 时删除；失败 / 中断 / 终止任务原样保留，
+    供续跑与排查。
+
+    必须放在 ``job.update(JobStatus.COMPLETED)`` 之后调用：先落完成状态再删
+    文件，进程若在中间崩溃，最坏只是留下可清理的旧文件，不会出现「任务可续跑
+    但解析产物已丢」的半状态。
+    """
+    if job.status != JobStatus.COMPLETED:
+        return
+    if _env_flag(KEEP_ARTIFACTS_ENV):
+        print(
+            f"  [cleanup] {KEEP_ARTIFACTS_ENV}=1, keep completed-job artifacts: "
+            f"{output_dir}"
+        )
+        return
+    for name in COMPLETED_ONLY_ARTIFACTS:
+        path = output_dir / name
+        try:
+            size = path.stat().st_size
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            # 清理失败不得把已完成任务转成失败，也不影响其它文件
+            print(f"  [cleanup] failed to remove {name}: {exc}", file=sys.stderr)
+            continue
+        print(f"  [cleanup] removed {name} ({size} bytes)")
+
+
 def run_v4_pipeline_thread(
     job: Job,
     job_dir: Path,
@@ -529,6 +580,8 @@ def run_v4_pipeline_thread(
             "errors": [],
         }
         job.update(JobStatus.COMPLETED, "V4 reverse pipeline complete")
+        # 完成状态已落盘后再删；非 completed（如强制终止）会在函数内直接返回
+        cleanup_completed_outputs(job, output_dir)
     except JobCancelled as e:
         # 必须先于 Exception：JobCancelled 继承 BaseException，本不会被下面的
         # except Exception 捕获；显式列出是为了让取消走 canceled 而非 failed 分支。

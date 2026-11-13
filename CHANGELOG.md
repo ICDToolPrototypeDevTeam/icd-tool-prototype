@@ -12,6 +12,7 @@
 ### Changed
 
 - **重置密码 / 禁用立即吊销会话（ADR-009）**：`users` 文档新增内部字段 `token_version`，登录 JWT 携带 `ver`；管理员重置密码或把账号从启用改为禁用时原子递增版本号，该账号所有已签发 Cookie 在下一次请求立即 401。重新启用不会恢复旧会话，必须重新登录；设置 / 取消管理员不影响会话。旧 Token 无 `ver` 时按 0 处理，升级部署不会踢掉现有会话。属于行为变化：重置 / 禁用后，被影响账号的所有已登录页面会回到登录页。
+- **已完成反向任务自动清理中间产物**：`backend/app/api/v4/runner.py` 在反向任务完成状态落盘后，删除 `output/eoicd_requirements.json`（单任务实测可达 169MB，是 `backend/output/v4` 磁盘膨胀的主要来源）、`output/eoicd_side_pairs.json`、`output/llm_cache.jsonl`。三者只在续跑时被读取，而 `completed` 任务不可续跑；失败 / 中断 / 被终止的任务原样保留。清理为 best-effort，失败不影响任务完成、结果页、历史列表与报告生成。需要保留这些文件时（如本地 e2e 反读）设置 `ICD_KEEP_JOB_ARTIFACTS=1`。仅作用于反向管线；正向管线、已有历史任务存量清理不在本次范围。
 
 ## [Unreleased] - 2026-11-12
 
