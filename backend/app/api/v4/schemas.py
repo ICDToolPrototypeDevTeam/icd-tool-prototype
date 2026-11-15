@@ -240,6 +240,19 @@ class V4HistoryOutputs(BaseModel):
     forward_docx: bool = False
 
 
+class V4HistoryAttachment(BaseModel):
+    """任务附件（上传时只保存、不参与分析）。
+
+    ``index`` 为该附件在 manifest ``params.attachment_files`` 列表中的下标，
+    管理员下载接口用它定位文件；``name`` 是上传时的原始文件名（下载时使用），
+    ``size`` 为字节数，仅用于展示。
+    """
+
+    index: int
+    name: str
+    size: int = 0
+
+
 class V4HistoryItem(BaseModel):
     """GET /api/v4/history 列表项。
 
@@ -274,6 +287,9 @@ class V4HistoryItem(BaseModel):
     mock: bool = False
     # 累计 token 用量；旧 manifest 无该字段时为 None
     token_usage: Optional[V4TokenUsage] = None
+    # 任务附件（只存储、不参与分析）。**仅管理员可见**：普通用户的列表项由
+    # 后端置为空数组，文件名也不下发（下载接口同样仅管理员可用）。
+    attachments: list[V4HistoryAttachment] = []
 
 
 class V4HistoryDeleteRequest(BaseModel):

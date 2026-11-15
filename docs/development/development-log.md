@@ -51,6 +51,108 @@
 
 ## 3. 开发记录
 
+### 2026-11-13 反向任务附件上传与管理员下载
+
+#### 任务目标
+
+在反向正确性分析上传页增加附件上传能力：附件只随任务保存、**不参与任何解析或分析**，供管理员事后在历史结果页下载。所有登录用户可上传；普通用户（含任务所有者）完全看不到附件信息；任意文件类型，沿用既有 50MB 单文件 / 200MB 单请求限制。
+
+#### 完成内容
+
+1. `backend/app/api/v4/coverage.py`：新增 `attachment_files: list[UploadFile] = File(default=[])`；附件保存到 `input/attachment/` 独立子目录；`_original_filename()` 统一 basename + GBK mojibake 修复（`_safe_filename()` 改为复用它），`_unique_attachment_name()` 处理落盘重名（追加 `_1` / `_2`，不覆盖）；`_save_upload()` 新增可选 `dest_name`。清单记录 `{path, name, size}`（`name` 为原始文件名），随 `launch_v4_pipeline(attachment_files=...)` 写入 manifest。
+2. `backend/app/api/v4/runner.py`：`launch_v4_pipeline` 新增 `attachment_files` 参数；续跑（参数为 `None`）时从 `job.params` 读取并保留原附件清单，避免 `set_dir` 重写 manifest 时丢失。
+3. `backend/app/api/v4/schemas.py`：新增 `V4HistoryAttachment`；`V4HistoryItem` 新增 `attachments`。
+4. `backend/app/api/v4/history.py`：历史列表仅对管理员填充 `attachments`（普通用户置空数组）；新增管理员专用 `GET /jobs/{job_id}/attachments/{index}`，按清单下标定位、路径限定在任务目录内，`FileResponse` 以原始文件名 + `application/octet-stream` 下载。
+5. 前端：`CorrectnessFileUpload` 新增附件多文件区块（不进预览）；`CorrectnessPage` 提交 `attachment_files` 并在重置时清空；`HistoryList` 对管理员新增「上传文件」按钮 + 下拉下载菜单；`types.ts` / `api/index.ts` 同步类型与下载地址；`index.css` 新增下拉菜单样式。前端用户可见名称统一为「其他支撑材料」（如 DD 表），接口字段 / 路由内部仍沿用 `attachment` 命名，不影响 API 契约。
+6. 附件不进入 `input_files`，也不传给 `run_reverse_pipeline` / `build_reverse_run_kwargs`，管线行为零变化。
+
+#### 修改文件
+
+1. `backend/app/api/v4/coverage.py`
+2. `backend/app/api/v4/runner.py`
+3. `backend/app/api/v4/schemas.py`
+4. `backend/app/api/v4/history.py`
+5. `frontend/src/components/CorrectnessFileUpload.tsx`
+6. `frontend/src/pages/CorrectnessPage.tsx`
+7. `frontend/src/components/HistoryList.tsx`
+8. `frontend/src/types.ts`
+9. `frontend/src/api/index.ts`
+10. `frontend/src/index.css`
+11. `docs/architecture/api.md`（第 2、4、13.5、14、17.1 节）
+12. `CHANGELOG.md`、`docs/development/development-log.md`
+13. 本地验证脚本（gitignored，未提交）：`backend/tests/auth/test_attachment_permissions.py`
+
+#### 验证方式
+
+1. `cd backend && py -3.12 tests/auth/test_attachment_permissions.py`：覆盖上传落盘 / 重名不覆盖 / manifest 记录 / 续跑保留、管理员可见普通用户不可见、下载 200 与 401 / 403 / 404、中文文件名 Content-Disposition。
+2. `cd backend && py -3.12 tests/test_artifact_cleanup_integration.py`（确认清理功能未被本次改动影响）。
+3. `cd backend && py -3.12 -m py_compile app/api/v4/coverage.py app/api/v4/history.py app/api/v4/runner.py app/api/v4/schemas.py`。
+4. `cd frontend && npm run build`。
+
+#### 验证结果
+
+1. 附件验证脚本：`ALL PASSED`。
+2. 中间产物清理集成脚本：`ALL PASSED`。
+3. `py_compile`：通过。
+4. 前端 `tsc && vite build`：通过（仅既有 chunk > 500 kB 提示）。
+5. 真实浏览器端到端（上传附件 → 跑完任务 → 管理员历史页下拉下载 / 普通用户不可见）：尚未验证；需在本地服务或真实样本任务上手工确认。
+
+#### 遗留问题
+
+1. 附件不参与分析，也没有类型 / 数量上限（仅受大小预算约束）；如需限制数量或扩展名，另行确认。
+2. 历史结果页的删除会连同 `input/attachment/` 一起整目录删除，这是既有删除语义，未单独提示附件内容。
+
+#### 下一步建议
+
+1. 本地启动前后端，用一个真实反向任务验证附件上传与管理员下载（普通用户账号确认看不到「附件」按钮）。
+2. 出包时无需部署层变化，但仍需重建后端镜像并覆盖前端产物。
+
+### 2026-11-13 已完成反向任务中间产物清理
+
+#### 任务目标
+
+控制 `backend/output/v4` 的磁盘膨胀。评估确认 `output/eoicd_requirements.json`（单任务实测可达 169MB）等三个中间产物只在续跑时读取，而 `completed` 任务不可续跑，因此可在任务成功完成并落盘状态后删除，且不得影响续跑、结果展示、历史列表与报告生成。
+
+#### 完成内容
+
+1. `backend/app/api/v4/runner.py` 新增 `COMPLETED_ONLY_ARTIFACTS`（`eoicd_requirements.json`、`eoicd_side_pairs.json`、`llm_cache.jsonl`）、`KEEP_ARTIFACTS_ENV`（`ICD_KEEP_JOB_ARTIFACTS`）与 `cleanup_completed_outputs()`。
+2. 在 `run_v4_pipeline_thread` 的 `job.update(JobStatus.COMPLETED, ...)` 之后调用清理；先落完成状态再删文件，避免「可续跑但解析产物已丢失」的半状态。函数内再校验 `job.status == COMPLETED`，失败 / 中断 / 被终止任务一律不动。
+3. 清理为 best-effort：单文件缺失跳过、删除失败只写 stderr，不影响任务完成与其它文件。
+4. 调试开关 `ICD_KEEP_JOB_ARTIFACTS=1` 时保留全部产物（本地 e2e / 探针脚本反读用）；接入方式为进程环境变量，部署无需默认配置。
+5. 仅反向管线；正向管线、`reverse_report.json` / `re_review_results.json` 及已有历史存量均未改动。
+
+#### 修改文件
+
+1. `backend/app/api/v4/runner.py`
+2. `docs/architecture/api.md`（第 10 节清理说明、第 13.2 节续跑依赖说明）
+3. `CHANGELOG.md`
+4. `docs/development/development-log.md`
+5. `backend/.env.example`（补充 `ICD_KEEP_JOB_ARTIFACTS` 说明）
+6. 本地验证脚本（gitignored，未提交）：`backend/tests/test_artifact_cleanup.py`、`backend/tests/test_artifact_cleanup_integration.py`
+
+#### 验证方式
+
+1. `cd backend && py -3.12 tests/test_artifact_cleanup.py`（函数级：只删三个目标；其它中间产物与对外产物保留；interrupted / canceled / failed 全保留；开关生效；缺失文件与重复调用安全）。
+2. `cd backend && py -3.12 tests/test_artifact_cleanup_integration.py`（走真实 `Job` 与 `run_v4_pipeline_thread` 外壳，仅把 `run_reverse_pipeline` 换成桩：completed 删除、canceled / failed 保留、开关生效、`job.result` 计数正常）。
+3. `cd backend && py -3.12 -m py_compile app/api/v4/runner.py tests/test_artifact_cleanup.py tests/test_artifact_cleanup_integration.py`。
+
+#### 验证结果
+
+1. 函数级脚本：`ALL PASSED`。
+2. 集成脚本：`ALL PASSED`（completed 路径日志显示三个文件被删除，canceled / failed 路径无删除）。
+3. `py_compile`：通过。
+4. 真实完整反向管线（含真实 `run_reverse_pipeline` 写盘）的端到端重跑：尚未验证；本次只在桩管线 + 真实线程外壳上验证。生产镜像尚未重建。
+
+#### 遗留问题
+
+1. 已有历史存量未清理：97 个已完成任务约 6.45GB，另有 161 个无 manifest 的遗留目录约 14.5GB；本次按用户决定不处理。
+2. 正向管线成功收尾自有 `runs/` 清理逻辑，本次未改；已完成反向任务不再保留 `eoicd_requirements.json` / `eoicd_side_pairs.json` / `llm_cache.jsonl`，若后续需要反读这些文件做离线分析，需在任务运行前设置 `ICD_KEEP_JOB_ARTIFACTS=1`。
+
+#### 下一步建议
+
+1. 出包时在真实样本上跑一次完整反向任务，确认完成日志出现 `[cleanup] removed ...`，结果页、下载、历史列表正常。
+2. 视需要再评估历史存量清理脚本（单独 Issue）。
+
 ### 2026-11-13 登录状态过期提示
 
 #### 任务目标

@@ -39,6 +39,7 @@ from app.api.v4.runner import (
     input_filenames_from_params,
 )
 from app.api.v4.schemas import (
+    V4HistoryAttachment,
     V4HistoryDeleteFailure,
     V4HistoryDeleteRequest,
     V4HistoryDeleteResponse,
@@ -149,12 +150,50 @@ def _mtime(path: Path) -> datetime:
         return datetime.now(timezone.utc)
 
 
-def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime, str | None]:
+def _read_manifest(job_dir: Path) -> Optional[dict]:
+    """读取任务 manifest（``job.json``）；缺失 / 损坏一律返回 None。"""
+    try:
+        raw = json.loads((job_dir / MANIFEST_NAME).read_text(encoding='utf-8'))
+    except Exception:  # noqa: BLE001 — 目录被删、JSON 损坏一律按「记录缺失」处理
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _attachment_items(params: object) -> list[V4HistoryAttachment]:
+    """从 manifest 参数快照取出附件列表（仅管理员可见，调用方负责过滤）。
+
+    ``index`` 保留原始列表下标：即使个别记录损坏被跳过，管理员下载接口仍按
+    manifest 中的同一下标定位，不会与展示顺序错位。
+    """
+    raw = params.get('attachment_files') if isinstance(params, dict) else None
+    if not isinstance(raw, list):
+        return []
+    items: list[V4HistoryAttachment] = []
+    for index, record in enumerate(raw):
+        if not isinstance(record, dict):
+            continue
+        name = record.get('name')
+        if not isinstance(name, str) or not name:
+            continue
+        try:
+            size = max(0, int(record.get('size', 0)))
+        except (TypeError, ValueError):
+            size = 0
+        items.append(V4HistoryAttachment(index=index, name=name, size=size))
+    return items
+
+
+def _history_item(
+    job_dir: Path, include_attachments: bool = True
+) -> tuple[V4HistoryItem, datetime, str | None]:
     """把一个任务目录组装成历史记录，返回「记录 / 排序时间 / 归属 owner_id」。
 
     第三项供 ``list_history`` 做归属过滤：只认 ``owner_id``（``str(User.id)``），
     ``owner_username`` 仅用于展示。manifest 缺失 / 损坏时 owner_id 为 ``None``
     （未归属，仅管理员可见）。
+
+    ``include_attachments=False`` 时 ``attachments`` 置空：附件仅管理员可见，
+    普通用户即使拥有该任务也拿不到文件名（列表接口层面的信息隔离）。
 
     manifest 缺失 / 损坏时退化为「只剩目录」的记录：上传失败会留下这类残留目录，
     它们不出现在任何列表里，却照样占磁盘 —— 只有在这里能看到并清理掉。
@@ -170,12 +209,7 @@ def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime, str | None]:
     size = _dir_size(job_dir)
     fallback = _mtime(job_dir)
 
-    data: Optional[dict] = None
-    try:
-        raw = json.loads((job_dir / MANIFEST_NAME).read_text(encoding='utf-8'))
-        data = raw if isinstance(raw, dict) else None
-    except Exception:  # noqa: BLE001 — 目录被删、JSON 损坏一律按「记录缺失」处理
-        data = None
+    data = _read_manifest(job_dir)
 
     if data is None:
         return (
@@ -215,6 +249,11 @@ def _history_item(job_dir: Path) -> tuple[V4HistoryItem, datetime, str | None]:
             has_reverse_matches=has_reverse_matches,
             mock=bool(data.get('mock', False)),
             token_usage=_parse_token_usage(data.get('token_usage')),
+            attachments=(
+                _attachment_items(data.get('params'))
+                if include_attachments
+                else []
+            ),
         ),
         created,
         owner_id if isinstance(owner_id, str) else None,
@@ -251,7 +290,11 @@ def list_history(user: User = Depends(current_user)):
     if not root.is_dir():
         return []
 
-    entries = [_history_item(child) for child in root.iterdir() if child.is_dir()]
+    entries = [
+        _history_item(child, include_attachments=user.is_superuser)
+        for child in root.iterdir()
+        if child.is_dir()
+    ]
     if not user.is_superuser:
         user_id = str(user.id)
         entries = [entry for entry in entries if entry[2] == user_id]
@@ -316,6 +359,57 @@ def view_reverse_matches(job_id: str, user: User = Depends(current_user)):
             detail='reverse_matches.json not found (forward job, or pipeline stopped before Step 3)',
         )
     return FileResponse(path=path, media_type='application/json')
+
+
+@router.get('/jobs/{job_id}/attachments/{index}')
+def download_attachment(
+    job_id: str, index: int, user: User = Depends(current_admin)
+):
+    """下载任务附件（上传时只存储、不参与分析），**仅管理员**。
+
+    普通用户即使是任务所有者也不可见：历史列表接口对他们返回空
+    ``attachments``，本接口由 ``current_admin`` 直接 403，两道一起做信息隔离。
+
+    文件按 manifest ``params.attachment_files[index]`` 定位，不拼接用户传来的
+    文件名；resolved 后仍校验必须落在任务目录内，防止 manifest 被篡改后越界。
+    下载响应固定 ``application/octet-stream`` + ``Content-Disposition:
+    attachment``，不在浏览器内联渲染 HTML / SVG 等类型。
+    """
+    job_dir = _resolve_job_dir(job_id)
+    data = _read_manifest(job_dir)
+    if data is None:
+        raise HTTPException(status_code=404, detail='job manifest not found')
+
+    params = data.get('params')
+    raw = params.get('attachment_files') if isinstance(params, dict) else None
+    if not isinstance(raw, list) or index < 0 or index >= len(raw):
+        raise HTTPException(status_code=404, detail='attachment not found')
+
+    record = raw[index]
+    rel = record.get('path') if isinstance(record, dict) else None
+    if not isinstance(rel, str) or not rel:
+        raise HTTPException(status_code=404, detail='attachment not found')
+
+    root = job_dir.resolve()
+    path = (job_dir / rel).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail='attachment not found')
+
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail='attachment file missing (job dir or file may have been deleted)',
+        )
+
+    name = record.get('name')
+    filename = name if isinstance(name, str) and name else path.name
+    return FileResponse(
+        path=path,
+        filename=filename,
+        media_type='application/octet-stream',
+    )
 
 
 @router.post('/history/delete', response_model=V4HistoryDeleteResponse)

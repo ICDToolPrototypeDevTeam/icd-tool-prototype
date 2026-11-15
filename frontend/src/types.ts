@@ -174,6 +174,16 @@ export interface V4HistoryOutputs {
   forward_docx: boolean
 }
 
+/** 任务附件（上传时只保存、不参与分析）；后端只对管理员下发。 */
+export interface V4HistoryAttachment {
+  /** 在任务 manifest 附件清单中的下标，下载地址用它定位文件 */
+  index: number
+  /** 上传时的原始文件名（下载时作为保存名） */
+  name: string
+  /** 字节数；仅用于展示 */
+  size: number
+}
+
 /**
  * 历史结果条目。**磁盘口径**：后端扫的是 output/v4/ 下的任务目录，
  * 因此进程重启前就跑完的任务（内存里已经没有了）同样会出现。
@@ -201,6 +211,8 @@ export interface V4HistoryItem {
   mock: boolean
   /** 累计 token 用量；null = 旧任务（升级前未统计），前端不展示 */
   token_usage?: V4TokenUsage | null
+  /** 任务附件（只存储、不参与分析）。普通用户恒为空数组（后端不下发文件名） */
+  attachments: V4HistoryAttachment[]
 }
 
 export interface V4HistoryDeleteResponse {

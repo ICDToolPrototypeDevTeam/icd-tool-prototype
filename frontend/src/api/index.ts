@@ -246,6 +246,14 @@ export function getJobLogDownloadUrlV4(jobId: string): string {
 }
 
 /**
+ * 任务附件下载地址（**仅管理员**；普通用户请求返回 403）。
+ * 用上传清单下标定位文件，不把文件名拼进 URL。
+ */
+export function getAttachmentDownloadUrlV4(jobId: string, index: number): string {
+  return `${API_V4_BASE}/jobs/${jobId}/attachments/${index}`
+}
+
+/**
  * 反向匹配中间产物（reverse_matches.json，Step 3 匹配明细）的查看地址。
  * **浏览器内直接查看**：后端按 application/json 返回且不发 attachment，
  * 新标签页打开即渲染，不落盘；需要留档时在页内另存。

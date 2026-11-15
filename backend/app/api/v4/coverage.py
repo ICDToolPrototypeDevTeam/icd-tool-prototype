@@ -83,25 +83,48 @@ class _RequestBudget:
             )
 
 
-def _safe_filename(name: str) -> str:
+def _original_filename(name: str) -> str:
+    """multipart filename → 原始文件名（basename + GBK mojibake 修复）。
+
+    Windows + curl 中文路径会在 multipart filename 字段做 GBK-as-latin1 mojibake。
+    反向修复:把 latin-1 unicode 字符还原为 GBK 字节再按 GBK 解出真中文。
+    仅在含非 ASCII 时尝试,失败则保持原值。附件下载用这份名字，落盘名另走
+    :func:`_safe_filename`。
+    """
     base = Path(name).name
-    # Windows + curl 中文路径会在 multipart filename 字段做 GBK-as-latin1 mojibake。
-    # 反向修复:把 latin-1 unicode 字符还原为 GBK 字节再按 GBK 解出真中文。
-    # 仅在含非 ASCII 时尝试,失败则保持原值。
     if any(ord(c) > 127 for c in base):
         try:
             base = base.encode("latin-1").decode("gbk")
         except (UnicodeEncodeError, UnicodeDecodeError):
             pass
-    base = base.replace(" ", "_")
+    return base
+
+
+def _safe_filename(name: str) -> str:
+    base = _original_filename(name).replace(" ", "_")
     cleaned = _SAFE_NAME_RE.sub("_", base)
     if not cleaned:
         raise HTTPException(status_code=422, detail=f"invalid filename: {name}")
     return cleaned
 
 
+def _unique_attachment_name(dest_dir: Path, name: str) -> str:
+    """附件落盘名：安全化后若重名，追加 ``_1`` / ``_2`` …，绝不覆盖已有文件。"""
+    safe = _safe_filename(name)
+    stem, suffix = Path(safe).stem, Path(safe).suffix
+    candidate = safe
+    n = 1
+    while (dest_dir / candidate).exists():
+        candidate = f"{stem}_{n}{suffix}"
+        n += 1
+    return candidate
+
+
 async def _save_upload(
-    file: UploadFile, dest_dir: Path, budget: Optional[_RequestBudget] = None
+    file: UploadFile,
+    dest_dir: Path,
+    budget: Optional[_RequestBudget] = None,
+    dest_name: Optional[str] = None,
 ) -> Path:
     """流式保存上传文件：1MB 分块，不在内存里保留整份文件。
 
@@ -110,7 +133,7 @@ async def _save_upload(
     """
     if not file.filename:
         raise HTTPException(status_code=422, detail="uploaded file has no filename")
-    safe = _safe_filename(file.filename)
+    safe = dest_name or _safe_filename(file.filename)
     dest = dest_dir / safe
     tmp = dest.with_name(f".{dest.name}.part")
     total = 0
@@ -257,6 +280,8 @@ async def coverage_analysis(
     eoicd_publisher_file: Optional[UploadFile] = File(None),
     eoicd_subscriber_file: Optional[UploadFile] = File(None),
     traceability_files: list[UploadFile] = File(default=[]),
+    # 任务附件：只存储、不参与任何解析/分析（供管理员事后在历史结果页下载）
+    attachment_files: list[UploadFile] = File(default=[]),
     # Mock 仅由 .env 的 USE_MOCK_LLM 控制；此字段仅作显式覆盖（None = 不动 env）
     use_mock_llm: Optional[bool] = Form(None),
     judge_providers: list[str] = Form(default_factory=lambda: ["deepseek"]),
@@ -364,6 +389,24 @@ async def coverage_analysis(
                 raise HTTPException(status_code=422, detail=f"traceability file {tf.filename} must be .xlsx")
             await _save_upload(tf, trace_dir, budget)
 
+    # —— 任务附件：独立目录保存，只记录元数据，绝不传给管线 ——
+    # 落盘名与原始文件名分开：落盘名走安全化并处理重名；``name`` 保留原始
+    # 文件名，管理员下载时用它作为 Content-Disposition 的文件名。
+    attachment_records: list[dict] = []
+    if attachment_files:
+        attach_dir = input_dir / 'attachment'
+        attach_dir.mkdir(parents=True, exist_ok=True)
+        for af in attachment_files:
+            if not af.filename:
+                raise HTTPException(status_code=422, detail="attachment file has no filename")
+            dest_name = _unique_attachment_name(attach_dir, af.filename)
+            saved = await _save_upload(af, attach_dir, budget, dest_name=dest_name)
+            attachment_records.append({
+                "path": saved.relative_to(job_dir).as_posix(),
+                "name": _original_filename(af.filename),
+                "size": saved.stat().st_size,
+            })
+
     # 自定义样式快照落盘（供追溯与续跑；未传样式时不写，任务目录内容不变）
     if resolved_schema is not None:
         (input_dir / "hlr_schema.json").write_text(
@@ -400,6 +443,7 @@ async def coverage_analysis(
         controller_profile=controller_profile,
         no_refine=no_refine,
         hlr_schema=resolved_schema,
+        attachment_files=attachment_records,
     )
 
     return V4AnalyzeResponse(
