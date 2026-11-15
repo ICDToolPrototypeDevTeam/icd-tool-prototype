@@ -1,7 +1,12 @@
 import { useState } from 'react'
 import { NavLink, Navigate, Outlet, Route, Routes, useNavigate } from 'react-router-dom'
 import { useAuth } from './auth/AuthContext'
-import { RequireAdmin, RequireAuth } from './components/RequireAuth'
+import {
+  RequireAdmin,
+  RequireAuditor,
+  RequireAuth,
+  RequireBusiness,
+} from './components/RequireAuth'
 import { useV4Health } from './hooks/useV4Health'
 import { useMockMode } from './hooks/useMockMode'
 import LandingPage from './pages/LandingPage'
@@ -11,6 +16,7 @@ import HistoryPage from './pages/HistoryPage'
 import SettingsPage from './pages/SettingsPage'
 import LoginPage from './pages/LoginPage'
 import AdminUsersPage from './pages/AdminUsersPage'
+import AuditPage from './pages/AuditPage'
 
 /** 受保护的页面外壳：顶栏、MOCK 提示、页脚与嵌套路由出口。 */
 function AppShell() {
@@ -19,6 +25,7 @@ function AppShell() {
   const { mockMode, setMockMode } = useMockMode()
   const navigate = useNavigate()
   const [loggingOut, setLoggingOut] = useState(false)
+  const isAuditor = user?.is_auditor === true
 
   const handleLogout = async () => {
     if (loggingOut) return
@@ -32,9 +39,9 @@ function AppShell() {
   }
 
   return (
-    <div className="app">
+    <div className={`app${isAuditor ? ' app--audit' : ''}`}>
       {/* Header */}
-      <header className="header">
+      <header className={`header${user?.is_admin ? ' header--wide-nav' : ''}`}>
         <div className="header__left">
           <img src="/logo1.png" alt="Logo" className="header__logo-img" />
           <div>
@@ -44,58 +51,71 @@ function AppShell() {
         </div>
 
         <nav className="header__nav">
-          <NavLink
-            to="/"
-            end
-            className={({ isActive }) =>
-              `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
-            }
-          >
-            工具入口
-          </NavLink>
-          <NavLink
-            to="/correctness"
-            className={({ isActive }) =>
-              `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
-            }
-          >
-            正确性分析
-          </NavLink>
-          <NavLink
-            to="/completeness"
-            className={({ isActive }) =>
-              `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
-            }
-          >
-            完整性分析
-          </NavLink>
-          <NavLink
-            to="/history"
-            className={({ isActive }) =>
-              `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
-            }
-          >
-            历史结果
-          </NavLink>
-          {user?.is_admin && (
+          {isAuditor ? (
             <NavLink
-              to="/settings"
+              to="/audit"
               className={({ isActive }) =>
                 `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
               }
             >
-              模型设置
+              审计中心
             </NavLink>
-          )}
-          {user?.is_admin && (
-            <NavLink
-              to="/admin/users"
-              className={({ isActive }) =>
-                `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
-              }
-            >
-              用户管理
-            </NavLink>
+          ) : (
+            <>
+              <NavLink
+                to="/"
+                end
+                className={({ isActive }) =>
+                  `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
+                }
+              >
+                工具入口
+              </NavLink>
+              <NavLink
+                to="/correctness"
+                className={({ isActive }) =>
+                  `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
+                }
+              >
+                正确性分析
+              </NavLink>
+              <NavLink
+                to="/completeness"
+                className={({ isActive }) =>
+                  `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
+                }
+              >
+                完整性分析
+              </NavLink>
+              <NavLink
+                to="/history"
+                className={({ isActive }) =>
+                  `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
+                }
+              >
+                历史结果
+              </NavLink>
+              {user?.is_admin && (
+                <NavLink
+                  to="/settings"
+                  className={({ isActive }) =>
+                    `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
+                  }
+                >
+                  模型设置
+                </NavLink>
+              )}
+              {user?.is_admin && (
+                <NavLink
+                  to="/admin/users"
+                  className={({ isActive }) =>
+                    `header__nav-link ${isActive ? 'header__nav-link--active' : ''}`
+                  }
+                >
+                  用户管理
+                </NavLink>
+              )}
+            </>
           )}
         </nav>
 
@@ -114,30 +134,32 @@ function AppShell() {
         </div>
 
         <div className="header__status">
-          <label
-            className={`mock-switch ${mockMode ? 'mock-switch--on' : ''}`}
-            title="MOCK 模式：模型调用返回模拟数据，用于验证流程本身"
-          >
-            <input
-              type="checkbox"
-              checked={mockMode}
-              onChange={(e) => setMockMode(e.target.checked)}
-            />
-            <span>MOCK 模式</span>
-          </label>
+          {!isAuditor && (
+            <label
+              className={`mock-switch ${mockMode ? 'mock-switch--on' : ''}`}
+              title="MOCK 模式：模型调用返回模拟数据，用于验证流程本身"
+            >
+              <input
+                type="checkbox"
+                checked={mockMode}
+                onChange={(e) => setMockMode(e.target.checked)}
+              />
+              <span>MOCK 模式</span>
+            </label>
+          )}
           <div className={`status-dot ${!v4Online ? 'status-dot--offline' : ''}`} />
           <span>{!v4Online ? 'V4 服务不可用' : '在线服务'}</span>
         </div>
       </header>
 
-      {mockMode && (
+      {!isAuditor && mockMode && (
         <div className="mock-banner">
           MOCK 模式已开启：所有模型调用返回模拟数据，分析结果不可用于验收。正式分析前请关闭。
         </div>
       )}
 
       {/* Main */}
-      <main className="main">
+      <main className={`main ${isAuditor ? 'main--audit' : ''}`}>
         <Outlet />
       </main>
 
@@ -170,10 +192,38 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route path="/" element={<LandingPage />} />
-        <Route path="/correctness" element={<CorrectnessPage />} />
-        <Route path="/completeness" element={<CompletenessPage />} />
-        <Route path="/history" element={<HistoryPage />} />
+        <Route
+          path="/"
+          element={
+            <RequireBusiness>
+              <LandingPage />
+            </RequireBusiness>
+          }
+        />
+        <Route
+          path="/correctness"
+          element={
+            <RequireBusiness>
+              <CorrectnessPage />
+            </RequireBusiness>
+          }
+        />
+        <Route
+          path="/completeness"
+          element={
+            <RequireBusiness>
+              <CompletenessPage />
+            </RequireBusiness>
+          }
+        />
+        <Route
+          path="/history"
+          element={
+            <RequireBusiness>
+              <HistoryPage />
+            </RequireBusiness>
+          }
+        />
         <Route
           path="/settings"
           element={
@@ -188,6 +238,14 @@ export default function App() {
             <RequireAdmin>
               <AdminUsersPage />
             </RequireAdmin>
+          }
+        />
+        <Route
+          path="/audit"
+          element={
+            <RequireAuditor>
+              <AuditPage />
+            </RequireAuditor>
           }
         />
         <Route path="*" element={<Navigate to="/" replace />} />

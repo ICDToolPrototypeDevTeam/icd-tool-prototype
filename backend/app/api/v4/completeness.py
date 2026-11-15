@@ -21,14 +21,17 @@
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 
 from app.api.v4.coverage import _RequestBudget, _save_upload
 from app.api.v4.runner import launch_forward_pipeline
 from app.api.v4.schemas import V4AnalyzeResponse
+from app.audit import catalog
+from app.audit.service import elapsed_ms, record_event
 from app.auth.deps import current_user
 from app.auth.models import User
 from app.execution import config as execution_config
@@ -51,9 +54,26 @@ async def completeness_analysis(
     use_mock_llm: Optional[bool] = Form(None),
     # 未登录由 fastapi-users 返回 401；归属写入创建的任务（后续任务按 owner_id 隔离）
     user: User = Depends(current_user),
+    # 审计用；FastAPI 自动注入，直接调用（测试）时可省略
+    request: Request = None,
 ):
+    started = time.perf_counter()
     # 正向尚未接入 Celery Worker：当前部署保留入口，但提交直接 503。
     if not execution_config.forward_enabled():
+        record_event(
+            request=request,
+            category=catalog.CATEGORY_OPERATION,
+            module='jobs',
+            action='task_create',
+            summary='创建完整性分析任务失败：当前部署未启用正向管线',
+            user=user,
+            target_type='job',
+            target_label='完整性分析任务',
+            detail={'任务类型': catalog.task_type_label('completeness')},
+            result=catalog.RESULT_FAILURE,
+            error='当前部署未启用正向管线',
+            duration_ms=elapsed_ms(started),
+        )
         raise HTTPException(
             status_code=503,
             detail='正向完整性分析在当前部署中未启用（仅启用反向管线）',
@@ -116,17 +136,67 @@ async def completeness_analysis(
     for tf in trace_files:
         trace_paths.append(await _save_upload(tf, input_dir, budget))
 
+    audit_detail = {
+        '任务编号': job.job_id,
+        '任务类型': catalog.task_type_label('completeness'),
+        '系统类型': (
+            catalog.profile_label(controller_profile)
+            if controller_profile
+            else '按文件名自动识别'
+        ),
+        '分析模式': '追溯范围分析' if analysis_mode == 'trace' else '全量分析',
+        'HLR 文件': hlr_path.name,
+        'EoICD 发布方文件': pub_path.name if pub_path else '未提供',
+        'EoICD 订阅方文件': sub_path.name if sub_path else '未提供',
+        '追溯文件数': len(trace_paths),
+        '模拟模式': (
+            '跟随系统配置' if use_mock_llm is None else ('开启' if use_mock_llm else '关闭')
+        ),
+    }
+
     # —— 后台线程跑正向管线 ——
-    launch_forward_pipeline(
-        job=job,
-        job_dir=job_dir,
-        hlr_path=hlr_path,
-        publisher_path=pub_path,
-        subscriber_path=sub_path,
-        analysis_mode=analysis_mode,
-        trace_files=tuple(trace_paths),
-        use_mock_llm=use_mock_llm,
-        controller_profile=controller_profile,
+    try:
+        launch_forward_pipeline(
+            job=job,
+            job_dir=job_dir,
+            hlr_path=hlr_path,
+            publisher_path=pub_path,
+            subscriber_path=sub_path,
+            analysis_mode=analysis_mode,
+            trace_files=tuple(trace_paths),
+            use_mock_llm=use_mock_llm,
+            controller_profile=controller_profile,
+        )
+    except Exception as exc:  # noqa: BLE001
+        record_event(
+            request=request,
+            category=catalog.CATEGORY_OPERATION,
+            module='jobs',
+            action='task_create',
+            summary=f'创建完整性分析任务失败：{type(exc).__name__}',
+            user=user,
+            target_type='job',
+            target_id=job.job_id,
+            target_label='完整性分析任务',
+            detail=audit_detail,
+            result=catalog.RESULT_FAILURE,
+            error=str(exc),
+            duration_ms=elapsed_ms(started),
+        )
+        raise
+
+    record_event(
+        request=request,
+        category=catalog.CATEGORY_OPERATION,
+        module='jobs',
+        action='task_create',
+        summary='创建完整性分析任务',
+        user=user,
+        target_type='job',
+        target_id=job.job_id,
+        target_label='完整性分析任务',
+        detail=audit_detail,
+        duration_ms=elapsed_ms(started),
     )
 
     return V4AnalyzeResponse(

@@ -42,3 +42,41 @@ export function RequireAdmin({ children }: { children: ReactNode }) {
   if (!user.is_admin) return <Navigate to="/" replace />
   return <>{children}</>
 }
+
+/** 审计管理员守卫：未登录跳登录页；非审计管理员（含系统管理员）回到首页。 */
+export function RequireAuditor({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth()
+  const location = useLocation()
+
+  if (loading) return <AuthLoading />
+  if (!user) {
+    return (
+      <Navigate
+        to="/login"
+        replace
+        state={{ from: location.pathname + location.search }}
+      />
+    )
+  }
+  if (!user.is_auditor) return <Navigate to="/" replace />
+  return <>{children}</>
+}
+
+/** 业务页面守卫：审计管理员只能使用审计中心，访问业务页面时送回 /audit。 */
+export function RequireBusiness({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth()
+  const location = useLocation()
+
+  if (loading) return <AuthLoading />
+  if (!user) {
+    return (
+      <Navigate
+        to="/login"
+        replace
+        state={{ from: location.pathname + location.search }}
+      />
+    )
+  }
+  if (user.is_auditor) return <Navigate to="/audit" replace />
+  return <>{children}</>
+}

@@ -18,6 +18,7 @@ import re
 from fastapi import HTTPException
 
 from app.auth.models import User
+from app.auth.roles import is_admin
 from app.job_manager import MANIFEST_NAME, job_manager
 from app.v4.config import get_output_root
 
@@ -68,7 +69,7 @@ def ensure_owner(owner_id: str | None, user: User) -> None:
     未归属（``None`` / 空串）或归属不是当前用户时统一 404 —— 不区分「任务不存在」
     与「无权访问」，避免用 404/403 差异探测他人任务。
     """
-    if user.is_superuser:
+    if is_admin(user):
         return
     if not owner_id or owner_id != str(user.id):
         raise HTTPException(status_code=404, detail='job not found')

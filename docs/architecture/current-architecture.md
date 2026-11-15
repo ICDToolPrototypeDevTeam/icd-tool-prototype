@@ -18,10 +18,11 @@ ICD工具原型采用前后端分离架构。
 ```text
 用户浏览器
     ↓
-React + TypeScript 前端（登录页 + 登录守卫）
+React + TypeScript 前端（登录页 + 角色守卫 + 审计中心）
     ↓
-FastAPI 后端（/api/v4）—— 登录鉴权 + 任务编排/生产者：上传、落盘、登记、投递
-    ├── 账号库 ──> MongoDB（独立容器，仅存账号；不存任务与产物）
+FastAPI 后端（/api/v4）—— 登录鉴权 + 审计 + 任务编排/生产者：上传、落盘、登记、投递
+    ├── 账号库 / 审计日志 ──> MongoDB（独立容器；存账号与 audit_logs，不存任务与产物）
+    ├── 运行指标 ──> Redis（短期 TTL，容器 / Worker / 趋势采样）
     ↓  任务消息（Celery）
 Redis（broker + 跨进程控制面）
     ↓
@@ -48,8 +49,8 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 
 前端主要职责包括：
 
-1. 提供登录页、登录状态维持与退出登录；
-2. 提供路由守卫（`RequireAuth` / `RequireAdmin`），未登录跳转登录页，非管理员不能进入管理员页面；
+1. 提供登录页、登录状态维持与退出登录；登录成功后按角色跳转（审计管理员 → `/audit`，其余 → 业务页）；
+2. 提供路由守卫（`RequireAuth` / `RequireAdmin` / `RequireAuditor` / `RequireBusiness`）：未登录跳转登录页；系统管理员不能进入审计中心，审计管理员只能进入审计中心；
 3. 提供文件上传页面；
 4. 支持上传 HLR Word 文件（必填）；
 5. 支持上传 EoICD Publisher / Subscriber PubSub Excel（二选一）；
@@ -58,8 +59,9 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 8. 展示任务处理状态（六步进度）；
 9. 展示处理结果摘要（统计卡片 + 星级分布）；
 10. 提供输出文档预览与下载入口；管理员在任务 / 历史列表可看到“所属账号”列；
-11. 提供管理员用户管理页（创建账号、重置密码、禁用 / 启用、设置 / 取消管理员）；
-12. 提供管理员模型设置页面，运行时修改三个模型名称与思考模式开关（无需重启服务）；非管理员隐藏该入口。
+11. 提供管理员用户管理页（创建账号、重置密码、禁用 / 启用、选择三值角色）；
+12. 提供管理员模型设置页面，运行时修改三个模型名称与思考模式开关（无需重启服务）；非系统管理员隐藏该入口；
+13. 提供审计中心（`/audit`）：概览、登录日志、操作日志、系统运行状态四个标签页；日志支持按时间、结果、角色、模块、操作类型、账号、IP、关键词筛选与服务端分页，详情抽屉展示业务明细；系统运行页用纯 SVG / CSS 图表展示容器资源、任务进程与告警，5 秒轮询且在页面隐藏时暂停。
 
 前端不负责：
 
@@ -77,7 +79,7 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 后端主要职责包括：
 
 1. 接收前端上传的输入文件；
-2. 提供登录 / 登出 / 当前用户接口，管理员创建账号、重置密码、禁用 / 启用账号（MongoDB 账号库）；
+2. 提供登录 / 登出 / 当前用户接口，系统管理员创建账号、重置密码、禁用 / 启用账号、修改三值角色（MongoDB 账号库）；
 3. 创建并维护本地分析任务，创建时写入当前登录用户的归属；
 4. 解析 HLR Word 文件与 EoICD PubSub Excel；
 5. 用 DeepSeek 对每条 HLR 做 AI 标注；
@@ -85,7 +87,8 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 7. 编排多智能体裁判（DeepSeek / MiniMax / Qwen）与降级保护；
 8. 执行 Review Agent 共识复核与星级评分；
 9. 生成 1 份 xlsx + 4 份 docx 报告；
-10. 提供任务状态查询和结果下载接口，并按任务归属做统一访问校验。
+10. 提供任务状态查询和结果下载接口，并按任务归属做统一访问校验；
+11. 记录登录与操作审计日志（异步批量写入 MongoDB，fail-open），并向审计管理员提供日志查询、概览与系统运行状态接口。
 
 ## 5. 后端模块划分
 
@@ -94,12 +97,13 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | 模块             | 职责                            |
 | -------------- | ----------------------------- |
 | `main.py`      | FastAPI 应用入口：CORS + `/api/v4` 路由装载；lifespan 初始化 MongoDB / Beanie 并播种初始管理员、执行 Celery 自检、启动扫描与失联巡检；SPA 静态兜底限定在静态目录内（`unquote` + `resolve` + `relative_to`，拒绝 `..`）；`ICD_DOCS_ENABLED` 控制 `/docs` / `/redoc` / `/openapi.json` |
-| `auth/`        | 认证与账号模块：`config.py`（认证 env 读取与校验）、`db.py`（Motor + Beanie 初始化 / ping）、`models.py`（User 文档）、`schemas.py`（请求 / 响应模型）、`manager.py`（用户名小写化、密码哈希、重复创建保护）、`backend.py`（JWTStrategy + CookieTransport + FastAPIUsers）、`seed.py`（初始管理员播种）、`deps.py`（`current_user` / `current_admin`）、`router.py`（`/auth/*`、`/admin/users*`）、`access.py`（任务归属统一访问校验） |
+| `auth/`        | 认证与账号模块：`config.py`（认证 env 读取与校验）、`db.py`（Motor + Beanie 初始化 / ping，`document_models` 含 User 与 AuditLog）、`models.py`（User 文档，`role` 三值）、`roles.py`（角色常量、中文标签与 `effective_role` 兼容回退）、`schemas.py`（请求 / 响应模型，`role` 与旧字段兼容）、`manager.py`（用户名小写化、密码哈希、重复创建保护、角色与 `is_superuser` 同步）、`backend.py`（JWTStrategy + CookieTransport + FastAPIUsers）、`seed.py`（初始管理员播种 + 历史账号角色回填）、`deps.py`（`current_user` / `current_admin` / `current_auditor` / `require_business_access`）、`router.py`（`/auth/*`、`/admin/users*`，登录与账号变更写审计日志）、`access.py`（任务归属统一访问校验） |
+| `audit/`       | 审计模块（ADR-009）：`catalog.py`（模块 / 动作 / 角色 / 结果中文词表、User-Agent 解析、检索文本拼接）、`models.py`（`audit_logs` 集合与索引）、`writer.py`（异步批量写入器，有界队列 + fail-open）、`schemas.py`（审计接口响应模型）、`service.py`（事件构造、查询、概览、词表）、`system.py`（容器级资源、任务进程、队列、依赖与健康判定）、`router.py`（`/audit/*`，仅审计管理员） |
 | `job_manager.py` | 任务状态管理（`JobStatus` / `Job` / `JobManager`）；持有任务累计 token（`total_tokens`）与 manifest 持久化；任务归属字段 `owner_id` / `owner_username` 随 Job 与 `job.json` 持久化。Celery 模式下 manifest（`job.json`）是唯一权威状态，`get_job` / `list_jobs` 每次回读并叠加控制面快照；启动扫描按「pending 存活 / 心跳新鲜存活 / 心跳过期按意图收尾 / Redis 不可达不判断」恢复 |
 | `token_usage.py` | 反向 LLM token 采集：解析 OpenAI 兼容 `usage` 的三种形状，并从线程绑定的 Job 累加（只 import `job_log`，不 import `job_manager`，避免循环依赖） |
 | `job_log.py`   | 任务日志缓冲、stdout/stderr Tee、线程归属与 job.log 落盘；Celery 模式下 API 进程按字节偏移从 `job.log` 增量同步 Worker 日志（只消费完整行，二进制追加避免 CRLF 字节错位）；不依赖任何 `app.*` 业务模块 |
 | `job_scheduler.py` | **inline 模式**的进程内任务队列：固定 `MAX_CONCURRENT_JOBS`（默认 2）个常驻工作线程领取任务（新任务 FIFO，续跑任务插队首，不抢占执行中任务）；出队时做票据比对（同一任务的旧条目丢弃）与跳过裁决（排队期间被终止 / 放弃的任务不执行，原因写入该任务日志）。Celery 模式下不使用 |
-| `execution/` | 任务执行层（ADR-008）：`config.py`（执行模式与 env 解析）、`celery_app.py`（Celery 应用与长任务参数）、`dispatcher.py`（投递 / revoke）、`tasks.py`（Worker 侧入口：认领、心跳、执行反向管线）、`control.py`（Redis 控制面与 Lua 原子操作）、`reaper.py`（失联 Worker 巡检）；只被 `api/v4/runner.py`、`api/v4/jobs.py`、`main.py` 调用，不反向依赖路由层 |
+| `execution/` | 任务执行层（ADR-008）：`config.py`（执行模式与 env 解析）、`celery_app.py`（Celery 应用与长任务参数、worker 启停时启停指标上报）、`dispatcher.py`（投递 / revoke）、`tasks.py`（Worker 侧入口：认领、心跳、执行反向管线，认领后上报任务进程 PID）、`control.py`（Redis 控制面与 Lua 原子操作、活动任务快照）、`reaper.py`（失联 Worker 巡检）、`metrics.py`（cgroup 内存 / CPU 采样、任务子进程资源、Redis 指标快照与 1 小时历史，供审计中心系统运行页读取）；只被 `api/v4/runner.py`、`api/v4/jobs.py`、`main.py` 调用，不反向依赖路由层 |
 | `runtime_settings.py` | 运行时模型设置：三个模型名与三个思考开关原子落盘到 `OUTPUT_DIR/settings.json`，保存时写入 `os.environ`，启动时回读；不依赖任何业务管线 |
 | `api/v4/`      | V4 路由层：`router.py`（聚合）、`schemas.py`（响应模型）、`runner.py`（经 `job_scheduler` 入队 + 7 个 derive_*）、`coverage.py` / `jobs.py` / `outputs.py` / `settings.py` |
 | `api/v4/hlr_schemas.py` | HLR 表格样式管理与辅助接口：样式列表 / 新建 / 更新 / 删除、文档表格扫描与试解析（扫描与试解析均不调用 LLM）；内置模板只读（403），未知样式 404、重名 409、配置非法 422 |
@@ -124,7 +128,7 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 
 **HLR 表格样式与 controller profile 的分工**：自定义样式只覆盖解析器的 `field_map`（行标签映射）与 `requirement_scan`（需求表识别与 `id_pattern` 校验）；controller profile 继续负责匹配关键词、追溯表配置、AI 标注示例与 preprocess hook —— `build_profile_with_schema` 只替换 `hlr_parser` 配置，profile 的其余配置原样保留。内置模板由各 profile 的 `config.yaml` 派生，未修改的模板按该控制器的原生解析路径执行（native），因此默认行为与样式能力引入前一致。下游管线只消费 `requirement_id` + `content`（可选 `rationale`），样式变化不影响 Step 2 及之后的输入与产物结构。
 
-### 5.1 认证与账号隔离（阶段 A，ADR-007）
+### 5.1 认证与账号隔离（阶段 A，ADR-007；角色三值与审计管理员见 ADR-009）
 
 `backend/app/auth/` 是认证与账号管理的唯一入口，V4 路由不在 `main.py` 内直接实现鉴权逻辑：
 
@@ -132,26 +136,71 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 backend/app/auth/
 ├── config.py    # MONGO_URL / MONGO_DB / AUTH_JWT_SECRET / AUTH_TOKEN_TTL_SECONDS /
 │                # AUTH_COOKIE_NAME / AUTH_COOKIE_SECURE / ICD_ADMIN_* / ICD_DOCS_ENABLED
-├── db.py        # AsyncIOMotorClient + init_beanie + ping_db；启动不可达即失败
-├── models.py    # User（集合 users；email 字段承载小写用户名；is_active / is_superuser）
-├── schemas.py   # UserCreateRequest（is_admin）/ UserUpdateRequest（is_superuser）/ UserRead / MeResponse
-├── manager.py   # UserManager：用户名小写化、密码哈希、重复创建与唯一索引竞态保护
+├── db.py        # AsyncIOMotorClient + init_beanie（User + AuditLog）+ ping_db；启动不可达即失败
+├── models.py    # User（集合 users；email 字段承载小写用户名；is_active / is_superuser / role）
+├── roles.py     # ROLE_USER / ROLE_ADMIN / ROLE_AUDITOR / ROLE_ANONYMOUS / ROLE_SYSTEM、
+│                # ROLE_LABELS、effective_role（role 为空时按 is_superuser 回退）、is_admin / is_auditor
+├── schemas.py   # UserCreateRequest（role，兼容 is_admin）/ UserUpdateRequest（role，兼容 is_superuser）/
+│                # UserRead（含 role / role_label / is_auditor）/ MeResponse
+├── manager.py   # UserManager：用户名小写化、密码哈希、重复创建与唯一索引竞态保护、角色与 is_superuser 同步
 ├── backend.py   # JWTStrategy + CookieTransport（HttpOnly / SameSite=Lax / Path=/）+ FastAPIUsers
-├── seed.py      # 用户集合为空时按 ICD_ADMIN_* 创建初始管理员
-├── deps.py      # current_user / current_admin
-├── router.py    # /auth/login、/auth/logout、/auth/me、/admin/users*
+├── seed.py      # 用户集合为空时按 ICD_ADMIN_* 创建初始管理员；ensure_user_roles 回填 / 修正历史账号角色
+├── deps.py      # current_user / current_admin / current_auditor / require_business_access
+├── router.py    # /auth/login、/auth/logout、/auth/me、/admin/users*（登录 / 登出 / 账号变更写审计日志）
 └── access.py    # get_job_owner / ensure_owner / require_job_access / is_valid_job_id
 ```
 
+角色与访问规则：
+
+| 角色 `role` | 中文标签 | 权限范围 |
+| --- | --- | --- |
+| `user`（默认） | 业务用户 | 业务页面与业务接口；任务按归属可见 |
+| `admin` | 系统管理员 | 业务全部权限 + `/admin/users*` + 全局设置 / HLR 样式管理；**不可进入审计中心**（前后端均 403） |
+| `auditor` | 审计管理员 | **仅** `/auth/login`、`/auth/logout`、`/auth/me`、`/health` 与 `/audit/*`；业务接口统一 403 |
+
+`is_superuser` 保留为兼容字段，由 `role` 派生（`admin` → True，其余 → False）；`role` 为空的历史账号按 `is_superuser` 回退（`effective_role`），启动时 `ensure_user_roles()` 回填落库。
+
 关键边界：
 
-1. **Mongo 只存账号**：`mongo` 为 compose 独立服务（命名卷 `mongo_data`），后端容器通过服务名访问；服务器编排不映射宿主端口。任务与产物仍落 `backend/output/v4/{job_id}/`，设置与 HLR 样式仍落 `backend/output/*.json`。
+1. **Mongo 存账号与审计日志**：`mongo` 为 compose 独立服务（命名卷 `mongo_data`），后端容器通过服务名访问；服务器编排不映射宿主端口。任务与产物仍落 `backend/output/v4/{job_id}/`，设置与 HLR 样式仍落 `backend/output/*.json`。
 2. **任务归属**：`Job` 与 `job.json` 增加 `owner_id`（`str(User.id)`，权限键）与 `owner_username`（冗余展示）。创建任务时写入当前登录用户；续跑沿用原归属；CLI 与旧 manifest 无归属 → 仅管理员可见。
 3. **统一访问校验**：所有按 `job_id` 的任务接口（内存 / 磁盘）统一走 `app/auth/access.py` 的 `require_job_access()` / `ensure_owner()`；内存任务先查 `Job.owner_id`，磁盘任务读 manifest，归属不匹配或任务不存在统一 404，管理员放行全部；任务 / 历史列表按 `owner_id` 过滤。`outputs.py` 先校验归属再判断文件存在性，避免通过 404/200 差异探测他人任务。普通用户访问管理员接口 → 403。
-4. **历史与全局配置**：`GET /history` 按 manifest 的 `owner_id` 过滤（管理员全部）；`POST /history/delete`、`GET/PUT /settings`、HLR 样式新建 / 更新 / 删除限管理员；HLR 样式列表 / 扫描 / 试解析对登录用户开放。
-5. **失败语义**：未登录 401；Mongo 运行中失联 → 受保护接口 503 `{"detail": "database unavailable"}`；启动时 Mongo 不可达 → 启动失败并打印明确日志。
-6. **静态兜底加固**：SPA 兜底只返回解析后位于静态目录内的文件；含 `..`（含编码形式）或越界的请求返回 404，不回落 `index.html`（不做路径纠正）；`/api/*` 未匹配路由返回 JSON 404；`ICD_DOCS_ENABLED=0` 时 `/docs` / `/redoc` / `/openapi.json` 也不被兜底接住。
-7. **正向代码树未改**：`backend/forward/` 业务实现与产物生成方式不变，正向适配层只在 API 入口增加登录与归属校验；正反向仍互不 import 业务模块。
+4. **业务路由统一业务准入**：`api/v4/router.py` 用 `_business_only = [Depends(require_business_access)]` 统一挂到业务子路由（coverage、completeness、jobs、outputs、history、settings、hlr_schemas），审计管理员访问业务接口统一 403，不逐个路由重复判断。
+5. **历史与全局配置**：`GET /history` 按 manifest 的 `owner_id` 过滤（管理员全部）；`POST /history/delete`、`GET/PUT /settings`、HLR 样式新建 / 更新 / 删除限管理员；HLR 样式列表 / 扫描 / 试解析对登录用户开放。
+6. **失败语义**：未登录 401；Mongo 运行中失联 → 受保护接口 503 `{"detail": "database unavailable"}`；启动时 Mongo 不可达 → 启动失败并打印明确日志；登录失败对客户端统一返回 400（具体原因只写审计日志）。
+7. **静态兜底加固**：SPA 兜底只返回解析后位于静态目录内的文件；含 `..`（含编码形式）或越界的请求返回 404，不回落 `index.html`（不做路径纠正）；`/api/*` 未匹配路由返回 JSON 404；`ICD_DOCS_ENABLED=0` 时 `/docs` / `/redoc` / `/openapi.json` 也不被兜底接住。
+8. **正向代码树未改**：`backend/forward/` 业务实现与产物生成方式不变，正向适配层只在 API 入口增加登录与归属校验；正反向仍互不 import 业务模块。
+
+### 5.2 审计与运行监控（ADR-009）
+
+`backend/app/audit/` 是审计日志与系统运行状态的唯一入口，业务路由只通过 `record_event()` 记录事件，不直接写 Mongo：
+
+```text
+backend/app/audit/
+├── catalog.py   # 类别 / 模块 / 动作 / 动作类型 / 角色 / 结果中文词表；User-Agent 解析；关键词检索文本拼接
+├── models.py    # AuditLog（集合 audit_logs；ts 倒序、category / module / actor / result / ip 索引；永久保留）
+├── writer.py    # AuditWriter：有界队列（20000）+ 后台批量写入（100 条 / 0.5s）；fail-open，不阻塞业务
+├── schemas.py   # 审计日志 / 明细 / 概览 / 系统运行 / 历史趋势响应模型
+├── service.py   # build_event / record_event / query_logs / get_log / overview / meta
+├── system.py    # 容器资源、任务进程、队列、依赖健康与 1 小时趋势聚合；告警阈值判定
+└── router.py    # /audit/logs、/audit/logs/{id}、/audit/meta、/audit/overview、/audit/system、/audit/system/history
+```
+
+运行监控数据来源（`app/execution/metrics.py`）：
+
+- **API 容器**：API 进程每 5s 采样自身 cgroup 内存（v2 `memory.current` / v1 `memory.usage_in_bytes`，有 `inactive_file` 时扣除）与 CPU（按 quota / 宿主核数归一），写 Redis `icd:metrics:api`（TTL 30s）。
+- **Worker 容器**：Celery Worker 启动时起后台线程，每 5s 上报 CPU / 内存到 `icd:metrics:worker:{hostname}`（TTL 20s）；心跳超过 15s 视为失联。
+- **任务进程**：Worker 认领任务后上报子进程 PID；审计接口按 `psutil` 读取各任务 RSS / CPU，仅展示不设阈值。
+- **趋势**：采样点写入 Redis `icd:metrics:history`（720 点 / 1 小时 TTL），供系统运行页折线图；Redis 不可用时返回 `available=false` 与提示，不报 500。
+- **依赖健康**：Mongo / Redis 只做连接与延迟探测，不挂载 `docker.sock`、不做宿主机级监控。
+
+关键边界：
+
+1. **审计写入 fail-open**：队列满或 Mongo 异常时丢弃事件并记日志，业务请求正常返回；审计失败不得影响业务。
+2. **敏感信息不落库**：不记录密码、JWT / Cookie、API Key、文件内容；登录失败原因只在审计记录中体现。
+3. **日志不可删**：v1 无删除接口、无 CSV 导出；查询本身不记审计，避免自放大。
+4. **时间口径**：存储 UTC，展示 Asia/Shanghai；IP 取 `request.client.host`，暂不解析 `X-Forwarded-For`。
+5. **角色互斥**：系统管理员不能进入审计中心；审计管理员只能使用审计中心（含登录 / 登出 / 本人信息 / 健康检查）。
 
 ## 6. 前端模块划分
 
@@ -315,13 +364,17 @@ backend/output/v4/{job_id}/
 
 当前架构服务于本地演示原型，存在以下限制：
 
-1. 任务状态以任务目录内的 `job.json` 为准，不引入独立任务状态服务；MongoDB 仅用于账号库，任务与分析产物不入库（阶段 B 后续设计）。
-2. 已实现登录与账号隔离，但无细粒度角色、操作审计、自助注册、邮箱验证与找回密码。
+1. 任务状态以任务目录内的 `job.json` 为准，不引入独立任务状态服务；MongoDB 用于账号库与审计日志，任务与分析产物不入库（阶段 B 后续设计）。
+2. 已实现三种角色（业务用户 / 系统管理员 / 审计管理员）与操作审计，但仍无自助注册、邮箱验证与找回密码；角色不可自定义、不可细粒度到具体操作级别。
 3. 暂不实现按账号的资源配额 / 多租户配额管理：Celery 提供的是全局 Worker 并发（默认 20），无按用户配额与公平调度。
 4. 暂不实现云端部署和容器编排平台（Kubernetes 等）的运维能力。
 5. 任务执行层已由 Celery + Redis 承担（ADR-008）：单队列 `icd.reverse`、固定 Worker 并发（默认 20）、FIFO，无多级优先级、无抢占；`job_scheduler.py` 仅保留为 inline 测试 / 回滚路径。
 6. Celery 模式下正向管线未接入 Worker（创建与续跑返回 503），需待正向测试通过后另行接入。
 7. Windows 桌面打包版本阶段暂停交付，只保证内网服务器 Docker 部署（ADR-007）。
+8. 运行监控只覆盖 API 容器、Worker 容器与任务进程，MongoDB / Redis 仅做健康与延迟探测；不挂载 `docker.sock`、不采集宿主机级进程与整机资源。
+9. 告警阈值为容器级固定值（内存 75% / 90%、CPU 85% / 95%、磁盘 80% / 90%、Worker 心跳 15s、依赖不可用），不可在页面配置；任务进程 RSS / CPU 仅展示，不设阈值。
+10. 本地开发 compose 未设置容器内存上限时，内存百分比显示为空，只显示已用字节；需在服务器部署中通过 compose 限额获得百分比。
+11. 审计日志依赖 MongoDB：MongoDB 不可用时审计写入被丢弃（fail-open），审计查询返回 503；v1 无删除接口、无 CSV 导出、不记录查询自身。
 
 如后续需要扩展上述能力，应通过新的 Issue 或 ADR 明确设计后再实施。
 
@@ -342,12 +395,13 @@ backend/output/v4/{job_id}/
 ```text
 backend/app/
 ├── main.py                 # 顶层 FastAPI 入口（CORS + V4 router 装载 + lifespan 初始化 Mongo/管理员 + 静态兜底加固）
-├── auth/                   # 认证与账号管理（config / db / models / schemas / manager / backend / seed / deps / router / access）
+├── auth/                   # 认证与账号管理（config / db / models / roles / schemas / manager / backend / seed / deps / router / access）
+├── audit/                  # 审计与运行监控（ADR-009）：词表 / AuditLog 模型 / 异步写入器 / 查询与概览 / 系统运行聚合 / 审计接口
 ├── job_manager.py          # 共享 Job / JobManager（JobStatus 唯一来源；owner_id / owner_username 随 manifest 持久化）
 ├── job_log.py              # 进程级日志缓冲 / stdout-stderr Tee / job.log 落盘与恢复（不 import app.*）
 ├── job_scheduler.py        # inline 模式进程内队列（常驻工作线程 + 票据 + 出队跳过裁决；并发上限 MAX_CONCURRENT_JOBS）
 ├── execution/              # 任务执行层（ADR-008）：执行模式配置 / Celery 应用 / 投递与 revoke /
-│                           #   Worker 任务入口 / Redis 控制面 / 失联巡检（不 import api/v4）
+│                           #   Worker 任务入口 / Redis 控制面 / 失联巡检 / 资源指标采集（不 import api/v4）
 ├── token_usage.py          # 反向 token 采集（usage 解析 + 绑定 Job 累加；不 import job_manager）
 ├── runtime_settings.py     # 运行时模型设置：output/settings.json 持久化 + os.environ 热应用
 ├── forward/                # 正向适配层（Issue #119）：编排与翻译，零业务算法，不 import app.v4.*
@@ -361,7 +415,7 @@ backend/app/
 │   └── adapter.py          # 编排与翻译（run_forward_job）
 ├── api/
 │   └── v4/
-│       ├── router.py       # V4 路由聚合（health + coverage + completeness + jobs + outputs + history + settings）
+│       ├── router.py       # V4 路由聚合（health + audit + coverage + completeness + jobs + outputs + history + settings + hlr-schemas）
 │       ├── schemas.py      # V4Job* / V4ModelSettings* Pydantic
 │       ├── runner.py       # V4 任务启动（celery → execution.dispatcher；inline → job_scheduler）+ 执行函数（runtime 上下文绑定 + derive_*）
 │       ├── coverage.py     # POST /api/v4/coverage-analysis

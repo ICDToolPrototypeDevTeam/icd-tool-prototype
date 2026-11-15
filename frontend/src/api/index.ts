@@ -21,6 +21,13 @@ import type {
   AdminUser,
   AdminUserCreatePayload,
   AdminUserUpdatePayload,
+  AuditQuery,
+  AuditLogListResponse,
+  AuditLogDetail,
+  AuditMeta,
+  AuditOverview,
+  AuditSystemResponse,
+  AuditHistoryResponse,
 } from '../types'
 
 // ========== V4 API ==========
@@ -127,6 +134,60 @@ export async function updateAdminUserV4(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+// ========== 审计中心（仅审计管理员） ==========
+
+function auditQueryString(query: AuditQuery): string {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === '') continue
+    params.set(key, String(value))
+  }
+  const suffix = params.toString()
+  return suffix ? `?${suffix}` : ''
+}
+
+/** 登录日志 / 操作日志列表（服务端分页）。 */
+export async function getAuditLogs(query: AuditQuery): Promise<AuditLogListResponse> {
+  const res = await apiFetch(`${API_V4_BASE}/audit/logs${auditQueryString(query)}`)
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+/** 单条日志详情（含中文明细字段）。 */
+export async function getAuditLog(id: string): Promise<AuditLogDetail> {
+  const res = await apiFetch(`${API_V4_BASE}/audit/logs/${encodeURIComponent(id)}`)
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+/** 筛选词表：模块 / 动作 / 角色 / 结果 / 时间段预设，均为中文标签。 */
+export async function getAuditMeta(): Promise<AuditMeta> {
+  const res = await apiFetch(`${API_V4_BASE}/audit/meta`)
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+/** 概览：KPI、按小时趋势、模块与角色分布、最近事件。 */
+export async function getAuditOverview(hours = 24): Promise<AuditOverview> {
+  const res = await apiFetch(`${API_V4_BASE}/audit/overview?hours=${hours}`)
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+/** 系统运行状态：容器资源、任务进程、队列、依赖与告警。 */
+export async function getAuditSystem(): Promise<AuditSystemResponse> {
+  const res = await apiFetch(`${API_V4_BASE}/audit/system`)
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.json()
+}
+
+/** 系统资源历史曲线（Redis 保留最近 1 小时，每 5 秒一个采样点）。 */
+export async function getAuditSystemHistory(minutes = 30): Promise<AuditHistoryResponse> {
+  const res = await apiFetch(`${API_V4_BASE}/audit/system/history?minutes=${minutes}`)
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.json()
 }

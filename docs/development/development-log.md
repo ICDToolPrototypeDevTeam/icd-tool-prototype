@@ -51,6 +51,75 @@
 
 ## 3. 开发记录
 
+### 2026-11-13 审计管理员、审计日志与系统运行监控（ADR-009）
+
+#### 任务目标
+
+新增审计管理员身份：可查看业务用户与系统管理员的登录、操作日志，并可查看各人员正在使用的进程 / 内存等运行状态（直观图表）。日志信息项要全面（IP、时间、操作人、操作内容、操作模块、操作类型、结果等），支持与信息项对应的组合查询，代码值翻译为中文、可读性高；页面要求美观。权限约定：系统管理员不可进入审计中心，审计管理员只能使用审计中心。
+
+#### 完成内容
+
+1. 角色模型由布尔管理员扩展为三值 `role`（`user` / `admin` / `auditor`），`is_superuser` 保留并由角色派生；新增 `app/auth/roles.py`（常量、中文标签、`effective_role` 回退、`is_admin` / `is_auditor` / `role_to_superuser`），启动时 `ensure_user_roles()` 回填历史账号。
+2. 认证依赖新增 `current_auditor`（非审计管理员 403）与 `require_business_access`（审计管理员访问业务接口 403）；`api/v4/router.py` 对 coverage / completeness / jobs / outputs / history / settings / hlr_schemas 统一挂业务准入，`/audit/*` 单独挂审计管理员依赖。系统管理员访问审计接口同样 403。
+3. `/auth/login` 与 `/auth/logout` 改为自定义路由（`OAuth2PasswordRequestForm`），登录成功 / 失败（账号不存在 / 密码错误 / 账号被禁用）都写审计；失败原因只落服务端，客户端统一 400，账号不存在时也做一次哈希以抵消响应时间差。账号创建 / 更新、任务创建 / 取消 / 终止 / 放弃 / 续跑、产物与日志下载、设置与 HLR 样式变更均写审计。
+4. 新增 `app/audit/`：`catalog.py` 中文词表与 User-Agent 解析、`models.py`（`audit_logs` 集合 + 6 个索引）、`writer.py`（有界队列 20000 + 后台批量写入 100 条 / 0.5s，fail-open）、`schemas.py`、`service.py`（事件构造 / 查询 / 概览 / 词表）、`system.py`（容器资源、任务进程、队列、依赖健康、阈值与趋势）、`router.py`。
+5. 新增接口：`GET /api/v4/audit/logs`（时间 / 类别 / 模块 / 动作 / 结果 / 操作人 / 角色 / IP / 关键词 + 服务端分页）、`/audit/logs/{id}`、`/audit/meta`、`/audit/overview?hours=`、`/audit/system`、`/audit/system/history?minutes=`。
+6. 新增 `app/execution/metrics.py`：API 进程每 5s 采样 cgroup 内存（v1/v2，扣除 `inactive_file`）与 CPU（按 quota / 宿主核数归一）写 `icd:metrics:api`（TTL 30s）；Worker 后台线程每 5s 上报 `icd:metrics:worker:{hostname}`（TTL 20s）；采样点写 `icd:metrics:history`（720 点 / 1 小时 TTL）；Worker 认领任务后上报子进程 PID，审计接口按 `psutil` 读取任务 RSS / CPU 并按用户聚合。告警阈值：内存 75% / 90%、CPU 85% / 95%、磁盘 80% / 90%、Worker 心跳 15s、依赖不可用为严重；任务级只展示不设阈值。
+7. 前端新增 `/audit` 审计中心：概览 / 登录日志 / 操作日志 / 系统运行四个标签页，组合筛选、服务端分页、明细抽屉、5s 轮询（页面隐藏时暂停）；图表为纯 SVG / CSS 实现，未引入图表库；登录后按角色跳转（审计管理员进入审计中心），`RequireAuditor` / `RequireBusiness` 守卫；用户管理页角色下拉增加审计管理员。
+8. 文档：新增 ADR-009，更新项目范围、架构、API、README、CHANGELOG、本开发纪要。
+
+#### 修改文件
+
+1. `backend/app/auth/{models,schemas,deps,seed,router,manager,access,db}.py`、`backend/app/auth/roles.py`（新增）
+2. `backend/app/audit/{__init__,catalog,models,writer,schemas,service,system,router}.py`（新增）
+3. `backend/app/execution/{celery_app,tasks,control}.py`、`backend/app/execution/metrics.py`（新增）
+4. `backend/app/api/v4/{router,coverage,completeness,jobs,outputs,history,settings,hlr_schemas}.py`
+5. `backend/app/main.py`（审计写入器与 API 指标采样启停）、`backend/requirements.txt`（新增 `psutil>=6.1,<8`）
+6. `frontend/src/components/audit/`（新增）、`frontend/src/pages/AuditPage.tsx`（新增）、`frontend/src/{App.tsx,api/index.ts,types.ts,index.css}`、`frontend/src/auth/AuthContext.tsx`、`frontend/src/components/RequireAuth.tsx`、`frontend/src/pages/{LoginPage,AdminUsersPage}.tsx`
+7. `backend/tests/test_audit_{roles,event,system,writer}.py`（新增，29 个用例）
+8. `docs/decisions/ADR-009-审计管理员与审计日志.md`（新增）、`docs/project/scope.md`、`docs/architecture/current-architecture.md`、`docs/architecture/api.md`
+9. `README.md`、`CHANGELOG.md`、`docs/development/development-log.md`
+
+#### 验证方式
+
+1. 后端单元测试：`docker compose run --rm --no-deps -v "<repo>/backend:/app" backend sh -c "pip install pytest httpx==0.27.2 && python -m pytest tests -q"`。
+2. 与 HEAD 基线对比：`git archive HEAD` 导出到独立目录，复制同一份 `tests/` 与 `.env` 后运行同一命令，比较失败用例集合。
+3. 前端构建：`cd frontend && npm run build`。
+4. 重建后端与前端镜像并重启容器，按三角色权限矩阵逐项请求（`curl` 表单登录 + Cookie）：
+   - 管理员访问 `/audit/logs` → 403；审计管理员访问 `/jobs`、`/history`、`/settings`、`/admin/users` → 403；审计管理员访问审计接口 → 200。
+   - 登录失败、设置修改、账号创建等操作后，在 `/audit/logs` 中按 `category` / `module` / `action` / `keyword` 查询到对应中文记录。
+   - 日志明细、概览、系统运行、趋势接口返回结构完整；`/history` 下载路径无任务时能正常返回错误。
+5. 中文关键词：命令行受 Git Bash 编码影响，改用预编码 UTF-8 URL 验证 `keyword=登录失败`、`keyword=审计管理员` 均能命中。
+
+#### 验证结果
+
+1. 后端全量测试（`tests/`）：**67 failed / 365 passed / 3 skipped / 10 collection errors**；HEAD 基线为 **70 failed / 333 passed / 3 skipped / 10 errors**。逐条比对失败用例集合：**没有新增失败**（3 条 HEAD 失败在本次修复后通过；其余差异为执行顺序 / 既有不稳定用例）。67 条失败与 10 条收集错误均为既有本地测试相对 HEAD 的漂移（例如仍导入已移除的 `app.v4.reverse` 包），不在本次范围。
+2. 新增 29 个审计用例：全部通过（角色依赖、事件构造、系统聚合、写入器 fail-open 与批量落库）。
+3. 前端 `npm run build`：通过（`tsc && vite build`，仅有既有 chunk > 500 kB 提示）。
+4. 镜像重建与容器重启：`docker compose build backend frontend` 通过，`docker compose up -d` 后 `/api/v4/health` 200、前端 200。
+5. 三角色权限矩阵：管理员访问审计接口 403、审计管理员访问业务接口与用户管理 403、审计管理员审计接口 200（**已验证**）。
+6. 审计记录：登录失败（账号不存在 / 密码错误）与登录成功、登出、设置修改、账号创建均产生中文记录；`keyword` 中文检索（预编码 URL）命中正确条数（**已验证**）。
+7. 系统运行接口：返回 API / Worker 资源、运行中任务、队列、Mongo / Redis 健康与趋势；本地 compose 未设容器内存上限时内存百分比为空、只显示已用字节（**已验证**）。
+8. 浏览器内页面视觉与交互（图表布局、抽屉、筛选、角色跳转）：**尚未验证**（本次未做浏览器自动化，需人工检查）。
+9. 中文关键词直接由 Git Bash 命令行传入会因 cp936 编码损坏，属验证工具限制，不是应用缺陷；浏览器与预编码 URL 均正常。
+
+#### 遗留问题
+
+1. 审计日志永久保留，无归档 / TTL / 删除 / CSV 导出；数据量长期增长后的容量评估未做。
+2. IP 取 `request.client.host`，部署在反向代理后时所有记录都会是代理 IP；需后续增加可信代理与 `X-Forwarded-For` 解析配置。
+3. 运行监控不覆盖宿主机与容器外进程；本地 compose 未设内存上限时内存百分比为空。
+4. Worker 只上报自身容器的聚合资源，多 Worker 实例按 hostname 分别展示；未做跨实例汇总页。
+5. 审计写入 fail-open：Mongo 不可用期间的事件会丢失，不补写。
+6. 浏览器视觉验收与服务器部署验收未执行。
+7. 本次改动尚未提交（按项目约定由用户执行 git 操作）。
+
+#### 下一步建议
+
+1. 上线前人工检查审计中心四个标签页的视觉与交互（暗色 / 窄屏 / 空数据状态）。
+2. 在目标服务器验证容器内存上限下的百分比、告警颜色与 Worker 失联提示。
+3. 如需长期运行，评估 `audit_logs` 容量与索引成本，另行设计归档策略。
+4. 如部署反向代理，增加可信代理白名单后再启用 `X-Forwarded-For`。
+
 ### 2026-11-12 用户登录与账号隔离（阶段 A，ADR-007）
 
 #### 任务目标
@@ -4616,3 +4685,33 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   5. 任务队列为单队列 FIFO、无按用户配额与公平调度；20 个用户同时提交时先到先得。
   6. Issue 编号待用户回填。
 - **下一步建议**：1) 用户提交分支并重建镜像 / 出包；2) 在目标服务器按新版部署说明完成三服务部署，重点验收 §5.4 内存分配、Worker 并发与 20 路峰值；3) 用一条真实 24h 级大任务观察心跳、日志增量与内存曲线；4) 正向接入 Worker 单独立项。
+
+## 2026-11-13 审计中心重做为航空软件控制台风格（前端重设计，改动未提交）
+
+- **背景（用户提出）**：审计中心页面「无重点、日志可读性不高、信息分散」。两次尝试（重排原组件、深墨索引栏 + 纸面台账）分别被判定「还是很丑」「风格过于怪异，都是 PPT 风格」，要求符合航空应用软件气质，并让图表更美观、刻度正确。本次放弃独立视觉体系，回到平台既有设计语言重做，同时重写图表。
+- **实现方式**：
+  1. 视觉沿用平台控制台风格：蓝色渐变页头、`#f8fafc` 页面底色、白色面板 + 1px 边框 + 12px 圆角 + 轻阴影、`#0066cc` 主色、系统无衬线字体、常规企业表格 / 表单 / 胶囊状态。页头为「审计中心」标题 + 日期与留痕状态，下方是白底标签栏（栏目 + 统计范围 + 刷新）。
+  2. 概览：四张指标卡（审计记录 / 登录失败 / 操作失败 / 活跃账号），失败卡可点击下钻到已过滤的日志；事件趋势为堆叠柱状图（蓝 = 成功、红 = 失败），右侧为事件构成、最近记录表、高频模块与操作角色条形表。
+  3. 图表刻度重写：Y 轴只落在 1 / 2 / 2.5 / 5 的整数倍上，计数类图表强制整数刻度（不再出现「0.5 条事件」）；折线 / 面积图改为 5 等分，20% 左右的读数落在 0–25% 坐标上而不是挤在 0–40% 底部；百分比轴最小 1% 步长，避免低占用率被取整成一串重复的 0%；全零数据给出 0–5 的完整刻度。事件趋势按数据量自动聚合为每小时 / 每 6 小时 / 每天，横轴刻度严格等距（不在末尾补点）、数量随图表宽度收缩，刻度文字居中对准刻度线；显式绘制网格线、坐标轴线、刻度短线，坐标文字统一 10.5px。
+  4. 日志页：白卡筛选区（关键词 + 查询、时间 / 结果 / 角色 + 更多筛选 / 重置）+ 日志面板；表格按天插入分隔行，失败行左侧红色内嵌竖线，结果用胶囊标签；保留服务端分页与「第 N 页 / 共 N 条」。
+  5. 详情抽屉：白色右侧面板，标题 + 结果标签、摘要、记录信息字段表、失败原因与业务明细；保留 Esc 关闭、焦点转移与滚动锁定。
+  6. 系统运行：健康结论条（左侧 4px 状态色）、四条资源刻度（75% / 90% 阈值刻度，未设置限额时显示「—」而不是虚构百分比）、四项读数、三张趋势图、任务进程 / 账号资源表、依赖探活与 Worker 名录；保留 5 秒轮询（页面隐藏时暂停）。
+  7. 响应式：≤1180 概览双栏收窄；≤1024 指标两列、双栏改单栏；≤900 审计页头单独把平台页头压回单行（隐藏导航、缩小状态胶囊），标签栏转为上下两行；≤600 指标两列、最近记录隐藏「类别」列并让事件列省略号截断（不再横向裁切）、抽屉全宽；≤420 指标单列；宽表始终在 `audit-table-wrap` 内横向滚动。补充 `focus-visible` 焦点样式与 `prefers-reduced-motion` 处理。
+  8. 角色与路由规则未改：`/audit` 仍只对审计管理员开放，系统管理员仍被重定向，审计管理员仍无法进入业务页面；后端接口、权限与数据口径零改动。
+- **修改文件**：`frontend/src/pages/AuditPage.tsx`、`frontend/src/components/audit/AuditOverview.tsx`、`AuditLogExplorer.tsx`、`AuditFilters.tsx`、`AuditDetailDrawer.tsx`、`Charts.tsx`、`SystemMonitor.tsx`、`format.ts`（新增日志摘要去重显示）、`audit.css`（整体重写）、`CHANGELOG.md`、本 log。
+- **新增文件**：无。
+- **删除文件**：`frontend/src/components/audit/AuditEntryRow.tsx`（台账专用组件，重做后不再使用）。
+- **验证方式与结果**：
+  1. `cd frontend && npx tsc --noEmit` → 无错误（**已验证**）。
+  2. `cd frontend && npm run build`（tsc + vite）→ 通过，仅有既有 chunk 体积提示（**已验证**）。
+  3. 重建并重启前端容器（`docker compose build frontend && docker compose up -d frontend`）→ 启动正常（**已验证**）。
+  4. 用无头 Chrome + CDP 注入审计管理员身份与示例审计数据（不创建临时审计账号、不写永久审计日志），在 1440 / 1180 / 980 / 760 / 560 五个宽度截图核对概览、登录记录、操作记录、系统运行、详情抽屉与下钻；`document.scrollWidth` 均等于视口宽度，控制台无错误（**已验证，数据为示例数据**）。窄屏宽表在自身容器内滚动。
+  5. 概览下钻：点击「登录失败」后自动切到登录记录，时间预设「最近 24 小时」、结果「失败」，列表只返回失败登录（**已验证**）。
+  6. 图表刻度：趋势图 Y 轴为 0 / 5 / 10 / 15 / 20 的整数刻度，横轴 1440 宽度 6 个刻度（每 4 小时）、560 宽度 4 个刻度（每 6 小时），间距相等、文字居中对准刻度线；系统页内存趋势为 0–25%（5% 步长）、CPU 趋势为 0–50%（10% 步长）、任务并发为 0–5（整数）；把并发数据临时全置 0 后纵轴仍为 0–5 个且无重复刻度（**已验证**）。
+  7. 560 宽度下最近记录表完整显示（隐藏类别列、事件省略号），系统运行的任务进程表在 `audit-table-wrap` 内横向滚动（`scrollWidth 860` vs 容器 `510`），页面本身无横向溢出（**已验证**）。
+  8. 真实审计账号登录后的页面**尚未验证**：验证过程未创建审计账号，避免留下无法删除的登录审计记录；后端接口字段未改动，风险主要在视觉层。
+- **遗留问题**：
+  1. 改动未提交；需用户确认视觉后自行提交。
+  2. 示例数据覆盖了主要字段，但真实数据的极端值（超长摘要 / 失败原因 / 720 点范围、空结果）仍建议用真实审计账号走查一次。
+  3. 760 / 560 宽度下操作记录表仍需横向滚动查看「结果」等右侧列（有意保留，不压缩列宽）。
+- **下一步建议**：1) 用户在审计管理员账号下走查概览、失败下钻、日志筛选、详情与系统运行；2) 确认后提交前端改动；3) 若移动端成为长期使用场景，再单独评估日志表的卡片化展示。

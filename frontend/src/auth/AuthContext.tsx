@@ -20,7 +20,8 @@ interface AuthContextValue {
   user: AuthUser | null
   /** 首次会话恢复（getMe）是否仍在进行 */
   loading: boolean
-  login: (username: string, password: string) => Promise<void>
+  /** 登录成功后返回当前用户，便于按角色决定落地页 */
+  login: (username: string, password: string) => Promise<AuthUser>
   logout: () => Promise<void>
   refresh: () => Promise<void>
 }
@@ -57,7 +58,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (username: string, password: string) => {
     await loginV4(username, password)
-    setUser(await getMeV4())
+    const me = await getMeV4()
+    if (!me) throw new Error('登录状态未能建立，请重试')
+    setUser(me)
+    return me
   }, [])
 
   const logout = useCallback(async () => {

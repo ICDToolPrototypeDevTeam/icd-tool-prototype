@@ -25,12 +25,17 @@ from pymongo.errors import PyMongoError
 load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
 from app.api.v4.router import router as v4_router
+from app.audit.writer import start_audit_writer, stop_audit_writer
 from app.auth.db import close_db, init_db
-from app.auth.seed import ensure_admin_seed
+from app.auth.seed import ensure_admin_seed, ensure_user_roles
 from app.execution.config import (
     config_snapshot,
     use_celery,
     validate_celery_runtime,
+)
+from app.execution.metrics import (
+    start_api_metrics_sampler,
+    stop_api_metrics_sampler,
 )
 from app.job_log import install_log_tee, set_config_lines
 from app.job_manager import job_manager
@@ -57,9 +62,14 @@ async def lifespan(app: FastAPI):
     try:
         await init_db()
         await ensure_admin_seed()
+        # 历史账号没有 role 字段：按 is_superuser 回填并同步，保证权限判断一致。
+        await ensure_user_roles()
     except Exception as e:  # noqa: BLE001
         print(f'[auth] init failed: {type(e).__name__}: {e}', file=sys.stderr)
         raise
+    # 审计日志异步写入器（fail-open）与 API 容器指标采样（5 秒一次）。
+    start_audit_writer()
+    start_api_metrics_sampler()
     # Celery 模式自检：缺依赖只告警（history 等只读接口仍可用），
     # 真正提交任务时 dispatcher 会返回 503 并在任务日志里说明原因。
     if use_celery():
@@ -87,6 +97,9 @@ async def lifespan(app: FastAPI):
     yield
     if reaper_stop is not None:
         reaper_stop.set()
+    # 先停采样与审计写入，再关 Mongo：写入器最后一批日志仍需要数据库。
+    await stop_api_metrics_sampler()
+    await stop_audit_writer()
     await close_db()
 
 

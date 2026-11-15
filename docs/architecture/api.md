@@ -21,10 +21,10 @@ API 设计应遵守以下原则：
 | `/api/v4/health`                               | `GET`  | 后端健康检查（含 MongoDB 可用性；未登录可访问） |
 | `/api/v4/auth/login`                           | `POST` | 用户名 + 密码登录，下发 HttpOnly Cookie |
 | `/api/v4/auth/logout`                          | `POST` | 退出登录并清除 Cookie |
-| `/api/v4/auth/me`                              | `GET`  | 当前登录用户（`id` / `username` / `is_admin`） |
-| `/api/v4/admin/users`                          | `GET`  | 管理员查询全部账号 |
-| `/api/v4/admin/users`                          | `POST`  | 管理员创建账号（请求字段 `is_admin`） |
-| `/api/v4/admin/users/{user_id}`                | `PATCH` | 管理员重置密码 / 禁用启用 / 设置取消管理员（请求字段 `is_superuser`） |
+| `/api/v4/auth/me`                              | `GET`  | 当前登录用户（`id` / `username` / `is_admin` / `role` / `role_label` / `is_auditor`） |
+| `/api/v4/admin/users`                          | `GET`  | 管理员查询全部账号（含 `role` / `role_label` / `is_auditor`） |
+| `/api/v4/admin/users`                          | `POST`  | 管理员创建账号（三值角色 `role`；兼容旧字段 `is_admin`） |
+| `/api/v4/admin/users/{user_id}`                | `PATCH` | 管理员重置密码 / 禁用启用 / 修改角色（`role`；兼容旧字段 `is_superuser`） |
 | `/api/v4/coverage-analysis`                    | `POST` | 上传输入文件并创建 V4 反向管线任务               |
 | `/api/v4/completeness-analysis`                | `POST` | 上传输入文件并创建 V4 正向完整性分析任务（Celery 模式下 503，见第 18 节） |
 | `/api/v4/jobs`                                 | `GET`  | 查询未完成/中断任务列表（可选 `status`、`task_type` 过滤） |
@@ -50,10 +50,16 @@ API 设计应遵守以下原则：
 | `/api/v4/hlr-schemas/{schema_id}`              | `DELETE` | 删除自定义样式（内置模板只读） |
 | `/api/v4/hlr-schemas/scan`                     | `POST` | 扫描上传 .docx 的表格结构（不调用 LLM） |
 | `/api/v4/hlr-schemas/preview`                  | `POST` | 用指定样式试解析 .docx（不调用 LLM） |
+| `/api/v4/audit/logs`                           | `GET`  | 审计日志查询（登录日志 / 操作日志，服务端分页与筛选，第 19 节） |
+| `/api/v4/audit/logs/{log_id}`                  | `GET`  | 单条审计日志详情（含业务明细与原始 User-Agent） |
+| `/api/v4/audit/meta`                           | `GET`  | 审计筛选词表（模块 / 动作 / 角色 / 结果，均为中文标签） |
+| `/api/v4/audit/overview`                       | `GET`  | 审计概览统计（累计数、按小时趋势、模块 / 角色分布） |
+| `/api/v4/audit/system`                         | `GET`  | 系统运行状态（容器资源、任务进程、队列、依赖与告警） |
+| `/api/v4/audit/system/history`                 | `GET`  | 系统运行趋势回看（内存 / CPU / 运行任务数） |
 
 `{model}` ∈ `{deepseek, minimax, qwen}`。
 
-除 `GET /api/v4/health` 与 `POST /api/v4/auth/login` 外，本版所有接口都要求登录；任务级接口再按归属校验。完整权限矩阵、Cookie 参数与 401/403/404/503 语义见第 17 节。
+除 `GET /api/v4/health` 与 `POST /api/v4/auth/login` 外，本版所有接口都要求登录；任务级接口再按归属校验。审计中心接口（`/api/v4/audit/*`）仅审计管理员可用，系统管理员与业务用户返回 403。完整权限矩阵、Cookie 参数与 401/403/404/503 语义见第 17 节。
 
 任务执行模式由后端环境变量 `JOB_EXECUTOR` 决定（`celery` 为生产部署，`inline` 仅测试/回滚）。Celery 模式下同一套接口路径与请求/响应字段不变，但任务由独立 Worker 进程执行，新增的 503（控制面/队列不可用、正向未启用）与 409（Worker 仍在执行）语义见第 18 节。
 
@@ -1038,28 +1044,33 @@ Content-Type: multipart/form-data
 
 ### 17.1 权限矩阵
 
-| 资源 / 接口 | 未登录 | 普通用户 | 管理员 |
-| --- | --- | --- | --- |
-| `GET /api/v4/health` | 允许 | 允许 | 允许 |
-| `POST /api/v4/auth/login` | 允许 | 允许 | 允许 |
-| `POST /api/v4/auth/logout`、`GET /api/v4/auth/me` | 拒绝（401） | 本人 | 本人 |
-| `POST /api/v4/coverage-analysis`、`POST /api/v4/completeness-analysis` | 拒绝（401） | 允许 | 允许 |
-| `GET /api/v4/jobs` | 拒绝（401） | 仅本人 | 全部 |
-| `GET /api/v4/jobs/{job_id}`、`/result`、`/logs`、`/logs/download` | 拒绝（401） | 仅本人 | 全部 |
-| `POST /api/v4/jobs/{job_id}/resume`、`/abandon`、`/cancel`、`/force-cancel` | 拒绝（401） | 仅本人 | 全部 |
-| `/api/v4/jobs/{job_id}/outputs/*`、`/intermediates/reverse-matches` | 拒绝（401） | 仅本人 | 全部 |
-| `GET /api/v4/history` | 拒绝（401） | 仅本人 | 全部 |
-| `POST /api/v4/history/delete` | 拒绝（401） | 拒绝（403） | 允许 |
-| `GET /api/v4/settings`、`PUT /api/v4/settings` | 拒绝（401） | 拒绝（403） | 允许 |
-| `GET /api/v4/hlr-schemas`、`POST /api/v4/hlr-schemas/scan`、`POST /api/v4/hlr-schemas/preview` | 拒绝（401） | 允许 | 允许 |
-| `POST /api/v4/hlr-schemas`、`PUT/DELETE /api/v4/hlr-schemas/{schema_id}` | 拒绝（401） | 拒绝（403） | 允许 |
-| `/api/v4/admin/users*` | 拒绝（401） | 拒绝（403） | 允许 |
+角色三值：`user`（业务用户）、`admin`（系统管理员）、`auditor`（审计管理员）。系统管理员**不能**进入审计中心；审计管理员**只能**使用审计中心，业务接口一律 403。
+
+| 资源 / 接口 | 未登录 | 业务用户 | 系统管理员 | 审计管理员 |
+| --- | --- | --- | --- | --- |
+| `GET /api/v4/health` | 允许 | 允许 | 允许 | 允许 |
+| `POST /api/v4/auth/login` | 允许 | 允许 | 允许 | 允许 |
+| `POST /api/v4/auth/logout`、`GET /api/v4/auth/me` | 拒绝（401） | 本人 | 本人 | 本人 |
+| `POST /api/v4/coverage-analysis`、`POST /api/v4/completeness-analysis` | 拒绝（401） | 允许 | 允许 | 拒绝（403） |
+| `GET /api/v4/jobs` | 拒绝（401） | 仅本人 | 全部 | 拒绝（403） |
+| `GET /api/v4/jobs/{job_id}`、`/result`、`/logs`、`/logs/download` | 拒绝（401） | 仅本人 | 全部 | 拒绝（403） |
+| `POST /api/v4/jobs/{job_id}/resume`、`/abandon`、`/cancel`、`/force-cancel` | 拒绝（401） | 仅本人 | 全部 | 拒绝（403） |
+| `/api/v4/jobs/{job_id}/outputs/*`、`/intermediates/reverse-matches` | 拒绝（401） | 仅本人 | 全部 | 拒绝（403） |
+| `GET /api/v4/history` | 拒绝（401） | 仅本人 | 全部 | 拒绝（403） |
+| `POST /api/v4/history/delete` | 拒绝（401） | 拒绝（403） | 允许 | 拒绝（403） |
+| `GET /api/v4/settings`、`PUT /api/v4/settings` | 拒绝（401） | 拒绝（403） | 允许 | 拒绝（403） |
+| `GET /api/v4/hlr-schemas`、`POST /api/v4/hlr-schemas/scan`、`POST /api/v4/hlr-schemas/preview` | 拒绝（401） | 允许 | 允许 | 拒绝（403） |
+| `POST /api/v4/hlr-schemas`、`PUT/DELETE /api/v4/hlr-schemas/{schema_id}` | 拒绝（401） | 拒绝（403） | 允许 | 拒绝（403） |
+| `/api/v4/admin/users*` | 拒绝（401） | 拒绝（403） | 允许 | 拒绝（403） |
+| `/api/v4/audit/logs*`、`/audit/meta`、`/audit/overview`、`/audit/system*` | 拒绝（401） | 拒绝（403） | 拒绝（403） | 允许 |
 
 约定：
 
 - **任务归属**：`owner_id`（`str(User._id)`）是权限判断键；`owner_username` 仅用于展示。任务不存在、无归属或归属不是当前用户时统一返回 **404**，不区分“不存在”与“无权访问”。
-- **未归属任务**：升级前已存在的任务目录、CLI 任务与 manifest 损坏的目录只对管理员可见、可下载、可删除。
-- **管理员**：可访问全部账号的任务与历史，包括无归属任务。
+- **未归属任务**：升级前已存在的任务目录、CLI 任务与 manifest 损坏的目录只对系统管理员可见、可下载、可删除。
+- **系统管理员**：可访问全部账号的任务与历史，包括无归属任务；不能访问审计中心。
+- **审计管理员**：可查看全部登录日志、操作日志与系统运行状态；不能调用任何业务接口，也不能查看账号列表。
+- **审计日志查询**：只读接口，不记录查询行为本身；审计日志无删除接口，默认永久保留。
 - **MongoDB 不可用**：受保护接口返回 **503** `{"detail": "database unavailable"}`；`GET /health` 同样返回 503。
 
 ### 17.2 登录 / 登出 / 当前用户
@@ -1102,9 +1113,18 @@ GET /api/v4/auth/me
 需登录；未登录 → **401**。预期返回：
 
 ```json
-{ "id": "<user _id>", "username": "zhangsan", "is_admin": false }
+{
+  "id": "<user _id>",
+  "username": "zhangsan",
+  "is_admin": false,
+  "role": "user",
+  "role_label": "业务用户",
+  "is_auditor": false
+}
 ```
 
+- `role` ∈ `user` / `admin` / `auditor`；`role_label` 为对应中文标签；
+- `is_admin` 仅在 `role=admin` 时为 `true`；`is_auditor` 仅在 `role=auditor` 时为 `true`；
 - `username` 对应存储中的小写用户名；接口不暴露 `email`、密码哈希等内部字段；
 - 登录标识只支持用户名（大小写不敏感），不支持邮箱登录；
 - 账号被禁用后，下一次请求即被拒绝（401），不依赖 JWT 过期；
@@ -1113,7 +1133,7 @@ GET /api/v4/auth/me
 
 ### 17.3 管理员账号管理
 
-以下接口仅管理员可用；普通用户 → **403**，未登录 → **401**。
+以下接口仅系统管理员可用；业务用户与审计管理员 → **403**，未登录 → **401**。
 
 ```text
 GET /api/v4/admin/users
@@ -1127,6 +1147,9 @@ GET /api/v4/admin/users
   "username": "zhangsan",
   "is_active": true,
   "is_superuser": false,
+  "role": "user",
+  "role_label": "业务用户",
+  "is_auditor": false,
   "created_at": "ISO-8601"
 }
 ```
@@ -1135,11 +1158,13 @@ GET /api/v4/admin/users
 POST /api/v4/admin/users
 Content-Type: application/json
 
-{ "username": "zhangsan", "password": "<至少 8 位>", "is_admin": false }
+{ "username": "zhangsan", "password": "<至少 8 位>", "role": "user" }
 ```
 
 - 成功 → **201** + 账号项（结构同上）；
-- **创建请求使用 `is_admin`**（不是 `is_superuser`）；`username` 1–64 字符且不含空白，密码 8–128 字符；
+- `role` ∈ `user` / `admin` / `auditor`，省略时默认 `user`；创建审计管理员时传 `"role": "auditor"`；
+- 兼容旧前端：只传 `is_admin: true` 等价于 `role: "admin"`；同时传 `role` 与 `is_admin` 且含义冲突 → 422；
+- `username` 1–64 字符且不含空白，密码 8–128 字符；
 - 用户名重复（忽略大小写）→ **409**；
 - 用户名统一转小写存储；创建后不可修改。
 
@@ -1147,11 +1172,12 @@ Content-Type: application/json
 PATCH /api/v4/admin/users/{user_id}
 Content-Type: application/json
 
-{ "password": "<新密码，可选>", "is_active": false, "is_superuser": true }
+{ "password": "<新密码，可选>", "is_active": false, "role": "auditor" }
 ```
 
 - 三个字段均可选，只提交需要变更的字段；成功 → **200** + 账号项；
-- **更新请求使用 `is_superuser`**（与创建请求的 `is_admin` 不同，注意区分）；
+- `role` 修改后即时生效，`is_superuser` 同步为 `role == "admin"`；
+- 兼容旧前端：`is_superuser: true` 等价于 `role: "admin"`；`is_superuser: false` 会把系统管理员降为业务用户，审计管理员保持 `auditor`；
 - 重置密码不需要旧密码；
 - 用户不存在或 `user_id` 非法 → **404**；
 - 禁用 / 降级最后一个活跃管理员 → **409**（系统必须始终保留至少一个活跃管理员）；
@@ -1212,3 +1238,162 @@ Content-Type: application/json
 Celery 模式下正向完整性分析未接入 Worker：`POST /completeness-analysis` 与正向任务的 `resume` 返回 503，前端入口保留可见。
 
 `FORWARD_PIPELINE_ENABLED=1` 可显式放开该拦截，但**当前部署不要设置**：放开后正向任务仍走 API 进程内的 `job_scheduler` 线程池（不经 Redis / Worker），会占用 API 进程资源，与「20 并发长任务在 Worker 执行」的部署假设冲突。inline 模式下未配置该变量时正向默认可用，与历史行为一致。
+
+## 19. 审计中心接口（审计管理员）
+
+以下接口仅审计管理员（`role=auditor`）可用；系统管理员、业务用户 → **403**，未登录 → **401**。设计背景见 `docs/decisions/ADR-009-审计管理员与审计日志.md`。
+
+审计日志写入 MongoDB `audit_logs` 集合，**永久保留、不提供删除接口**；查询接口本身不写审计日志（否则每看一次日志就多一条日志）。日志在落库时已把模块、动作、角色、结果等英文代码翻译成中文标签，前端直接展示。
+
+### 19.1 查询审计日志
+
+```text
+GET /api/v4/audit/logs
+```
+
+查询参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `start`、`end` | ISO-8601 时间范围；省略时默认最近 7 天 |
+| `category` | `login`（登录日志） / `operation`（操作日志） |
+| `module` | 操作模块（`auth` / `users` / `jobs` / `outputs` / `history` / `settings` / `hlr`） |
+| `action` | 操作动作（如 `task_create`、`history_delete`），词表见 `/audit/meta` |
+| `result` | `success` / `failure` |
+| `actor` | 操作人账号，模糊匹配（忽略大小写） |
+| `role` | 操作人角色：`user` / `admin` / `auditor` / `anonymous` / `system` |
+| `ip` | IP 地址，模糊匹配 |
+| `keyword` | 关键词，对日志所有可见内容做全文匹配 |
+| `page`、`page_size` | 服务端分页，默认 1 / 20，`page_size` 上限 100 |
+
+响应：
+
+```json
+{
+  "items": [
+    {
+      "id": "<log _id>",
+      "ts": "ISO-8601（UTC）",
+      "category": "operation",
+      "category_label": "操作日志",
+      "module": "jobs",
+      "module_label": "任务管理",
+      "action": "task_cancel",
+      "action_label": "终止任务",
+      "action_type": "control",
+      "action_type_label": "任务控制",
+      "actor_username": "zhangsan",
+      "actor_role": "user",
+      "actor_role_label": "业务用户",
+      "target_type": "job",
+      "target_id": "<job_id>",
+      "target_label": "正确性分析任务",
+      "summary": "终止任务「正确性分析任务」",
+      "result": "success",
+      "result_label": "成功",
+      "error": null,
+      "duration_ms": 12,
+      "ip": "172.18.0.1",
+      "client": "Chrome 120 / Windows 10/11",
+      "request_method": "POST",
+      "request_path": "/api/v4/jobs/<job_id>/cancel"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "page_size": 20
+}
+```
+
+- 时间统一按 UTC 存储，前端按 `Asia/Shanghai` 展示；
+- 登录失败只记录服务端原因（如「密码错误」「账号不存在」「账号已被禁用」），客户端始终只收到统一的 400「用户名或密码错误」；
+- 不记录密码、JWT / Cookie、API Key 或上传文件内容；
+- IP 取直连地址 `request.client.host`，当前不解析 `X-Forwarded-For`（未引入可信代理配置）。
+
+### 19.2 日志详情
+
+```text
+GET /api/v4/audit/logs/{log_id}
+```
+
+在列表字段基础上增加：
+
+- `detail`：业务明细键值对（键与值均为中文，如 `{"账号": "zhangsan", "角色": "业务用户", "账号状态": "启用"}`）；
+- `user_agent`：原始 User-Agent（仅供排查）。
+
+`log_id` 非法或不存在 → **404**。
+
+### 19.3 筛选词表
+
+```text
+GET /api/v4/audit/meta
+```
+
+返回 `categories`、`modules`、`actions`（含所属 `module`）、`roles`、`results`、`time_presets`，每项为 `{value, label}`。词表与日志标签来自同一份 `app/audit/catalog.py`，新增埋点时先登记词表。
+
+### 19.4 审计概览
+
+```text
+GET /api/v4/audit/overview?hours=24
+```
+
+`hours` ∈ `[1, 168]`，默认 24。返回：
+
+- `totals`：`total`、`login_success`、`login_failure`、`operation_success`、`operation_failure`、`unique_actors`、`active_users_30m`、`running_jobs`；
+- `by_hour`：按小时（`Asia/Shanghai`）补齐的 `{hour, total, failure}` 序列；
+- `by_module` / `by_role`：`{value, label, count}` 列表；
+- `recent`：最近 8 条事件（结构同 19.1 列表项）。
+
+### 19.5 系统运行状态
+
+```text
+GET /api/v4/audit/system
+```
+
+返回容器级快照，用于判断系统当前运行情况：
+
+| 字段 | 说明 |
+| --- | --- |
+| `health` | `{level: ok/warning/critical, label, reasons[]}`，级别取所有告警中的最高级 |
+| `api` | API 容器：PID、主机名、RSS、CPU、线程数、运行时长、内存 `{used_bytes, limit_bytes, percent, source}`、可用核数、子进程列表 |
+| `workers` | Worker 容器列表（结构同上，另含 `pool_size` 与子进程） |
+| `worker_summary` | Worker 在线状态、数量、并发池、运行任务数、合计 RSS / CPU / 内存 |
+| `queue` | `{length, running, concurrency}`；Redis 不可用时为 `null` |
+| `disk` | `/app/output` 所在文件系统的 `{used_bytes, limit_bytes, percent, source}` |
+| `processes` | 当前运行任务：`job_id`、归属账号、任务类型、状态、PID、RSS、CPU、开始时间、运行时长、阶段、Worker 主机名 |
+| `users` | 按账号聚合的运行任务数、RSS、CPU |
+| `dependencies` | `redis` / `mongo` 的 `{ok, latency_ms, label}` |
+| `mode` | 当前执行模式：`celery` / `inline` |
+
+告警阈值（容器级，不跨容器相加）：
+
+| 指标 | 告警 | 严重 |
+| --- | --- | --- |
+| 容器内存使用率 | ≥ 75% | ≥ 90% |
+| 容器 CPU 使用率 | ≥ 85% | ≥ 95% |
+| 结果目录磁盘使用率 | ≥ 80% | ≥ 90% |
+| Worker 心跳 | — | 超过 15 秒未更新 |
+| Redis / MongoDB | — | 不可用 |
+
+- 没有 cgroup 内存限额时（例如本地 compose 未设置 `mem_limit`），`percent` 为 `null`，只展示已用字节，不虚构百分比；
+- 磁盘口径是宿主机数据盘，不是容器配额；
+- 单个任务进程只展示 RSS / CPU 参考值，不设独立告警阈值；
+- Redis 不可用时返回「指标不可用」，不判定 Worker 离线。
+
+### 19.6 系统运行趋势
+
+```text
+GET /api/v4/audit/system/history?minutes=30
+```
+
+`minutes` ∈ `[1, 60]`，默认 30。返回 `{available, warning?, points[]}`；每个点包含 `ts`、API / Worker 的 RSS、CPU、内存百分比与运行任务数。历史点由 Worker 指标上报线程每 5 秒追加，Redis 保留最近 1 小时（720 点）；Redis 不可用时 `available=false` 并给出 `warning`。
+
+### 19.7 错误响应
+
+| 场景 | 状态码 |
+| --- | --- |
+| 未登录 | 401 |
+| 非审计管理员（含系统管理员） | 403 `{"detail": "需要审计管理员权限"}` |
+| 日志不存在 / `log_id` 非法 | 404 |
+| MongoDB 不可用 | 503（审计查询依赖 Mongo） |
+| Redis 不可用 | 系统状态接口仍返回 200，相关字段为 `null` / `available=false` |

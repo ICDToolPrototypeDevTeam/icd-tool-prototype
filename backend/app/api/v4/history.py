@@ -25,11 +25,12 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from app.api.v4.runner import (
@@ -47,9 +48,12 @@ from app.api.v4.schemas import (
     V4HistoryOutputs,
     V4TokenUsage,
 )
+from app.audit import catalog
+from app.audit.service import elapsed_ms, record_event
 from app.auth.access import is_valid_job_id, require_job_access
 from app.auth.deps import current_admin, current_user
 from app.auth.models import User
+from app.auth.roles import is_admin
 from app.job_log import LOG_FILE_NAME, job_log_store
 from app.job_manager import MANIFEST_NAME, Job, JobStatus, job_manager
 from app.v4.config import get_output_root
@@ -252,7 +256,7 @@ def list_history(user: User = Depends(current_user)):
         return []
 
     entries = [_history_item(child) for child in root.iterdir() if child.is_dir()]
-    if not user.is_superuser:
+    if not is_admin(user):
         user_id = str(user.id)
         entries = [entry for entry in entries if entry[2] == user_id]
     entries.sort(key=lambda entry: entry[1], reverse=True)
@@ -270,7 +274,11 @@ def _log_download_name(job_id: str, path: Path) -> str:
 
 
 @router.get('/jobs/{job_id}/logs/download')
-def download_job_log(job_id: str, user: User = Depends(current_user)):
+def download_job_log(
+    job_id: str,
+    user: User = Depends(current_user),
+    request: Request = None,
+):
     """下载该次运行的 ``job.log``（stdout/stderr 全集，含失败堆栈与执行过程）。
 
     **磁盘口径**：不查内存登记表，因此进程重启后、任务失败 / 中断 / 被终止之后
@@ -281,6 +289,7 @@ def download_job_log(job_id: str, user: User = Depends(current_user)):
     归属校验先于路径解析与文件存在性判断：非本人 / 未归属任务统一 404。
     日志文件不存在（任务从未真正开始、目录已被删）→ 404；job_id 非法 → 400。
     """
+    started = time.perf_counter()
     require_job_access(job_id, user)
     path = _resolve_job_dir(job_id) / LOG_FILE_NAME
     if not path.is_file():
@@ -288,15 +297,37 @@ def download_job_log(job_id: str, user: User = Depends(current_user)):
             status_code=404,
             detail='job.log not found (job never started, or its dir was deleted)',
         )
+    filename = _log_download_name(job_id, path)
+    try:
+        size_text = catalog.format_bytes(path.stat().st_size)
+    except OSError:
+        size_text = '未知'
+    record_event(
+        request=request,
+        category=catalog.CATEGORY_OPERATION,
+        module='history',
+        action='log_download',
+        summary='下载任务运行日志',
+        user=user,
+        target_type='job',
+        target_id=job_id,
+        target_label='任务运行日志',
+        detail={'任务编号': job_id, '下载文件': filename, '文件大小': size_text},
+        duration_ms=elapsed_ms(started),
+    )
     return FileResponse(
         path=path,
-        filename=_log_download_name(job_id, path),
+        filename=filename,
         media_type='text/plain',
     )
 
 
 @router.get('/jobs/{job_id}/intermediates/reverse-matches')
-def view_reverse_matches(job_id: str, user: User = Depends(current_user)):
+def view_reverse_matches(
+    job_id: str,
+    user: User = Depends(current_user),
+    request: Request = None,
+):
     """浏览器内查看反向匹配中间产物 ``output/reverse_matches.json``（Step 3 匹配明细）。
 
     ADR-001 D7 原本不暴露 JSON 中间产物，并预留了「新开子路由」的开放方式；本路由
@@ -308,6 +339,7 @@ def view_reverse_matches(job_id: str, user: User = Depends(current_user)):
     文件不存在（正向任务、Step 3 未跑完、目录已被删）→ 404；job_id 非法 → 400
     （两道校验同日志下载，走同一个 ``_resolve_job_dir``）。
     """
+    started = time.perf_counter()
     require_job_access(job_id, user)
     path = _resolve_job_dir(job_id) / 'output' / _REVERSE_MATCHES_FILE
     if not path.is_file():
@@ -315,12 +347,31 @@ def view_reverse_matches(job_id: str, user: User = Depends(current_user)):
             status_code=404,
             detail='reverse_matches.json not found (forward job, or pipeline stopped before Step 3)',
         )
+    try:
+        size_text = catalog.format_bytes(path.stat().st_size)
+    except OSError:
+        size_text = '未知'
+    record_event(
+        request=request,
+        category=catalog.CATEGORY_OPERATION,
+        module='history',
+        action='reverse_matches_view',
+        summary='查看反向匹配明细',
+        user=user,
+        target_type='job',
+        target_id=job_id,
+        target_label='反向匹配明细',
+        detail={'任务编号': job_id, '文件大小': size_text},
+        duration_ms=elapsed_ms(started),
+    )
     return FileResponse(path=path, media_type='application/json')
 
 
 @router.post('/history/delete', response_model=V4HistoryDeleteResponse)
 def delete_history(
-    req: V4HistoryDeleteRequest, user: User = Depends(current_admin)
+    req: V4HistoryDeleteRequest,
+    user: User = Depends(current_admin),
+    request: Request = None,
 ):
     """硬删除历史结果：整目录 ``rmtree``，**含 ``input/`` 里用户上传的原文件**。
 
@@ -329,6 +380,7 @@ def delete_history(
     白名单 + 路径归属校验 → 批次内无运行中任务。单目录删除失败（权限、文件被
     占用）计入 ``failed``，不影响同批其它任务；返回体里带上每个任务释放的字节数。
     """
+    started = time.perf_counter()
     if not req.confirm:
         raise HTTPException(status_code=400, detail='confirm=true is required: deletion is irreversible')
     if not req.job_ids:
@@ -344,6 +396,23 @@ def delete_history(
 
     blocked = [job_id for job_id, _ in targets if _is_running(job_manager.get_job(job_id))]
     if blocked:
+        record_event(
+            request=request,
+            category=catalog.CATEGORY_OPERATION,
+            module='history',
+            action='history_delete',
+            summary=f'删除历史结果失败：{len(blocked)} 个任务仍在运行',
+            user=user,
+            target_type='history',
+            target_label=f'{len(targets)} 个历史任务',
+            detail={
+                '申请删除数': len(targets),
+                '运行中未删除': '、'.join(blocked[:20]),
+            },
+            result=catalog.RESULT_FAILURE,
+            error='存在运行中的任务，整批未删除',
+            duration_ms=elapsed_ms(started),
+        )
         raise HTTPException(
             status_code=409,
             detail=f'job still running, nothing deleted: {", ".join(blocked)}',
@@ -370,4 +439,28 @@ def delete_history(
         deleted.append(V4HistoryDeleteResult(job_id=job_id, freed_bytes=freed))
         print(f'[history] deleted job {job_id} dir={job_dir} freed={freed}B')
 
+    record_event(
+        request=request,
+        category=catalog.CATEGORY_OPERATION,
+        module='history',
+        action='history_delete',
+        summary=(
+            f'删除历史结果：成功 {len(deleted)} 个，失败 {len(failed)} 个，'
+            f'释放 {catalog.format_bytes(total_freed)}'
+        ),
+        user=user,
+        target_type='history',
+        target_label=f'{len(targets)} 个历史任务',
+        detail={
+            '申请删除数': len(targets),
+            '成功删除数': len(deleted),
+            '删除失败数': len(failed),
+            '释放空间': catalog.format_bytes(total_freed),
+            '成功任务': '、'.join(item.job_id for item in deleted[:20]) or '无',
+            '失败任务': '、'.join(item.job_id for item in failed[:20]) or '无',
+        },
+        result=catalog.RESULT_SUCCESS if not failed else catalog.RESULT_FAILURE,
+        error=f'{len(failed)} 个任务删除失败' if failed else None,
+        duration_ms=elapsed_ms(started),
+    )
     return V4HistoryDeleteResponse(deleted=deleted, failed=failed, total_freed_bytes=total_freed)

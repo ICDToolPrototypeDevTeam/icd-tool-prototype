@@ -2,6 +2,26 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-11-13
+
+### Added
+
+- **审计管理员角色与审计中心（ADR-009）**：账号角色由布尔管理员扩展为三值 `role`（`user` 业务用户 / `admin` 系统管理员 / `auditor` 审计管理员），`is_superuser` 保留兼容并由角色派生，历史账号启动时自动回填。职责分离：系统管理员不可进入审计中心（前后端 403），审计管理员只能使用审计中心（除登录 / 登出 / `/auth/me` / 健康检查外，业务接口一律 403）。新增 `backend/app/audit/`：`catalog.py` 中文词表（模块 / 动作 / 动作类型 / 角色 / 结果 / 任务类型 / profile / 模型）与 User-Agent 解析、`models.py`（MongoDB `audit_logs` 集合，6 个索引，永久保留）、`writer.py`（有界队列 20000 + 批量写入 100 条 / 0.5s，fail-open 不阻塞业务）、`service.py`（事件构造、查询、概览、词表）、`system.py`（容器资源 / 任务进程 / 队列 / 依赖健康 / 趋势）、`router.py`。新增接口 `GET /api/v4/audit/logs`、`/audit/logs/{id}`、`/audit/meta`、`/audit/overview`、`/audit/system`、`/audit/system/history`，仅审计管理员可访问。日志记录时间、IP、客户端、操作人 / 角色、模块、动作、操作类型、内容摘要、结果、对象、详情、错误与耗时，代码值同时保存中文标签；支持时间范围、类别、模块、动作、结果、操作人、角色、IP、中文关键词查询与服务端分页。登录成功 / 失败（原因只记服务端，客户端统一 400）、登出、账号创建 / 修改、任务创建 / 取消 / 终止 / 放弃 / 续跑、下载、设置与 HLR 样式变更均写审计。前端新增 `/audit` 页面（概览 / 登录日志 / 操作日志 / 系统运行四个标签页，明细抽屉、组合筛选、5s 轮询在页面隐藏时暂停），图表用纯 SVG / CSS 实现，未引入图表库。
+- **系统运行监控与 Redis 指标采集**：新增 `backend/app/execution/metrics.py`。API 进程每 5s 采样自身 cgroup 内存（v1/v2，扣除 `inactive_file`）与 CPU（按 quota / 宿主核数归一）写 `icd:metrics:api`（TTL 30s）；Celery Worker 后台线程每 5s 上报 `icd:metrics:worker:{hostname}`（TTL 20s）；采样点写入 `icd:metrics:history`（720 点 / 1 小时 TTL）形成趋势；Worker 认领任务后上报子进程 PID，审计接口按 `psutil` 读取任务 RSS / CPU 并按用户聚合。告警阈值：内存 75% / 90%、CPU 85% / 95%、磁盘 80% / 90%、Worker 心跳 15s、Redis / Mongo 不可用为严重；任务级指标只展示不设阈值。不挂载 `docker.sock`、不做宿主机级监控。
+
+### Changed
+
+- **登录路由改为自定义实现**：`/auth/login` 与 `/auth/logout` 不再直接挂载 fastapi-users 自带路由，改为 `OAuth2PasswordRequestForm` 自定义处理，以便记录审计日志；登录成功与失败均记录，失败原因（账号不存在 / 密码错误 / 账号被禁用）只写服务端，客户端仍统一返回 400，账号不存在时也做一次密码哈希以抵消响应时间差。
+- **管理接口兼容字段**：创建 / 更新账号接受 `role`，旧字段 `is_admin` / `is_superuser` 继续兼容（冲突 422）；仍禁止禁用或降级最后一个活跃管理员（409）。
+- **业务路由准入**：`api/v4/router.py` 对 coverage、completeness、jobs、outputs、history、settings、hlr_schemas 统一挂 `require_business_access`，审计管理员访问业务接口统一 403。
+- **API 响应新增字段**：`/auth/me` 与用户管理响应增加 `role` / `role_label` / `is_auditor`；旧字段保留不变。
+- **新增依赖**：`psutil>=6.1,<8`（审计中心系统运行页的容器 / 任务进程 RSS 与 CPU 采集）；需重建后端镜像。
+- **审计中心页面重做为平台控制台风格（仅前端展示）**：沿用蓝色页头、白底面板与常规企业表格，概览为四张指标卡（失败卡可下钻）+ 事件趋势堆叠柱状图 + 事件构成 + 最近记录 + 高频模块 / 操作角色；日志页为筛选卡 + 按天分组的表格 + 胶囊结果标签；详情为右侧抽屉；系统运行保留健康结论、资源刻度、读数、趋势图与进程 / Worker 名录。图表重写：Y 轴刻度只取 1 / 2 / 2.5 / 5 的整数倍，计数类强制整数刻度，百分比轴最小 1% 步长且全零数据也能给出 0–5 的完整刻度，折线图 5 等分使低占比读数不再挤在底部，事件趋势按数据量聚合为每小时 / 6 小时 / 天，横轴刻度严格等距、随宽度收缩并居中对准刻度线。窄屏下页头单行、指标两列、最近记录隐藏类别列并省略长事件，宽表在自身容器内横向滚动。接口、权限、审计记录字段与数据口径不变。
+
+### Fixed
+
+- **路由函数无法直接调用**：业务路由与认证路由中新增的 `request: Request` 参数改为末位可选参数（`request: Request = None`），恢复既有 pytest 直接调用路由函数的兼容性；FastAPI 运行时仍正常注入 `Request`。
+
 ## [Unreleased] - 2026-11-12
 
 ### Added
