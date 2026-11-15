@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
 import sys
 from pathlib import Path
 from typing import Optional
@@ -143,6 +145,15 @@ def run_reverse_job(self, job_id: str, run_token: str) -> None:
             file=sys.stderr,
         )
         return
+
+    try:
+        # 仅供审计中心展示「哪个 Worker 子进程在跑这个任务」；失败不影响执行。
+        ctl.set_process(os.getpid(), socket.gethostname())
+    except control.RedisUnavailable as exc:
+        print(
+            f"[worker] set process info failed for {job_id}: {exc}",
+            file=sys.stderr,
+        )
 
     def _on_cancel() -> None:
         job.cancel_requested = True

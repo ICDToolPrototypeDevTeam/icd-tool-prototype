@@ -5,6 +5,7 @@ from __future__ import annotations
 from beanie import init_beanie
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from app.audit.models import AuditLog
 from app.auth.config import AuthSettings, get_auth_settings
 from app.auth.models import User
 
@@ -24,7 +25,7 @@ async def init_db(settings: AuthSettings | None = None) -> None:
         await client.admin.command('ping')
         await init_beanie(
             database=client[settings.mongo_db],
-            document_models=[User],
+            document_models=[User, AuditLog],
         )
     except Exception:
         client.close()

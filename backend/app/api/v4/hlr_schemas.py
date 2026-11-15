@@ -15,9 +15,10 @@
 from __future__ import annotations
 
 import tempfile
+import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 
 from app.api.v4.coverage import ALLOWED_CONTROLLER_PROFILES
 from app.api.v4.schemas import (
@@ -28,6 +29,8 @@ from app.api.v4.schemas import (
     V4HLRSchemaScanResponse,
     V4HLRSchemaUpdate,
 )
+from app.audit import catalog
+from app.audit.service import elapsed_ms, record_event
 from app.auth.deps import current_admin, current_user
 from app.auth.models import User
 from app.v4 import hlr_schema_store as store
@@ -153,9 +156,12 @@ def list_hlr_schemas(
     '/hlr-schemas', response_model=V4HLRSchemaItem, status_code=201
 )
 def create_hlr_schema(
-    payload: V4HLRSchemaCreate, _user: User = Depends(current_admin)
+    payload: V4HLRSchemaCreate,
+    user: User = Depends(current_admin),
+    request: Request = None,
 ) -> V4HLRSchemaItem:
     """新建自定义样式（仅管理员）；样式配置非法 422，名称冲突 409。"""
+    started = time.perf_counter()
     try:
         schema = validate_schema_payload(payload.config)
         stored = store.create_custom_schema(payload.name, schema)
@@ -163,6 +169,19 @@ def create_hlr_schema(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except store.SchemaConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    record_event(
+        request=request,
+        category=catalog.CATEGORY_OPERATION,
+        module='hlr',
+        action='hlr_schema_create',
+        summary=f'新建 HLR 表格样式「{stored.name}」',
+        user=user,
+        target_type='hlr_schema',
+        target_id=stored.id,
+        target_label=stored.name,
+        detail={'样式编号': stored.id, '样式名称': stored.name},
+        duration_ms=elapsed_ms(started),
+    )
     return _item_from_stored(stored)
 
 
@@ -251,9 +270,16 @@ async def preview_hlr_schema(
 def update_hlr_schema(
     schema_id: str,
     payload: V4HLRSchemaUpdate,
-    _user: User = Depends(current_admin),
+    user: User = Depends(current_admin),
+    request: Request = None,
 ) -> V4HLRSchemaItem:
     """更新自定义样式（仅管理员）；内置模板只读（403），未知 ID 404。"""
+    started = time.perf_counter()
+    old_name: str | None = None
+    try:
+        old_name = store.get_custom_schema(schema_id).name
+    except Exception:  # noqa: BLE001 — 原值只用于审计展示，取不到不影响更新
+        old_name = None
     try:
         schema = validate_schema_payload(payload.config)
         stored = store.update_custom_schema(schema_id, payload.name, schema)
@@ -265,18 +291,55 @@ def update_hlr_schema(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except store.SchemaNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    detail = {'样式编号': stored.id, '样式名称': stored.name}
+    if old_name and old_name != stored.name:
+        detail['原名称'] = old_name
+    record_event(
+        request=request,
+        category=catalog.CATEGORY_OPERATION,
+        module='hlr',
+        action='hlr_schema_update',
+        summary=f'修改 HLR 表格样式「{stored.name}」',
+        user=user,
+        target_type='hlr_schema',
+        target_id=stored.id,
+        target_label=stored.name,
+        detail=detail,
+        duration_ms=elapsed_ms(started),
+    )
     return _item_from_stored(stored)
 
 
 @router.delete('/hlr-schemas/{schema_id}')
 def delete_hlr_schema(
-    schema_id: str, _user: User = Depends(current_admin)
+    schema_id: str,
+    user: User = Depends(current_admin),
+    request: Request = None,
 ) -> dict:
     """删除自定义样式（仅管理员）；内置模板只读（403），未知 ID 404。"""
+    started = time.perf_counter()
+    name: str | None = None
+    try:
+        name = store.get_custom_schema(schema_id).name
+    except Exception:  # noqa: BLE001 — 原值只用于审计展示
+        name = None
     try:
         store.delete_custom_schema(schema_id)
     except store.SchemaReadOnlyError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except store.SchemaNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    record_event(
+        request=request,
+        category=catalog.CATEGORY_OPERATION,
+        module='hlr',
+        action='hlr_schema_delete',
+        summary=f'删除 HLR 表格样式「{name or schema_id}」',
+        user=user,
+        target_type='hlr_schema',
+        target_id=schema_id,
+        target_label=name or schema_id,
+        detail={'样式编号': schema_id, '样式名称': name or '未知'},
+        duration_ms=elapsed_ms(started),
+    )
     return {"deleted": True}

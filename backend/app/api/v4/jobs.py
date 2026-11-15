@@ -11,9 +11,10 @@
 """
 from __future__ import annotations
 
+import time
 from typing import Optional, Union
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.v4.runner import (
     _merged_progress,
@@ -41,9 +42,12 @@ from app.api.v4.schemas import (
     V4JobStatusResponse,
     V4TokenUsage,
 )
+from app.audit import catalog
+from app.audit.service import elapsed_ms, record_event
 from app.auth.access import ensure_owner
 from app.auth.deps import current_user
 from app.auth.models import User
+from app.auth.roles import is_admin
 from app.execution import config as execution_config
 from app.execution import control as job_control
 from app.execution import dispatcher
@@ -119,6 +123,38 @@ def _job_log_path(job) -> Path:
     return Path(job_dir) / LOG_FILE_NAME
 
 
+def _record_job_action(
+    request: Request,
+    user: User,
+    action: str,
+    job: Job,
+    started: float,
+    *,
+    summary: Optional[str] = None,
+    detail: Optional[dict] = None,
+) -> None:
+    """记录任务控制类操作；失败不影响接口返回。"""
+    task_label = catalog.task_type_label(job.task_type)
+    record_event(
+        request=request,
+        category=catalog.CATEGORY_OPERATION,
+        module='jobs',
+        action=action,
+        summary=summary or f'{catalog.action_label(action)}（{task_label}）',
+        user=user,
+        target_type='job',
+        target_id=job.job_id,
+        target_label=task_label,
+        detail={
+            '任务编号': job.job_id,
+            '任务类型': task_label,
+            '任务状态': catalog.task_status_label(job.status.value),
+            **(detail or {}),
+        },
+        duration_ms=elapsed_ms(started),
+    )
+
+
 @router.get('/jobs', response_model=list[V4JobListItem])
 def list_v4_jobs(
     status: Optional[str] = None,
@@ -132,7 +168,7 @@ def list_v4_jobs(
     管理员看全部（未归属的遗留任务也包含在内）。
     """
     jobs = job_manager.list_jobs()
-    if not user.is_superuser:
+    if not is_admin(user):
         jobs = [j for j in jobs if j.owner_id == str(user.id)]
     if status:
         jobs = [j for j in jobs if j.status.value == status]
@@ -292,7 +328,11 @@ def get_v4_job_result(job_id: str, user: User = Depends(current_user)):
 
 
 @router.post('/jobs/{job_id}/resume', response_model=V4AnalyzeResponse)
-def resume_v4_job(job_id: str, user: User = Depends(current_user)):
+def resume_v4_job(
+    job_id: str,
+    user: User = Depends(current_user),
+    request: Request = None,
+):
     """继续一个被中断或被用户终止的任务。
 
     按 manifest 中落盘的参数快照重新执行整条管线（已上传的输入文件直接复用，
@@ -300,7 +340,9 @@ def resume_v4_job(job_id: str, user: User = Depends(current_user)):
     输入文件缺失 → 409，且任务状态保持不变。续跑前由 ``relaunch_from_manifest``
     复位取消标志，否则第一个检查点会立刻再次取消。
     """
+    started = time.perf_counter()
     job = _get_job(job_id, user)
+    previous_status = job.status.value
     if job.status not in (JobStatus.INTERRUPTED, JobStatus.CANCELED):
         raise HTTPException(
             status_code=409,
@@ -342,6 +384,18 @@ def resume_v4_job(job_id: str, user: User = Depends(current_user)):
     except dispatcher.QueueUnavailable as e:
         raise HTTPException(status_code=503, detail=str(e))
 
+    _record_job_action(
+        request,
+        user,
+        'task_resume',
+        job,
+        started,
+        summary='继续任务（重新运行分析流程）',
+        detail={
+            '操作前状态': catalog.task_status_label(previous_status),
+            '续跑方式': '按参数快照重新执行',
+        },
+    )
     return V4AnalyzeResponse(
         job_id=job.job_id,
         status=job.status.value,
@@ -350,7 +404,11 @@ def resume_v4_job(job_id: str, user: User = Depends(current_user)):
 
 
 @router.post('/jobs/{job_id}/abandon', response_model=V4AnalyzeResponse)
-def abandon_v4_job(job_id: str, user: User = Depends(current_user)):
+def abandon_v4_job(
+    job_id: str,
+    user: User = Depends(current_user),
+    request: Request = None,
+):
     """放弃一个被中断或被用户终止的任务；只改状态，不删除输入与中间产物。
 
     ``abandoned`` 是这套状态机里的**终态**：任务被中断/终止后，用户要么续跑，
@@ -365,7 +423,9 @@ def abandon_v4_job(job_id: str, user: User = Depends(current_user)):
     从未启动。放弃与工作线程出队之间没有锁，存在毫秒级竞态窗口（出队裁决刚通过
     即被放弃），此时任务会照常跑完并落 completed，无数据损坏。
     """
+    started = time.perf_counter()
     job = _get_job(job_id, user)
+    previous_status = job.status.value
     queued_unstarted = (
         job.status == JobStatus.PENDING and job.thread_ident is None
     )
@@ -398,6 +458,15 @@ def abandon_v4_job(job_id: str, user: User = Depends(current_user)):
             )
 
     job.update(JobStatus.ABANDONED, '用户已放弃继续')
+    _record_job_action(
+        request,
+        user,
+        'task_abandon',
+        job,
+        started,
+        summary='放弃任务（文件保留在输出目录）',
+        detail={'操作前状态': catalog.task_status_label(previous_status)},
+    )
     return V4AnalyzeResponse(
         job_id=job.job_id,
         status=job.status.value,
@@ -406,7 +475,11 @@ def abandon_v4_job(job_id: str, user: User = Depends(current_user)):
 
 
 @router.post('/jobs/{job_id}/cancel', response_model=V4AnalyzeResponse)
-def cancel_v4_job(job_id: str, user: User = Depends(current_user)):
+def cancel_v4_job(
+    job_id: str,
+    user: User = Depends(current_user),
+    request: Request = None,
+):
     """终止一个任务（协作式）。
 
     运行中的任务：只置取消标志，管线在下一个检查点（步骤开头 / 每个 case）抛出
@@ -423,7 +496,9 @@ def cancel_v4_job(job_id: str, user: User = Depends(current_user)):
     排队任务立即终止后的 ``canceled``），不是虚构的 ``canceling``：前端靠
     ``cancel_requested`` 展示「正在终止…」，避免再出现「同一个词表示两件事」的歧义。
     """
+    started = time.perf_counter()
     job = _get_job(job_id, user)
+    previous_status = job.status.value
     if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
         raise HTTPException(
             status_code=409,
@@ -441,6 +516,15 @@ def cancel_v4_job(job_id: str, user: User = Depends(current_user)):
             # Worker 已占用：只写控制面，由心跳/管线检查点消费；manifest 由
             # Worker 落 canceled。内存标记让本进程的响应立即显示「正在终止」。
             job.cancel_requested = True
+            _record_job_action(
+                request,
+                user,
+                'task_cancel',
+                job,
+                started,
+                summary='终止运行中的任务（等待检查点停止）',
+                detail={'操作前状态': catalog.task_status_label(previous_status)},
+            )
             return V4AnalyzeResponse(
                 job_id=job.job_id,
                 status=job.status.value,
@@ -448,6 +532,15 @@ def cancel_v4_job(job_id: str, user: User = Depends(current_user)):
             )
         # 未被占用：消息还在队列里，Worker 的 claim 会因 cancel 标志被拒绝
         job.update(JobStatus.CANCELED, '任务已被用户终止（排队等待期间，未开始执行）')
+        _record_job_action(
+            request,
+            user,
+            'task_cancel',
+            job,
+            started,
+            summary='终止排队中的任务（未开始执行）',
+            detail={'操作前状态': catalog.task_status_label(previous_status)},
+        )
         return V4AnalyzeResponse(
             job_id=job.job_id,
             status=job.status.value,
@@ -461,12 +554,30 @@ def cancel_v4_job(job_id: str, user: User = Depends(current_user)):
         # 但取消标志已置位，管线第一个检查点立刻再落回 canceled —— 两种时序
         # 都收敛到「未执行任何步骤即终止」。
         job.update(JobStatus.CANCELED, '任务已被用户终止（排队等待期间，未开始执行）')
+        _record_job_action(
+            request,
+            user,
+            'task_cancel',
+            job,
+            started,
+            summary='终止排队中的任务（未开始执行）',
+            detail={'操作前状态': catalog.task_status_label(previous_status)},
+        )
         return V4AnalyzeResponse(
             job_id=job.job_id,
             status=job.status.value,
             message='任务尚未开始执行，已直接终止（已产出文件保留）',
         )
 
+    _record_job_action(
+        request,
+        user,
+        'task_cancel',
+        job,
+        started,
+        summary='终止运行中的任务（等待检查点停止）',
+        detail={'操作前状态': catalog.task_status_label(previous_status)},
+    )
     return V4AnalyzeResponse(
         job_id=job.job_id,
         status=job.status.value,
@@ -475,7 +586,11 @@ def cancel_v4_job(job_id: str, user: User = Depends(current_user)):
 
 
 @router.post('/jobs/{job_id}/force-cancel', response_model=V4AnalyzeResponse)
-def force_cancel_v4_job(job_id: str, user: User = Depends(current_user)):
+def force_cancel_v4_job(
+    job_id: str,
+    user: User = Depends(current_user),
+    request: Request = None,
+):
     """强制终止一个运行中的任务（不等待检查点）。
 
     与 ``/cancel`` 的区别：``/cancel`` 只置标志，管线要跑到检查点才停；本接口
@@ -489,7 +604,9 @@ def force_cancel_v4_job(job_id: str, user: User = Depends(current_user)):
     排队等待中的任务同样可强制终止：无绑定线程可注入，直接落 ``canceled`` 终态，
     工作线程出队时跳过执行。
     """
+    started = time.perf_counter()
     job = _get_job(job_id, user)
+    previous_status = job.status.value
     if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
         raise HTTPException(
             status_code=409,
@@ -512,6 +629,18 @@ def force_cancel_v4_job(job_id: str, user: User = Depends(current_user)):
             JobStatus.CANCELED,
             '已强制终止：Worker 已收到终止指令（已产出文件保留，不支持续跑）',
         )
+        _record_job_action(
+            request,
+            user,
+            'task_force_cancel',
+            job,
+            started,
+            summary='强制终止运行中的任务',
+            detail={
+                '操作前状态': catalog.task_status_label(previous_status),
+                'Worker 是否已占用': '是' if claimed else '否',
+            },
+        )
         return V4AnalyzeResponse(
             job_id=job.job_id,
             status=job.status.value,
@@ -523,6 +652,18 @@ def force_cancel_v4_job(job_id: str, user: User = Depends(current_user)):
         )
 
     injected = job.force_cancel()
+    _record_job_action(
+        request,
+        user,
+        'task_force_cancel',
+        job,
+        started,
+        summary='强制终止运行中的任务',
+        detail={
+            '操作前状态': catalog.task_status_label(previous_status),
+            '是否中断执行线程': '是' if injected else '否',
+        },
+    )
     return V4AnalyzeResponse(
         job_id=job.job_id,
         status=job.status.value,

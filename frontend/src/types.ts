@@ -297,11 +297,17 @@ export type HlrSchemaPayload =
 
 // ========== Auth Types ==========
 
+/** 三值角色：业务用户 / 系统管理员 / 审计管理员。 */
+export type UserRole = 'user' | 'admin' | 'auditor'
+
 /** 当前登录用户（GET /api/v4/auth/me）。 */
 export interface AuthUser {
   id: string
   username: string
   is_admin: boolean
+  role: UserRole
+  role_label: string
+  is_auditor: boolean
 }
 
 /** 管理员用户管理列表项（GET /api/v4/admin/users，Task 9 使用）。 */
@@ -310,23 +316,250 @@ export interface AdminUser {
   username: string
   is_active: boolean
   is_superuser: boolean
+  role: UserRole
+  role_label: string
+  is_auditor: boolean
   created_at: string
 }
 
 /**
  * POST /api/v4/admin/users 请求体。
- * 注意：创建接口用 `is_admin`（后端 UserCreateRequest），
- * 更新接口用 `is_superuser`（后端 UserUpdateRequest），两者字段名不同。
+ * 新前端统一传 `role`；`is_admin` 仅为兼容旧调用保留。
  */
 export interface AdminUserCreatePayload {
   username: string
   password: string
-  is_admin: boolean
+  role?: UserRole
+  is_admin?: boolean
 }
 
 /** PATCH /api/v4/admin/users/{id} 请求体；只提交需要变更的字段。 */
 export interface AdminUserUpdatePayload {
   password?: string
   is_active?: boolean
+  role?: UserRole
+  /** 兼容旧调用；新前端统一传 role。 */
   is_superuser?: boolean
+}
+
+// ========== 审计中心 Types ==========
+
+export interface AuditOption {
+  value: string
+  label: string
+  module?: string | null
+  module_label?: string | null
+}
+
+export interface AuditMeta {
+  categories: AuditOption[]
+  modules: AuditOption[]
+  actions: AuditOption[]
+  roles: AuditOption[]
+  results: AuditOption[]
+  time_presets: AuditOption[]
+}
+
+export interface AuditLogItem {
+  id: string
+  ts: string
+  category: string
+  category_label: string
+  module: string
+  module_label: string
+  action: string
+  action_label: string
+  action_type: string
+  action_type_label: string
+  actor_username: string | null
+  actor_role: string
+  actor_role_label: string
+  target_type: string | null
+  target_id: string | null
+  target_label: string | null
+  summary: string
+  result: string
+  result_label: string
+  error: string | null
+  duration_ms: number | null
+  ip: string | null
+  client: string | null
+  request_method: string | null
+  request_path: string | null
+}
+
+export interface AuditLogDetail extends AuditLogItem {
+  detail: Record<string, unknown>
+  user_agent: string | null
+}
+
+export interface AuditLogListResponse {
+  items: AuditLogItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+/** GET /api/v4/audit/logs 的查询参数。 */
+export interface AuditQuery {
+  start?: string
+  end?: string
+  category?: string
+  module?: string
+  action?: string
+  result?: string
+  actor?: string
+  role?: string
+  ip?: string
+  keyword?: string
+  page?: number
+  page_size?: number
+}
+
+export interface AuditTotals {
+  total: number
+  login_success: number
+  login_failure: number
+  operation_success: number
+  operation_failure: number
+  unique_actors: number
+  active_users_30m: number
+  running_jobs: number | null
+}
+
+export interface AuditHourPoint {
+  hour: string
+  total: number
+  failure: number
+}
+
+export interface AuditCountItem {
+  value: string
+  label: string
+  count: number
+}
+
+export interface AuditOverview {
+  range_hours: number
+  totals: AuditTotals
+  by_hour: AuditHourPoint[]
+  by_module: AuditCountItem[]
+  by_role: AuditCountItem[]
+  recent: AuditLogItem[]
+}
+
+export interface AuditResourceMetric {
+  used_bytes: number | null
+  limit_bytes: number | null
+  percent: number | null
+  source: string
+}
+
+export interface AuditChildInfo {
+  pid: number
+  rss_bytes: number
+  cpu_percent: number | null
+  status: string
+  create_time: string | null
+}
+
+export interface AuditContainerInfo {
+  pid: number
+  hostname: string | null
+  rss_bytes: number
+  cpu_percent: number | null
+  threads: number | null
+  started_at: string | null
+  uptime_seconds: number | null
+  memory: AuditResourceMetric
+  cpu_available_cores: number | null
+  cpu_source: string
+  updated_at: string | null
+  pool_size: number | null
+  children: AuditChildInfo[]
+}
+
+export interface AuditWorkerSummary {
+  online: boolean
+  count: number
+  pool_size: number
+  children_count: number
+  running_jobs: number
+  rss_bytes: number
+  cpu_percent: number | null
+  memory: AuditResourceMetric
+  last_seen: string | null
+}
+
+export interface AuditQueueInfo {
+  length: number | null
+  running: number
+  concurrency: number | null
+}
+
+export interface AuditDependencyInfo {
+  ok: boolean
+  latency_ms: number | null
+  label: string
+}
+
+export interface AuditProcessInfo {
+  job_id: string
+  owner_username: string | null
+  task_type: string
+  task_type_label: string
+  status: string
+  status_label: string
+  pid: number | null
+  rss_bytes: number | null
+  cpu_percent: number | null
+  started_at: string | null
+  runtime_seconds: number | null
+  stage: string | null
+  message: string | null
+  worker: string | null
+}
+
+export interface AuditUserResource {
+  username: string
+  running_jobs: number
+  rss_bytes: number
+  cpu_percent: number | null
+}
+
+export interface AuditHealth {
+  level: 'ok' | 'warning' | 'critical'
+  label: string
+  reasons: string[]
+}
+
+export interface AuditSystemResponse {
+  generated_at: string
+  mode: string
+  health: AuditHealth
+  api: AuditContainerInfo
+  workers: AuditContainerInfo[]
+  worker_summary: AuditWorkerSummary
+  queue: AuditQueueInfo
+  disk: AuditResourceMetric
+  processes: AuditProcessInfo[]
+  users: AuditUserResource[]
+  dependencies: Record<string, AuditDependencyInfo>
+}
+
+export interface AuditHistoryPoint {
+  ts: number
+  api_rss_bytes: number | null
+  api_cpu_percent: number | null
+  api_memory_percent: number | null
+  worker_rss_bytes: number | null
+  worker_cpu_percent: number | null
+  worker_memory_percent: number | null
+  running_jobs: number | null
+}
+
+export interface AuditHistoryResponse {
+  points: AuditHistoryPoint[]
+  available: boolean
+  warning: string | null
 }

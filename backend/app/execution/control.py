@@ -91,6 +91,11 @@ def _get_client():
         return _client
 
 
+def get_client():
+    """公开的连接获取入口（指标采集等只读用途）。失败抛 :class:`RedisUnavailable`。"""
+    return _get_client()
+
+
 def _run(operation):
     try:
         return operation(_get_client())
@@ -220,6 +225,7 @@ def prepare(job_id: str, run_token: str, ttl: Optional[int] = None) -> None:
             _key(job_id),
             "cancel", "force", "abandon",
             "claimed_token", "claimed_at", "heartbeat_at", "worker",
+            "pid", "started_at",
         )
         pipe.expire(_key(job_id), ttl)
         pipe.zrem(ACTIVE_KEY, job_id)
@@ -239,6 +245,31 @@ def claim(job_id: str, run_token: str) -> bool:
             )
         )
     ) == 1
+
+
+def set_process(
+    job_id: str,
+    pid: int,
+    worker: str,
+    started_at: Optional[float] = None,
+) -> None:
+    """记录当前执行该任务的 Worker 子进程，供审计中心展示进程/内存。
+
+    只是展示性元数据：写入失败不影响任务运行，调用方用 ``snapshot`` 读取。
+    """
+    mapping = {
+        "pid": str(int(pid)),
+        "worker": str(worker),
+        "started_at": _now_text(started_at),
+    }
+
+    def op(client):
+        pipe = client.pipeline(transaction=True)
+        pipe.hset(_key(job_id), mapping=mapping)
+        pipe.expire(_key(job_id), execution_config.lease_ttl_s())
+        return pipe.execute()
+
+    _run(op)
 
 
 def heartbeat(job_id: str, run_token: str) -> int:
@@ -331,6 +362,37 @@ def snapshot(job_id: str) -> Optional[dict]:
         return snapshot_or_raise(job_id)
     except RedisUnavailable:
         return None
+
+
+def active_snapshots() -> list[dict]:
+    """active 集合里所有任务的完整控制面快照（含 ``job_id``）。"""
+    def op(client):
+        job_ids = client.zrange(ACTIVE_KEY, 0, -1)
+        if not job_ids:
+            return []
+        pipe = client.pipeline(transaction=False)
+        for job_id in job_ids:
+            pipe.hgetall(_key(job_id))
+        rows = pipe.execute()
+        result: list[dict] = []
+        for job_id, data in zip(job_ids, rows):
+            row = dict(data or {})
+            row["job_id"] = str(job_id)
+            result.append(row)
+        return result
+
+    return list(_run(op) or [])
+
+
+def active_count() -> int:
+    """当前 active 集合中的任务数（含刚失联、reaper 尚未处理的）。"""
+    return int(_run(lambda client: client.zcard(ACTIVE_KEY)))
+
+
+def queue_length() -> int:
+    """Celery 任务队列长度（Redis list 长度）。"""
+    queue = execution_config.queue_name()
+    return int(_run(lambda client: client.llen(queue)))
 
 
 def stale_active(cutoff: float) -> list[str]:
@@ -472,6 +534,11 @@ class JobControl:
 
     def snapshot_or_raise(self) -> dict:
         return snapshot_or_raise(self.job_id)
+
+    def set_process(
+        self, pid: int, worker: str, started_at: Optional[float] = None
+    ) -> None:
+        set_process(self.job_id, pid, worker, started_at)
 
     def request_cancel(self) -> bool:
         return request_cancel(self.job_id)

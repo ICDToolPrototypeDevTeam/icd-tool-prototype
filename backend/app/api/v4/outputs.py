@@ -8,14 +8,17 @@ ADR-001 Issue A：
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from app.api.v4.runner import FORWARD_OUTPUT_FILES, V4_OUTPUT_FILES
+from app.audit import catalog
+from app.audit.service import elapsed_ms, record_event
 from app.auth.access import is_valid_job_id, require_job_access
 from app.auth.deps import current_user
 from app.auth.models import User
@@ -54,6 +57,41 @@ def _manifest_task_type(job_dir: Path) -> Optional[str]:
     return task_type if isinstance(task_type, str) and task_type else None
 
 
+def _record_download(
+    request: Request,
+    user: User,
+    job_id: str,
+    task_type: str,
+    file_label: str,
+    path: Path,
+    started: float,
+) -> None:
+    """记录一次成功的产物下载；失败（404）不记录。"""
+    task_label = catalog.task_type_label(task_type)
+    try:
+        size_text = catalog.format_bytes(path.stat().st_size)
+    except OSError:
+        size_text = '未知'
+    record_event(
+        request=request,
+        category=catalog.CATEGORY_OPERATION,
+        module='outputs',
+        action='output_download',
+        summary=f'下载{file_label}（{task_label}）',
+        user=user,
+        target_type='job',
+        target_id=job_id,
+        target_label=task_label,
+        detail={
+            '任务编号': job_id,
+            '任务类型': task_label,
+            '下载文件': file_label,
+            '文件大小': size_text,
+        },
+        duration_ms=elapsed_ms(started),
+    )
+
+
 def _output_root(job_id: str, expected_task_type: str, user: User) -> Path:
     """定位任务的 output 目录；归属或任务类型不符时 404。
 
@@ -85,35 +123,59 @@ def _output_root(job_id: str, expected_task_type: str, user: User) -> Path:
 
 
 @router.get('/jobs/{job_id}/outputs/eoicd-xlsx')
-def download_eoicd_xlsx(job_id: str, user: User = Depends(current_user)):
+def download_eoicd_xlsx(
+    job_id: str,
+    user: User = Depends(current_user),
+    request: Request = None,
+):
+    started = time.perf_counter()
     root = _output_root(job_id, "correctness", user)
     f = root / V4_OUTPUT_FILES["eoicd_xlsx"]
     if not f.exists():
         raise HTTPException(status_code=404, detail='eoicd xlsx not generated (job may be running or failed)')
+    filename = _stamped_name(V4_OUTPUT_FILES["eoicd_xlsx"], f)
+    _record_download(
+        request, user, job_id, "correctness",
+        "EoICD 条目化需求.xlsx", f, started,
+    )
     return FileResponse(
         path=f,
-        filename=_stamped_name(V4_OUTPUT_FILES["eoicd_xlsx"], f),
+        filename=filename,
         media_type=MEDIA_XLSX,
     )
 
 
 @router.get('/jobs/{job_id}/outputs/consensus-docx')
-def download_consensus_docx(job_id: str, user: User = Depends(current_user)):
+def download_consensus_docx(
+    job_id: str,
+    user: User = Depends(current_user),
+    request: Request = None,
+):
+    started = time.perf_counter()
     root = _output_root(job_id, "correctness", user)
     f = root / V4_OUTPUT_FILES["consensus_docx"]
     if not f.exists():
         raise HTTPException(status_code=404, detail='consensus docx not generated (job may be running or failed)')
+    filename = _stamped_name(V4_OUTPUT_FILES["consensus_docx"], f)
+    _record_download(
+        request, user, job_id, "correctness",
+        "EoICD与软件高层需求差异报告.docx", f, started,
+    )
     return FileResponse(
         path=f,
-        filename=_stamped_name(V4_OUTPUT_FILES["consensus_docx"], f),
+        filename=filename,
         media_type=MEDIA_DOCX,
     )
 
 
 @router.get('/jobs/{job_id}/outputs/consistency/{model}')
 def download_consistency_docx(
-    job_id: str, model: str, user: User = Depends(current_user)
+    job_id: str,
+    model: str,
+    user: User = Depends(current_user),
+    request: Request = None,
 ):
+    started = time.perf_counter()
     if model not in ALLOWED_MODELS:
         raise HTTPException(
             status_code=400,
@@ -129,34 +191,59 @@ def download_consistency_docx(
             status_code=404,
             detail=f'consistency {model} docx not generated (job may be running or failed)',
         )
+    filename = _stamped_name(V4_OUTPUT_FILES[key], f)
+    _record_download(
+        request, user, job_id, "correctness",
+        f'{catalog.model_label(model)} 一致性报告.docx', f, started,
+    )
     return FileResponse(
         path=f,
-        filename=_stamped_name(V4_OUTPUT_FILES[key], f),
+        filename=filename,
         media_type=MEDIA_DOCX,
     )
 
 
 @router.get('/jobs/{job_id}/outputs/forward-xlsx')
-def download_forward_xlsx(job_id: str, user: User = Depends(current_user)):
+def download_forward_xlsx(
+    job_id: str,
+    user: User = Depends(current_user),
+    request: Request = None,
+):
+    started = time.perf_counter()
     root = _output_root(job_id, "completeness", user)
     f = root / FORWARD_OUTPUT_FILES["forward_xlsx"]
     if not f.exists():
         raise HTTPException(status_code=404, detail='forward xlsx not generated (job may be running or failed)')
+    filename = _stamped_name(FORWARD_OUTPUT_FILES["forward_xlsx"], f)
+    _record_download(
+        request, user, job_id, "completeness",
+        "完整性分析结果.xlsx", f, started,
+    )
     return FileResponse(
         path=f,
-        filename=_stamped_name(FORWARD_OUTPUT_FILES["forward_xlsx"], f),
+        filename=filename,
         media_type=MEDIA_XLSX,
     )
 
 
 @router.get('/jobs/{job_id}/outputs/forward-docx')
-def download_forward_docx(job_id: str, user: User = Depends(current_user)):
+def download_forward_docx(
+    job_id: str,
+    user: User = Depends(current_user),
+    request: Request = None,
+):
+    started = time.perf_counter()
     root = _output_root(job_id, "completeness", user)
     f = root / FORWARD_OUTPUT_FILES["forward_docx"]
     if not f.exists():
         raise HTTPException(status_code=404, detail='forward docx not generated (job may be running or failed)')
+    filename = _stamped_name(FORWARD_OUTPUT_FILES["forward_docx"], f)
+    _record_download(
+        request, user, job_id, "completeness",
+        "完整性分析报告.docx", f, started,
+    )
     return FileResponse(
         path=f,
-        filename=_stamped_name(FORWARD_OUTPUT_FILES["forward_docx"], f),
+        filename=filename,
         media_type=MEDIA_DOCX,
     )

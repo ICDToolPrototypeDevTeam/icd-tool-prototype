@@ -23,6 +23,9 @@ class User(Document):
     hashed_password: str
     is_active: bool = True
     is_superuser: bool = False
+    # 三值角色：user / admin / auditor。历史账号没有该字段，读取时由
+    # ``app.auth.roles.effective_role`` 按 is_superuser 兼容回退。
+    role: str | None = None
     is_verified: bool = True
     token_version: int = 0
     created_at: datetime = Field(default_factory=_utcnow)
