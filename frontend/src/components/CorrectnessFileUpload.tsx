@@ -8,11 +8,14 @@ interface Props {
   eoicdPublisherFile: FileItem | null
   eoicdSubscriberFile: FileItem | null
   traceabilityFiles: FileItem[]
+  /** 任务附件：只随任务保存，不参与任何解析（仅管理员可在历史结果页下载） */
+  attachmentFiles: FileItem[]
   selectedPreviewFile: FileItem | null
   onHlrWordChange: (file: FileItem | null) => void
   onEoicdPublisherChange: (file: FileItem | null) => void
   onEoicdSubscriberChange: (file: FileItem | null) => void
   onTraceabilityChange: (files: FileItem[]) => void
+  onAttachmentChange: (files: FileItem[]) => void
   onPreviewSelect: (file: FileItem | null) => void
 }
 
@@ -38,17 +41,20 @@ export default function CorrectnessFileUpload({
   eoicdPublisherFile,
   eoicdSubscriberFile,
   traceabilityFiles,
+  attachmentFiles,
   selectedPreviewFile,
   onHlrWordChange,
   onEoicdPublisherChange,
   onEoicdSubscriberChange,
   onTraceabilityChange,
+  onAttachmentChange,
   onPreviewSelect,
 }: Props) {
   const hlrWordInputRef = useRef<HTMLInputElement>(null)
   const publisherInputRef = useRef<HTMLInputElement>(null)
   const subscriberInputRef = useRef<HTMLInputElement>(null)
   const traceabilityInputRef = useRef<HTMLInputElement>(null)
+  const attachmentInputRef = useRef<HTMLInputElement>(null)
 
   function handleSingleFile(
     e: React.ChangeEvent<HTMLInputElement>,
@@ -67,6 +73,14 @@ export default function CorrectnessFileUpload({
     if (!files) return
     const items = Array.from(files).map(makeFileItem)
     onTraceabilityChange([...traceabilityFiles, ...items])
+  }
+
+  function handleAttachments(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files
+    if (!files) return
+    // 附件不参与分析，也不进预览；只追加到待上传清单。
+    const items = Array.from(files).map(makeFileItem)
+    onAttachmentChange([...attachmentFiles, ...items])
   }
 
   function renderFileItem(
@@ -104,7 +118,7 @@ export default function CorrectnessFileUpload({
   function renderUploadButton(
     label: string,
     inputRef: React.RefObject<HTMLInputElement>,
-    accept: string,
+    accept: string | undefined,
     onChange: (e: React.ChangeEvent<HTMLInputElement>) => void,
     multiple = false
   ) {
@@ -132,7 +146,7 @@ export default function CorrectnessFileUpload({
           <div className="card__icon card__icon--blue"><FolderOpen size={20} /></div>
           <div>
             <div className="card__title">文件上传</div>
-            <div className="card__subtitle">上传 SWHLR Word、EoICD Pub/Sub Excel 与追溯表</div>
+            <div className="card__subtitle">上传 SWHLR Word、EoICD Pub/Sub Excel、追溯表与其他支撑材料</div>
           </div>
         </div>
         <div className="card__body" style={{ height: 'calc(100% - 81px)', overflow: 'auto' }}>
@@ -212,6 +226,41 @@ export default function CorrectnessFileUpload({
               traceabilityInputRef,
               '.xlsx,.xls',
               handleTraceability,
+              true
+            )}
+          </div>
+
+          {/* Attachment files (optional, multi, any type, not analyzed) */}
+          <div className="file-section">
+            <div className="file-section__title">
+              <Paperclip size={16} /> 其他支撑材料（如 DD 表） <span className="file-section__optional">选填（0-N）</span>
+            </div>
+            {attachmentFiles.length > 0 && (
+              <div className="file-list">
+                {attachmentFiles.map((f) => (
+                  <div key={f.id} className="file-item">
+                    <div className="file-item__icon"><Paperclip size={18} /></div>
+                    <div className="file-item__info">
+                      <div className="file-item__name">{f.name}</div>
+                      <div className="file-item__meta">{formatSize(f.size)}</div>
+                    </div>
+                    <button
+                      className="file-item__remove"
+                      onClick={() =>
+                        onAttachmentChange(attachmentFiles.filter((x) => x.id !== f.id))
+                      }
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {renderUploadButton(
+              '添加支撑材料',
+              attachmentInputRef,
+              undefined,
+              handleAttachments,
               true
             )}
           </div>

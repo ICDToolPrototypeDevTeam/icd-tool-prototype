@@ -51,7 +51,7 @@
 
 ## 3. 开发记录
 
-### 2026-11-13 审计管理员、审计日志与系统运行监控（ADR-009）
+### 2026-11-13 审计管理员、审计日志与系统运行监控（ADR-010）
 
 #### 任务目标
 
@@ -61,12 +61,12 @@
 
 1. 角色模型由布尔管理员扩展为三值 `role`（`user` / `admin` / `auditor`），`is_superuser` 保留并由角色派生；新增 `app/auth/roles.py`（常量、中文标签、`effective_role` 回退、`is_admin` / `is_auditor` / `role_to_superuser`），启动时 `ensure_user_roles()` 回填历史账号。
 2. 认证依赖新增 `current_auditor`（非审计管理员 403）与 `require_business_access`（审计管理员访问业务接口 403）；`api/v4/router.py` 对 coverage / completeness / jobs / outputs / history / settings / hlr_schemas 统一挂业务准入，`/audit/*` 单独挂审计管理员依赖。系统管理员访问审计接口同样 403。
-3. `/auth/login` 与 `/auth/logout` 改为自定义路由（`OAuth2PasswordRequestForm`），登录成功 / 失败（账号不存在 / 密码错误 / 账号被禁用）都写审计；失败原因只落服务端，客户端统一 400，账号不存在时也做一次哈希以抵消响应时间差。账号创建 / 更新、任务创建 / 取消 / 终止 / 放弃 / 续跑、产物与日志下载、设置与 HLR 样式变更均写审计。
+3. `/auth/login` 与 `/auth/logout` 改为自定义路由（`OAuth2PasswordRequestForm`），登录成功 / 失败（账号不存在 / 密码错误 / 账号已被禁用）都写审计；账号不存在与密码错误统一返回 400 `LOGIN_BAD_CREDENTIALS`，密码正确但账号被禁用返回 400 `LOGIN_USER_NOT_ACTIVE`（与同日「禁用账号的登录提示区分」条目合并），具体失败原因只落服务端，账号不存在时也做一次哈希以抵消响应时间差。账号创建 / 更新、任务创建 / 取消 / 终止 / 放弃 / 续跑、产物与日志下载、设置与 HLR 样式变更均写审计。
 4. 新增 `app/audit/`：`catalog.py` 中文词表与 User-Agent 解析、`models.py`（`audit_logs` 集合 + 6 个索引）、`writer.py`（有界队列 20000 + 后台批量写入 100 条 / 0.5s，fail-open）、`schemas.py`、`service.py`（事件构造 / 查询 / 概览 / 词表）、`system.py`（容器资源、任务进程、队列、依赖健康、阈值与趋势）、`router.py`。
 5. 新增接口：`GET /api/v4/audit/logs`（时间 / 类别 / 模块 / 动作 / 结果 / 操作人 / 角色 / IP / 关键词 + 服务端分页）、`/audit/logs/{id}`、`/audit/meta`、`/audit/overview?hours=`、`/audit/system`、`/audit/system/history?minutes=`。
 6. 新增 `app/execution/metrics.py`：API 进程每 5s 采样 cgroup 内存（v1/v2，扣除 `inactive_file`）与 CPU（按 quota / 宿主核数归一）写 `icd:metrics:api`（TTL 30s）；Worker 后台线程每 5s 上报 `icd:metrics:worker:{hostname}`（TTL 20s）；采样点写 `icd:metrics:history`（720 点 / 1 小时 TTL）；Worker 认领任务后上报子进程 PID，审计接口按 `psutil` 读取任务 RSS / CPU 并按用户聚合。告警阈值：内存 75% / 90%、CPU 85% / 95%、磁盘 80% / 90%、Worker 心跳 15s、依赖不可用为严重；任务级只展示不设阈值。
 7. 前端新增 `/audit` 审计中心：概览 / 登录日志 / 操作日志 / 系统运行四个标签页，组合筛选、服务端分页、明细抽屉、5s 轮询（页面隐藏时暂停）；图表为纯 SVG / CSS 实现，未引入图表库；登录后按角色跳转（审计管理员进入审计中心），`RequireAuditor` / `RequireBusiness` 守卫；用户管理页角色下拉增加审计管理员。
-8. 文档：新增 ADR-009，更新项目范围、架构、API、README、CHANGELOG、本开发纪要。
+8. 文档：新增 ADR-010，更新项目范围、架构、API、README、CHANGELOG、本开发纪要。
 
 #### 修改文件
 
@@ -77,7 +77,7 @@
 5. `backend/app/main.py`（审计写入器与 API 指标采样启停）、`backend/requirements.txt`（新增 `psutil>=6.1,<8`）
 6. `frontend/src/components/audit/`（新增）、`frontend/src/pages/AuditPage.tsx`（新增）、`frontend/src/{App.tsx,api/index.ts,types.ts,index.css}`、`frontend/src/auth/AuthContext.tsx`、`frontend/src/components/RequireAuth.tsx`、`frontend/src/pages/{LoginPage,AdminUsersPage}.tsx`
 7. `backend/tests/test_audit_{roles,event,system,writer}.py`（新增，29 个用例）
-8. `docs/decisions/ADR-009-审计管理员与审计日志.md`（新增）、`docs/project/scope.md`、`docs/architecture/current-architecture.md`、`docs/architecture/api.md`
+8. `docs/decisions/ADR-010-审计管理员与审计日志.md`（新增）、`docs/project/scope.md`、`docs/architecture/current-architecture.md`、`docs/architecture/api.md`
 9. `README.md`、`CHANGELOG.md`、`docs/development/development-log.md`
 
 #### 验证方式
@@ -100,7 +100,7 @@
 5. 三角色权限矩阵：管理员访问审计接口 403、审计管理员访问业务接口与用户管理 403、审计管理员审计接口 200（**已验证**）。
 6. 审计记录：登录失败（账号不存在 / 密码错误）与登录成功、登出、设置修改、账号创建均产生中文记录；`keyword` 中文检索（预编码 URL）命中正确条数（**已验证**）。
 7. 系统运行接口：返回 API / Worker 资源、运行中任务、队列、Mongo / Redis 健康与趋势；本地 compose 未设容器内存上限时内存百分比为空、只显示已用字节（**已验证**）。
-8. 浏览器内页面视觉与交互（图表布局、抽屉、筛选、角色跳转）：**尚未验证**（本次未做浏览器自动化，需人工检查）。
+8. 浏览器内页面视觉与交互：已用本地 mock 审计接口做 CDP 无头走查（1440 / 1180 / 980 / 760 / 560 五档），无控制台错误与横向溢出，失败下钻、详情抽屉、筛选与分页正常；真实审计账号与后端数据的联动**尚未验证**（需人工检查）。
 9. 中文关键词直接由 Git Bash 命令行传入会因 cp936 编码损坏，属验证工具限制，不是应用缺陷；浏览器与预编码 URL 均正常。
 
 #### 遗留问题
@@ -111,7 +111,7 @@
 4. Worker 只上报自身容器的聚合资源，多 Worker 实例按 hostname 分别展示；未做跨实例汇总页。
 5. 审计写入 fail-open：Mongo 不可用期间的事件会丢失，不补写。
 6. 浏览器视觉验收与服务器部署验收未执行。
-7. 本次改动尚未提交（按项目约定由用户执行 git 操作）。
+7. 审计中心改动已提交（`75e7e5b`）；与 `Test-Intranet-Debug-and-Optimize` 合并后，登录失败码与 Token 版本号语义见同日其他条目。
 
 #### 下一步建议
 
@@ -119,7 +119,242 @@
 2. 在目标服务器验证容器内存上限下的百分比、告警颜色与 Worker 失联提示。
 3. 如需长期运行，评估 `audit_logs` 容量与索引成本，另行设计归档策略。
 4. 如部署反向代理，增加可信代理白名单后再启用 `X-Forwarded-For`。
+### 2026-11-13 反向任务附件上传与管理员下载
 
+#### 任务目标
+
+在反向正确性分析上传页增加附件上传能力：附件只随任务保存、**不参与任何解析或分析**，供管理员事后在历史结果页下载。所有登录用户可上传；普通用户（含任务所有者）完全看不到附件信息；任意文件类型，沿用既有 50MB 单文件 / 200MB 单请求限制。
+
+#### 完成内容
+
+1. `backend/app/api/v4/coverage.py`：新增 `attachment_files: list[UploadFile] = File(default=[])`；附件保存到 `input/attachment/` 独立子目录；`_original_filename()` 统一 basename + GBK mojibake 修复（`_safe_filename()` 改为复用它），`_unique_attachment_name()` 处理落盘重名（追加 `_1` / `_2`，不覆盖）；`_save_upload()` 新增可选 `dest_name`。清单记录 `{path, name, size}`（`name` 为原始文件名），随 `launch_v4_pipeline(attachment_files=...)` 写入 manifest。
+2. `backend/app/api/v4/runner.py`：`launch_v4_pipeline` 新增 `attachment_files` 参数；续跑（参数为 `None`）时从 `job.params` 读取并保留原附件清单，避免 `set_dir` 重写 manifest 时丢失。
+3. `backend/app/api/v4/schemas.py`：新增 `V4HistoryAttachment`；`V4HistoryItem` 新增 `attachments`。
+4. `backend/app/api/v4/history.py`：历史列表仅对管理员填充 `attachments`（普通用户置空数组）；新增管理员专用 `GET /jobs/{job_id}/attachments/{index}`，按清单下标定位、路径限定在任务目录内，`FileResponse` 以原始文件名 + `application/octet-stream` 下载。
+5. 前端：`CorrectnessFileUpload` 新增附件多文件区块（不进预览）；`CorrectnessPage` 提交 `attachment_files` 并在重置时清空；`HistoryList` 对管理员新增「上传文件」按钮 + 下拉下载菜单；`types.ts` / `api/index.ts` 同步类型与下载地址；`index.css` 新增下拉菜单样式。前端用户可见名称统一为「其他支撑材料」（如 DD 表），接口字段 / 路由内部仍沿用 `attachment` 命名，不影响 API 契约。
+6. 附件不进入 `input_files`，也不传给 `run_reverse_pipeline` / `build_reverse_run_kwargs`，管线行为零变化。
+
+#### 修改文件
+
+1. `backend/app/api/v4/coverage.py`
+2. `backend/app/api/v4/runner.py`
+3. `backend/app/api/v4/schemas.py`
+4. `backend/app/api/v4/history.py`
+5. `frontend/src/components/CorrectnessFileUpload.tsx`
+6. `frontend/src/pages/CorrectnessPage.tsx`
+7. `frontend/src/components/HistoryList.tsx`
+8. `frontend/src/types.ts`
+9. `frontend/src/api/index.ts`
+10. `frontend/src/index.css`
+11. `docs/architecture/api.md`（第 2、4、13.5、14、17.1 节）
+12. `CHANGELOG.md`、`docs/development/development-log.md`
+13. 本地验证脚本（gitignored，未提交）：`backend/tests/auth/test_attachment_permissions.py`
+
+#### 验证方式
+
+1. `cd backend && py -3.12 tests/auth/test_attachment_permissions.py`：覆盖上传落盘 / 重名不覆盖 / manifest 记录 / 续跑保留、管理员可见普通用户不可见、下载 200 与 401 / 403 / 404、中文文件名 Content-Disposition。
+2. `cd backend && py -3.12 tests/test_artifact_cleanup_integration.py`（确认清理功能未被本次改动影响）。
+3. `cd backend && py -3.12 -m py_compile app/api/v4/coverage.py app/api/v4/history.py app/api/v4/runner.py app/api/v4/schemas.py`。
+4. `cd frontend && npm run build`。
+
+#### 验证结果
+
+1. 附件验证脚本：`ALL PASSED`。
+2. 中间产物清理集成脚本：`ALL PASSED`。
+3. `py_compile`：通过。
+4. 前端 `tsc && vite build`：通过（仅既有 chunk > 500 kB 提示）。
+5. 真实浏览器端到端（上传附件 → 跑完任务 → 管理员历史页下拉下载 / 普通用户不可见）：尚未验证；需在本地服务或真实样本任务上手工确认。
+
+#### 遗留问题
+
+1. 附件不参与分析，也没有类型 / 数量上限（仅受大小预算约束）；如需限制数量或扩展名，另行确认。
+2. 历史结果页的删除会连同 `input/attachment/` 一起整目录删除，这是既有删除语义，未单独提示附件内容。
+
+#### 下一步建议
+
+1. 本地启动前后端，用一个真实反向任务验证附件上传与管理员下载（普通用户账号确认看不到「附件」按钮）。
+2. 出包时无需部署层变化，但仍需重建后端镜像并覆盖前端产物。
+
+### 2026-11-13 已完成反向任务中间产物清理
+
+#### 任务目标
+
+控制 `backend/output/v4` 的磁盘膨胀。评估确认 `output/eoicd_requirements.json`（单任务实测可达 169MB）等三个中间产物只在续跑时读取，而 `completed` 任务不可续跑，因此可在任务成功完成并落盘状态后删除，且不得影响续跑、结果展示、历史列表与报告生成。
+
+#### 完成内容
+
+1. `backend/app/api/v4/runner.py` 新增 `COMPLETED_ONLY_ARTIFACTS`（`eoicd_requirements.json`、`eoicd_side_pairs.json`、`llm_cache.jsonl`）、`KEEP_ARTIFACTS_ENV`（`ICD_KEEP_JOB_ARTIFACTS`）与 `cleanup_completed_outputs()`。
+2. 在 `run_v4_pipeline_thread` 的 `job.update(JobStatus.COMPLETED, ...)` 之后调用清理；先落完成状态再删文件，避免「可续跑但解析产物已丢失」的半状态。函数内再校验 `job.status == COMPLETED`，失败 / 中断 / 被终止任务一律不动。
+3. 清理为 best-effort：单文件缺失跳过、删除失败只写 stderr，不影响任务完成与其它文件。
+4. 调试开关 `ICD_KEEP_JOB_ARTIFACTS=1` 时保留全部产物（本地 e2e / 探针脚本反读用）；接入方式为进程环境变量，部署无需默认配置。
+5. 仅反向管线；正向管线、`reverse_report.json` / `re_review_results.json` 及已有历史存量均未改动。
+
+#### 修改文件
+
+1. `backend/app/api/v4/runner.py`
+2. `docs/architecture/api.md`（第 10 节清理说明、第 13.2 节续跑依赖说明）
+3. `CHANGELOG.md`
+4. `docs/development/development-log.md`
+5. `backend/.env.example`（补充 `ICD_KEEP_JOB_ARTIFACTS` 说明）
+6. 本地验证脚本（gitignored，未提交）：`backend/tests/test_artifact_cleanup.py`、`backend/tests/test_artifact_cleanup_integration.py`
+
+#### 验证方式
+
+1. `cd backend && py -3.12 tests/test_artifact_cleanup.py`（函数级：只删三个目标；其它中间产物与对外产物保留；interrupted / canceled / failed 全保留；开关生效；缺失文件与重复调用安全）。
+2. `cd backend && py -3.12 tests/test_artifact_cleanup_integration.py`（走真实 `Job` 与 `run_v4_pipeline_thread` 外壳，仅把 `run_reverse_pipeline` 换成桩：completed 删除、canceled / failed 保留、开关生效、`job.result` 计数正常）。
+3. `cd backend && py -3.12 -m py_compile app/api/v4/runner.py tests/test_artifact_cleanup.py tests/test_artifact_cleanup_integration.py`。
+
+#### 验证结果
+
+1. 函数级脚本：`ALL PASSED`。
+2. 集成脚本：`ALL PASSED`（completed 路径日志显示三个文件被删除，canceled / failed 路径无删除）。
+3. `py_compile`：通过。
+4. 真实完整反向管线（含真实 `run_reverse_pipeline` 写盘）的端到端重跑：尚未验证；本次只在桩管线 + 真实线程外壳上验证。生产镜像尚未重建。
+
+#### 遗留问题
+
+1. 已有历史存量未清理：97 个已完成任务约 6.45GB，另有 161 个无 manifest 的遗留目录约 14.5GB；本次按用户决定不处理。
+2. 正向管线成功收尾自有 `runs/` 清理逻辑，本次未改；已完成反向任务不再保留 `eoicd_requirements.json` / `eoicd_side_pairs.json` / `llm_cache.jsonl`，若后续需要反读这些文件做离线分析，需在任务运行前设置 `ICD_KEEP_JOB_ARTIFACTS=1`。
+
+#### 下一步建议
+
+1. 出包时在真实样本上跑一次完整反向任务，确认完成日志出现 `[cleanup] removed ...`，结果页、下载、历史列表正常。
+2. 视需要再评估历史存量清理脚本（单独 Issue）。
+
+### 2026-11-13 登录状态过期提示
+
+#### 任务目标
+
+会话失效后跳回登录页时明确告知用户原因，避免用户误以为自己未登录或页面出错；同时不能把首次访问、主动退出或网络异常误报为“登录过期”。
+
+#### 完成内容
+
+1. `AuthContext` 新增 `sessionExpired` 状态，并在 `sessionStorage` 维护按标签页隔离的 `icd_had_session` 标记。
+2. 登录成功或 `getMe` 成功恢复会话时写入标记并清除过期状态；主动退出时清除标记与过期状态。
+3. 页面内受保护接口收到 401（会话过期、重置密码、禁用等）且本标签页存在标记时，置为过期状态。
+4. 刷新页面后 `getMe` 返回 401（Cookie 已失效）且存在标记时，同样置为过期状态；`getMe` 因网络 / 服务异常抛错时只按未登录处理，不标记过期。
+5. 登录页显示“登录状态已失效，请重新登录”，并新增 `.login-notice` 样式。
+
+#### 修改文件
+
+1. `frontend/src/auth/AuthContext.tsx`
+2. `frontend/src/pages/LoginPage.tsx`
+3. `frontend/src/index.css`
+4. `CHANGELOG.md`、`docs/development/development-log.md`、`更新说明.md`
+
+#### 验证方式
+
+1. `cd frontend && npm run build`（TypeScript 与产物构建）。
+2. 手工场景：登录后等待会话过期或由管理员重置 / 禁用该账号，页面内触发请求，应回到登录页并显示过期提示。
+3. 手工场景：会话失效后刷新页面，应显示过期提示；首次打开页面、主动退出后不应显示。
+
+#### 验证结果
+
+1. 前端构建：通过（vite 5.4.21，2257 modules transformed）。
+2. 手工场景：尚未验证，原因是本机无运行中的服务与可等待 8 小时的会话；需上线前在浏览器实测。
+
+#### 遗留问题
+
+1. 多个标签页各自维护标记：某标签页主动退出后，其他仍打开且曾登录的标签页在后续 401 时可能提示“登录状态已失效”，属于轻微误报。
+2. 关掉标签页后新开视为首次访问，不提示过期（有意为之，避免隔天首次打开被误报）。
+3. 过期提示与登录失败提示可能同时出现（例如会话失效后使用被禁用账号登录），文案不冲突。
+
+#### 下一步建议
+
+1. 在本地或服务器启动完整服务，按上述手工场景逐项验证。
+2. 出包时随前端产物一起覆盖 `frontend/dist`，无需重建后端镜像。
+
+### 2026-11-13 禁用账号的登录提示区分
+
+#### 任务目标
+
+账号被禁用后，用户登录时不再得到“用户名或密码错误”这一误导性提示，而是明确提示账号已被禁用。
+
+#### 完成内容
+
+1. `POST /api/v4/auth/login` 改为自定义登录路由：先校验用户名与密码，密码正确但 `is_active=false` 时返回 400 `LOGIN_USER_NOT_ACTIVE`；用户名不存在或密码错误仍返回 `LOGIN_BAD_CREDENTIALS`。
+2. 内置 fastapi-users 认证路由仅保留 `/logout`，避免登录路由重复注册。
+3. 前端登录页把 `LOGIN_USER_NOT_ACTIVE` 映射为“账号已被禁用，请联系管理员”。
+4. 同步 API 文档、CHANGELOG、本纪要与《更新说明》。
+
+#### 修改文件
+
+1. `backend/app/auth/router.py`
+2. `frontend/src/pages/LoginPage.tsx`
+3. `docs/architecture/api.md`、`CHANGELOG.md`、`docs/development/development-log.md`、`更新说明.md`
+4. 本地验证脚本（gitignored）：`backend/tests/auth/test_admin_users.py` 增加错误码断言
+
+#### 验证方式
+
+1. `cd backend && py -3.12 tests/auth/test_admin_users.py`（RED→GREEN：先看到禁用登录仍返回 `LOGIN_BAD_CREDENTIALS` 的失败，再通过）。
+2. 8 个认证回归脚本。
+3. `cd frontend && npm run build`（TypeScript 与产物构建）。
+
+#### 验证结果
+
+1. `test_admin_users.py`：通过；密码错误仍为 `LOGIN_BAD_CREDENTIALS`，账号禁用为 `LOGIN_USER_NOT_ACTIVE`。
+2. 8 个认证回归脚本：全部通过。
+3. 前端构建：通过。
+4. 浏览器实际提示文案：尚未验证（需启动服务后手工登录禁用账号）。
+
+#### 遗留问题
+
+1. 该错误码会向“已知道正确密码”的调用方暴露账号禁用状态；对内网分配账号的场景可接受。
+2. 登录接口其余错误语义（账号未验证等）未变化。
+
+#### 下一步建议
+
+1. 在浏览器用被禁用账号登录一次，确认页面文案。
+2. 出包时随本版一起重建后端镜像与前端产物。
+
+### 2026-11-13 会话吊销与 Token 版本号（ADR-009）
+
+#### 任务目标
+
+补齐阶段 A 的会话吊销缺口：管理员重置密码或禁用账号后，该账号所有已签发的登录 Cookie 在下一次请求时立即失效，而不是等 8 小时 JWT 自然过期；重新启用账号不恢复旧会话。不引入单设备下线、Refresh Token 或“强制下线”按钮。
+
+#### 完成内容
+
+1. `User` 文档新增内部字段 `token_version`（默认 0，不下发到任何 API 响应）。
+2. 新增 `VersionedJWTStrategy`：登录签发 JWT 时携带 claim `ver`；每次读取 Token 时与用户当前 `token_version` 比较，不一致即视为未登录。旧 Token 无 `ver` 按 0 处理，旧用户文档无该字段同样按 0 处理，升级部署不会踢掉现有会话。
+3. 管理员 `PATCH /api/v4/admin/users/{user_id}` 改为 Mongo 原子更新：重置密码、或 `is_active` 由 true 改为 false 时，在同一次 `$set` + `$inc` 中递增 `token_version`；启用账号、设置 / 取消管理员不递增，避免误吊销。
+4. 前端无需改动：旧 Cookie 下一次请求返回 401 后，现有登录守卫按未登录处理并跳转登录页。
+5. 文档同步：ADR-009（新增）、ADR-007（关联 ADR 与已知限制）、API 文档、架构文档、CHANGELOG、本纪要、服务器部署验收清单与《更新说明》。
+
+#### 修改文件
+
+1. `backend/app/auth/models.py`
+2. `backend/app/auth/backend.py`
+3. `backend/app/auth/router.py`
+4. `docs/decisions/ADR-009-会话吊销与Token版本号.md`（新增）
+5. `docs/decisions/ADR-007-用户登录与账号隔离.md`
+6. `docs/architecture/api.md`、`docs/architecture/current-architecture.md`
+7. `CHANGELOG.md`、`docs/development/development-log.md`
+8. `docs/testing/服务器部署验收清单.md`、`更新说明.md`
+9. 本地验证脚本（`backend/tests/` 为 gitignored，不随仓库提交）：`backend/tests/auth/test_token_version.py`（新增）、`backend/tests/auth/test_e2e_isolation.py`（补“重新启用后旧 Cookie 仍 401、重新登录”断言）
+
+#### 验证方式
+
+1. `cd backend && py -3.12 tests/auth/test_token_version.py`（RED→GREEN：先看到 `ver` 缺失与版本未递增的失败，再通过）。
+2. 认证回归脚本：`test_auth_foundation.py`、`test_auth_routes.py`、`test_admin_users.py`、`test_job_owner_fields.py`、`test_job_isolation.py`、`test_history_permissions.py`、`test_static_security.py`。
+3. 端到端回归（需本地 uvicorn 服务与 MOCK 环境）：`py -3.12 tests/auth/test_e2e_isolation.py`。
+
+#### 验证结果
+
+1. `test_token_version.py`：通过（`test_token_version PASSED`）。覆盖：JWT 含 `ver=0`、`/auth/me` 不暴露 `token_version`、DB 版本改为 1 后旧 Cookie 401 且改回 0 后恢复 200、无 `ver` 旧 Token 在版本 0 可用 / 版本 1 失效；管理员重置密码、禁用、重新启用、重复禁用、设置 / 取消管理员、最后一个管理员 409、管理员重置自己密码等场景。
+2. 其余 7 个认证回归脚本：全部通过（8/8）。
+3. 端到端脚本已更新断言，但**尚未执行**（需要启动本地服务与 MOCK 环境）。
+
+#### 遗留问题
+
+1. 仅支持整账号吊销：无单设备下线、无“强制下线”按钮（本阶段确认不做）。
+2. 未重置 / 未禁用期间被窃取的 Cookie 仍在 8 小时 TTL 内有效。
+3. 端到端回归与浏览器验收尚未执行，上线前需按验收清单第 19 行实测“禁用—启用后旧 Cookie 仍 401”。
+
+#### 下一步建议
+
+1. 在本地或服务器上执行端到端回归与验收清单第 19 行。
+2. 如需按设备管理会话，后续可考虑在 Token 中加入 `jti` 并维护吊销表（本阶段不实现）。
 ### 2026-11-12 用户登录与账号隔离（阶段 A，ADR-007）
 
 #### 任务目标

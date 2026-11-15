@@ -2,7 +2,8 @@
 """认证路由：Cookie 登录 / 登出 / 当前用户 / 管理员账号管理。
 
 登录与登出使用自定义路由（而不是 fastapi-users 自带路由），以便记录审计日志。
-失败原因只写服务端审计日志，客户端统一返回「用户名或密码错误」，不泄露账号是否存在。
+账号不存在 / 密码错误统一返回 `LOGIN_BAD_CREDENTIALS`；密码正确但账号被禁用返回
+`LOGIN_USER_NOT_ACTIVE`（只向已掌握密码者暴露禁用状态）。具体失败原因只写服务端审计日志。
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi_users.exceptions import UserAlreadyExists, UserNotExists
+from fastapi_users.router.common import ErrorCode
 
 from app.audit import catalog
 from app.audit.service import elapsed_ms, record_event
@@ -46,12 +48,18 @@ router = APIRouter()
 _settings = get_auth_settings()
 
 
-@router.post('/auth/login')
+@router.post('/auth/login', name='auth:cookie.login')
 async def login(
     credentials: OAuth2PasswordRequestForm = Depends(),
     request: Request = None,
 ):
-    """Cookie 登录，并记录审计日志（成功与失败都记）。"""
+    """Cookie 登录，并记录审计日志（成功与失败都记）。
+
+    账号不存在 / 密码错误统一返回 ``LOGIN_BAD_CREDENTIALS``，具体原因只写
+    服务端审计；密码正确但账号被禁用返回 ``LOGIN_USER_NOT_ACTIVE``，供前端
+    提示“账号已被禁用”。禁用状态只在密码验证通过后暴露，避免向不知道密码
+    的人泄露账号是否存在。
+    """
     started = time.perf_counter()
     username = (credentials.username or '').strip().lower()
     user: User | None = None
@@ -72,14 +80,14 @@ async def login(
         except Exception:  # noqa: BLE001 — 仅用于抵消耗时
             pass
         reason = reason or '账号不存在'
-    elif not user.is_active:
-        reason = '账号已被禁用'
     else:
         verified, updated_hash = user_manager.password_helper.verify_and_update(
             credentials.password, user.hashed_password
         )
         if not verified:
             reason = '密码错误'
+        elif not user.is_active:
+            reason = '账号已被禁用'
         elif updated_hash is not None:
             # 密码哈希算法升级：与 fastapi-users 的 authenticate 行为一致
             user.hashed_password = updated_hash
@@ -102,12 +110,17 @@ async def login(
         )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail='用户名或密码错误',
+            detail=(
+                'LOGIN_USER_NOT_ACTIVE'
+                if reason == '账号已被禁用'
+                else ErrorCode.LOGIN_BAD_CREDENTIALS
+            ),
         )
 
     assert user is not None
     strategy = auth_backend.get_strategy()
     response = await auth_backend.login(strategy, user)
+    await user_manager.on_after_login(user, request, response)
     role = effective_role(user)
     record_event(
         request=request,
@@ -286,21 +299,38 @@ async def update_user(
             )
 
     changes: dict[str, str] = {}
+    set_fields: dict[str, object] = {}
+    revoke = False
+
     if payload.password is not None:
-        user.hashed_password = user_manager.password_helper.hash(payload.password)
+        set_fields['hashed_password'] = user_manager.password_helper.hash(
+            payload.password
+        )
         changes['密码'] = '已重置'
-    if payload.is_active is not None and payload.is_active != user.is_active:
-        changes['账号状态'] = '启用' if payload.is_active else '禁用'
-        user.is_active = payload.is_active
+        revoke = True
+    if payload.is_active is not None:
+        if payload.is_active != user.is_active:
+            changes['账号状态'] = '启用' if payload.is_active else '禁用'
+        if user.is_active and not payload.is_active:
+            # 启用 → 禁用：递增 Token 版本号，立即吊销该账号已签发的 Cookie
+            revoke = True
+        set_fields['is_active'] = payload.is_active
     if next_role != current_role:
         changes['角色'] = f'{role_label(current_role)} → {role_label(next_role)}'
-        user.role = next_role
-    user.is_superuser = role_to_superuser(next_role)
+    # role 与 is_superuser 在创建 / 更新 / 启动补齐时保持同步
+    set_fields['role'] = next_role
+    set_fields['is_superuser'] = role_to_superuser(next_role)
 
     changed = bool(changes)
     if changed:
-        user.updated_at = datetime.now(timezone.utc)
-        await user.save()
+        set_fields['updated_at'] = datetime.now(timezone.utc)
+        update: dict[str, dict[str, object]] = {'$set': set_fields}
+        if revoke:
+            update['$inc'] = {'token_version': 1}
+        await user.update(update)
+        refreshed = await User.get(object_id)
+        if refreshed is not None:
+            user = refreshed
 
     if changed:
         action = (

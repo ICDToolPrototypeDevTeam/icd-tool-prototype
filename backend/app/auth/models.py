@@ -27,6 +27,7 @@ class User(Document):
     # ``app.auth.roles.effective_role`` 按 is_superuser 兼容回退。
     role: str | None = None
     is_verified: bool = True
+    token_version: int = 0
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
