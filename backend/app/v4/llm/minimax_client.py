@@ -55,8 +55,11 @@ class MiniMaxClient:
         # 开启时保持历史请求体不变（不发送 enable_thinking）；关闭时发送 false。
         # 当前真实 MiniMax OpenAI 兼容接口会忽略该字段（思考无法关闭），切换
         # 到 Qwen 接口后生效；PROVIDER 仍为 minimax，token 记账与报告标签不变。
+        # 关闭时同时发两处：DashScope 兼容接口认顶层 enable_thinking；自建
+        # vLLM / SGLang 只认 chat_template_kwargs，顶层字段会被静默忽略。
         if not self._thinking:
             payload["enable_thinking"] = False
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         last_error = None
         for attempt in range(max_retries + 1):

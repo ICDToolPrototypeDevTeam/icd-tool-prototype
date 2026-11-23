@@ -38,6 +38,13 @@ for _p in (_BACKEND, _PROJECT, _SHARED_DIR, _IDENTITY_SRC, _ATTR_SRC, _MULTI_DIR
 
 import app.forward.config_builder as config_builder  # noqa: E402
 import utils as shared_utils  # noqa: E402
+
+# qwen / minimax 关闭思考时的完整字段：顶层字段供 DashScope 云接口，
+# chat_template_kwargs 供自建 vLLM / SGLang（顶层字段会被其静默忽略）。
+_QWEN_OFF_FIELDS = {
+    "enable_thinking": False,
+    "chat_template_kwargs": {"enable_thinking": False},
+}
 import name_ai_matcher  # noqa: E402
 import name_translator  # noqa: E402
 import attr_mismatch_ai_matcher  # noqa: E402
@@ -154,9 +161,9 @@ def test_shared_helper_semantics():
         assert shared_utils.thinking_enabled() is False
         assert shared_utils.thinking_payload("qwen") == {}  # 显式 provider 优先
     with _patched_env(AI_PROVIDER="qwen", QWEN_THINKING="false"):
-        assert shared_utils.thinking_payload() == {"enable_thinking": False}
+        assert shared_utils.thinking_payload() == _QWEN_OFF_FIELDS
     with _patched_env(AI_PROVIDER="minimax", MINIMAX_THINKING="off"):
-        assert shared_utils.thinking_payload() == {"enable_thinking": False}
+        assert shared_utils.thinking_payload() == _QWEN_OFF_FIELDS
     with _patched_env(AI_PROVIDER="deepseek", DEEPSEEK_THINKING="1"):
         assert shared_utils.thinking_payload() == {}
     with _patched_env(AI_PROVIDER="deepseek", DEEPSEEK_THINKING=""):
@@ -178,6 +185,7 @@ def test_name_matcher_payload():
             name_ai_matcher.call_ai_api("prompt", _identity_cfg())
         assert captured["payload"]["thinking"] == {"type": "disabled"}
         assert "enable_thinking" not in captured["payload"]
+        assert "chat_template_kwargs" not in captured["payload"]
 
         captured.clear()
         with _patched_env(AI_PROVIDER="deepseek", DEEPSEEK_THINKING="1"):
@@ -199,6 +207,7 @@ def test_name_translator_payload():
         with _patched_env(AI_PROVIDER="qwen", QWEN_THINKING="0"):
             name_translator._call_translate_api("prompt", _identity_cfg())
         assert captured["payload"]["enable_thinking"] is False
+        assert captured["payload"]["chat_template_kwargs"] == {"enable_thinking": False}
         assert "thinking" not in captured["payload"]
     finally:
         restore_read()
@@ -215,6 +224,7 @@ def test_attribute_matcher_payload():
         with _patched_env(AI_PROVIDER="minimax", MINIMAX_THINKING="0"):
             attr_mismatch_ai_matcher.call_ai_api("prompt", _attr_cfg())
         assert captured["payload"]["enable_thinking"] is False
+        assert captured["payload"]["chat_template_kwargs"] == {"enable_thinking": False}
     finally:
         restore_read()
         restore_requests()
@@ -261,6 +271,7 @@ def test_cluster_ai_client_payload():
         with _patched_env(AI_PROVIDER="qwen", QWEN_THINKING="0"):
             client.chat("sys", "user")
         assert captured["payload"]["enable_thinking"] is False
+        assert captured["payload"]["chat_template_kwargs"] == {"enable_thinking": False}
     finally:
         restore()
 

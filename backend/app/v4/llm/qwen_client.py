@@ -54,8 +54,11 @@ class QwenClient:
         # 思考模式由前端「模型设置」页控制：Qwen 默认开启，因此开启时保持
         # 历史请求体不变（不发送 enable_thinking）；关闭时显式发送 false。
         # 不发送 reasoning_effort——当前默认行为即不指定档位。
+        # 关闭时同时发两处：DashScope 兼容接口认顶层 enable_thinking；自建
+        # vLLM / SGLang 只认 chat_template_kwargs，顶层字段会被静默忽略。
         if not self._thinking:
             payload["enable_thinking"] = False
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         last_error = None
         for attempt in range(max_retries + 1):

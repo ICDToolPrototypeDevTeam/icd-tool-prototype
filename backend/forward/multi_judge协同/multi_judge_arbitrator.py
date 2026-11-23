@@ -293,8 +293,13 @@ def thinking_payload(provider=None) -> dict:
     if (os.environ.get(env_name, "") or "").strip().lower() in _THINKING_FALSE:
         if provider == "deepseek":
             return {"thinking": {"type": "disabled"}}
-        # qwen / minimax：与反向 QwenClient / MiniMaxClient 的关闭字段一致
-        return {"enable_thinking": False}
+        # qwen / minimax：与反向 QwenClient / MiniMaxClient 的关闭字段一致。
+        # 同时发两处：DashScope 兼容接口认顶层 enable_thinking；自建 vLLM /
+        # SGLang 只认 chat_template_kwargs，顶层字段会被静默忽略。
+        return {
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
     return {}
 
 
