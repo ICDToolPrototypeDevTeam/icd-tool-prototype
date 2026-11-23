@@ -10,6 +10,7 @@ from pymongo.errors import DuplicateKeyError
 from starlette.requests import Request
 
 from app.auth.models import User
+from app.auth.roles import role_to_superuser
 from app.auth.schemas import UserCreateRequest
 
 
@@ -41,12 +42,14 @@ class UserManager(ObjectIDIDMixin, BaseUserManager[User, PydanticObjectId]):
         else:
             raise UserAlreadyExists()
 
+        role = user_create.resolved_role
         user = User(
             email=email,
             hashed_password=self.password_helper.hash(user_create.password),
             is_verified=True,
             is_active=True,
-            is_superuser=user_create.is_admin,
+            role=role,
+            is_superuser=role_to_superuser(role),
         )
         try:
             await user.insert()

@@ -16,3 +16,5 @@ redis>=6.1,<7
 fastapi-users[beanie,jwt]==13.0.0
 beanie==1.26.0
 motor==3.6.0
+# 审计中心「系统运行」：容器/任务进程的 RSS 与 CPU 采集
+psutil>=6.1,<8

@@ -19,6 +19,9 @@
 """
 from __future__ import annotations
 
+import os
+import sys
+
 from celery import Celery
 
 from app.execution import config
@@ -56,3 +59,48 @@ celery_app.conf.update(
 # 属性；显式别名保证三种写法都能拿到同一个实例。
 app = celery_app
 celery = celery_app
+
+
+def _resolve_concurrency(sender) -> int:
+    try:
+        value = int(getattr(sender, "concurrency", 0) or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value > 0:
+        return value
+    raw = os.getenv("ICD_WORKER_CONCURRENCY", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return 20
+
+
+def _on_worker_ready(sender=None, **kwargs) -> None:
+    """Worker 主进程就绪后启动容器指标上报线程。
+
+    只由 Worker 容器执行；API 进程不启动该线程，避免重复上报。
+    """
+    try:
+        from app.execution import metrics
+
+        metrics.start_worker_reporter(_resolve_concurrency(sender))
+    except Exception as exc:  # noqa: BLE001 — 指标不可用不影响 Worker
+        print(
+            f"[metrics] worker reporter startup failed: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
+
+def _on_worker_shutdown(sender=None, **kwargs) -> None:
+    try:
+        from app.execution import metrics
+
+        metrics.stop_worker_reporter()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+from celery.signals import worker_ready, worker_shutdown  # noqa: E402
+
+worker_ready.connect(_on_worker_ready, weak=False)
+worker_shutdown.connect(_on_worker_shutdown, weak=False)

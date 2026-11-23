@@ -7,7 +7,19 @@ import {
   updateAdminUserV4,
 } from '../api'
 import { useAuth } from '../auth/AuthContext'
-import type { AdminUser, AdminUserUpdatePayload } from '../types'
+import type { AdminUser, AdminUserUpdatePayload, UserRole } from '../types'
+
+const ROLE_OPTIONS: { value: UserRole; label: string }[] = [
+  { value: 'user', label: '业务用户' },
+  { value: 'admin', label: '系统管理员' },
+  { value: 'auditor', label: '审计管理员' },
+]
+
+function roleBadgeClass(role: UserRole): string {
+  if (role === 'admin') return 'admin-users__badge--admin'
+  if (role === 'auditor') return 'admin-users__badge--auditor'
+  return 'admin-users__badge--user'
+}
 
 /**
  * 后端 created_at 可能是 Mongo 返回的 naive UTC（无时区后缀），
@@ -57,7 +69,7 @@ export default function AdminUsersPage() {
   const [creating, setCreating] = useState(false)
   const [newUsername, setNewUsername] = useState('')
   const [newPassword, setNewPassword] = useState('')
-  const [newIsAdmin, setNewIsAdmin] = useState(false)
+  const [newRole, setNewRole] = useState<UserRole>('user')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -103,12 +115,13 @@ export default function AdminUsersPage() {
       await createAdminUserV4({
         username,
         password: newPassword,
-        is_admin: newIsAdmin,
+        role: newRole,
       })
       setNewUsername('')
       setNewPassword('')
-      setNewIsAdmin(false)
-      setNotice(`已创建账号「${username}」`)
+      setNewRole('user')
+      const roleLabel = ROLE_OPTIONS.find((item) => item.value === newRole)?.label
+      setNotice(`已创建账号「${username}」（${roleLabel}）`)
       await load()
     } catch (e) {
       setError(describeError(e))
@@ -134,7 +147,9 @@ export default function AdminUsersPage() {
       const affectsSelf =
         user !== null &&
         updated.id === user.id &&
-        (payload.is_active !== undefined || payload.is_superuser !== undefined)
+        (payload.is_active !== undefined ||
+          payload.role !== undefined ||
+          payload.is_superuser !== undefined)
       if (affectsSelf) {
         await refresh()
         return
@@ -178,14 +193,13 @@ export default function AdminUsersPage() {
     )
   }
 
-  function handleToggleAdmin(target: AdminUser) {
-    if (busyId) return
+  function handleChangeRole(target: AdminUser, role: UserRole) {
+    if (busyId || role === target.role) return
+    const label = ROLE_OPTIONS.find((item) => item.value === role)?.label || role
     void applyUpdate(
       target,
-      { is_superuser: !target.is_superuser },
-      target.is_superuser
-        ? `已取消「${target.username}」的管理员权限`
-        : `已将「${target.username}」设为管理员`,
+      { role },
+      `已将「${target.username}」的角色调整为「${label}」`,
     )
   }
 
@@ -196,7 +210,7 @@ export default function AdminUsersPage() {
       <div className="landing-hero">
         <h1 className="landing-hero__title">用户管理</h1>
         <p className="landing-hero__subtitle">
-          创建账号、重置密码、启用或禁用账号，并调整管理员角色；系统始终保留至少一个活跃管理员
+          创建账号、重置密码、启用或禁用账号，并调整账号角色（业务用户 / 系统管理员 / 审计管理员）；系统始终保留至少一个活跃管理员
         </p>
       </div>
 
@@ -247,14 +261,20 @@ export default function AdminUsersPage() {
                 disabled={creating}
               />
             </label>
-            <label className="admin-users__check">
-              <input
-                type="checkbox"
-                checked={newIsAdmin}
-                onChange={(e) => setNewIsAdmin(e.target.checked)}
+            <label className="admin-users__create-field">
+              <span className="admin-users__create-label">角色</span>
+              <select
+                className="admin-users__input"
+                value={newRole}
+                onChange={(e) => setNewRole(e.target.value as UserRole)}
                 disabled={creating}
-              />
-              管理员
+              >
+                {ROLE_OPTIONS.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
             </label>
             <button
               type="submit"
@@ -309,13 +329,9 @@ export default function AdminUsersPage() {
                       <td className="admin-users__username">{item.username}</td>
                       <td>
                         <span
-                          className={`admin-users__badge ${
-                            item.is_superuser
-                              ? 'admin-users__badge--admin'
-                              : 'admin-users__badge--user'
-                          }`}
+                          className={`admin-users__badge ${roleBadgeClass(item.role)}`}
                         >
-                          {item.is_superuser ? '管理员' : '普通用户'}
+                          {item.role_label}
                         </span>
                       </td>
                       <td>
@@ -350,14 +366,21 @@ export default function AdminUsersPage() {
                           >
                             {item.is_active ? '禁用' : '启用'}
                           </button>
-                          <button
-                            type="button"
-                            className="btn btn--secondary"
+                          <select
+                            className="admin-users__role-select"
+                            value={item.role}
                             disabled={writeBusy}
-                            onClick={() => handleToggleAdmin(item)}
+                            title="调整账号角色"
+                            onChange={(e) =>
+                              handleChangeRole(item, e.target.value as UserRole)
+                            }
                           >
-                            {item.is_superuser ? '取消管理员' : '设为管理员'}
-                          </button>
+                            {ROLE_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
                         </div>
                       </td>
                     </tr>

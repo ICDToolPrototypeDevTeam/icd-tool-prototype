@@ -12,16 +12,19 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Optional
 
 import openpyxl
 from docx import Document
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from starlette.concurrency import run_in_threadpool
 
 from app.api.v4.runner import launch_v4_pipeline
 from app.api.v4.schemas import V4AnalyzeResponse
+from app.audit import catalog
+from app.audit.service import elapsed_ms, record_event
 from app.auth.deps import current_user
 from app.auth.models import User
 from app.job_manager import job_manager
@@ -291,7 +294,10 @@ async def coverage_analysis(
     hlr_schema: Optional[str] = Form(None),
     # 未登录由 fastapi-users 返回 401；归属写入创建的任务（后续任务按 owner_id 隔离）
     user: User = Depends(current_user),
+    # 审计用；FastAPI 自动注入，直接调用（测试）时可省略
+    request: Request = None,
 ):
+    started = time.perf_counter()
     # —— 字段校验 ——
     _hlr_ext = Path(hlr_word_file.filename or "").suffix.lower()
     if _hlr_ext not in SUPPORTED_HLR_EXTENSIONS:
@@ -430,20 +436,72 @@ async def coverage_analysis(
                 ),
             )
 
+    audit_detail = {
+        '任务编号': job.job_id,
+        '任务类型': catalog.task_type_label('correctness'),
+        '系统类型': catalog.profile_label(controller_profile),
+        'HLR 文件': hlr_path.name,
+        'EoICD 发布方文件': pub_path.name if pub_path else '未提供',
+        'EoICD 订阅方文件': sub_path.name if sub_path else '未提供',
+        '追溯文件数': len(traceability_files),
+        '评审模型': '、'.join(
+            catalog.model_label(item) for item in (judge_providers or [])
+        ) or '未指定',
+        '模拟模式': (
+            '跟随系统配置' if use_mock_llm is None else ('开启' if use_mock_llm else '关闭')
+        ),
+        '自定义表格样式': '使用' if resolved_schema is not None else '未使用',
+        '追溯预筛': '开启' if enable_traceability_prefilter else '关闭',
+    }
+
     # —— 后台线程跑 V4 管线（use_mock_llm 由 runner 在线程内绑定运行上下文） ——
-    launch_v4_pipeline(
-        job=job,
-        job_dir=job_dir,
-        hlr_path=hlr_path,
-        publisher_path=pub_path,
-        subscriber_path=sub_path,
-        trace_dir=trace_dir,
-        judge_providers=judge_providers,
-        use_mock_llm=use_mock_llm,
-        controller_profile=controller_profile,
-        no_refine=no_refine,
-        hlr_schema=resolved_schema,
-        attachment_files=attachment_records,
+    try:
+        launch_v4_pipeline(
+            job=job,
+            job_dir=job_dir,
+            hlr_path=hlr_path,
+            publisher_path=pub_path,
+            subscriber_path=sub_path,
+            trace_dir=trace_dir,
+            judge_providers=judge_providers,
+            use_mock_llm=use_mock_llm,
+            controller_profile=controller_profile,
+            no_refine=no_refine,
+            hlr_schema=resolved_schema,
+            attachment_files=attachment_records,
+        )
+    except Exception as exc:  # noqa: BLE001 — 记录失败后按原逻辑返回 503 等
+        record_event(
+            request=request,
+            category=catalog.CATEGORY_OPERATION,
+            module='jobs',
+            action='task_create',
+            summary=f'创建正确性分析任务失败：{type(exc).__name__}',
+            user=user,
+            target_type='job',
+            target_id=job.job_id,
+            target_label='正确性分析任务',
+            detail=audit_detail,
+            result=catalog.RESULT_FAILURE,
+            error=str(exc),
+            duration_ms=elapsed_ms(started),
+        )
+        raise
+
+    record_event(
+        request=request,
+        category=catalog.CATEGORY_OPERATION,
+        module='jobs',
+        action='task_create',
+        summary=(
+            f'创建正确性分析任务（{catalog.profile_label(controller_profile)}）'
+        ),
+        user=user,
+        target_type='job',
+        target_id=job.job_id,
+        target_label='正确性分析任务',
+        detail=audit_detail,
+        duration_ms=elapsed_ms(started),
     )
 
     return V4AnalyzeResponse(

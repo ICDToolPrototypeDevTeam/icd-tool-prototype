@@ -52,7 +52,8 @@ interface AuthContextValue {
   loading: boolean
   /** 本标签页曾登录、当前会话已失效（用于登录页提示） */
   sessionExpired: boolean
-  login: (username: string, password: string) => Promise<void>
+  /** 登录成功后返回当前用户，便于按角色决定落地页 */
+  login: (username: string, password: string) => Promise<AuthUser>
   logout: () => Promise<void>
   refresh: () => Promise<void>
 }
@@ -103,12 +104,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (username: string, password: string) => {
     await loginV4(username, password)
-    const current = await getMeV4()
-    setUser(current)
-    if (current) {
-      setSessionMarker()
-      setSessionExpired(false)
-    }
+    const me = await getMeV4()
+    if (!me) throw new Error('登录状态未能建立，请重试')
+    setUser(me)
+    setSessionMarker()
+    setSessionExpired(false)
+    return me
   }, [])
 
   const logout = useCallback(async () => {

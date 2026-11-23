@@ -45,8 +45,8 @@ export default function LoginPage() {
     )
   }
 
-  // 已登录（例如手动访问 /login）直接回到目标页
-  if (user) return <Navigate to={from} replace />
+  // 已登录（例如手动访问 /login）直接回到目标页；审计管理员固定进入审计中心
+  if (user) return <Navigate to={user.is_auditor ? '/audit' : from} replace />
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -54,8 +54,8 @@ export default function LoginPage() {
     setSubmitting(true)
     setError('')
     try {
-      await login(username.trim(), password)
-      navigate(from, { replace: true })
+      const me = await login(username.trim(), password)
+      navigate(me.is_auditor ? '/audit' : from, { replace: true })
     } catch (err) {
       setError(describeLoginError(err))
     } finally {

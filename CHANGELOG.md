@@ -12,14 +12,26 @@
 
 ### Added
 
+- **审计管理员角色与审计中心（ADR-010）**：账号角色由布尔管理员扩展为三值 `role`（`user` 业务用户 / `admin` 系统管理员 / `auditor` 审计管理员），`is_superuser` 保留兼容并由角色派生，历史账号启动时自动回填。职责分离：系统管理员不可进入审计中心（前后端 403），审计管理员只能使用审计中心（除登录 / 登出 / `/auth/me` / 健康检查外，业务接口一律 403）。新增 `backend/app/audit/`：`catalog.py` 中文词表（模块 / 动作 / 动作类型 / 角色 / 结果 / 任务类型 / profile / 模型）与 User-Agent 解析、`models.py`（MongoDB `audit_logs` 集合，6 个索引，永久保留）、`writer.py`（有界队列 20000 + 批量写入 100 条 / 0.5s，fail-open 不阻塞业务）、`service.py`（事件构造、查询、概览、词表）、`system.py`（容器资源 / 任务进程 / 队列 / 依赖健康 / 趋势）、`router.py`。新增接口 `GET /api/v4/audit/logs`、`/audit/logs/{id}`、`/audit/meta`、`/audit/overview`、`/audit/system`、`/audit/system/history`，仅审计管理员可访问。日志记录时间、IP、客户端、操作人 / 角色、模块、动作、操作类型、内容摘要、结果、对象、详情、错误与耗时，代码值同时保存中文标签；支持时间范围、类别、模块、动作、结果、操作人、角色、IP、中文关键词查询与服务端分页。登录成功 / 失败（账号不存在与密码错误统一返回 400 `LOGIN_BAD_CREDENTIALS`，密码正确但账号被禁用返回 400 `LOGIN_USER_NOT_ACTIVE`；具体原因只记服务端）、登出、账号创建 / 修改、任务创建 / 取消 / 终止 / 放弃 / 续跑、下载、设置与 HLR 样式变更均写审计。前端新增 `/audit` 页面（概览 / 登录日志 / 操作日志 / 系统运行四个标签页，明细抽屉、组合筛选、5s 轮询在页面隐藏时暂停），图表用纯 SVG / CSS 实现，未引入图表库。
+- **系统运行监控与 Redis 指标采集**：新增 `backend/app/execution/metrics.py`。API 进程每 5s 采样自身 cgroup 内存（v1/v2，扣除 `inactive_file`）与 CPU（按 quota / 宿主核数归一）写 `icd:metrics:api`（TTL 30s）；Celery Worker 后台线程每 5s 上报 `icd:metrics:worker:{hostname}`（TTL 20s）；采样点写入 `icd:metrics:history`（720 点 / 1 小时 TTL）形成趋势；Worker 认领任务后上报子进程 PID，审计接口按 `psutil` 读取任务 RSS / CPU 并按用户聚合。告警阈值：内存 75% / 90%、CPU 85% / 95%、磁盘 80% / 90%、Worker 心跳 15s、Redis / Mongo 不可用为严重；任务级指标只展示不设阈值。不挂载 `docker.sock`、不做宿主机级监控。
 - **其他支撑材料（任务附件，只存储、不参与分析）**：反向正确性分析上传页新增「其他支撑材料」多文件上传框（如 DD 表），任意文件类型，沿用单文件 50MB / 单请求 200MB 限制。附件保存到任务目录 `input/attachment/` 独立子目录（落盘重名自动追加序号，不覆盖），**不传给管线、不进入 `input_files`**；每个附件的 `{path, name, size}` 写入 manifest `params.attachment_files`，续跑重写 manifest 时保留。历史结果页对管理员新增「上传文件」按钮 + 下拉下载入口（`GET /api/v4/jobs/{job_id}/attachments/{index}`，按清单下标定位、限定在任务目录内）；普通用户即使为任务所有者，列表中的 `attachments` 也恒为空数组（文件名不下发），下载接口返回 403。所有登录用户均可上传附件。
 - **登录状态过期提示**：会话失效后回到登录页时明确提示“登录状态已失效，请重新登录”，覆盖两类场景：页面内请求因会话失效（8 小时过期、管理员重置密码 / 禁用等）返回 401；刷新页面后发现 Cookie 已失效。首次访问、主动退出不提示；网络 / 服务异常不误报为登录失效。实现仅在前端使用按标签页的 `sessionStorage` 标记，不改后端与接口。
 - **禁用账号的登录提示可区分**：`POST /api/v4/auth/login` 改为自定义登录路由。用户名不存在或密码错误仍返回 400 `LOGIN_BAD_CREDENTIALS`；密码正确但账号被禁用时返回 400 `LOGIN_USER_NOT_ACTIVE`，前端提示“账号已被禁用，请联系管理员”，不再与密码错误混用同一文案。响应状态码与 Cookie 下发方式不变。
 
 ### Changed
 
+- **登录路由改为自定义实现（审计 + 禁用提示）**：`/auth/login` 与 `/auth/logout` 不再直接挂载 fastapi-users 自带路由，改为 `OAuth2PasswordRequestForm` 自定义处理，登录成功与失败均写审计；账号不存在 / 密码错误统一返回 400 `LOGIN_BAD_CREDENTIALS`，密码正确但账号被禁用返回 400 `LOGIN_USER_NOT_ACTIVE`，具体失败原因只写服务端，账号不存在时也做一次密码哈希以抵消响应时间差。
+- **管理接口兼容字段**：创建 / 更新账号接受 `role`，旧字段 `is_admin` / `is_superuser` 继续兼容（冲突 422）；仍禁止禁用或降级最后一个活跃管理员（409）。
+- **业务路由准入**：`api/v4/router.py` 对 coverage、completeness、jobs、outputs、history、settings、hlr_schemas 统一挂 `require_business_access`，审计管理员访问业务接口统一 403。
+- **API 响应新增字段**：`/auth/me` 与用户管理响应增加 `role` / `role_label` / `is_auditor`；旧字段保留不变。
+- **新增依赖**：`psutil>=6.1,<8`（审计中心系统运行页的容器 / 任务进程 RSS 与 CPU 采集）；需重建后端镜像。
+- **审计中心页面重做为平台控制台风格（仅前端展示）**：沿用蓝色页头、白底面板与常规企业表格，概览为四张指标卡（失败卡可下钻）+ 事件趋势堆叠柱状图 + 事件构成 + 最近记录 + 高频模块 / 操作角色；日志页为筛选卡 + 按天分组的表格 + 胶囊结果标签；详情为右侧抽屉；系统运行保留健康结论、资源刻度、读数、趋势图与进程 / Worker 名录。图表重写：Y 轴刻度只取 1 / 2 / 2.5 / 5 的整数倍，计数类强制整数刻度，百分比轴最小 1% 步长且全零数据也能给出 0–5 的完整刻度，折线图 5 等分使低占比读数不再挤在底部，事件趋势按数据量聚合为每小时 / 6 小时 / 天，横轴刻度严格等距、随宽度收缩并居中对准刻度线。窄屏下页头单行、指标两列、最近记录隐藏类别列并省略长事件，宽表在自身容器内横向滚动。接口、权限、审计记录字段与数据口径不变。
 - **重置密码 / 禁用立即吊销会话（ADR-009）**：`users` 文档新增内部字段 `token_version`，登录 JWT 携带 `ver`；管理员重置密码或把账号从启用改为禁用时原子递增版本号，该账号所有已签发 Cookie 在下一次请求立即 401。重新启用不会恢复旧会话，必须重新登录；设置 / 取消管理员不影响会话。旧 Token 无 `ver` 时按 0 处理，升级部署不会踢掉现有会话。属于行为变化：重置 / 禁用后，被影响账号的所有已登录页面会回到登录页。
 - **已完成反向任务自动清理中间产物**：`backend/app/api/v4/runner.py` 在反向任务完成状态落盘后，删除 `output/eoicd_requirements.json`（单任务实测可达 169MB，是 `backend/output/v4` 磁盘膨胀的主要来源）、`output/eoicd_side_pairs.json`、`output/llm_cache.jsonl`。三者只在续跑时被读取，而 `completed` 任务不可续跑；失败 / 中断 / 被终止的任务原样保留。清理为 best-effort，失败不影响任务完成、结果页、历史列表与报告生成。需要保留这些文件时（如本地 e2e 反读）设置 `ICD_KEEP_JOB_ARTIFACTS=1`。仅作用于反向管线；正向管线、已有历史任务存量清理不在本次范围。
+
+### Fixed
+
+- **路由函数无法直接调用**：业务路由与认证路由中新增的 `request: Request` 参数改为末位可选参数（`request: Request = None`），恢复既有 pytest 直接调用路由函数的兼容性；FastAPI 运行时仍正常注入 `Request`。
 
 ## [Unreleased] - 2026-11-12
 
@@ -219,7 +231,6 @@
 ### Fixed
 
 - 修复**进程重启后已完成任务无法再下载产物**的问题（上一条的另一半）。下载接口原先只按**内存**里的任务表判断任务类型，而重启后内存任务表是空的（`load_interrupted` 只载入未完成的），于是已知根因的产物文件被当成「不属于本类型任务」而 404 —— 服务器上表现为「文件还在、就是下不了」。现在下载接口定位任务类型按「**内存 → 磁盘 `job.json`**」回退，重启后照样能下；同时保留原有的类型校验收紧（拿反向接口去下正向产物仍然 404，不会串）。该改动需**重建后端镜像**才生效。
-
 
 ### Added
 
@@ -974,4 +985,3 @@
 - HSCU E2E 已通过 mock LLM 验证：job `dd0790ed` 跑通完整 6 步管线，4 类 DOCX 输出齐全，HLR 解析 10 条 / 追溯匹配 15 条。
 - HSCU 0/10 反向匹配：当前 HSCU HLR 信号关键词（如 `HYD_xxx` / `LBL_xxx`）在提供的 EoICD 样例文件中未出现（样例仅含 AHMU `AIRCRAFT_STATUS` 信号），属测试数据问题，非 profile 问题。
 - AMS / FGMC 回归验证通过：AMS job `a335bce9`（~60s）+ FGMC job `67e745b9`（<5s）均产出 4 DOCX，无回归。
-

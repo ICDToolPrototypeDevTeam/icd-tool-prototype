@@ -12,6 +12,7 @@ ICD工具原型Ver4.1是一个面向EoICD源文件和软件高层需求（HLR）
 ## 1. 主要功能
 
 - **用户登录与账号隔离**：用户名 + 密码登录，账号由管理员创建、重置密码、禁用 / 启用，不开放自注册；普通用户只能查看、下载、继续、终止、放弃自己的任务与结果（历史删除仅管理员），管理员可管理全部账号的任务与历史。账号保存在 MongoDB，任务与产物仍落本地任务目录（详见 [ADR-007](docs/decisions/ADR-007-用户登录与账号隔离.md)）。
+- **三种角色与审计中心**：业务用户 / 系统管理员 / 审计管理员三种角色。审计管理员只能进入审计中心，查看业务用户与系统管理员的登录日志、操作日志，以及 API 容器、Worker 容器、任务进程的内存 / CPU 与 Redis 队列、依赖健康、最近 1 小时趋势；系统管理员不能进入审计中心。日志信息项含时间、IP、客户端、操作人 / 角色、模块、动作、类型、内容、结果、对象、详情与耗时，代码值统一翻译为中文，支持按信息项组合查询与中文关键词检索（详见 [ADR-010](docs/decisions/ADR-010-审计管理员与审计日志.md)）。
 - **HLR→EoICD 可追溯性分析**：从软件高层需求（HLR）出发，逐条验证每条 HLR 需求是否能在 EoICD 接口定义中找到对应项，从而判断 HLR 到 EoICD 的追溯与覆盖情况。
 - **输入解析与 HLR 标注**：解析 HLR Word 和 EoICD PubSub Excel，得到结构化的 HLR 需求列表与 EoICD 接口清单；用 DeepSeek 为每条 HLR 需求标注总线类型、Label 号、关联设备、信号关键词，作为匹配线索。
 - **反向匹配（含追溯表预筛选）**：根据标注线索为每条 HLR 需求寻找最可能对应的 EoICD 接口定义（Block）；支持上传追溯表预先缩小匹配范围，匹配失败时自动回退到全量匹配。
@@ -162,7 +163,7 @@ docker compose logs worker | grep concurrency   # 期望：concurrency: 20 (pref
 | `http://localhost:3000` | 前端界面（未登录会跳转登录页） |
 | `http://localhost:8000/api/v4/health` | 后端健康检查（含 MongoDB 状态） |
 
-首次访问使用 `ICD_ADMIN_USERNAME` / `ICD_ADMIN_PASSWORD` 配置的初始管理员登录；登录后可在「用户管理」创建普通账号。普通账号只能看到自己的任务与历史，管理员可看到全部任务与历史并管理账号。
+首次访问使用 `ICD_ADMIN_USERNAME` / `ICD_ADMIN_PASSWORD` 配置的初始管理员登录；登录后可在「用户管理」创建普通账号，角色可选业务用户 / 系统管理员 / 审计管理员。普通账号只能看到自己的任务与历史，管理员可看到全部任务与历史并管理账号；审计管理员登录后直接进入审计中心，只能查看日志与系统运行状态。
 
 ### 4.5 使用演示
 
@@ -224,7 +225,8 @@ icd-tool-prototype/
 ├── backend/                      # 后端工程
 │   ├── app/
 │   │   ├── api/v4/               # V4 API 路由（router / schemas / runner / coverage / jobs / outputs）
-│   │   ├── auth/                 # 登录 / 账号管理 / 任务归属校验（MongoDB 账号库）
+│   │   ├── auth/                 # 登录 / 账号管理 / 角色 / 任务归属校验（MongoDB 账号库）
+│   │   ├── audit/                # 审计日志与运行监控（audit_logs 集合 / 异步写入 / 系统运行状态）
 │   │   ├── forward/              # 正向适配层（配置构建 / MOCK 服务 / 子进程执行 / 产物收集；编排与翻译，零业务算法）
 │   │   ├── v4/                   # V4 反向业务模块
 │   │   │   ├── comparison/       #   多模型裁判 + Review Agent 共识 + 一星复查 + 报告生成
@@ -271,6 +273,7 @@ icd-tool-prototype/
 | `docs/decisions/ADR-001-V4后端接入策略.md` | V4 后端工程化集成关键决策（Partially Superseded） |
 | `docs/decisions/ADR-002-移除V3.md` | 移除 V3 旧版代码决策 |
 | `docs/decisions/ADR-008-Celery-Redis任务执行层.md` | Celery + Redis 任务执行层决策 |
+| `docs/decisions/ADR-010-审计管理员与审计日志.md` | 审计管理员角色、审计日志与运行监控决策 |
 | `docs/development/development-log.md` | 开发纪要 |
 | `docs/development/debug-log.md` | 问题排查记录 |
 | `.claude/rules/context-rules.md` | Claude Code 上下文读取规则 |
@@ -286,7 +289,8 @@ icd-tool-prototype/
 | 文件处理 | openpyxl、python-docx、PyYAML、python-dotenv |
 | AI/LLM | DeepSeek、MiniMax、Qwen / DashScope |
 | 任务执行 | Celery（prefork，默认 20 并发）+ Redis（队列 + 跨进程控制面） |
-| 账号库 | MongoDB 7.0（独立容器，仅存账号；任务与产物仍落本地任务目录） |
+| 账号库 / 审计日志 | MongoDB 7.0（独立容器，存账号与 `audit_logs`；任务与产物仍落本地任务目录） |
+| 运行监控 | psutil + Redis 短期指标（cgroup 内存 / CPU、任务进程、1 小时趋势） |
 | 部署 | Docker Compose（redis / backend / worker / mongo 四服务） |
 
 ## 8. 当前阶段
@@ -296,7 +300,8 @@ icd-tool-prototype/
 - **V4.0**：已完成 HLR→EoICD 可追溯性分析全流程（6 步），三模型并行裁判 + 星级评分共识，输出 5 份产物。DeepSeek 为必填（同时用于 HLR 标注和 Review Agent），MiniMax / Qwen 为可选（未配置时从 `JUDGE_PROVIDERS` 中移除即可）。
 - **V4.1 正向完整性分析**：已完成 EoICD→HLR 完整性分析全流程（多 judge 一致性管线：阶段1 共享解析 → 各 judge 并行判定 → 共识复核（仲裁 + 复查）→ 生成报告），输出 1 份 Word 报告 + 1 份 Excel 明细。
 - **用户登录与账号隔离（阶段 A）**：已完成登录、账号管理、任务归属与访问隔离，MongoDB 作为独立账号库随交付包部署。任务与产物不入库（阶段 B 后续设计）；Windows 桌面打包本阶段暂停交付（见 [ADR-007](docs/decisions/ADR-007-用户登录与账号隔离.md)）。
-- **前端**：默认使用 V4.0 界面（含登录页、管理员用户管理页）。
+- **审计管理员与审计中心（ADR-010）**：已完成三角色权限互斥、登录 / 操作审计（中文词表 + 组合查询）、容器与任务级运行监控（纯 SVG / CSS 图表）。审计日志永久保留，v1 不提供删除与导出；不做宿主机级监控。
+- **前端**：默认使用 V4.0 界面（含登录页、管理员用户管理页、审计中心页）。
 - **V3.0 旧版代码**：已移除（见 [ADR-002](docs/decisions/ADR-002-移除V3.md)）。
 
 ## 9. 贡献者
