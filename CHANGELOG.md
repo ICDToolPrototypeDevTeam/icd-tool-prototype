@@ -12,6 +12,9 @@
 ### Changed
 
 - **部署默认启用 2 路任务内并行**：`docker-compose.yml` / `docker-compose.server.yml` 的 backend 与 worker 服务新增 `REVERSE_CASE_CONCURRENCY=2`、`REVERSE_LABEL_CONCURRENCY=2`、`LLM_PER_MODEL_LIMIT=50`、`ICD_WORKER_CONCURRENCY` 透传；`DEGRADATION_MAX_INFLIGHT` / `DEGRADATION_DRAIN_WORKERS` 默认值由 6 调整为 8（避免 6 个在飞名额把 2 路 case 并行钉死在 6，且为 drain 留出余量）。按 20 个 Worker 子进程计算，每模型并发峰值 40 ≤ 服务端声明的 50。`backend/.env.example` 同步补充说明。
+### Fixed
+
+- **Qwen / MiniMax 关闭思考在内网自建模型服务上不生效**：此前关闭时只发送顶层 `enable_thinking: false`，该字段仅 DashScope 等云兼容接口识别；内网 `dtagtcore.jz.ai` 上的 `qwen35-397b-int8` 等自建 OpenAI 兼容服务（vLLM / SGLang）只从 `chat_template_kwargs` 读取思考开关，顶层字段被静默忽略，设置页关闭后模型仍按开启思考运行。现反向 `QwenClient` / `MiniMaxClient` 与正向 3 个共享 helper（覆盖 5 个请求构造点）在关闭时同时发送顶层 `enable_thinking: false` 与 `chat_template_kwargs: {"enable_thinking": false}`，云接口与自建服务各取所需；开启 / 未知 provider / mock 的请求体不变。DeepSeek 字段未改动；真实内网网关的 reasoning token 变化待部署后探针复核。
 
 ## [Unreleased] - 2026-11-13
 

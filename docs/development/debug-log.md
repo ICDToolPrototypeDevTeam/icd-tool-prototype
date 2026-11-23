@@ -3595,3 +3595,75 @@ verified
 
 1. 后续继续增加导航项或加宽右侧用户区时可能再次重叠，需同步调整 `1400px` 阈值。
 2. 用户名超过约 15 个字符时，1440–1536 宽度下可能重新接近重叠；当前账号名较短，未做额外处理。
+
+## BUG-20261123-001：Qwen / MiniMax 关闭思考在内网自建模型服务上不生效
+
+#### 状态
+
+fixed（本地请求体探针 + 正向自测通过；真实内网网关行为尚未验证）
+
+#### 发现日期
+
+2026-11-23
+
+#### 关联 Issue / PR
+
+- Issue 待补（本地分支 `issue-185-186-outputs-handle`）
+- 关联能力：模型设置页思考模式开关（反向 + 正向）
+
+#### 问题现象
+
+设置页关闭 Qwen / MiniMax 思考后，内网模型服务仍按开启思考运行（依据：请求字段与服务端协议不匹配；真实网关表现待探针确认）。
+
+#### 复现方式
+
+1. 部署 `.env` 指向 `QWEN_BASE_URL=http://dtagtcore.jz.ai`、`QWEN_MODEL=qwen35-397b-int8`；
+2. 设置页关闭 Qwen 思考并保存；
+3. 跑反向任务，观察 qwen 裁判耗时 / 响应 reasoning token 未明显下降。
+
+#### 影响范围
+
+反向 Qwen / MiniMax 裁判的思考开关；正向 Qwen / MiniMax judge、聚类映射、名称判定、术语翻译、属性比对与 Step5/5.5 仲裁的思考开关。DeepSeek 字段不在本次改动内。
+
+#### 原因分析
+
+（已定位）调用链本身完整：`runtime_settings` 写入 `QWEN_THINKING`，`factory.get_llm()` 将 `thinking=thinking_enabled("qwen")` 传入 `QwenClient`，关闭时 payload 带顶层 `enable_thinking: false`。但该字段是 DashScope 兼容接口的协议；生产指向的 `dtagtcore.jz.ai` 是自建 OpenAI 兼容服务（模型名 `qwen35-397b-int8`，vLLM / SGLang 一类）。这类服务由服务端渲染 chat template，思考开关只从 `chat_template_kwargs` 读取，顶层 `enable_thinking` 被静默忽略，因此关闭无效。正向 3 个 `thinking_payload()` helper 同样只返回顶层字段，问题一致。
+
+#### 修复方案
+
+关闭时双字段同时发送：保留顶层 `enable_thinking: false`（DashScope），追加 `chat_template_kwargs: {"enable_thinking": false}`（自建 vLLM / SGLang）。开启 / 未知 provider / mock 仍返回空字典，请求体不变；DeepSeek 分支不动。
+
+#### 修改文件
+
+1. `backend/app/v4/llm/qwen_client.py`
+2. `backend/app/v4/llm/minimax_client.py`
+3. `backend/forward/EoICD-HLR正向匹配与属性比对_支持追溯/shared/utils.py`
+4. `backend/forward/multi_judge协同/multi_judge_arbitrator.py`
+5. `backend/forward/HLR需求聚类/hlr_cluster_tool/ai_client.py`
+6. `backend/forward/tests/test_thinking_toggle.py`
+
+#### 验证方式
+
+1. 反向探针 `python backend/tests/verify_thinking_payload.py`（mock HTTP，断言开启 / 关闭两态的完整请求体）；
+2. 正向 `python tests/run_all.py`（7 个测试模块 + 3 个生产文件自测）；
+3. 服务器 / 容器内对真实网关发 A/B/C 三组请求，比较 `reasoning_content` 与 `usage.completion_tokens_details.reasoning_tokens`（A 不加字段、B 仅顶层、C 仅 `chat_template_kwargs`）。
+
+#### 验证结果
+
+**部分通过（本机，2026-11-23）**：
+
+1. 反向探针：关闭时 qwen / minimax 均带两个字段，开启时均不带；通过。
+2. 正向自测：`[OK] 所有自测通过`；通过。
+3. DashScope 公网实测（`python backend/tests/probe_qwen_thinking_live.py qwen`，模型 `qwen3.6-35b-a3b`）：
+   - A 不加字段：`reasoning_content` 4160 字符 / 1347 reasoning tokens / 12.8s；
+   - B 仅顶层、C 仅 `chat_template_kwargs`、D 两者都加：reasoning 均为 0 / 2.3~3.2s；
+   - 修复后的 `QwenClient`（`QWEN_THINKING=0`）实跑：reasoning 0 / 2.5s，说明关闭字段确实发出并被服务端接受。
+4. **反向 MiniMax 实测不通过（模型限制）**：本地 `.env` 的 `MINIMAX_BASE_URL` 指向 DashScope、模型 `MiniMax-M2.5`，该模型返回 `400 InvalidParameter: The value of the enable_thinking parameter is restricted to True`；旧实现（仅顶层字段）同样 400，本次双字段改动未引入该错误，但该模型无法关闭思考。
+5. **尚未验证**：本机访问 `dtagtcore.jz.ai` 的公网 DNS 已解析为域名停放页（HTTP 200 但内容为 "domain for sale"），不是内网网关；SSH 到 `106.14.182.88` 超时。真实网关仍需在服务器 / 容器内（或接入内网 DNS 后）执行第 3 项探针。
+
+#### 遗留问题
+
+1. 真实内网网关是否接受 `chat_template_kwargs`、以及自建 vLLM / SGLang 是否忽略顶层字段，需在服务器 / 容器内用同一 A/B/C/D 探针确认；
+2. 生产 minimax / deepseek 两个槽位实际都指向同一网关上的 `DeepSeek-V4-Flash-0731-INT8`，自建 DeepSeek 的开关字段可能是 `chat_template_kwargs: {"thinking": false}`，本次未改，需单独评估；
+3. DashScope 上的 `MiniMax-M2.5` 明确禁止 `enable_thinking=false`，若本地 / 某部署仍以该模型作 MiniMax 槽位，关闭思考会 400；需决定是忽略该配置错误、前端提示，还是按模型能力裁剪字段；
+4. 需重建后端镜像才在服务器生效。

@@ -856,12 +856,13 @@ Content-Type: application/json
 | provider | 开启（默认） | 关闭 |
 | --- | --- | --- |
 | DeepSeek | 发送 `thinking: {"type": "enabled"}` + `reasoning_effort: "low"` | 发送 `thinking: {"type": "disabled"}`，不发送 `reasoning_effort` |
-| Qwen | 保持历史请求体，不发送 `enable_thinking`（服务端默认开启） | 发送 `enable_thinking: false` |
-| MiniMax | 保持历史请求体，不发送 `enable_thinking` | 按 Qwen 兼容协议发送 `enable_thinking: false` |
+| Qwen | 保持历史请求体，不发送 `enable_thinking`（服务端默认开启） | 发送 `enable_thinking: false` + `chat_template_kwargs: {"enable_thinking": false}` |
+| MiniMax | 保持历史请求体，不发送 `enable_thinking` | 按 Qwen 兼容协议发送上述两个字段 |
 
 - 不向前端暴露 effort 档位；Qwen / MiniMax 不发送 `reasoning_effort`（保持历史行为）。
 - 正向管线使用同一套 provider 字段，但只在**关闭**时追加；开启 / 未知 provider / mock 保持历史请求体不变（因此正向「开启」不等于反向 DeepSeek 的显式 `thinking: enabled` + `reasoning_effort: low`，服务端默认行为仍为开启）。
-- MiniMax 槽位仍保留 `minimax` 的模型名、token 记账与报告标签。关闭时按 Qwen 兼容协议发送 `enable_thinking: false`，是否生效取决于 `MINIMAX_BASE_URL` 指向的接口：指向 Qwen 兼容接口时生效，旧版 MiniMax OpenAI 兼容接口可能忽略该参数。
+- Qwen / MiniMax 关闭时**同时**发送顶层 `enable_thinking: false` 与 `chat_template_kwargs: {"enable_thinking": false}`：DashScope 等云兼容接口认顶层字段，自建 vLLM / SGLang 只认 `chat_template_kwargs`，顶层字段会被其静默忽略；两种部署各取所需，服务端忽略另一种字段。
+- MiniMax 槽位仍保留 `minimax` 的模型名、token 记账与报告标签。关闭时按 Qwen 兼容协议发送上述两个字段，是否生效取决于 `MINIMAX_BASE_URL` 指向的接口：指向 Qwen 兼容 / 自建 vLLM 时生效，旧版 MiniMax OpenAI 兼容接口可能忽略该参数。
 - 缓存 key：开启路径沿用历史 key（升级后默认配置仍命中旧缓存）；关闭路径追加 provider 级 `_thinking=disabled` 变体，不复用开启状态下的判定结果。
 
 ### 15.3 兼容与错误响应
