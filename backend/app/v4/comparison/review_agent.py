@@ -7,6 +7,8 @@ import json
 import sys
 import time
 
+from app.v4.concurrency import run_parallel_ordered
+from app.v4.degradation.config import DegradationConfig
 from app.v4.llm import get_llm
 from app.v4.llm_cache import KIND_CONSENSUS, compute_key, resolve_model
 from app.v4.models import (
@@ -41,6 +43,7 @@ def review_judgments(
     cache=None,
     tag: str = "consensus",
     tracker=None,
+    case_concurrency: int | None = None,
 ) -> ConsensusOutput:
     """Review per-case multi-agent judgments and produce consensus.
 
@@ -49,14 +52,24 @@ def review_judgments(
 
     ``cache``（可选 LLMCache）按内容寻址复用已完成的共识判定；``tag`` 只用于
     日志区分（Step 5 全量共识 / Step 5.6 复查后的局部共识），不参与 key。
+
+    ``case_concurrency`` 为同时送审的 case 数；None 时读
+    ``REVERSE_CASE_CONCURRENCY``（缺省 1 = 保持原串行行为）。结果顺序恒与入参
+    一致，调用方仍可按下标对齐。
     """
+    if case_concurrency is None:
+        case_concurrency = DegradationConfig.from_env().case_concurrency
+    workers = max(1, int(case_concurrency))
+    # 0.3s 间隔只为串行时给模型服务留呼吸；并行时每个 worker 各睡一次只会
+    # 把并行收益吃回去，故只在串行路径保留。
+    serial_delay = 0.3 if workers <= 1 else 0.0
+
     llm = get_llm("deepseek")
     system_prompt = _load_consensus_prompt()
     total = len(multi_results)
-    results: list[ConsensusResult] = []
     model = resolve_model(CONSENSUS_PROVIDER) if cache is not None else ""
 
-    for idx, mr in enumerate(multi_results):
+    def _review_one(mr: MultiJudgeResult) -> tuple[ConsensusResult, bool]:
         user_prompt = _build_review_user_prompt(mr)
         key = (
             compute_key(
@@ -77,40 +90,51 @@ def review_judgments(
             # 存的是上一轮的对象：强制换回本轮入参，保证命中/未命中的产物逐字节一致
             # （agent_name / raw_response 不参与 prompt，理论上可能不同）
             consensus.model_results = mr.judgments
-            if tracker is not None:
-                tracker.add(reused=1)
-        else:
-            consensus = _call_review_api(
-                llm=llm,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                case_id=mr.case_id,
-                model_results=mr.judgments,
-            )
-            if tracker is not None:
-                tracker.add(rerun=1)
-            if cache is not None and consensus.final_analysis != REVIEW_FAILURE_ANALYSIS:
-                cache.put(
-                    key,
-                    kind=KIND_CONSENSUS,
-                    provider=CONSENSUS_PROVIDER,
-                    model=model,
-                    case_id=mr.case_id,
-                    payload=consensus.model_dump(),
-                    params=REVIEW_PARAMS,
-                )
-        results.append(consensus)
+            return consensus, True
 
+        consensus = _call_review_api(
+            llm=llm,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            case_id=mr.case_id,
+            model_results=mr.judgments,
+        )
+        if cache is not None and consensus.final_analysis != REVIEW_FAILURE_ANALYSIS:
+            cache.put(
+                key,
+                kind=KIND_CONSENSUS,
+                provider=CONSENSUS_PROVIDER,
+                model=model,
+                case_id=mr.case_id,
+                payload=consensus.model_dump(),
+                params=REVIEW_PARAMS,
+            )
+        return consensus, False
+
+    def _on_reviewed(pos: int, mr: MultiJudgeResult, outcome: tuple[ConsensusResult, bool]) -> None:
+        consensus, cached = outcome
+        if tracker is not None:
+            if cached:
+                tracker.add(reused=1)
+            else:
+                tracker.add(rerun=1)
         print(
-            f"  [review] {mr.case_id} ({idx + 1}/{total}) {tag} "
-            f"{'HIT ' if cached is not None else ''}"
+            f"  [review] {mr.case_id} ({pos + 1}/{total}) {tag} "
+            f"{'HIT ' if cached else ''}"
             f"stars={consensus.star_rating} agreement={consensus.agreement_level} "
             f"→ {consensus.final_coverage_status}",
             file=sys.stderr,
         )
 
-        if idx < total - 1:
-            time.sleep(0.3)
+    outcomes = run_parallel_ordered(
+        multi_results,
+        _review_one,
+        max_workers=workers,
+        thread_name_prefix="consensus-review",
+        serial_delay=serial_delay,
+        on_result=_on_reviewed,
+    )
+    results = [consensus for consensus, _ in outcomes]
 
     summary = _build_summary(results)
     return ConsensusOutput(

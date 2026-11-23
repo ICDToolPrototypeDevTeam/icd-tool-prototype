@@ -4,6 +4,14 @@
 
 ## [Unreleased] - 2026-11-23
 
+### Added
+
+- **反向管线任务内并行（只影响反向）**：新增 `REVERSE_CASE_CONCURRENCY`（Step 4 多智能体裁判 / Step 5 共识 / Step 5.5 低星复查 / Step 5.6 局部共识同时处理的 case 数）与 `REVERSE_LABEL_CONCURRENCY`（Step 2 HLR 标注同时处理的条数），默认均为 1，即未配置时行为与改动前完全一致。并行入口统一走 `v4/concurrency.run_parallel_ordered()`：固定窗口提交、结果按输入顺序归位、线程经 `bind_thread_context` 继承任务归属与运行上下文、取消时停止调度未提交条目、异常原样抛出。Step 5.6 由「逐 case 调用共识」改为一次批量调用。新增 `LLM_PER_MODEL_LIMIT`（默认 50）与启动日志行 `[config] REVERSE_CONCURRENCY worker/case/label/peak/model/limit`，当每模型峰值（`ICD_WORKER_CONCURRENCY × max(case, label)`）超过该值时追加 WARN（只告警，不做运行时限流）。
+- **并行安全加固**：`DegradationContext` 的 provider 健康状态、统计计数与 drain 列表改为锁保护（新增 `add_drain` / `drain_snapshot` / `clear_drain`）；`Job.set_progress` 增加进度锁；`Job.set_reuse_stats` 改为锁内单调合并，避免乱序回调让前端计数倒退。
+
+### Changed
+
+- **部署默认启用 2 路任务内并行**：`docker-compose.yml` / `docker-compose.server.yml` 的 backend 与 worker 服务新增 `REVERSE_CASE_CONCURRENCY=2`、`REVERSE_LABEL_CONCURRENCY=2`、`LLM_PER_MODEL_LIMIT=50`、`ICD_WORKER_CONCURRENCY` 透传；`DEGRADATION_MAX_INFLIGHT` / `DEGRADATION_DRAIN_WORKERS` 默认值由 6 调整为 8（避免 6 个在飞名额把 2 路 case 并行钉死在 6，且为 drain 留出余量）。按 20 个 Worker 子进程计算，每模型并发峰值 40 ≤ 服务端声明的 50。`backend/.env.example` 同步补充说明。
 ### Fixed
 
 - **Qwen / MiniMax 关闭思考在内网自建模型服务上不生效**：此前关闭时只发送顶层 `enable_thinking: false`，该字段仅 DashScope 等云兼容接口识别；内网 `dtagtcore.jz.ai` 上的 `qwen35-397b-int8` 等自建 OpenAI 兼容服务（vLLM / SGLang）只从 `chat_template_kwargs` 读取思考开关，顶层字段被静默忽略，设置页关闭后模型仍按开启思考运行。现反向 `QwenClient` / `MiniMaxClient` 与正向 3 个共享 helper（覆盖 5 个请求构造点）在关闭时同时发送顶层 `enable_thinking: false` 与 `chat_template_kwargs: {"enable_thinking": false}`，云接口与自建服务各取所需；开启 / 未知 provider / mock 的请求体不变。DeepSeek 字段未改动；真实内网网关的 reasoning token 变化待部署后探针复核。

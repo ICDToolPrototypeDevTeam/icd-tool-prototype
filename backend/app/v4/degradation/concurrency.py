@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Shared concurrency primitives for the V4 pipeline.
+"""Degradation backpressure primitives for the V4 pipeline.
 
 Process-wide thread pool executor + inflight semaphore + a gate wrapper that
 submits callables through the semaphore. Both ``app.v4.pipeline`` (Step 4
@@ -9,6 +9,8 @@ introducing a circular import between pipeline ↔ re_review.
 
 Moved out of ``pipeline.py`` so that ``re_review.py`` can import these without
 triggering pipeline.py's own import of re_review_judgments at module load.
+
+通用并行执行 ``run_parallel_ordered`` 已移至 ``app.v4.concurrency``。
 """
 
 from __future__ import annotations

@@ -25,8 +25,12 @@ from app.v4.comparison.report_generator import generate_consensus_reverse_report
 from app.v4.comparison.re_review import re_review_judgments
 from app.v4.comparison.review_agent import review_judgments, _build_summary
 from app.v4.config import JUDGE_PROVIDERS
+from app.v4.concurrency import run_parallel_ordered
 from app.v4.degradation import DegradationConfig, DegradationContext
-from app.v4.degradation.concurrency import _get_drain_executor, _submit_with_gate
+from app.v4.degradation.concurrency import (
+    _get_drain_executor,
+    _submit_with_gate,
+)
 from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.v4.doc_generators.excel_generator import generate_eoicd_excel
 from app.v4.doc_generators.word_generator import generate_consistency_report
@@ -658,13 +662,16 @@ def _judge_with_degradation(
 
     system_prompt = _build_judge_system_prompt(profile)
     total = len(cases)
-    results: list[MultiJudgeResult] = []
     executor = _get_drain_executor()
     models = {p: resolve_model(p) for p in providers} if cache is not None else {}
+    # case 维度并行：峰值 = case_concurrency × （每 case 的 provider 数），
+    # provider 级仍共用 executor + inflight 信号量这一份背压预算。
+    workers = max(1, int(ctx.config.case_concurrency))
+    serial_delay = 0.3 if workers <= 1 else 0.0
+    completed = 0
 
-    for idx, case in enumerate(cases):
-        raise_if_cancelled()
-        report_progress(case_index=idx + 1, case_total=total)
+    def _judge_one(item: tuple[int, object]) -> tuple[MultiJudgeResult, int]:
+        _idx, case = item
         hit: dict[str, dict] = {}
         keys: dict[str, str] = {}
         if cache is not None:
@@ -709,9 +716,7 @@ def _judge_with_degradation(
         if had_timeout:
             ctx.record_case_timeout()
             for p, f in timed_out:
-                if len(ctx.drain) < ctx.config.drain_max_tasks:
-                    ctx.drain.append((case.case_id, p, f))
-                else:
+                if not ctx.add_drain(case.case_id, p, f):
                     cancelled = f.cancel()
                     print(
                         f"  [degradation] drain limit ({ctx.config.drain_max_tasks}) reached, "
@@ -745,25 +750,39 @@ def _judge_with_degradation(
             p: hit[p] if p in hit else (skipped[p] if p in skipped else gathered[p])
             for p in providers
         }
-        results.append(MultiJudgeResult(
+        mjr = MultiJudgeResult(
             case_id=case.case_id,
             judgments=case_judgments,
-        ))
+        )
+        return mjr, len(hit)
 
-        statuses = {p: j.get("coverage_status", "?") for p, j in case_judgments.items()}
+    def _on_judged(pos: int, _item: tuple[int, object], outcome: tuple[MultiJudgeResult, int]) -> None:
+        # 进度按「已完成 case 数」上报；回调在主线程执行，串行/并行语义一致。
+        nonlocal completed
+        mjr, hit_count = outcome
+        completed += 1
+        report_progress(case_index=completed, case_total=total)
+        statuses = {p: j.get("coverage_status", "?") for p, j in mjr.judgments.items()}
         print(
-            f"  [multi] {case.case_id} ({idx + 1}/{total}) {statuses}",
+            f"  [multi] {mjr.case_id} ({pos + 1}/{total}) {statuses}",
             file=sys.stderr,
         )
         # 仅命中时打缓存行（miss 不打印）：首跑全未命中时不再出现 hit=0/3 噪声
-        if cache is not None and hit:
+        if cache is not None and hit_count:
             print(
-                f"  [cache] {case.case_id} hit={len(hit)}/{len(providers)}",
+                f"  [cache] {mjr.case_id} hit={hit_count}/{len(providers)}",
                 file=sys.stderr,
             )
 
-        if idx < total - 1:
-            time.sleep(0.3)
+    outcomes = run_parallel_ordered(
+        list(enumerate(cases)),
+        _judge_one,
+        max_workers=workers,
+        thread_name_prefix="multi-judge-case",
+        serial_delay=serial_delay,
+        on_result=_on_judged,
+    )
+    results = [mjr for mjr, _ in outcomes]
 
     return MultiJudgeOutput(
         total_cases=total,
@@ -785,16 +804,17 @@ def _drain_and_rereview(
     failure counter; late errors keep the counter as-is (the TIMEOUT
     placeholder already counted one failure).
     """
-    if not ctx.drain:
+    drain = ctx.drain_snapshot()
+    if not drain:
         return multi_out, set()
 
-    futures = [f for _, _, f in ctx.drain]
+    futures = [f for _, _, f in drain]
     done, _ = concurrent.futures.wait(futures, timeout=budget)
 
     case_map = {r.case_id: r for r in multi_out.results}
     updated: set[str] = set()
 
-    for case_id, provider, future in ctx.drain:
+    for case_id, provider, future in drain:
         if future not in done:
             continue
         mjr = case_map.get(case_id)
@@ -827,7 +847,7 @@ def _drain_and_rereview(
                 file=sys.stderr,
             )
 
-    ctx.drain.clear()
+    ctx.clear_drain()
     return multi_out, updated
 
 
@@ -1256,15 +1276,21 @@ def run_reverse_pipeline(
     job.update(JobStatus.RUNNING, "Step 5.6/6: Re-run consensus after re-review")
 
     if re_reviewed_ids:
-        # Partial update: re-run consensus only for re-reviewed cases
+        # Partial update: re-run consensus only for re-reviewed cases。
+        # 一次批量调用（内部按 case 并行）而不是逐 case 调用，避免每个 case
+        # 各自建一次线程池；结果顺序与 target_ids 一致，按下标回填。
         consensus_map = {r.case_id: r for r in consensus_out.results}
-        for case_id in sorted(re_reviewed_ids):
-            mr = next((m for m in multi_out.results if m.case_id == case_id), None)
-            if mr is None:
-                continue
-            new_consensus = review_judgments([mr], cache=cache, tag="consensus(5.6)", tracker=tracker)
-            if new_consensus.results:
-                consensus_map[case_id] = new_consensus.results[0]
+        mr_map = {m.case_id: m for m in multi_out.results}
+        target_ids = [cid for cid in sorted(re_reviewed_ids) if cid in mr_map]
+        if target_ids:
+            new_consensus = review_judgments(
+                [mr_map[cid] for cid in target_ids],
+                cache=cache,
+                tag="consensus(5.6)",
+                tracker=tracker,
+            )
+            for case_id, cr in zip(target_ids, new_consensus.results):
+                consensus_map[case_id] = cr
         all_results = list(consensus_map.values())
         new_summary = _build_summary(all_results)
         consensus_out = ConsensusOutput(

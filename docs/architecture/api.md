@@ -181,6 +181,8 @@ GET /api/v4/jobs/{job_id}
 
 `mock_models` 按 ADR-001 D5 规则取值：`multi_judge_results.json.providers ∩ {"minimax", "qwen"}`；该交集**总是**执行，故该字段只会出现 `minimax` / `qwen`（`deepseek` 不会出现）。`USE_MOCK_LLM=1` 时三个模型的判定都由 Mock 产生，但该字段的取值规则不变。
 
+`case_index` / `case_total` 为**已完成 / 全部 case 数**（Step 4 多智能体裁判、Step 5.5 低星复查上报）；`REVERSE_CASE_CONCURRENCY > 1` 时按完成数递增（可能跳跃），不表示“当前正在处理第几个 case”。
+
 `resumed` 表示本次运行是否为中断后的恢复运行（`resume` 启动后置 `true`，首跑为 `false`）。`reuse` 仅在恢复运行时非空，以**模型调用次数**为单位反映本次运行的两个去向：`reused` = 直接复用中断前已完成结果、未发起请求的调用次数；`rerun` = 本次接续发起的调用次数（含中断前未执行到的步骤，以及中断时正在执行或已失败、缓存中没有可用结果的调用）。计数按**反向管线的 Step 2（HLR 标注）/4/5/5.5/5.6** 逐条模型调用累计、不去重（同一结果在后续步骤再次命中会再计一次），因此与 `llm_cache.jsonl` 的行数不是同一口径；也与需求条数不同 —— 每个需求对应「每个模型一次判定 + 一次共识」等多次调用。其中 HLR 标注整批完成、命中 `hlr_labels.json` 直接加载时，加载的 N 条按 `reused` 计入。**正向管线不产生 `reuse` 计数**（恒为 `{"reused": 0, "rerun": 0}`）：新正向多 judge 一致性管线的续跑复用发生在任务目录内的正向工作区（代码树副本与各 judge 工作区中间结果原样复用，见第 13.2 节），不逐条经过父进程记账。
 
 `interrupted` / `abandoned` 为任务中断恢复相关状态，见第 13 节。

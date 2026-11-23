@@ -109,6 +109,7 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | `api/v4/hlr_schemas.py` | HLR 表格样式管理与辅助接口：样式列表 / 新建 / 更新 / 删除、文档表格扫描与试解析（扫描与试解析均不调用 LLM）；内置模板只读（403），未知样式 404、重名 409、配置非法 422 |
 | `v4/pipeline.py` | V4 反向管线编排（`run_reverse_pipeline`，6 步）；正向管线不在 `v4/` 内（见 `forward/` 与 `app/forward/` 两行） |
 | `v4/config.py` | V4 env 加载（DEEPSEEK_* / USE_MOCK_LLM / JUDGE_PROVIDERS）+ 业务常量 |
+| `v4/concurrency.py` | 通用任务内并行执行器 `run_parallel_ordered`：固定窗口提交、结果按输入顺序归位、线程上下文绑定、取消时停止调度未提交条目；不依赖任何降级模块 |
 | `v4/errors.py` | 管线异常 → 面向用户的错误分类与建议；复用 `degradation.fallback.classify_exception` |
 | `v4/models.py` | V4 Pydantic 模型（EoICDRequirement / HLRLabel / ReverseCase / ConsensusResult 等） |
 | `v4/parsers/`  | EoICD PubSub Excel + HLR Word 解析；`glossary_tables.py` 按表头语义识别缩略语表/术语表（不依赖固定表序号、列数或列顺序） |
@@ -116,7 +117,7 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | `v4/hlr_schema_store.py` | 自定义 HLR 表格样式的持久化与引用解析：`OUTPUT_DIR/hlr_schemas.json` 原子读写、CRUD、名称唯一校验、`template_id` / `schema_id` / 内联配置三种引用的解析与快照序列化 |
 | `v4/matching/` | HLR 标注、条目过滤、信号画像、Block 聚合、HLR 分类、反向匹配、追溯预筛选；`glossary_index.py` 为每条 case 选取命中的文档术语（只供裁判/复查 prompt，不参与匹配评分）；`internal_channel.py` 为 AMS 内部通道需求前置判断（命中按无匹配 + 内部接口标注，不进入 Block 评分与裁判） |
 | `v4/comparison/` | 多模型裁判、Review Agent 共识、一星复查、报告生成 |
-| `v4/degradation/` | Provider 健康跟踪、Case 超时、熔断、星级降级 |
+| `v4/degradation/` | Provider 健康跟踪、Case 超时、熔断、星级降级；`concurrency.py` 仅保留降级专用的进程级 executor / 信号量与 `_submit_with_gate` 背压闸门 |
 | `v4/doc_generators/` | xlsx + 单模型 docx + 共识 docx 生成（反向） |
 | `v4/llm/`       | LLM 抽象层：`factory.py`（env 驱动 + mock fallback）、deepseek/minimax/qwen client、`mock_llm.py` |
 | `v4/prompts/`   | Prompt Markdown 文本资产（reverse_judge / consensus / re_review） |
@@ -268,6 +269,20 @@ Step 6 报告生成
 后续标注、匹配、裁判和共识复核流程应复用解析后的结构化数据。
 ```
 
+反向管线的任务内并发（只影响反向，正向管线不变）：
+
+```text
+Step 2 HLR 标注         REVERSE_LABEL_CONCURRENCY   默认 1（串行）；>1 时未命中条目并行标注
+Step 4 / 5 / 5.5 / 5.6  REVERSE_CASE_CONCURRENCY    默认 1（串行）；>1 时 case 维度并行
+每模型并发峰值          ICD_WORKER_CONCURRENCY × max(case_concurrency, label_concurrency)
+                        （同一任务同一时刻只处于一个阶段）；超过 LLM_PER_MODEL_LIMIT 时启动日志打 WARN
+结果顺序                并行不改变产物顺序：所有并行入口按输入顺序归位
+共享预算                Step 4 / 5.5 的 provider 调用仍走进程级 executor + DEGRADATION_MAX_INFLIGHT 信号量
+```
+
+实现入口集中在 `v4/concurrency.run_parallel_ordered()`：固定窗口提交、每个线程经
+`bind_thread_context` 继承 job 归属与运行上下文、取消时停止调度未提交条目、异常原样抛出。
+
 ### 7.1 正向完整性分析流程（EoICD → HLR，多 judge 一致性管线）
 
 正向管线回答「EoICD 业务对象在 HLR 正文中是否漏写」，与反向分析（正确性比对）互补。Issue #119 起，正向改为**原样集成**的多 judge 一致性管线，当前代码树对应「正向检查集成-发送工具集成版 V5」：业务实现全部在 `backend/forward/` 原样代码树内（`multi_judge_runner.py` 编排），工程侧由适配层 `backend/app/forward/` 驱动，与反向管线（`v4/pipeline.py`）严格分离。
@@ -333,7 +348,7 @@ backend/app/forward/        适配层（编排与翻译，零业务算法）：
 2. 文件解析逻辑应放在 `v4/parsers/`；
 3. 反向匹配逻辑应放在 `v4/matching/`；
 4. 多智能体裁判与共识逻辑应放在 `v4/comparison/`；
-5. 降级保护逻辑应放在 `v4/degradation/`；
+5. 降级保护逻辑应放在 `v4/degradation/`；与降级无关的通用并行执行工具应放在 `v4/concurrency.py`；
 6. 报告文档生成逻辑应放在 `v4/doc_generators/`；
 7. 任务状态管理应放在 `job_manager.py`，不应写入 `main.py`；任务执行模式差异（inline / celery）必须收敛在 `execution/` 内，路由层不得写死 Celery 调用；
 8. 任务执行层只允许 `runner.py` / `jobs.py` / `main.py` 调用 `execution/`；`execution/` 不得 import `api/v4/*`，避免 Worker 进程拉起整个 Web 层；
@@ -428,6 +443,7 @@ backend/app/
 └── v4/                     # V4 业务子包
     ├── cli.py              # V4 CLI 入口
     ├── config.py           # V4 env 加载 + 业务常量
+    ├── concurrency.py      # 通用任务内并行执行器（固定窗口 + 保序 + 取消）
     ├── errors.py           # 管线异常 → 用户可读的错误分类与建议
     ├── hlr_schema_store.py # 自定义 HLR 表格样式：output/hlr_schemas.json 持久化 + 引用解析
     ├── models.py           # V4 Pydantic 模型

@@ -62,6 +62,14 @@ services:
       - FORWARD_PIPELINE_ENABLED=0
       # 容器内后端走 compose 网络的服务名；覆盖 backend/.env 的 localhost 默认值
       - MONGO_URL=mongodb://mongo:27017/icd
+      # 反向管线任务内并行度（仅反向）：每模型峰值 =
+      # ICD_WORKER_CONCURRENCY × max(case, label)，首版 20 × 2 = 40 ≤ 50。
+      - ICD_WORKER_CONCURRENCY=${ICD_WORKER_CONCURRENCY:-20}
+      - REVERSE_CASE_CONCURRENCY=${REVERSE_CASE_CONCURRENCY:-2}
+      - REVERSE_LABEL_CONCURRENCY=${REVERSE_LABEL_CONCURRENCY:-2}
+      - LLM_PER_MODEL_LIMIT=${LLM_PER_MODEL_LIMIT:-50}
+      - DEGRADATION_MAX_INFLIGHT=${DEGRADATION_MAX_INFLIGHT:-8}
+      - DEGRADATION_DRAIN_WORKERS=${DEGRADATION_DRAIN_WORKERS:-8}
     depends_on:
       redis:
         condition: service_healthy
@@ -84,6 +92,14 @@ services:
       - JOB_EXECUTOR=celery
       - CELERY_BROKER_URL=redis://redis:6379/0
       - FORWARD_PIPELINE_ENABLED=0
+      # 反向管线任务内并行度（仅反向）：每模型峰值 =
+      # ICD_WORKER_CONCURRENCY × max(case, label)，首版 20 × 2 = 40 ≤ 50。
+      - ICD_WORKER_CONCURRENCY=${ICD_WORKER_CONCURRENCY:-20}
+      - REVERSE_CASE_CONCURRENCY=${REVERSE_CASE_CONCURRENCY:-2}
+      - REVERSE_LABEL_CONCURRENCY=${REVERSE_LABEL_CONCURRENCY:-2}
+      - LLM_PER_MODEL_LIMIT=${LLM_PER_MODEL_LIMIT:-50}
+      - DEGRADATION_MAX_INFLIGHT=${DEGRADATION_MAX_INFLIGHT:-8}
+      - DEGRADATION_DRAIN_WORKERS=${DEGRADATION_DRAIN_WORKERS:-8}
     # 一个子进程一次只跑一个任务；-c 20 = 最多 20 个分析任务并行。
     # 本机内存较小时先在 .env 里把 ICD_WORKER_CONCURRENCY 调小。
     command:
