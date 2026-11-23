@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 
 from app.job_manager import raise_if_cancelled
+from app.v4.concurrency import run_parallel_ordered
+from app.v4.degradation.config import DegradationConfig
 from app.v4.llm.factory import get_llm, use_mock_llm
 from app.v4.llm_cache import (
     KIND_HLR_LABEL,
@@ -253,12 +255,20 @@ def label_hlrs(
 
     labels: dict[str, HLRLabel] = {}
     total = len(hlr_reqs)
-    throttle_s = _throttle_seconds()
     hits = 0
     # 注意：LLMCache 定义了 __len__，空缓存为假值，判空必须用 is not None
     model = resolve_model(LABEL_PROVIDER) if cache is not None else ""
+    # 同一任务同一时刻只处于一个阶段：Step 2 的并行峰值只取决于 label_concurrency。
+    label_concurrency = DegradationConfig.from_env().label_concurrency
+    # 逐条节流只在串行时保留：并行本身已把请求摊到多个线程，再让每个线程各睡
+    # 0.2s 只会把并行收益吃掉。
+    throttle_s = _throttle_seconds() if label_concurrency <= 1 else 0.0
 
     print(f"  [label] Labeling {total} SWHLRs via {llm.model}...")
+    # 第一遍在主线程过缓存（每条一个取消检查点，命中即成形）；未命中的条目
+    # 收进 pending 统一下发到线程池。缓存命中的判定与计数只在主线程发生，
+    # 日志顺序与串行版本一致，tracker 的 reused 计数也不会被并发打乱。
+    pending: list[tuple[int, HLRRequirement, str, str]] = []
     for idx, hlr in enumerate(hlr_reqs):
         # 每条一个取消检查点：单条标注就是一次秒级模型调用，检查只是一次 Event 读取，
         # 成本可忽略。原先按步长（每 20 条）落位时，十几条的批次在整批之内只有 idx=0
@@ -285,7 +295,10 @@ def label_hlrs(
                 print(f"  [label] {idx + 1}/{total} {hlr.requirement_id} HIT "
                       f"bus={lbl.bus_types} devices={lbl.devices[:3]}...")
                 continue
+        pending.append((idx, hlr, user_prompt, key))
 
+    def _label_one(item: tuple[int, HLRRequirement, str, str]) -> HLRLabel:
+        _, hlr, user_prompt, key = item
         lbl = _call_label_api(llm, hlr, system_prompt, user_prompt, **LABEL_PARAMS)
         if lbl is None:
             lbl = _fallback_label(hlr)  # 失败结果不写缓存（失败原因见 _call_label_api 的 stderr 行），下次运行仍会重试
@@ -299,13 +312,29 @@ def label_hlrs(
                 payload=lbl.model_dump(),
                 params=LABEL_PARAMS,
             )
+        return lbl
+
+    def _on_labeled(_pos: int, item: tuple[int, HLRRequirement, str, str], lbl: HLRLabel) -> None:
+        idx, hlr = item[0], item[1]
         if tracker is not None:
             tracker.add(rerun=1)
         labels[hlr.requirement_id] = lbl
         print(f"  [label] {idx + 1}/{total} {hlr.requirement_id} "
               f"bus={lbl.bus_types} devices={lbl.devices[:3]}...")
-        if throttle_s and idx < total - 1:
-            time.sleep(throttle_s)
+
+    if pending:
+        run_parallel_ordered(
+            pending,
+            _label_one,
+            max_workers=label_concurrency,
+            thread_name_prefix="hlr-label",
+            serial_delay=throttle_s,
+            on_result=_on_labeled,
+        )
+
+    # 并行时 labels 的插入顺序是完成顺序；按入参顺序重建，保证产物与串行版本
+    # 逐字节一致（下游可能按 dict 顺序遍历）。
+    labels = {hlr.requirement_id: labels[hlr.requirement_id] for hlr in hlr_reqs}
 
     # 仅命中时打汇总（miss 不打印）：首跑与恢复未命中的日志格式一致，避免「全 MISS」歧义
     if cache is not None and hits:

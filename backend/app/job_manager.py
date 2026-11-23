@@ -195,6 +195,12 @@ class Job:
         # 进度线程与 token 线程都会写同一份 job.json：把「构造 payload + 原子写」
         # 整体串行化，避免旧 payload 在新值之后落盘、把 token 写回旧值。
         self._persist_lock = threading.Lock()
+        # 反向管线 case 并行后，多个线程会同时 set_progress：progress 的
+        # 复制-修改-赋值必须串行，否则后写的线程可能用旧快照覆盖新进度。
+        self._progress_lock = threading.Lock()
+        # 复用计数回调在锁外执行，并行时可能乱序到达；锁 + 单调合并保证
+        # 前端看到的 reused/rerun 不会倒退。
+        self._reuse_lock = threading.Lock()
 
     def set_dir(self, job_dir: Path, params: dict) -> None:
         """绑定输出目录与任务参数快照，并立即落盘 manifest。
@@ -275,9 +281,31 @@ class Job:
         self._persist()
 
     def set_reuse_stats(self, reused: int, rerun: int) -> None:
-        """更新恢复运行的实时复用计数并落盘（管线每完成一个 case 调用一次）。"""
-        self.reuse = {'reused': int(reused), 'rerun': int(rerun)}
-        self.updated_at = datetime.now(timezone.utc)
+        """更新恢复运行的实时复用计数并落盘（管线每完成一个 case 调用一次）。
+
+        并发 case 下 ``ReuseTracker`` 的回调可能在锁外乱序到达：计数只允许
+        单调增加，避免较早的快照后落盘把前端数字改小。
+        """
+        try:
+            new_reused = max(0, int(reused))
+            new_rerun = max(0, int(rerun))
+        except (TypeError, ValueError):
+            return
+        with self._reuse_lock:
+            current = self.reuse or {}
+            try:
+                old_reused = max(0, int(current.get('reused', 0)))
+            except (TypeError, ValueError):
+                old_reused = 0
+            try:
+                old_rerun = max(0, int(current.get('rerun', 0)))
+            except (TypeError, ValueError):
+                old_rerun = 0
+            self.reuse = {
+                'reused': max(old_reused, new_reused),
+                'rerun': max(old_rerun, new_rerun),
+            }
+            self.updated_at = datetime.now(timezone.utc)
         self._persist()
 
     def _token_should_flush(self, force_flush: bool) -> bool:
@@ -373,28 +401,32 @@ class Job:
         ``message`` 与既有契约一致（``_parse_progress`` 仍在解析它），额外的
         stage_* / case_* 字段让前端不必再靠正则从 message 里猜。
         """
-        if self.hard_killed:
-            # 已强制终止：不让「正在生成报告」之类的进度文字盖在已终止的任务上
-            return
-        if message is not None:
-            self.message = message
-        progress = dict(self.progress or {})
-        for key, value in (
-            ('stage', stage),
-            ('stage_index', stage_index),
-            ('stage_total', stage_total),
-            ('case_index', case_index),
-            ('case_total', case_total),
-        ):
-            if value is not None:
-                progress[key] = value
-        progress['message'] = self.message
-        self.progress = progress
-        self.updated_at = datetime.now(timezone.utc)
+        should_flush = False
+        with self._progress_lock:
+            if self.hard_killed:
+                # 已强制终止：不让「正在生成报告」之类的进度文字盖在已终止的任务上
+                return
+            if message is not None:
+                self.message = message
+            progress = dict(self.progress or {})
+            for key, value in (
+                ('stage', stage),
+                ('stage_index', stage_index),
+                ('stage_total', stage_total),
+                ('case_index', case_index),
+                ('case_total', case_total),
+            ):
+                if value is not None:
+                    progress[key] = value
+            progress['message'] = self.message
+            self.progress = progress
+            self.updated_at = datetime.now(timezone.utc)
 
-        now = time.monotonic()
-        if force_flush or (now - self._last_progress_persist) >= PROGRESS_PERSIST_INTERVAL_S:
-            self._last_progress_persist = now
+            now = time.monotonic()
+            if force_flush or (now - self._last_progress_persist) >= PROGRESS_PERSIST_INTERVAL_S:
+                self._last_progress_persist = now
+                should_flush = True
+        if should_flush:
             self._persist()
 
     def set_error(self, error: dict) -> None:

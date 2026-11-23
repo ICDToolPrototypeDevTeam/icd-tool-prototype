@@ -35,13 +35,14 @@ from app.v4.comparison.semantic_judge import (
 )
 from app.v4.matching.glossary_index import append_glossary_section
 from app.v4.config import JUDGE_PROVIDERS
+from app.v4.concurrency import run_parallel_ordered
 from app.v4.degradation.config import DegradationConfig
 from app.v4.degradation.concurrency import (
     _get_drain_executor,
     _submit_with_gate,
 )
 from app.v4.degradation.fallback import classify_exception, make_error_judgment
-from app.job_manager import raise_if_cancelled, report_progress
+from app.job_manager import report_progress
 from app.v4.llm import get_llm
 from app.v4.llm_cache import KIND_RE_REVIEW, compute_key, resolve_model
 from app.v4.models import (
@@ -409,18 +410,22 @@ def re_review_judgments(
 
     system_prompt = load_prompt("re_review")
 
-    re_review_meta: list[dict] = []
-    re_reviewed_count = 0
+    # case 维度并行：同一任务同一时刻只处于一个阶段，峰值只取决于
+    # case_concurrency。每个 case 内部仍沿用「每 provider 一个 future + 共享
+    # inflight 信号量」的既有背压，因此并发 case 共享同一份预算。
+    cfg = DegradationConfig.from_env()
+    workers = max(1, int(cfg.case_concurrency))
+    ordered_ids = sorted(low_confidence_ids)
+    case_total = len(ordered_ids)
+    completed = 0
 
-    for case_id in sorted(low_confidence_ids):
-        raise_if_cancelled()
-        report_progress(case_index=len(re_review_meta) + 1, case_total=len(low_confidence_ids))
+    def _re_review_one(case_id: str) -> dict | None:
         mjr = mjr_map.get(case_id)
         case = case_map.get(case_id)
         if mjr is None or case is None:
             # Nothing to re-review — likely a stale consensus entry. Skip
             # silently so a partial pipeline state does not break the run.
-            continue
+            return None
 
         original_judgments: dict[str, dict] = dict(mjr.judgments or {})
 
@@ -464,7 +469,6 @@ def re_review_judgments(
         # time dropped from sum → max). Reuses the Step 4 executor +
         # inflight semaphore so concurrent re-review tasks share the same
         # backpressure gate as multi-agent.
-        cfg = DegradationConfig.from_env()
         futures: dict[Future, str] = {}
         if miss:
             executor = _get_drain_executor()
@@ -531,21 +535,34 @@ def re_review_judgments(
 
         mjr.judgments = new_judgments
 
-        re_review_meta.append(
-            {
-                "case_id": case_id,
-                "original_judgments": original_judgments,
-                "re_review_judgments": new_judgments,
-            }
-        )
-        re_reviewed_count += 1
-
         cache_note = f" (hit={len(hit)}/{len(active_providers)})" if hit else ""
         print(
             f"  [re-review] {case_id}: re-reviewed "
             f"{len(active_providers)} providers{cache_note}",
             file=sys.stderr,
         )
+        return {
+            "case_id": case_id,
+            "original_judgments": original_judgments,
+            "re_review_judgments": new_judgments,
+        }
+
+    def _on_re_reviewed(_pos: int, _case_id: str, _entry: dict | None) -> None:
+        # 进度按「已完成 case 数」上报；回调在主线程执行，串行/并行语义一致。
+        nonlocal completed
+        completed += 1
+        report_progress(case_index=completed, case_total=case_total)
+
+    entries = run_parallel_ordered(
+        ordered_ids,
+        _re_review_one,
+        max_workers=workers,
+        thread_name_prefix="re-review-case",
+        on_result=_on_re_reviewed,
+    )
+    # 结果已按输入顺序归位，meta 顺序与 sorted(low_confidence_ids) 一致
+    re_review_meta = [entry for entry in entries if entry is not None]
+    re_reviewed_count = len(re_review_meta)
 
     if re_reviewed_count == 0:
         # No actionable cases — write nothing and leave files untouched.

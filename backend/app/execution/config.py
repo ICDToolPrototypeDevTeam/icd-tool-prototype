@@ -96,6 +96,21 @@ def _float_env(name: str, default: float, minimum: float) -> float:
     return max(minimum, value)
 
 
+def _int_env(name: str, default: int, minimum: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        print(
+            f"[execution] invalid {name}={raw!r}; use {default}",
+            file=sys.stderr,
+        )
+        return default
+    return max(minimum, value)
+
+
 def heartbeat_interval_s() -> float:
     return _float_env("JOB_HEARTBEAT_INTERVAL_S", DEFAULT_HEARTBEAT_INTERVAL_S, 5.0)
 
@@ -155,6 +170,7 @@ def config_snapshot() -> list[str]:
     在 Worker 进程里也会重新写一遍（运行时设置可能已被前端改过）。
     """
     from app.v4.config import get_output_root
+    from app.v4.degradation.config import DegradationConfig
 
     key_state = " ".join(
         f'{name}={"yes" if (os.getenv(f"{name}_API_KEY") or "").strip() else "no"}'
@@ -164,7 +180,13 @@ def config_snapshot() -> list[str]:
         f'{name}={os.getenv(f"{name}_MODEL") or "(未配置)"}'
         for name in ("DEEPSEEK", "MINIMAX", "QWEN")
     )
-    return [
+    # 每模型并发峰值：同一任务同一时刻只处于一个阶段，故峰值 = Worker 并发数
+    # × max(case 并发, 标签并发)。超过服务端声明的每模型上限时只警告（不做
+    # 运行时限流）；这行进日志头部，方便在 UI 上核对部署参数是否生效。
+    deg = DegradationConfig.from_env()
+    worker_conc = _int_env("ICD_WORKER_CONCURRENCY", 20, 1)
+    peak_per_model = worker_conc * max(deg.case_concurrency, deg.label_concurrency)
+    snapshot = [
         "[config] JOB_EXECUTOR={} | USE_MOCK_LLM={} (容器配置) | {} | "
         "JUDGE_PROVIDERS={} | OUTPUT_DIR={} | STATIC_DIR={}".format(
             job_executor(),
@@ -180,4 +202,19 @@ def config_snapshot() -> list[str]:
             "enabled" if forward_enabled() else "disabled",
         ),
         f"[config] MODELS {models}",
+        "[config] REVERSE_CONCURRENCY worker={} case={} label={} "
+        "peak/model={} limit={}".format(
+            worker_conc,
+            deg.case_concurrency,
+            deg.label_concurrency,
+            peak_per_model,
+            deg.llm_per_model_limit,
+        ),
     ]
+    if peak_per_model > deg.llm_per_model_limit:
+        snapshot.append(
+            f"[config][WARN] 每模型并发峰值 {peak_per_model} 超过上限 "
+            f"{deg.llm_per_model_limit}：请调小 ICD_WORKER_CONCURRENCY 或 "
+            "REVERSE_CASE_CONCURRENCY / REVERSE_LABEL_CONCURRENCY"
+        )
+    return snapshot

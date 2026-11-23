@@ -4950,3 +4950,34 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   2. 示例数据覆盖了主要字段，但真实数据的极端值（超长摘要 / 失败原因 / 720 点范围、空结果）仍建议用真实审计账号走查一次。
   3. 760 / 560 宽度下操作记录表仍需横向滚动查看「结果」等右侧列（有意保留，不压缩列宽）。
 - **下一步建议**：1) 用户在审计管理员账号下走查概览、失败下钻、日志筛选、详情与系统运行；2) 确认后提交前端改动；3) 若移动端成为长期使用场景，再单独评估日志表的卡片化展示。
+
+## 2026-11-23 反向管线任务内并行（W=20 / C=L=2，只影响反向，改动未提交）
+
+- **背景（用户提出）**：部署服务器的大模型端反馈「已有的模型支持的并发至少 50 个」，而当前反向管线是逐 case 串行，20 个 Worker 子进程并行时每个任务内部只用 1 路，长任务墙钟时间被串行步骤主导。用户要求只针对反向管线改并行，并明确首版参数：`ICD_WORKER_CONCURRENCY=20`、`REVERSE_CASE_CONCURRENCY=2`、`REVERSE_LABEL_CONCURRENCY=2`。约束：不得修改正向管线、共享解析器、匹配算法、prompt、评分规则与 DOCX 结构。
+- **并发模型**：同一任务同一时刻只处于一个阶段，故每模型峰值 = `ICD_WORKER_CONCURRENCY × max(case_concurrency, label_concurrency)` = 20 × 2 = 40 ≤ 50；不引入 Redis 全局闸门。代码默认 `1/1`（与改动前逐字节一致），由部署环境开启 2/2。
+- **实现方式**：
+  1. 新增 `v4/concurrency.py`，提供通用 `run_parallel_ordered(items, fn, max_workers=..., serial_delay=..., on_result=...)`：`max_workers<=1` 走原串行路径（逐条取消检查 + 原节流间隔）；并行路径固定窗口提交（在飞 ≤ max_workers）、每个 future 经 `bind_thread_context` 保留 job 归属 / token 记账 / mock 模式、结果按下标归位、`JobCancelled` 与普通异常原样抛出并取消未开始的 future。`v4/degradation/concurrency.py` 仅保留降级专用的后台 executor / inflight 信号量 / `_submit_with_gate`，不再承载通用并行逻辑。
+  2. `v4/degradation/config.py`：新增 `REVERSE_CASE_CONCURRENCY` / `REVERSE_LABEL_CONCURRENCY`（正整数校验，非法回落 1）与 `LLM_PER_MODEL_LIMIT`（默认 50）；`DEGRADATION_MAX_INFLIGHT` / `DEGRADATION_DRAIN_WORKERS` 默认 6 → 8（避免 6 个在飞名额把 2 路 case 并行钉死在 6）。
+  3. `v4/degradation/context.py`：健康状态 / 统计计数 / drain 列表全部改为 `RLock` 保护，新增 `add_drain` / `drain_snapshot` / `clear_drain`；`to_summary` 在锁内取快照。
+  4. Step 2 `matching/hlr_labeler.py`：主线程先过缓存（命中即落位、`reused` 计数只在主线程），未命中条目并行标注；最终按入参顺序重建 `labels` 字典；`0.2s` 逐条节流只在串行时保留。
+  5. Step 4 `pipeline._judge_with_degradation`：case 维度并行，case 内 provider 仍走共享 executor + inflight 信号量；进度按「已完成 case 数」上报，`[multi]` / `[cache]` 日志移到主线程回调；`ctx.add_drain` 替代直接操作列表。
+  6. Step 5 / 5.6 `comparison/review_agent.py`：`review_judgments` 增加 `case_concurrency`（缺省读配置），结果按入参顺序返回；0.3s case 间隔只在串行时保留。Step 5.6 由逐 case 调用改为一次批量调用后按 `case_id` 回填。
+  7. Step 5.5 `comparison/re_review.py`：case 维度并行，meta 顺序恢复为 `sorted(case_id)`；`cfg` 提到循环外；进度按完成数上报。
+  8. `job_manager.py`：`set_progress` 增加进度锁（复制-修改-赋值串行，落盘仍在锁外）；`set_reuse_stats` 改为锁内单调合并（乱序回调不让计数倒退）。
+  9. `execution/config.py`：启动快照新增 `[config] REVERSE_CONCURRENCY worker/case/label/peak/model/limit`，峰值超过 `LLM_PER_MODEL_LIMIT` 时追加 WARN（只告警，不做运行时限流）。
+  10. `docker-compose.yml` / `docker-compose.server.yml` 的 backend 与 worker 增加上述环境变量透传（默认 2/2、limit 50、inflight/drain 8）；`backend/.env.example` 同步说明。
+- **修改文件**：`backend/app/job_manager.py`、`backend/app/execution/config.py`、`backend/app/v4/degradation/{config,context,concurrency}.py`、`backend/app/v4/matching/hlr_labeler.py`、`backend/app/v4/comparison/{review_agent,re_review}.py`、`backend/app/v4/pipeline.py`、`docker-compose.yml`、`docker-compose.server.yml`、`backend/.env.example`、`CHANGELOG.md`、`docs/project/workflow.md`、`docs/architecture/current-architecture.md`、`docs/architecture/api.md`、本 log。
+- **新增文件**：`backend/app/v4/concurrency.py`（通用并行执行器，从 `degradation/concurrency.py` 拆出，不依赖降级模块）；本地测试（`backend/tests/` 被 .gitignore 排除，不入库）：`test_reverse_concurrency.py`（13 个用例：执行器顺序 / 在飞窗口 / 串行间隔 / 并行取消、Step 2 标注顺序、Step 5 共识顺序、Step 4 峰值与顺序、Step 5.5 meta 顺序、并发配置解析与非法值回落、启动自检告警、复用计数单调、进度并发写）。
+- **删除文件**：无。
+- **验证方式与结果**：
+  1. `python -c "import app.v4.pipeline, app.v4.matching.hlr_labeler, app.v4.comparison.review_agent, app.v4.comparison.re_review, app.execution.config"` → 通过（**已验证**）。
+  2. 新增 `tests/test_reverse_concurrency.py` → **13 passed**（**已验证**）。
+  3. 相关既有测试 `test_pipeline_checkpoints.py` / `test_hlr_labeler_throttle.py` / `test_reverse_label_profile.py` → **12 passed**（含「Step 2 取消后第 2 条不再标注」「Step 4 取消在 case 边界抛出」）（**已验证**）。
+  4. 全量回归 `python -m pytest tests -q --continue-on-collection-errors --ignore=tests/test_reverse_pipeline_entry.py` → **302 passed / 5 failed / 2 skipped / 21 个收集错误**。本机缺 `beanie` 导致 21 个 API / audit 用例无法收集；5 项失败（`test_hlr_word_parser_adaptivity::test_t12`、`test_job_cancel` 裸 `except BaseException` 扫描命中既有 `job_scheduler.py:155`、`test_parse_artifact_reuse`、`test_runner_cancel`、`test_zip_entry_normalize`）均不经过本次修改的函数（**已验证，既有失败/环境缺失**）。
+  5. 真实模型端到端与 20 路压测**尚未验证**；未重建镜像、未出包。
+- **遗留问题**：
+  1. 改动未提交（用户统一处理 git）。
+  2. 本机缺 `beanie`，`test_reverse_base_stages` / `test_reverse_*` 等依赖 API 设置的用例未能执行；`tests/test_reverse_pipeline_entry.py` 引用了不存在的 `app.v4.reverse.pipeline`（既有收集错误）。
+  3. 并行只做了单测与既有回归验证，还未用真实模型跑一遍完整反向任务；Step 4/5 的日志顺序在并行时按完成顺序交错（产物顺序不变）。
+  4. 部署时需在服务器 `.env` / compose 确认 `REVERSE_CASE_CONCURRENCY` / `REVERSE_LABEL_CONCURRENCY` 生效（启动日志 `[config] REVERSE_CONCURRENCY ...`），并按实际模型端上限复核峰值。
+- **下一步建议**：1) 用户提交后重建后端镜像并出包；2) 目标服务器用真实输入跑一条完整反向任务，核对启动日志峰值行、Step 2/4/5/5.5 耗时与产物顺序；3) 观察模型服务端并发与错误率，必要时把 C/L 回调为 1 或调整 `ICD_WORKER_CONCURRENCY`。

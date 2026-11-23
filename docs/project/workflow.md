@@ -28,6 +28,9 @@ Step 1: 解析输入
 
 Step 2: HLR AI 标注
     DeepSeek 对每条 HLR 标注 bus_types / labels / devices / signal_keywords
+    并发：缓存命中的条目在主线程逐条落位；未命中条目按「单次窗口」并行标注
+    （REVERSE_LABEL_CONCURRENCY，默认 1 = 原串行），结果按入参顺序归位；
+    逐条 0.2s 节流只在串行时保留。每条一个取消检查点
     模块: matching/hlr_labeler.py
 
 Step 3: 反向匹配（含条目过滤→信号画像→Block 聚合→HLR 分类→匹配→可选追溯预筛选）
@@ -53,7 +56,10 @@ Step 3.6: 文档术语索引（不新增 LLM 调用）
 
 Step 4: 多智能体裁判（含降级保护）
     DeepSeek / MiniMax / Qwen 三模型并行独立判定（线程池 + concurrent.futures 执行模型）
-    任务提交限流：信号量（DEGRADATION_MAX_INFLIGHT，默认 6）控制同时提交到线程池的任务数，超限任务在 submit 前阻塞等待
+    Case 维度并发（REVERSE_CASE_CONCURRENCY，默认 1 = 原串行）：固定窗口提交、
+    按完成顺序上报进度、结果按入参顺序归位；case 内 provider 并行改为提交到
+    共享 executor，因此每模型峰值 ≈ ICD_WORKER_CONCURRENCY × case_concurrency
+    任务提交限流：信号量（DEGRADATION_MAX_INFLIGHT，默认 8）控制同时提交到线程池的任务数，超限任务在 submit 前阻塞等待
     Case 级超时控制：前 2 个完成后第三个固定额外等待（默认 120s），不足 2 个时兜底上限（300s）
     超时任务不取消：转后台线程池继续执行，等待 Step 4.5 统一收尾（迟到但有效的输出不丢弃）
     Provider 熔断器：连续失败达阈值后自动跳过，TTL 到期自动恢复
@@ -78,6 +84,8 @@ Step 5: Review Agent 共识（含降级后处理，ADR-004 v3 fusion 两维度�
     key 字段白名单（12 个）：Direction / DataFormatType / BitOffset / ParameterSize / OneState / ZeroState / Label / FuncRngMin / FuncRngMax / Units / Period / SDIExpected；vague 表达（无具体字段名）不影响降级
     final_coverage_status 阈值：star ≥ 2（5★/4★/3★/2★）取 majority 的 coverage_status；star ≤ 1（1★）强制「待确认」
     降级后处理：存活 provider 不足时硬上限约束（0 个 → 强制 1★ + no_consensus + 待确认；1 个 → ≤1★；2 个 → ≤2★）
+    并发：case 维度并发（REVERSE_CASE_CONCURRENCY，默认 1 = 原串行），结果按
+    入参顺序返回；case 间 0.3s 间隔只在串行时保留
     模块: comparison/review_agent.py + degradation/context.py
 
 Step 5.5: 低星复查（peer-aware 反思，5 星体系）
@@ -86,13 +94,14 @@ Step 5.5: 低星复查（peer-aware 反思，5 星体系）
     2★ → 复查后可达 3★（minority provider 重新审视反对方 key 字段意见，弱化立场）
     每个 provider 看到自己之前的判断（Judgment A）和 peer 的判断（Judgment B/C），触发反思纠正
     error provider 跳过：不重新查询 coverage_status="error" 的 provider，保留其 error 状态
-    并发模型：per-case 内并行 3 个 provider——每个 case 一次性 submit 到 Step 4 共享的 drain executor（`_get_drain_executor()` + `_submit_with_gate()`），用 `concurrent.futures.wait` + `FIRST_COMPLETED` 在 `case_total_timeout` ceiling 内 gather；case 维度仍串行。单 case wall time = `max(providers)`（非 `sum(providers)`）。复用 Step 4 的 `_get_drain_executor` / `_get_inflight_sema` / `_submit_with_gate` / `make_error_judgment` / `classify_exception` 基础设施，无新引入组件。
+    并发模型：per-case 内并行 3 个 provider——每个 case 一次性 submit 到 Step 4 共享的 drain executor（`_get_drain_executor()` + `_submit_with_gate()`），用 `concurrent.futures.wait` + `FIRST_COMPLETED` 在 `case_total_timeout` ceiling 内 gather；case 维度按 REVERSE_CASE_CONCURRENCY 并发（默认 1 = 原串行），跨 case 共用同一份 executor + 信号量预算。单 case wall time = `max(providers)`（非 `sum(providers)`）。复用 Step 4 的 `_get_drain_executor` / `_get_inflight_sema` / `_submit_with_gate` / `make_error_judgment` / `classify_exception` 基础设施，无新引入组件。
     模块: comparison/re_review.py
     术语注入: 复查 prompt 与初判使用同一段 case 命中术语，避免复查模型失去
     初判时已看到的用词解释
 
 Step 5.6: 部分共识重跑（含降级后处理）
     仅对被复查过的 case（re_reviewed_ids）重跑共识，更新对应条目
+    一次批量调用（内部按 REVERSE_CASE_CONCURRENCY 并行），结果按 case_id 回填
     其余 case 保持不变
     共识结果经 `_apply_degradation_review()` 重新应用 star cap 并重建 summary
     模块: comparison/review_agent.py + degradation/context.py
