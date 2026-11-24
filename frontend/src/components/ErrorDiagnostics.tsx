@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { V4JobError, V4LogLine } from '../types'
-import { STAGE_LABELS } from './ProcessingView'
+import { STAGE_LABELS } from './progress/stageMeta'
 
 export interface ErrorDiagnosticsProps {
   error: V4JobError | null
