@@ -1,18 +1,23 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { CircleStop, TriangleAlert } from 'lucide-react'
+import { CircleStop, Download, TriangleAlert } from 'lucide-react'
 import CompletenessFileUpload from '../components/CompletenessFileUpload'
 import CompletenessResultView from '../components/CompletenessResultView'
 import InterruptedTasks from '../components/InterruptedTasks'
-import ProcessingView from '../components/ProcessingView'
+import TaskProgressBoard from '../components/progress/TaskProgressBoard'
 import WorkflowSteps from '../components/WorkflowSteps'
 import { useAnalysisJob } from '../hooks/useAnalysisJob'
 import ErrorDiagnostics, { DiagnosticsCopyButton } from '../components/ErrorDiagnostics'
 import type { ErrorDiagnosticsProps } from '../components/ErrorDiagnostics'
-import JobLogPanel from '../components/JobLogPanel'
 import { useJobLogs } from '../hooks/useJobLogs'
 import { useMockMode } from '../hooks/useMockMode'
-import { abandonJobV4, analyzeCompletenessV4, getForwardJobResultV4, resumeJobV4 } from '../api'
+import {
+  abandonJobV4,
+  analyzeCompletenessV4,
+  getForwardJobResultV4,
+  getJobLogDownloadUrlV4,
+  resumeJobV4,
+} from '../api'
 import type { FileItem, ForwardAnalysisMode, V4ForwardJobResultResponse, V4JobListItem } from '../types'
 
 export default function CompletenessPage() {
@@ -192,7 +197,8 @@ export default function CompletenessPage() {
       )}
 
       {job.pageState === 'processing' && (
-        <ProcessingView
+        <TaskProgressBoard
+          taskType="completeness"
           progress={job.progress}
           stage={job.stage}
           stageIndex={job.stageIndex}
@@ -201,16 +207,17 @@ export default function CompletenessPage() {
           caseTotal={job.caseTotal}
           resumed={job.resumed}
           reuse={job.reuse}
+          resumedHint="中断恢复执行，已完成的检查结果将直接复用，不重复调用模型"
           tokenUsage={job.tokenUsage}
           mock={job.mock}
-          resumedHint="中断恢复执行 · 已完成的判定结果将直接复用，不重复调用模型"
+          lines={logLines}
+          truncated={logTruncated}
+          createdAt={job.createdAt}
           onCancel={job.jobId !== null ? job.cancel : undefined}
           cancelRequested={job.cancelRequested}
           onForceCancel={job.jobId !== null ? job.forceCancel : undefined}
           forceCancelAvailable={job.forceCancelAvailable}
-        >
-          <JobLogPanel lines={logLines} truncated={logTruncated} defaultOpen={false} />
-        </ProcessingView>
+        />
       )}
 
       {job.pageState === 'success' && job.resultData && (
@@ -239,7 +246,6 @@ export default function CompletenessPage() {
           </h3>
           <p className="error-message">{job.errorMessage}</p>
           <ErrorDiagnostics {...diagProps} />
-          <JobLogPanel lines={logLines} truncated={logTruncated} defaultOpen />
           <div className="error-state__actions">
             {job.jobStatus === 'canceled' ? (
               <>
@@ -256,6 +262,16 @@ export default function CompletenessPage() {
               </button>
             )}
             <DiagnosticsCopyButton {...diagProps} />
+            {job.jobId && (
+              <a
+                className="btn btn--ghost"
+                href={getJobLogDownloadUrlV4(job.jobId)}
+                download
+              >
+                <Download size={15} aria-hidden="true" />
+                下载运行日志
+              </a>
+            )}
           </div>
         </div>
       )}

@@ -2,6 +2,17 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-11-24
+
+### Changed
+
+- **处理页进度视图重构（仅前端）**：移除正向 / 反向处理页与错误页的原始日志面板（`JobLogPanel`），改为结构化任务进度看板 `TaskProgressBoard`：阶段轨道（含每步耗时）、当前阶段条目进度矩阵、最近完成条目与详情、关键数据（EoICD / SWHLR / Case / 缓存复用 / 平均星级）、复核结果分布、语义化实时动态和降级提示。条目数超过 240 时矩阵按段聚合（每格代表多条，格内按结果比例着色，悬停显示该段计数），上百 / 上千条仍能稳定展示；复核阶段已裁判未复核的条目使用浅蓝「待复核」，与一致 / 待确认 / 不一致结果区分。条目进度由现有任务日志解析（`components/progress/parseJobProgress.ts`），复核结论兼容后端英文 `coverage_status`（`covered` / `inconsistent` / `needs_review`）与「无匹配」，兼容 Celery / 进程重启后带 `ISO [level]` 前缀的日志行，并以状态接口兜底；错误页保留「复制诊断信息」并新增「下载运行日志」。
+
+### Fixed
+
+- **复核 / 报告阶段状态误报为多智能体裁判**：`Step 5 / 5.5 / 5.6 / 6` 只更新 `job.message`、不调用 `set_progress`，结构化进度里的 `stage` 仍停在 `multi_judge`。`backend/app/api/v4/runner.py` 的 `_merged_progress` 改为：message 解析出的步骤序号大于结构化进度时以 message 为准，`GET /jobs/{id}` 与失败分类现在能正确进入 `review` / `report`。
+- **前端阶段横幅被计时行回退**：`  [timing] Step 1/6: ...` 这类「上一步耗时」行此前被当成阶段横幅，会把最近阶段回退到上一步（Step 2 之后被 Step 1 覆盖），导致界面永远停在多智能体裁判。现仅从行首匹配真实的 `Step N/M:` 横幅，并在状态接口与日志横幅之间取更靠后的一步。
+
 ## [Unreleased] - 2026-11-23
 
 ### Added

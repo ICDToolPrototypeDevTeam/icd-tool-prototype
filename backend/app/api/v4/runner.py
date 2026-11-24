@@ -311,9 +311,22 @@ def _merged_progress(job: Job) -> dict:
 
     I-1：错误分类（_fail_job）与状态查询（jobs.get_v4_job_status）必须用
     同一个 stage 来源，否则同一次失败的 error.stage 会为空、而顶层 stage 非空。
+
+    Step 5 / 5.5 / 5.6 / 6 只更新 ``job.message``、不调用 ``set_progress``，
+    结构化进度里的 stage 仍停在 Step 4。message 解析出的步骤序号更大时以
+    message 为准，否则复核 / 报告阶段会被误报成 multi_judge（前端进度条与
+    失败分类都会受影响）。
     """
     progress = dict(job.progress or {})
-    for key, value in _parse_progress(job.message).items():
+    parsed = _parse_progress(job.message)
+    parsed_index = parsed.get("stage_index")
+    current_index = progress.get("stage_index")
+    if parsed_index is not None and (current_index is None or parsed_index > current_index):
+        for key in ("stage", "stage_index", "stage_total"):
+            value = parsed.get(key)
+            if value not in (None, ""):
+                progress[key] = value
+    for key, value in parsed.items():
         progress.setdefault(key, value)
     return progress
 

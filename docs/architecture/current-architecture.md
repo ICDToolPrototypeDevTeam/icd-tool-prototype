@@ -307,7 +307,7 @@ Step 4/4 报告生成
 更新任务状态和输出文件路径
 ```
 
-进度口径（前端 `ProcessingView.STAGE_LABELS`，与反向复用同一套四段）：`parse → multi_judge → review → report`；`case_index / case_total` = 已完成 / 全部 judge 数。
+进度口径（前端 `components/progress/stageMeta.ts` 的正向四段定义，由 `TaskProgressBoard` 渲染）：`parse → multi_judge → review → report`；`case_index / case_total` = 已完成 / 全部 judge 数。
 
 V5 起为降低内存与磁盘占用：属性比对大报告用 `common/jsonstream.py` 流式解析（不再整文件载入）；阶段1 共享产物由 `--eoicd-processed-dir` 直接引用，不再逐 judge 复制；`retained_*` / `attr_not_mentioned_*` / `attr_clustered_*` 等中间态默认不落盘（`config.output` 下 `save_retained_intermediate` / `keep_not_mentioned_intermediate` / `keep_clustered_intermediate` 可显式保留）；judge 子进程不再归档 `report_*.json`（`--no-report-archive`）。上传字段、产物名称与结果口径不变。
 

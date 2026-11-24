@@ -4981,3 +4981,38 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   3. 并行只做了单测与既有回归验证，还未用真实模型跑一遍完整反向任务；Step 4/5 的日志顺序在并行时按完成顺序交错（产物顺序不变）。
   4. 部署时需在服务器 `.env` / compose 确认 `REVERSE_CASE_CONCURRENCY` / `REVERSE_LABEL_CONCURRENCY` 生效（启动日志 `[config] REVERSE_CONCURRENCY ...`），并按实际模型端上限复核峰值。
 - **下一步建议**：1) 用户提交后重建后端镜像并出包；2) 目标服务器用真实输入跑一条完整反向任务，核对启动日志峰值行、Step 2/4/5/5.5 耗时与产物顺序；3) 观察模型服务端并发与错误率，必要时把 C/L 回调为 1 或调整 `ICD_WORKER_CONCURRENCY`。
+
+## 2026-11-24 处理页进度视图重构（移除日志面板，改动未提交）
+
+- **任务目标（用户提出）**：前端处理页与错误页的原始日志面板需要去除，但仍要能看见「条目进度」，且所有有价值信息要用更美观的方式呈现。经用户确认：正反向处理页与错误页全部移除日志面板、保留下载入口；条目对象覆盖 SWHLR 标注条目与裁判 / 复核 Case；数据来源为纯前端解析现有日志 + 状态字段，不改后端与 API；视觉方向为平台原生进度看板。
+- **完成内容**：
+  1. 新增 `TaskProgressBoard`：状态头（阶段、Step、任务时长、Token、MOCK、续跑复用、终止 / 强制终止）+ 阶段脉冲带（6 / 4 步，含每步耗时与当前阶段计时）+ 左栏「条目进度」（大数字、百分比、进度条、条目点阵、最近完成 8 条、点击查看详情、本阶段 ETA）+ 右栏「关键数据」（EoICD / SWHLR / Case / 缓存 / 平均星级、匹配或复核结果分布、阶段耗时、模型）+ 语义化「实时动态」+ 告警折叠条。
+  2. 新增纯函数解析模块 `parseJobProgress.ts`：识别 `[label] i/N id`、`[multi] id (i/N) {providers}`、`[review] ... stars= → 结论`、`[re-review]`、`[timing]`、正向 `judge[n] name` / `judge name 完成`、解析摘要与 `Stats:` 行；未知日志行一律忽略。兼容 Celery / 进程重启后从 `job.log` 同步来的 `ISO [level] text` 前缀，并把前缀时间作为 ETA 时间基准。日志缺失或截断时以状态接口的阶段 / Case 数兜底。
+  3. 条目进度按阶段切换：标注阶段 = 逐条 SWHLR（矩阵 + 缓存标记）；裁判阶段 = Case（矩阵蓝色 = 已裁判）；复核阶段 = Case（绿 / 黄 / 红 = 一致 / 待确认 / 不一致）；正向裁判阶段 = judge（含当前 judge 与「正在处理」提示）。解析 / 匹配 / 报告等无逐条数据的阶段改为当前动作与不确定进度条，不伪造条目状态。
+  4. ETA 只计算当前阶段：取最近 10 个完成事件的时间戳估算速率，样本少于 4 条、无时间戳或停滞超过 10 分钟时整块隐藏。
+  5. 错误页移除日志面板，保留「复制诊断信息」，新增「下载运行日志」链接（复用 `getJobLogDownloadUrlV4`）；历史结果页的日志下载入口未改动。
+  6. `ErrorDiagnostics` 的 `STAGE_LABELS` 迁移到 `components/progress/stageMeta.ts`；`useAnalysisJob` 暴露 `createdAt` 供续跑任务计算任务时长；删除 `JobLogPanel.tsx` / `ProcessingView.tsx` 及 `index.css` 中对应的 `.log-*` / `.processing-*` 死样式。
+- **修改文件**：`frontend/src/pages/CorrectnessPage.tsx`、`frontend/src/pages/CompletenessPage.tsx`、`frontend/src/components/ErrorDiagnostics.tsx`、`frontend/src/hooks/useAnalysisJob.ts`、`frontend/src/index.css`、`docs/architecture/current-architecture.md`（正向进度口径的组件引用）、`CHANGELOG.md`、本 log。
+- **新增文件**：`frontend/src/components/progress/TaskProgressBoard.tsx`、`StageRibbon.tsx`、`ItemProgress.tsx`、`TaskMetrics.tsx`、`ActivityFeed.tsx`、`AlertStrip.tsx`、`parseJobProgress.ts`、`stageMeta.ts`、`progressFormat.ts`、`task-progress.css`。
+- **删除文件**：`frontend/src/components/JobLogPanel.tsx`、`frontend/src/components/ProcessingView.tsx`。
+- **验证方式与结果**：
+  1. `cd frontend && npx tsc --noEmit` → 通过（**已验证**）。
+  2. `cd frontend && npm run build` → 通过（**已验证**；Vite 仅提示既有 bundle > 500kB 警告）。
+  3. 用临时 Vite 预览页 + Playwright（Chrome channel）渲染反向裁判中（12/50）、反向复核中（12/50 带星级与结论）、反向标注中（44/87）、正向裁判中（2/3 judge）、解析阶段五种状态，检查桌面 1440px 与移动 390px 布局、点阵颜色、最近完成、ETA、阶段自动滚动与响应式（**已人工查看截图**；预览文件与截图验证后已删除）。
+  4. 真实后端 + 真实任务的端到端**尚未验证**：未启动 FastAPI / Celery，也未用真实日志流走查；预览数据由临时脚本构造。
+- **遗留问题**：
+  1. 改动未提交（按项目规则由用户处理 git）。
+  2. 视觉与信息取舍待用户看真实效果后反馈（点阵密度、最近完成条数、右栏指标项、ETA 是否保留等）。
+  3. 日志解析依赖现有 `print` 文案，后端若改文案需同步更新 `parseJobProgress.ts`；解析不到时页面会退回状态接口的阶段 / Case 进度，不会报错。
+- **下一步建议**：1) 用户启动前后端，用 MOCK 反向 / 正向各跑一条任务走查；2) 根据真实观感调整点阵与指标；3) 确认后再由用户提交。
+- **首轮真实效果反馈修正（2026-11-24）**：
+  1. **去掉「匹配结果分布」区块**：用户确认匹配结果不需要做分布图；匹配完成时仍在实时动态保留一行「已匹配 / 待确定 / 无匹配」摘要，右栏只保留复核结果分布。
+  2. **大条目量矩阵**：条目数 ≤ 240 时一条一格；> 240 时按「总条数 / 160」聚合，每格代表 N 条，格内用按结果比例的渐变着色（不是简单取最严重状态，避免少数不一致把整段染红），悬停显示该段的完成 / 一致 / 待确认 / 不一致等计数；最近完成卡片继续承担具体条目 ID。临时用 1200 条标注、1000 个 Case 验证布局（截图人工查看）。
+  3. **修正「结果未知」**：后端 `final_coverage_status` 实际是英文 `covered` / `inconsistent` / `needs_review`（或退化写入的「待确认」/「无匹配」），此前前端只认中文，导致复核阶段大量结论落入「未知」。现 `normalizeOutcome` 同时识别中英文，并新增「无匹配」结论与独立配色；模型明细里的英文状态也一并翻译。
+  4. **ETA 更显眼**：从「最近完成」右侧的小字移到进度条下方（浅蓝底），并在状态头增加「预计剩余」；估算样本门槛 4 → 3 条，停滞阈值 10 → 30 分钟；不足 3 条时显示「完成 3 条后显示本阶段剩余时间估算」。
+  5. 仍**尚未**用真实后端任务走查；上述验证均为临时预览数据 + `tsc` / `build`。
+  6. **修复「共识复核动态出现在多智能体裁判界面 / 阶段不前进」**：根因有两层。前端 `parseJobProgress` 把 `  [timing] Step 1/6: ...` 也当成阶段横幅，而 pipeline 的 `clock.mark` 恰好把「上一步耗时」打印在下一步横幅之后，于是 Step 2 横幅刚出现就被 Step 1 timing 覆盖，最近阶段永远回退一步。现改为只从行首匹配真实的 `Step N/M:` 横幅（timing 行不再命中），并在状态接口与日志横幅之间取更靠后的一步。
+  7. **后端补状态推进**：`Step 5 / 5.5 / 5.6 / 6` 只更新 `job.message`、不调用 `set_progress`，`_merged_progress` 原先把结构化 stage（停在 `multi_judge`）当成权威。现当 message 解析出的 `stage_index` 大于结构化进度时，用 message 的 `stage / stage_index / stage_total` 覆盖；`GET /jobs/{id}` 与 `_fail_job` 的失败分类都能进入 `review` / `report`。用 `SimpleNamespace` 直接调用 `_merged_progress` 验证：Step 5 → `review 5`、Step 5.5 → `review 5`、Step 6 → `report 6`、Step 4 → `multi_judge 4`（**已验证**）。
+  8. **复核阶段矩阵状态**：`countedBy='reviewed'` 时，已裁判但未复核的条目改为浅蓝「待复核」，与绿 / 黄 / 红结果区分；图例按阶段切换为「待复核」而不是「已裁判」。
+  9. **阶段识别回归验证**：临时构造「status 仍为 multi_judge、日志已打印 Step 5 横幅 + 8 条英文 `[review]` 行」的场景，预览确认：顶部标题与阶段轨道进入「共识复核 Step 5/6」、条目面板变为「复核 Case 8/20」、矩阵 8 个彩色结果 + 12 个浅蓝待复核、分布 4 一致 / 2 待确认 / 2 不一致、无「未知」（截图人工查看，预览文件已删除）。
+  10. **阶段连接线矫正**：原实现把节点当成列居中，连接线按「列中心」换色，视觉上接不到节点；现改为每个阶段从自己的节点圆心连到下一节点圆心（`left: 14px`、宽度一列），完成阶段为浅蓝、当前阶段到下一步为灰。同时移除步骤区上方那条不连接任何元素的全宽分隔线。最近完成仍固定显示最近 8 条，数量很大时由聚合矩阵承担总量，不逐条铺开。

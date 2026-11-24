@@ -40,6 +40,8 @@ export interface AnalysisJobState<T> {
   mock: boolean
   jobId: string | null
   jobStatus: V4JobStatus | null
+  /** 任务创建时间（ISO）；用于续跑任务计算准确的任务时长 */
+  createdAt: string | null
   /** 已请求终止，等待管线在检查点停止 */
   cancelRequested: boolean
   /** 已请求终止且迟迟没停住 —— 此时才允许「强制终止」 */
@@ -75,6 +77,7 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
   const [mock, setMock] = useState(false)
   const [jobId, setJobId] = useState<string | null>(null)
   const [jobStatus, setJobStatus] = useState<V4JobStatus | null>(null)
+  const [createdAt, setCreatedAt] = useState<string | null>(null)
   const [cancelRequested, setCancelRequested] = useState(false)
   const [forceCancelAvailable, setForceCancelAvailable] = useState(false)
   const [tokenUsage, setTokenUsage] = useState<number | null>(null)
@@ -127,6 +130,7 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
     setMock(false)
     setJobId(null)
     setJobStatus(null)
+    setCreatedAt(null)
     setCancelRequested(false)
     setForceCancelAvailable(false)
     setTokenUsage(null)
@@ -243,6 +247,7 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
         if (status.resumed === true) setResumed(true)
         setMock(status.mock === true)
         setJobStatus(status.status)
+        if (status.created_at) setCreatedAt(status.created_at)
         const requested = status.cancel_requested === true
         setCancelRequested(requested)
         // 后端已经在终止中（例如刷新页面后挂到任务上）：同样要给出强制终止兜底，
@@ -332,6 +337,7 @@ export function useAnalysisJob<T>(): AnalysisJobState<T> {
     mock,
     jobId,
     jobStatus,
+    createdAt,
     cancelRequested,
     forceCancelAvailable,
     tokenUsage,
