@@ -117,9 +117,9 @@ V4 正向管线（完整性分析；Issue #119 起为多 judge 一致性管线�
 | `v4/hlr_schema_store.py` | 自定义 HLR 表格样式的持久化与引用解析：`OUTPUT_DIR/hlr_schemas.json` 原子读写、CRUD、名称唯一校验、`template_id` / `schema_id` / 内联配置三种引用的解析与快照序列化 |
 | `v4/matching/` | HLR 标注、条目过滤、信号画像、Block 聚合、HLR 分类、反向匹配、追溯预筛选；`glossary_index.py` 为每条 case 选取命中的文档术语（只供裁判/复查 prompt，不参与匹配评分）；`internal_channel.py` 为 AMS 内部通道需求前置判断（命中按无匹配 + 内部接口标注，不进入 Block 评分与裁判） |
 | `v4/comparison/` | 多模型裁判、Review Agent 共识、一星复查、报告生成 |
-| `v4/degradation/` | Provider 健康跟踪、Case 超时、熔断、星级降级；`concurrency.py` 仅保留降级专用的进程级 executor / 信号量与 `_submit_with_gate` 背压闸门 |
+| `v4/degradation/` | Provider 健康跟踪（NETWORK / TIMEOUT / 软错误分类计数、半开恢复、指数退避）、Case 预算（`budget.py` 的 per-case wait / hard deadline）、熔断、星级降级；`concurrency.py` 仅保留降级专用的进程级 executor / 信号量与 `_submit_with_gate` 背压闸门 |
 | `v4/doc_generators/` | xlsx + 单模型 docx + 共识 docx 生成（反向） |
-| `v4/llm/`       | LLM 抽象层：`factory.py`（env 驱动 + mock fallback）、deepseek/minimax/qwen client、`mock_llm.py` |
+| `v4/llm/`       | LLM 抽象层：`factory.py`（env 驱动 + mock fallback）、`deadline.py`（Deadline 协议与 StaticDeadline）、`streaming.py`（OpenAI 兼容传输：非流式 / SSE、usage 记录、单一重试入口 `chat_with_retry`）、deepseek/minimax/qwen client、`mock_llm.py` |
 | `v4/prompts/`   | Prompt Markdown 文本资产（reverse_judge / consensus / re_review） |
 | `v4/traceability/` | 追溯表预筛选（独立零耦合模块） |
 | `v4/refine/` | RPDU 专属：matched ICD Block 无关过滤 + 精确/同义词补采（Issue RPDU 适配续）；Step 3 后可选阶段 |
@@ -278,10 +278,15 @@ Step 4 / 5 / 5.5 / 5.6  REVERSE_CASE_CONCURRENCY    默认 1（串行）；>1 �
                         （同一任务同一时刻只处于一个阶段）；超过 LLM_PER_MODEL_LIMIT 时启动日志打 WARN
 结果顺序                并行不改变产物顺序：所有并行入口按输入顺序归位
 共享预算                Step 4 / 5.5 的 provider 调用仍走进程级 executor + DEGRADATION_MAX_INFLIGHT 信号量
+Case 内预算             Step 4 / 5.5 每个 case 独立 CaseBudget；run_parallel_ordered 与共享 executor / 信号量不变
 ```
 
 实现入口集中在 `v4/concurrency.run_parallel_ordered()`：固定窗口提交、每个线程经
 `bind_thread_context` 继承 job 归属与运行上下文、取消时停止调度未提交条目、异常原样抛出。
+
+LLM 调用超时按四层收敛：单请求 read timeout（`LLM_TIMEOUT`）→ case `wait_deadline`（写 TIMEOUT 占位）
+→ case `hard_deadline`（worker 自停，= wait + drain 预算，且不超过 `LLM_TOTAL_BUDGET`）→ 单次调用总预算
+`LLM_TOTAL_BUDGET`。传输层是唯一重试入口；语义层只对无效 JSON 重试一次。
 
 ### 7.1 正向完整性分析流程（EoICD → HLR，多 judge 一致性管线）
 
@@ -584,16 +589,32 @@ llm/thinking.py
   thinking_enabled(provider) / cache_variant(provider)
     读 *_THINKING（默认开启）；关闭值供缓存 key 追加 _thinking=disabled
 
+llm/deadline.py
+  Deadline 协议（hard_expired / remaining_hard）+ StaticDeadline
+    LLM 调用统一使用 CaseBudget（degradation/budget.py）或 StaticDeadline
+
+llm/streaming.py
+  chat_completion(url, headers, payload, provider, *, deadline, read_timeout,
+                  connect_timeout, stream, include_usage=True) -> ChatResponse
+    非流式: requests.post(stream=False) + (connect, read) timeout
+    SSE: 请求体带 stream=true；逐行解析 data:；usage / reasoning_content；
+         400+stream_options 自动去参重试一次；200 非 text/event-stream 按普通
+         completion 回退解析（streamed=False + WARNING），避免网关忽略流式时静默空结果
+  chat_with_retry(..., max_tokens, timeout, max_retries, deadline, stream)
+    唯一重试入口：传输重试按错误类型（408/429/NETWORK 重试，TIMEOUT/BAD_OUTPUT/4xx 终止）；
+    finish_reason=length 时 max_tokens 翻倍（上限 MAX_TOKEN_CAP=16384），非流式同步放大 read timeout
+    ChatResponse = {content, usage, finish_reason, reasoning_content, streamed}
+
 llm/deepseek_client.py
-  DeepSeekClient.chat(messages, temperature, max_tokens=1024, timeout=120, max_retries=2, ...)
+  DeepSeekClient.chat(messages, temperature, max_tokens=1024, timeout=None, max_retries=1, deadline=None, stream=None)
     幂等 URL:  base = base_url.rstrip('/'); if base.endswith('/v1'): base = base[:-3]
     url = f"{base}/v1/chat/completions"
 
 llm/qwen_client.py
-  QwenClient.chat(messages, temperature, max_tokens=1024, timeout=120, max_retries=2, ...)
+  QwenClient.chat(messages, temperature, max_tokens=1024, timeout=None, max_retries=1, deadline=None, stream=None)
 
 llm/minimax_client.py
-  MiniMaxClient.chat(messages, temperature, max_tokens=1024, timeout=120, max_retries=2, ...)
+  MiniMaxClient.chat(messages, temperature, max_tokens=1024, timeout=None, max_retries=1, deadline=None, stream=None)
 
 llm/mock_llm.py
   MockLLMClient.chat(messages, ...) -> ChatResponse

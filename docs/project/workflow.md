@@ -60,9 +60,9 @@ Step 4: 多智能体裁判（含降级保护）
     按完成顺序上报进度、结果按入参顺序归位；case 内 provider 并行改为提交到
     共享 executor，因此每模型峰值 ≈ ICD_WORKER_CONCURRENCY × case_concurrency
     任务提交限流：信号量（DEGRADATION_MAX_INFLIGHT，默认 8）控制同时提交到线程池的任务数，超限任务在 submit 前阻塞等待
-    Case 级超时控制：前 2 个完成后第三个固定额外等待（默认 120s），不足 2 个时兜底上限（300s）
+    Case 级超时控制：每个 case 一个 CaseBudget——wait_deadline 只决定 controller 何时写 TIMEOUT 占位（前 2 个完成后第三个固定额外等待，默认 120s；不足 2 个时用 300s 兜底），hard_deadline 决定 case 内 worker 何时自停
     超时任务不取消：转后台线程池继续执行，等待 Step 4.5 统一收尾（迟到但有效的输出不丢弃）
-    Provider 熔断器：连续失败达阈值后自动跳过，TTL 到期自动恢复
+    Provider 熔断器：按错误类型分类计数——AUTH 立即熔断；NETWORK 连续 3 次；TIMEOUT 连续 5 次；软错误只统计不熔断；TTL 到期半开恢复，再次熔断按 2× 指数退避（上限 600s）
     模块: comparison/{multi_judge,semantic_judge}.py + degradation/{config,context,fallback}.py
     LLM 抽象: llm/factory.py → get_llm(provider)
     术语注入: 初判 user prompt 在 SWHLR 位声明之后追加「文档术语与缩略语（仅本
@@ -76,6 +76,17 @@ Step 4.5: 超时任务后台收尾（drain）
     预算到期未返回的维持 TIMEOUT 降级；迟到失败不重复计入熔断失败计数
     统计: degradation.drained_late_count
     模块: pipeline.py `_drain_and_rereview()` + degradation/context.py
+
+Step 4 超时、预算与续跑
+    每个 case 独立 CaseBudget（degradation/budget.py）：wait_deadline = case 停止等待并写占位的时刻；
+    hard_deadline = case 内 worker 的最终自停时刻。pipeline 在 submit 后统一 rebase，避免信号量排队时间吃掉预算
+    hard_deadline = min(wait_deadline + DEGRADATION_DRAIN_BUDGET, LLM_TOTAL_BUDGET)；
+    drain join 窗口与 worker 生命周期对齐，超时 future 不 cancel，迟到有效结果仍替换 TIMEOUT 占位
+    case 级并行（REVERSE_CASE_CONCURRENCY=2）下每个 case 有独立 budget；run_parallel_ordered、
+    _submit_with_gate、共享 executor / 信号量均不变
+    Step 5.5 复查同样使用 per-case CaseBudget，但 wait = hard（无 drain）：case 一结束，遗留 worker 自停
+    流式（SSE）仅在 LLM_STREAM / LLM_STREAM_PROVIDERS 显式打开时启用；网关缓冲时按 TIMEOUT 中断；
+    保持 LLM_STREAM=0 可完全退回非流式，超时 / 重试 / 预算改造仍然生效
 
 Step 5: Review Agent 共识（含降级后处理，ADR-004 v3 fusion 两维度并行）
     对三模型判定结果综合复核并给出星级评价（1-5★，ADR-004 v3 fusion）
@@ -271,7 +282,7 @@ inline 模式（pytest / 回滚）继续使用 `job_scheduler.py` 进程内线�
 | Step 5.6 降级 | 存活 provider ≤ 2 | 星级受硬上限约束（0 个存活强制 1★，1 个 ≤1★，2 个 ≤2★），agreement 可能被覆盖为 single_source / no_consensus | `degradation.review_star_capped_count` 递增 |
 | Step 6 报告生成 | docx 写盘失败 | `outputs.<key>` 某项为 false | `/result.outputs` 部分 false |
 | Step 4 降级超时 | 单 case 超时（t2+120s 或 300s 兜底） | 超时 provider 先得 TIMEOUT error judgment，任务转后台；drain 上限（`drain_max_tasks`）内任务保留等待 join，超限任务 cancel；Step 4.5 预算内返回的有效结果替换占位 | `degradation.total_case_timeouts` 递增；迟到有效结果使 `degradation.drained_late_count` 递增 |
-| Step 4 降级熔断 | Provider 连续失败 ≥ 3 次 | 该 provider 被标记 unhealthy，后续 case 跳过 | `degradation.provider_status` 显示 unhealthy |
+| Step 4 降级熔断 | NETWORK 连续 3 次 / TIMEOUT 连续 5 次 / AUTH 1 次 | 该 provider 被标记 unhealthy，后续 case 跳过；软错误只计数不熔断 | `degradation.provider_status` 显示 unhealthy，`provider_stats` 记录分类计数 |
 | Step 4 全部 unhealthy | 所有 provider 均熔断 | `AllProvidersUnhealthyError` → job FAILED | `/result` 返 409 |
 
 ## 13. 流程变更原则

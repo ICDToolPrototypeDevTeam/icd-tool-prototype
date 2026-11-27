@@ -2,6 +2,29 @@
 
 本文档记录 ICD工具原型 的版本级变化。
 
+## [Unreleased] - 2026-11-26
+
+### Added
+
+- **LLM 调用总预算与 per-case 预算**：新增 `LLM_TOTAL_BUDGET`（默认 900s，覆盖传输重试与截断翻倍）、`LLM_CONNECT_TIMEOUT`（默认 5s）。新增 `degradation/budget.py` 的 `CaseBudget`：Step 4 每个 case 的 `wait_deadline` 只决定何时写 TIMEOUT 占位，`hard_deadline = min(wait + DEGRADATION_DRAIN_BUDGET, LLM_TOTAL_BUDGET)` 决定 worker 自停；drain 窗口与 worker 生命周期对齐。Step 5.5 复查同样使用 per-case budget（wait = hard，无 drain）。`run_parallel_ordered`、`_submit_with_gate`、共享 executor / 信号量均未改动。
+- **SSE 流式传输（默认关闭）**：新增 `llm/streaming.py` 与 `llm/deadline.py`，OpenAI 兼容传输支持非流式 / SSE；`LLM_STREAM` / `LLM_STREAM_PROVIDERS` / `LLM_STREAM_READ_TIMEOUT` 控制启用与块间读超时。流式成功时 `ChatResponse.streamed=True`；`stream_options` 被网关 400 拒绝时自动去参重试一次。默认 `LLM_STREAM=0`，需服务器探测确认增量流式后再启用。
+- **分类熔断与半开恢复**：`DegradationContext` 按错误类型计数——AUTH 立即熔断、NETWORK 连续 3 次、TIMEOUT 连续 5 次，BAD_OUTPUT / TRUNCATED / RATE_LIMITED 等软错误只统计不熔断；TTL 到期进入半开（预置阈值 -1），再次失败立即熔断，冷却按 2× 指数退避至 `DEGRADATION_MAX_UNHEALTHY_TTL`（默认 600s）。任务结果 `degradation` 新增 `provider_stats` 与 `drained_late_count`。
+
+### Changed
+
+- **重试收口到传输层**：`chat_with_retry` 成为唯一重试入口，语义层不再叠加 HTTP 重试，只对无效 JSON 重试一次。408/429/NETWORK 可重试，TIMEOUT、BAD_OUTPUT、400/401/403/404/422 直接终止；`finish_reason=length` 时 `max_tokens` 翻倍（上限 16384），非流式同步放大 read timeout，流式保持块间读超时不变。
+- **流式读超时默认 60s → 120s**：qwen3.8-flash 长 prompt + thinking on 时首包可能超过 60s（历史探针曾出现 180s 无 SSE 数据），因此把 `LLM_STREAM_READ_TIMEOUT` 默认值上调到 120s，与非流式 `LLM_TIMEOUT` 对齐。响应头、首包与块间仍共用该值，没有拆分首包超时；仍受 `DEGRADATION_CASE_TIMEOUT` 与 `LLM_TOTAL_BUDGET` 封顶。
+- **错误类型透传**：`TIMEOUT / NETWORK / AUTH / RATE_LIMITED / BAD_OUTPUT / TRUNCATED / STREAM_ABORTED / STREAM_INTERRUPTED / UNKNOWN` 写入 judgment 的 `error_type`，熔断与统计按类型区分，避免慢模型 3 次超时即熔断 300s。
+
+### Fixed
+
+- **SSE 缓冲网关的读超时被误判为 NETWORK**：requests 会把流中 `ReadTimeoutError` 包装成 `ConnectionError`，现沿异常因果链识别超时并归类 `TIMEOUT`，不再计入网络失败阈值。
+- **流式请求体缺少 `stream: true`**：真实调用时即使 `LLM_STREAM=1`，网关按请求体判定仍返回普通 JSON，`_stream` 静默得到空结果（`streamed=True` 但 content / reasoning / usage 全空）。现流式分支在请求体显式携带 `stream: true`，并在验证脚本中增加请求体断言防回归。
+- **网关忽略 `stream: true` 时的非 SSE 回退**：部分自建 OpenAI 兼容网关可能忽略流式开关、以 200 + `application/json` 返回普通 completion；此前会被当成非 SSE 行丢弃并静默返回空结果。现检测到非 `text/event-stream` 响应时按普通 completion 解析（`streamed=False`）并输出 WARNING；非 JSON body 则判 `BAD_OUTPUT`。
+- **流式读超时配置未生效**：`LLM_STREAM_READ_TIMEOUT` 此前只被读取、无消费点，流式实际使用 `LLM_TIMEOUT`（默认 120s）作为块间读超时。现在 `chat_with_retry` 的流式分支使用 `LLM_STREAM_READ_TIMEOUT`（当时默认 60s，后上调至 120s，见 Changed），非流式继续使用 `LLM_TIMEOUT`；流式截断重试保持该超时不变。
+- **降级配置非法值导致启动失败**：`DEGRADATION_CASE_TIMEOUT` / `EXTRA_WAIT` / `DRAIN_BUDGET` / `DRAIN_WORKERS` / `DRAIN_MAX_TASKS` / `MAX_INFLIGHT` / `CONSECUTIVE_FAILURES` / `UNHEALTHY_TTL` 原先直接 `float()` / `int()` 读取，`.env` 写错会抛 `ValueError`。现统一校验：非数字或负数回落默认值；其中 `EXTRA_WAIT`、`DRAIN_BUDGET`、`DRAIN_MAX_TASKS` 允许 0（分别表示不额外等待、不后台收尾、不保留迟到任务），其余字段 0 视为非法。
+- **Step 5.5 全超时仍打印「re-reviewed N providers」**：低星复查日志只按 provider 总数打印，全部超时时也会显示成功。现改为 `attempted / ok / timeout / error` 四项计数，`coverage_status=error` 的返回也计入 error；`[re-review] <case_id>:` 前缀保持不变，前端解析不受影响。
+
 ## [Unreleased] - 2026-11-24
 
 ### Changed

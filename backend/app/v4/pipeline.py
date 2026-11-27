@@ -15,6 +15,7 @@ import sys
 import textwrap
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 
 from app.v4.comparison.multi_judge import (
@@ -27,6 +28,7 @@ from app.v4.comparison.review_agent import review_judgments, _build_summary
 from app.v4.config import JUDGE_PROVIDERS
 from app.v4.concurrency import run_parallel_ordered
 from app.v4.degradation import DegradationConfig, DegradationContext
+from app.v4.degradation.budget import CaseBudget
 from app.v4.degradation.concurrency import (
     _get_drain_executor,
     _submit_with_gate,
@@ -535,7 +537,10 @@ def _judge_case_with_timeout(
     ceiling: float,
     extra_wait: float,
     executor: ThreadPoolExecutor,
-) -> tuple[dict[str, dict], bool, list[tuple[str, Future]]]:
+    *,
+    drain_budget: float = 300.0,
+    total_budget: float = 900.0,
+) -> tuple[dict[str, dict], bool, list[tuple[str, Future]], CaseBudget]:
     """Run all providers in parallel with fixed extra-wait timeout (thread version).
 
     Waits for providers one-by-one (FIRST_COMPLETED). Once 2 valid (non-error)
@@ -549,14 +554,25 @@ def _judge_case_with_timeout(
 
     Timed-out tasks are NOT cancelled: they keep running in the shared drain
     executor, and the caller joins them after Step 4 via _drain_and_rereview()
-    so late-but-valid outputs are not wasted.
+    so late-but-valid outputs are not wasted. The returned ``CaseBudget``
+    carries both deadlines: ``wait_deadline`` ends the case, ``hard_deadline``
+    stops a drained worker so it cannot outlive the drain window.
     """
+    submit_at = time.monotonic()
+    budget = CaseBudget(
+        start=submit_at,
+        wait_deadline=submit_at + ceiling,
+        hard_deadline=submit_at + min(ceiling + drain_budget, total_budget),
+    )
+    judge = partial(_judge_with_provider_sync, budget=budget)
     futures = {
-        _submit_with_gate(executor, _judge_with_provider_sync, case, p, system_prompt): p
+        _submit_with_gate(executor, judge, case, p, system_prompt): p
         for p in providers
     }
-    # start 计时放在 submit 之后，避免信号量阻塞时间吃掉超时预算
+    # start 计时放在 submit 之后，避免信号量阻塞时间吃掉超时预算。
+    # budget 同步 rebase：gate 排队时间不计入 case 的等待/硬截止预算。
     start = time.monotonic()
+    budget.rebase(start, ceiling, drain_budget, total_budget)
 
     pending = set(futures.keys())
     results: dict[str, dict] = {}
@@ -565,12 +581,18 @@ def _judge_case_with_timeout(
 
     while pending:
         if len(valid_times) >= 2:
-            extra = extra_wait
-            deadline = start + valid_times[-1] + extra
+            wait_deadline = start + valid_times[-1] + extra_wait
+            budget.update(
+                wait_deadline,
+                start + min(
+                    (wait_deadline - start) + drain_budget,
+                    total_budget,
+                ),
+            )
         else:
-            deadline = start + ceiling
+            wait_deadline = budget.wait_deadline
 
-        remaining = deadline - time.monotonic()
+        remaining = wait_deadline - time.monotonic()
 
         if remaining <= 0:
             for f in pending:
@@ -601,7 +623,7 @@ def _judge_case_with_timeout(
     # Timed-out futures are handed back for draining; results already hold
     # their TIMEOUT placeholders.
     timed_out = [(futures[f], f) for f in pending]
-    return results, had_timeout, timed_out
+    return results, had_timeout, timed_out, budget
 
 
 class _StepClock:
@@ -707,11 +729,13 @@ def _judge_with_degradation(
         }
 
         # Parallel judge with adaptive timeout
-        gathered, had_timeout, timed_out = _judge_case_with_timeout(
+        gathered, had_timeout, timed_out, _budget = _judge_case_with_timeout(
             case, healthy_miss, system_prompt,
             ceiling=ctx.config.case_total_timeout,
             extra_wait=ctx.config.extra_wait,
             executor=executor,
+            drain_budget=ctx.config.drain_budget,
+            total_budget=ctx.config.total_budget,
         )
         if had_timeout:
             ctx.record_case_timeout()
@@ -728,7 +752,9 @@ def _judge_with_degradation(
         # Update health per provider from actual results
         for provider, judgment in gathered.items():
             if _is_failure(judgment):
-                ctx.record_failure(provider)
+                ctx.record_failure(
+                    provider, judgment.get("error_type") or "UNKNOWN"
+                )
             else:
                 ctx.record_success(provider)
 
@@ -803,6 +829,11 @@ def _drain_and_rereview(
     consensus sees final judgments. Late valid results reset the provider's
     failure counter; late errors keep the counter as-is (the TIMEOUT
     placeholder already counted one failure).
+
+    The draining worker's own ``CaseBudget.hard_deadline`` is what actually
+    stops it; the caller passes the same ``drain_budget`` here and into
+    _judge_case_with_timeout, so the join window and the worker's remaining
+    lifetime expire together.
     """
     drain = ctx.drain_snapshot()
     if not drain:

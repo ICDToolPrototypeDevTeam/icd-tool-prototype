@@ -5016,3 +5016,47 @@ E2E（job `ed72ffc6`）进度日志中 REV-0004 minimax error、REV-0005 deepsee
   8. **复核阶段矩阵状态**：`countedBy='reviewed'` 时，已裁判但未复核的条目改为浅蓝「待复核」，与绿 / 黄 / 红结果区分；图例按阶段切换为「待复核」而不是「已裁判」。
   9. **阶段识别回归验证**：临时构造「status 仍为 multi_judge、日志已打印 Step 5 横幅 + 8 条英文 `[review]` 行」的场景，预览确认：顶部标题与阶段轨道进入「共识复核 Step 5/6」、条目面板变为「复核 Case 8/20」、矩阵 8 个彩色结果 + 12 个浅蓝待复核、分布 4 一致 / 2 待确认 / 2 不一致、无「未知」（截图人工查看，预览文件已删除）。
   10. **阶段连接线矫正**：原实现把节点当成列居中，连接线按「列中心」换色，视觉上接不到节点；现改为每个阶段从自己的节点圆心连到下一节点圆心（`left: 14px`、宽度一列），完成阶段为浅蓝、当前阶段到下一步为灰。同时移除步骤区上方那条不连接任何元素的全宽分隔线。最近完成仍固定显示最近 8 条，数量很大时由聚合矩阵承担总量，不逐条铺开。
+
+## 2026-11-26 LLM 超时 / 流式 / 熔断改造（分支 issue-xxx-timeout-mechanism-fixed，改动未提交）
+
+- **任务目标（用户提出）**：内网 Qwen 3.8 / 3.5 频繁出现 `API error HTTPConnectionPool` / `ReadTimeout` 与 `WARNING ... retrying`，连续 3 次失败又触发熔断，此后 300s 内该模型无结果。要求综合修复超时、重试与熔断，同时保留超时续跑（drain）机制；并发隔离不做，避免与同事的并行执行器改造冲突。
+- **根因**：
+  1. 语义层与客户端各有一套重试，单次判定最多放大到 3×3 次 HTTP 尝试，慢网关下形成长时间重试链。
+  2. 熔断器只有一个连续失败计数，慢模型的 TIMEOUT 与真正的 NETWORK 失败同权，3 次超时即熔断 300s。
+  3. 超时 future 没有硬截止，drain 窗口结束后 worker 仍可能继续占用共享 executor / inflight 信号量。
+  4. 截断重试把 read timeout 翻倍后没有总预算上限。
+- **完成内容**：
+  1. 新增 `llm/deadline.py`、`llm/streaming.py`：OpenAI 兼容传输统一处理非流式 / SSE、usage 与 reasoning 解析、`stream_options` 400 去参重试、`finish_reason=length` 时 `max_tokens` 翻倍（上限 16384）。
+  2. `chat_with_retry` 收口为唯一重试入口：408/429/NETWORK 可重试，TIMEOUT/BAD_OUTPUT/400/401/403/404/422 终止；语义层只对无效 JSON 重试一次。
+  3. 错误分类 `TIMEOUT / NETWORK / AUTH / RATE_LIMITED / BAD_OUTPUT / TRUNCATED / STREAM_ABORTED / STREAM_INTERRUPTED / UNKNOWN` 透传到 judgment 的 `error_type`。
+  4. 熔断器分类计数：AUTH 立即熔断、NETWORK 连续 3 次、TIMEOUT 连续 5 次，软错误只统计；TTL 到期半开（预置阈值 -1），冷却 2× 指数退避至 600s。
+  5. 新增 `degradation/budget.py` 的 `CaseBudget`：Step 4 每 case 独立 wait / hard deadline，hard = wait + drain 预算且不超过 `LLM_TOTAL_BUDGET`；超时 future 仍不 cancel，迟到有效结果继续由 drain 替换占位。Step 5.5 复查使用 per-case budget，wait = hard（无 drain）。
+  6. **未做并发隔离**：`v4/concurrency.run_parallel_ordered`、`_submit_with_gate`、共享 executor 与信号量均未改动，沿用同事 Issue #192 的并行执行器；本改造只在 case 内部增加预算。
+  7. 修复 e2e 暴露的分类缺陷：requests 把流中 `ReadTimeoutError` 包装成 `ConnectionError`，现沿因果链识别为 `TIMEOUT`，不再误记 NETWORK。
+- **修改文件**：`backend/app/v4/llm/{factory,streaming,deadline,qwen_client,minimax_client,deepseek_client,mock_llm}.py`、`backend/app/v4/degradation/{config,context,fallback,budget}.py`、`backend/app/v4/comparison/{semantic_judge,re_review,multi_judge}.py`、`backend/app/v4/pipeline.py`、`backend/app/v4/models.py`、`backend/.env.example`、`docs/project/workflow.md`、`docs/architecture/current-architecture.md`、`docs/architecture/api.md`、`CHANGELOG.md`、本 log。
+- **新增文件**：`backend/app/v4/degradation/budget.py`、`backend/app/v4/llm/deadline.py`、`backend/app/v4/llm/streaming.py`、`backend/tests/verify_case_budget.py`、`backend/tests/verify_streaming_config.py`、`backend/tests/verify_streaming_parse.py`、`backend/tests/verify_client_streaming.py`、`backend/tests/verify_semantic_retry.py`、`backend/tests/verify_health_classification.py`、`backend/tests/verify_case_budget_drain.py`、`backend/tests/verify_streaming_e2e.py`。
+- **验证方式与结果**：
+  1. `python -m py_compile` 全部 16 个修改模块 → 通过（**已验证**）。
+  2. `python tests/verify_case_budget.py`、`verify_streaming_config.py`、`verify_streaming_parse.py`、`verify_client_streaming.py`、`verify_semantic_retry.py`、`verify_health_classification.py`、`verify_timeout_conflict.py`、`verify_case_budget_drain.py`、`verify_streaming_e2e.py`、`verify_llm_timeout_env.py`、`verify_thinking_payload.py` → 全部 `ALL PASS`（**已验证**）。
+  3. Mock 端到端：`USE_MOCK_LLM=1 LLM_STREAM=0 python -m app.v4.cli reverse-analyze`（复用 AMS 已解析输入）→ 任务完成，3 个 case 的 3 个 provider judgment 齐全，`degradation` 含 `provider_status` / `provider_stats` / `total_case_timeouts` / `drained_late_count`，`[multi]` 顺序为 REV-0001..0003，日志无 `STREAM_ABORTED`（**已验证**）。
+  4. 服务器 SSE 探测（Task 0）**未执行**：原因是本机无法连接内网服务器。`LLM_STREAM` 保持 `0`，流式开关无实测结论（**尚未验证**）。
+  5. 真实小样本 / 内网实测**尚未验证**，原因是：无本机内网连接条件、无真实 key 环境。
+- **遗留问题**：
+  1. 改动未提交（按用户要求不擅自 commit；分支 `issue-xxx-timeout-mechanism-fixed`）。
+  2. 流式收益取决于网关是否真正增量 SSE；Task 0 未执行前不得打开 `LLM_STREAM`。
+  3. case 并行 + drain 叠加时仍可能占满 `DEGRADATION_MAX_INFLIGHT=8`；本改造未改闸门，靠 hard deadline 压缩旧 future 生命周期，需服务器观察 `[multi]` 间隔与 `degradation-drain` 线程数。
+  4. `LLM_TOTAL_BUDGET=900` 是 `300 + 240 + 300 + 60` 的经验值；超过 900s 的极慢 case 迟到结果会被有意丢弃。
+- **部署提示（手工）**：代码改动需重建后端镜像；仅改 `.env` 时重启容器即可。阶段 1 保持 `LLM_STREAM=0`、`LLM_TOTAL_BUDGET=900`，不要改 `REVERSE_CASE_CONCURRENCY` / `REVERSE_LABEL_CONCURRENCY` / `DEGRADATION_DRAIN_WORKERS` / `DEGRADATION_MAX_INFLIGHT`。只有探测返回 `STREAMING_OK` 后才设置 `LLM_STREAM_PROVIDERS` 与 `LLM_STREAM_READ_TIMEOUT`。
+- **下一步建议**：1) 用户在有内网条件的机器上运行 `backend/tests/probe_streaming_live.py`，按报告决定阶段 2；2) 部署后用 1-3 case 真实样本观察 `provider_stats` 与熔断次数；3) 确认效果后再决定是否提交与创建 PR。
+- **补记（同日，公网真实流式测试）**：`.env` 切换到公网 DashScope / DeepSeek 后执行了真实流式验证，发现并修复 1 个本地测试未覆盖的缺陷——`chat_completion` 未在请求体写 `"stream": true`，网关返回普通 JSON，`_stream` 静默得到空结果（详见 `debug-log.md` BUG-20261126-001）。修复后：
+  1. `python tests/live_streaming_smoke.py`（真实公网，走 `factory.get_llm` → `chat_with_retry` → SSE 解析）→ 4/4 PASS：qwen 15.9s、deepseek 1.0s、minimax(qwen3.8-flash, thinking on, 短问答) 12.7s、minimax(thinking off) 39.0s，均 `streamed=True` 且 usage 完整。
+  2. `python tests/probe_streaming_live.py`（裸 HTTP 探针）→ qwen、deepseek(thinking off)、minimax(thinking off) 均 `STREAMING_OK`；minimax 长 prompt + thinking on 出现 180s 无任何 SSE 数据（服务端沉默，与本次缺陷无关）。
+  3. 全量 11 个本地脚本复跑仍全部 OK（新增 `verify_client_streaming.py` 第 8 组断言，先 RED 后 GREEN）。
+  4. 上述真实测试针对公网端点；**内网网关探测（Task 0）仍未执行**，`LLM_STREAM` 是否可在内网开启仍以该探测为准。
+  5. 针对「自建网关可能像忽略 thinking 开关一样忽略 `stream`」的担忧，新增非 SSE 回退：`_stream` 检测到 200 + 非 `text/event-stream` 响应时按普通 completion 解析（`streamed=False`）并打 WARNING，不再静默返回空结果；`check_stream_ignored.py` 模拟验证 `SILENT_EMPTY=False`（详见 `debug-log.md` BUG-20261126-002）。
+  6. 专项核查配置接线时发现 `LLM_STREAM_READ_TIMEOUT` 未生效：`chat_with_retry` 原先把 `LLM_TIMEOUT` 同时作为流式 / 非流式读超时，块间超时实际 120s 而非配置的 60s。已改为流式分支读取 `llm_stream_read_timeout_seconds()`；`verify_client_streaming.py` 新增第 10 组（RED 3 项 → GREEN），`check_stream_timeout_wiring.py` 输出流式 60s / 非流式 120s（详见 `debug-log.md` BUG-20261126-003）。
+- **补记（同日，两处非阻塞观察修正）**：
+  1. Step 5.5 低星复查日志不再固定打印 provider 总数，改为 `attempted / ok / timeout / error` 四项计数；返回 `coverage_status=error` 的 judgment 计入 error，超时占位计入 timeout。`[re-review] <case_id>:` 前缀保留，前端 `parseJobProgress.ts` 无需改动。
+  2. `DegradationConfig.from_env()` 的 8 个裸读取字段全部收口到校验函数：非数字 / 负数回落默认值。按用户确认的方案 B，`DEGRADATION_EXTRA_WAIT`、`DEGRADATION_DRAIN_BUDGET`、`DEGRADATION_DRAIN_MAX_TASKS` 保留 0 语义（不额外等待 / 不后台收尾 / 不保留迟到任务），其余字段仍要求大于 0。
+  3. `backend/tests/verify_timeout_mechanisms.py` 新增 C6e、C7、扩展 E2、E4、E5；先观察 C6e / C7 / E4 / E5 四项 RED，实现后 `67 checks, 0 failed`、`ALL PASS`（**已验证**）。
+  4. 按用户确认，仅将 `LLM_STREAM_READ_TIMEOUT` 默认值从 60s 调到 120s（`backend/.env`、`.env.example`、`factory` 读取默认值与 `DegradationConfig` 默认值同步），用于覆盖长 prompt + thinking on 的首包慢场景；未拆分首包与块间超时，仍受 `DEGRADATION_CASE_TIMEOUT` / `LLM_TOTAL_BUDGET` 封顶。相关测试先 RED（4 个脚本共 7 项）→ GREEN（**已验证**）。

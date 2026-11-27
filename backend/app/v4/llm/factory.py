@@ -25,6 +25,9 @@ DEFAULT_MODELS = {
 class ChatResponse(TypedDict):
     content: str
     usage: dict
+    finish_reason: str
+    reasoning_content: str
+    streamed: bool
 
 
 class LLMClient(Protocol):
@@ -53,6 +56,43 @@ def llm_timeout_seconds() -> int:
     except ValueError:
         return 120
     return value if value > 0 else 120
+
+
+def _env_float(name: str, default: float) -> float:
+    """读取正浮点 env；未配置/非法/小于等于 0 时回落 default。"""
+    try:
+        value = float(os.getenv(name) or default)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def llm_stream_for(provider: str) -> bool:
+    """是否对该 provider 启用 SSE 流式。
+
+    ``LLM_STREAM_PROVIDERS`` 非空时按白名单覆盖；否则读全局 ``LLM_STREAM``。
+    默认关闭，只有服务器探测确认网关增量流式后才打开。
+    """
+    raw = (os.getenv("LLM_STREAM_PROVIDERS") or "").strip()
+    if raw:
+        allowed = {p.strip().lower() for p in raw.split(",") if p.strip()}
+        return provider.lower() in allowed
+    return (os.getenv("LLM_STREAM") or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def llm_total_budget_seconds() -> float:
+    """单次模型调用总预算（秒），覆盖传输重试与截断翻倍。"""
+    return _env_float("LLM_TOTAL_BUDGET", 900.0)
+
+
+def llm_stream_read_timeout_seconds() -> float:
+    """流式首包 / 块间读超时（秒），不是整次生成的总时长。"""
+    return _env_float("LLM_STREAM_READ_TIMEOUT", 120.0)
+
+
+def llm_connect_timeout_seconds() -> float:
+    """HTTP 连接超时（秒），流式与非流式共用。"""
+    return _env_float("LLM_CONNECT_TIMEOUT", 5.0)
 
 
 def get_llm(provider: str = "deepseek") -> LLMClient:

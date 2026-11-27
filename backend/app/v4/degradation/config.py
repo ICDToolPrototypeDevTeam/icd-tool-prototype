@@ -16,6 +16,42 @@ def _positive_int(name: str, default: str) -> int:
     return max(1, value)
 
 
+def _positive_float(name: str, default: float) -> float:
+    """读取正浮点 env；未配置/非法/小于等于 0 时回落 default。"""
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return value if value > 0 else default
+
+
+def _positive_int_default(name: str, default: int) -> int:
+    """读取正整数 env；非法或小于等于 0 时回落 default（阈值类配置）。"""
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _non_negative_float(name: str, default: float) -> float:
+    """读取非负浮点 env；未配置/非法/小于 0 时回落 default（0 合法）。"""
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+def _non_negative_int(name: str, default: int) -> int:
+    """读取非负整数 env；未配置/非法/小于 0 时回落 default（0 合法）。"""
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
 @dataclass
 class DegradationConfig:
     """All thresholds have sane defaults; every value is overridable via env."""
@@ -36,6 +72,13 @@ class DegradationConfig:
     llm_per_model_limit: int = 50
     consecutive_fail_threshold: int = 3     # N consecutive failures → unhealthy
     unhealthy_ttl: float = 300.0            # seconds, auto-recovery TTL
+    # 单次模型调用总预算（秒）：覆盖传输重试 + 截断翻倍；也是 worker 的硬截止
+    # 时间上限。默认 900 = CASE_TIMEOUT 300 + EXTRA_WAIT 240 + DRAIN 300 + 余量。
+    total_budget: float = 900.0
+    timeout_fail_threshold: int = 5         # N consecutive timeouts → unhealthy
+    max_unhealthy_ttl: float = 600.0        # exponential cooldown cap (seconds)
+    stream_read_timeout: float = 120.0      # SSE first-chunk / inter-chunk read timeout (seconds)
+    stream_connect_timeout: float = 5.0     # TCP connect timeout for streaming
     # 5 星体系（ADR-004）：star cap 上限 1-5。0/1/2 存活时硬上限分别 1/1/2。
     # 3 存活时不限制（用户确认不加 confidence cap）。
     zero_provider_star_cap: int = 1          # max stars when 0 providers alive
@@ -47,31 +90,44 @@ class DegradationConfig:
     @classmethod
     def from_env(cls) -> DegradationConfig:
         return cls(
-            case_total_timeout=float(
-                os.getenv("DEGRADATION_CASE_TIMEOUT", "300")
+            case_total_timeout=_positive_float(
+                "DEGRADATION_CASE_TIMEOUT", 300.0
             ),
-            extra_wait=float(
-                os.getenv("DEGRADATION_EXTRA_WAIT", "120")
+            extra_wait=_non_negative_float(
+                "DEGRADATION_EXTRA_WAIT", 120.0
             ),
-            drain_budget=float(
-                os.getenv("DEGRADATION_DRAIN_BUDGET", "300")
+            drain_budget=_non_negative_float(
+                "DEGRADATION_DRAIN_BUDGET", 300.0
             ),
-            drain_max_workers=int(
-                os.getenv("DEGRADATION_DRAIN_WORKERS", "8")
+            drain_max_workers=_positive_int_default(
+                "DEGRADATION_DRAIN_WORKERS", 8
             ),
-            drain_max_tasks=int(
-                os.getenv("DEGRADATION_DRAIN_MAX_TASKS", "60")
+            drain_max_tasks=_non_negative_int(
+                "DEGRADATION_DRAIN_MAX_TASKS", 60
             ),
-            max_inflight=int(
-                os.getenv("DEGRADATION_MAX_INFLIGHT", "8")
+            max_inflight=_positive_int_default(
+                "DEGRADATION_MAX_INFLIGHT", 8
             ),
             case_concurrency=_positive_int("REVERSE_CASE_CONCURRENCY", "1"),
             label_concurrency=_positive_int("REVERSE_LABEL_CONCURRENCY", "1"),
             llm_per_model_limit=_positive_int("LLM_PER_MODEL_LIMIT", "50"),
-            consecutive_fail_threshold=int(
-                os.getenv("DEGRADATION_CONSECUTIVE_FAILURES", "3")
+            consecutive_fail_threshold=_positive_int_default(
+                "DEGRADATION_CONSECUTIVE_FAILURES", 3
             ),
-            unhealthy_ttl=float(
-                os.getenv("DEGRADATION_UNHEALTHY_TTL", "300")
+            unhealthy_ttl=_positive_float(
+                "DEGRADATION_UNHEALTHY_TTL", 300.0
+            ),
+            total_budget=_positive_float("LLM_TOTAL_BUDGET", 900.0),
+            timeout_fail_threshold=_positive_int_default(
+                "DEGRADATION_TIMEOUT_FAILURES", 5
+            ),
+            max_unhealthy_ttl=_positive_float(
+                "DEGRADATION_MAX_UNHEALTHY_TTL", 600.0
+            ),
+            stream_read_timeout=_positive_float(
+                "LLM_STREAM_READ_TIMEOUT", 120.0
+            ),
+            stream_connect_timeout=_positive_float(
+                "LLM_CONNECT_TIMEOUT", 5.0
             ),
         )
