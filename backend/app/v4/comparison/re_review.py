@@ -24,7 +24,10 @@ import json
 import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, Future
+from functools import partial
 from pathlib import Path
+
+import requests
 
 from app.v4.comparison.semantic_judge import (
     _append_bit_assembly_derivation,
@@ -32,10 +35,12 @@ from app.v4.comparison.semantic_judge import (
     _append_sdi_layout_note,
     _append_side_views,
     _extract_json,
+    _http_error_type,
 )
 from app.v4.matching.glossary_index import append_glossary_section
 from app.v4.config import JUDGE_PROVIDERS
 from app.v4.concurrency import run_parallel_ordered
+from app.v4.degradation.budget import CaseBudget
 from app.v4.degradation.config import DegradationConfig
 from app.v4.degradation.concurrency import (
     _get_drain_executor,
@@ -44,6 +49,12 @@ from app.v4.degradation.concurrency import (
 from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.job_manager import report_progress
 from app.v4.llm import get_llm
+from app.v4.llm.deadline import Deadline
+from app.v4.llm.streaming import (
+    StreamAborted,
+    StreamHTTPError,
+    StreamInterrupted,
+)
 from app.v4.llm_cache import KIND_RE_REVIEW, compute_key, resolve_model
 from app.v4.models import (
     ConsensusOutput,
@@ -247,71 +258,105 @@ def _build_re_review_user_prompt(
 # ============================================================
 
 
-def _call_re_review_api(
-    llm,
-    system_prompt: str,
-    user_prompt: str,
-    agent_name: str,
-) -> dict:
-    """Call the re-review LLM and return a fresh judgment dict.
-
-    Retries up to 3 times on parse / API errors (2 retries), with a 1-second
-    backoff. On terminal failure the returned dict is marked with
-    ``coverage_status == "error"`` and an empty analysis so the caller can
-    still write it back without breaking the overall flow.
-    """
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-
-    for attempt in range(3):
-        try:
-            response = llm.chat(messages=messages, **RE_REVIEW_PARAMS)
-            content = _extract_json(response["content"])
-            data = json.loads(content)
-            return {
-                "agent_name": agent_name,
-                "coverage_status": data.get("coverage_status", "needs_review"),
-                "difference_type": data.get("difference_type", "需确认"),
-                "missing_points": data.get("missing_points", []) or [],
-                "inconsistent_points": data.get("inconsistent_points", []) or [],
-                "analysis": data.get("analysis", ""),
-                "suggested_action": data.get("suggested_action", ""),
-                "confidence": float(data.get("confidence", 0.5)),
-                "raw_response": "",
-            }
-        except Exception as exc:  # noqa: BLE001 — broad on purpose: re-review
-            # is best-effort per provider; we never want one bad provider to
-            # abort the whole re-review loop.
-            if attempt < 2:
-                time.sleep(1.0)
-                continue
-            return {
-                "agent_name": agent_name,
-                "coverage_status": "error",
-                "difference_type": "",
-                "missing_points": [],
-                "inconsistent_points": [],
-                "analysis": f"API error after retries: {exc}",
-                "suggested_action": "",
-                "confidence": 0.0,
-                "raw_response": "",
-            }
-
-    # Unreachable in practice — the loop above returns on every path — but
-    # kept for type-checker happiness.
+def _re_review_error(agent_name: str, error_type: str, message: str) -> dict:
     return {
         "agent_name": agent_name,
         "coverage_status": "error",
         "difference_type": "",
         "missing_points": [],
         "inconsistent_points": [],
-        "analysis": "Max retries exceeded",
+        "analysis": f"[{error_type}] {message}",
         "suggested_action": "",
         "confidence": 0.0,
         "raw_response": "",
+        "error_type": error_type,
     }
+
+
+def _call_re_review_api(
+    llm,
+    system_prompt: str,
+    user_prompt: str,
+    agent_name: str,
+    *,
+    budget: Deadline | None = None,
+    json_max_retries: int = 1,
+) -> dict:
+    """Call the re-review LLM and return a fresh judgment dict.
+
+    Transport retries live in ``chat_with_retry``; this layer retries only
+    invalid JSON. On terminal failure the returned dict is marked with
+    ``coverage_status == "error"`` and carries ``error_type`` so the caller
+    can still write it back without breaking the overall flow.
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    for attempt in range(json_max_retries + 1):
+        try:
+            response = llm.chat(
+                messages=messages, deadline=budget, **RE_REVIEW_PARAMS
+            )
+        except StreamHTTPError as exc:
+            return _re_review_error(
+                agent_name, _http_error_type(exc.status_code), str(exc)
+            )
+        except StreamAborted as exc:
+            return _re_review_error(agent_name, "STREAM_ABORTED", str(exc))
+        except StreamInterrupted as exc:
+            return _re_review_error(agent_name, exc.error_type, str(exc))
+        except requests.Timeout as exc:
+            return _re_review_error(agent_name, "TIMEOUT", str(exc))
+        except requests.RequestException as exc:
+            return _re_review_error(agent_name, "NETWORK", str(exc))
+        except Exception as exc:  # noqa: BLE001 — broad on purpose: re-review
+            # is best-effort per provider; we never want one bad provider to
+            # abort the whole re-review loop.
+            return _re_review_error(agent_name, "UNKNOWN", str(exc))
+
+        try:
+            content = _extract_json(response["content"])
+            data = json.loads(content)
+        except (
+            json.JSONDecodeError,
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            if response.get("finish_reason") == "length":
+                return _re_review_error(
+                    agent_name,
+                    "TRUNCATED",
+                    f"finish_reason=length: {exc}",
+                )
+            if attempt < json_max_retries and (
+                budget is None or not budget.hard_expired()
+            ):
+                time.sleep(1.0)
+                continue
+            return _re_review_error(
+                agent_name, "BAD_OUTPUT", f"JSON parse error: {exc}"
+            )
+
+        return {
+            "agent_name": agent_name,
+            "coverage_status": data.get("coverage_status", "needs_review"),
+            "difference_type": data.get("difference_type", "需确认"),
+            "missing_points": data.get("missing_points", []) or [],
+            "inconsistent_points": data.get("inconsistent_points", []) or [],
+            "analysis": data.get("analysis", ""),
+            "suggested_action": data.get("suggested_action", ""),
+            "confidence": float(data.get("confidence", 0.5)),
+            "raw_response": "",
+            "error_type": "",
+        }
+
+    # Unreachable in practice — the loop above returns on every path — but
+    # kept for type-checker happiness.
+    return _re_review_error(agent_name, "UNKNOWN", "Max retries exceeded")
 
 
 def _make_re_review_prompt(
@@ -340,6 +385,7 @@ def _call_one_re_review(
     original_judgments: dict[str, dict],
     provider: str,
     system_prompt: str,
+    deadline: Deadline | None = None,
 ) -> dict:
     """Sync wrapper for one provider's re-review call.
 
@@ -354,6 +400,7 @@ def _call_one_re_review(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         agent_name=provider,
+        budget=deadline,
     )
 
 
@@ -470,12 +517,21 @@ def re_review_judgments(
         # inflight semaphore so concurrent re-review tasks share the same
         # backpressure gate as multi-agent.
         futures: dict[Future, str] = {}
+        # Per-case budget: re-review has no drain, so hard == wait — a worker
+        # that outlives the case self-stops instead of running unattended.
+        now = time.monotonic()
+        budget = CaseBudget(
+            start=now,
+            wait_deadline=now + cfg.case_total_timeout,
+            hard_deadline=now + cfg.case_total_timeout,
+        )
         if miss:
             executor = _get_drain_executor()
+            call = partial(_call_one_re_review, deadline=budget)
             futures = {
                 _submit_with_gate(
                     executor,
-                    _call_one_re_review,
+                    call,
                     case,
                     original_judgments,
                     p,
@@ -488,7 +544,7 @@ def re_review_judgments(
         # extra" — re-review needs every provider's fresh judgment to
         # replace the original, so timeout should force-quit stragglers
         # rather than hold the case hostage).
-        deadline = time.monotonic() + cfg.case_total_timeout
+        deadline = budget.wait_deadline
         # dict(original_judgments) 已含全部 provider 键，后续赋值只覆盖不改序
         new_judgments: dict[str, dict] = dict(original_judgments)
         for p, j in hit.items():
@@ -497,9 +553,11 @@ def re_review_judgments(
             new_judgments[p] = nj
 
         pending = set(futures.keys())
+        ok_count = timeout_count = error_count = 0
         while pending:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                timeout_count = len(pending)
                 for f in pending:
                     p = futures[f]
                     new_judgments[p] = make_error_judgment(
@@ -514,10 +572,15 @@ def re_review_judgments(
                 try:
                     nj = f.result()
                 except Exception as exc:  # noqa: BLE001 — broad on purpose
+                    error_count += 1
                     new_judgments[p] = make_error_judgment(
                         p, f"re-review error: {exc}", classify_exception(exc)
                     )
                 else:
+                    if not isinstance(nj, dict) or nj.get("coverage_status") == "error":
+                        error_count += 1
+                    else:
+                        ok_count += 1
                     # Always stamp the provider name explicitly — guards
                     # against an LLM echoing a different ``agent_name``.
                     nj["agent_name"] = p
@@ -537,8 +600,9 @@ def re_review_judgments(
 
         cache_note = f" (hit={len(hit)}/{len(active_providers)})" if hit else ""
         print(
-            f"  [re-review] {case_id}: re-reviewed "
-            f"{len(active_providers)} providers{cache_note}",
+            f"  [re-review] {case_id}: attempted={len(futures)} "
+            f"ok={ok_count} timeout={timeout_count} error={error_count}"
+            f"{cache_note}",
             file=sys.stderr,
         )
         return {

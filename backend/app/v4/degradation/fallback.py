@@ -20,18 +20,29 @@ def make_error_judgment(provider: str, reason: str, error_type: str) -> dict:
         "suggested_action": "",
         "confidence": 0.0,
         "raw_response": "",
+        "error_type": error_type,
     }
 
 
 def classify_exception(exc: Exception) -> str:
     """Map exception to error_type for circuit-breaker decision.
 
-    Returns one of: TIMEOUT, NETWORK, AUTH, RATE_LIMITED, BAD_OUTPUT, UNKNOWN.
+    Returns one of: TIMEOUT, NETWORK, AUTH, RATE_LIMITED, BAD_OUTPUT,
+    STREAM_ABORTED, STREAM_INTERRUPTED, TRUNCATED, UNKNOWN.
     """
     name = type(exc).__name__
     msg = str(exc).lower()
 
-    if name == "TimeoutError" or "timeout" in msg:
+    # Transport errors carry their own classification; use it instead of
+    # guessing from the message.
+    if name in {"StreamInterrupted", "StreamAborted"}:
+        return getattr(exc, "error_type", "UNKNOWN")
+
+    if (
+        name == "TimeoutError"
+        or isinstance(exc, requests.Timeout)
+        or "timeout" in msg
+    ):
         return "TIMEOUT"
 
     if isinstance(exc, requests.HTTPError):

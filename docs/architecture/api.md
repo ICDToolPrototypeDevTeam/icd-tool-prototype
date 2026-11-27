@@ -270,8 +270,14 @@ GET /api/v4/jobs/{job_id}/result
       "minimax": "healthy",
       "qwen": "healthy"
     },
+    "provider_stats": {
+      "deepseek": {"network_failures": 0, "timeout_failures": 0, "soft_failures": 0, "cooldown_level": 0},
+      "minimax": {"network_failures": 0, "timeout_failures": 0, "soft_failures": 0, "cooldown_level": 0},
+      "qwen": {"network_failures": 0, "timeout_failures": 0, "soft_failures": 0, "cooldown_level": 0}
+    },
     "total_case_timeouts": 0,
-    "review_star_capped_count": 0
+    "review_star_capped_count": 0,
+    "drained_late_count": 0
   },
   "token_usage": { "total_tokens": 123456 },
   "errors": []
@@ -283,6 +289,8 @@ GET /api/v4/jobs/{job_id}/result
 `outputs.*` 5 个布尔为 false 时表示对应 docx/xlsx 未生成（pipeline 中途失败、文件被 GC 等）。
 
 降级场景下 `agreement_distribution` 可能出现 `single_source` / `no_consensus` 键（仅 1 个 / 0 个 provider 存活）；0 个存活时对应 case 强制 1★、`no_consensus`，`status_distribution` 计入 待确认。
+
+`degradation.provider_stats` 为各 provider 的分类失败计数与当前冷却级别：`network_failures`（NETWORK 连续失败）、`timeout_failures`（TIMEOUT 连续失败）、`soft_failures`（BAD_OUTPUT / TRUNCATED / RATE_LIMITED 等只统计不熔断）、`cooldown_level`（指数退避级别，0 表示未进入冷却）。`drained_late_count` 为 drain 阶段替换 TIMEOUT 占位的迟到有效结果数。旧任务缺少这些字段时按空对象 / 0 处理；无接口路径与请求字段变化。
 
 `matched_count` / `pending_count` / `unmatched_count` 分别取自 `reverse_matches.json` 的 `hlr_已匹配` / `hlr_待确定` / `hlr_无匹配`。AMS 内部通道命中项（14.4）本身计入 `无匹配`，因此也计入 `unmatched_count` 与 `status_distribution["无匹配"]`；`stats.hlr_内部接口` 只是其中的子计数，不影响上述三个计数之和。
 

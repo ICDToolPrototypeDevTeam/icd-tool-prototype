@@ -7,6 +7,14 @@ import json
 import re
 import time
 
+import requests
+
+from app.v4.llm.deadline import Deadline
+from app.v4.llm.streaming import (
+    StreamAborted,
+    StreamHTTPError,
+    StreamInterrupted,
+)
 from app.v4.matching.glossary_index import append_glossary_section
 from app.v4.matching.hlr_classifier import (
     extract_bit_fields,
@@ -520,14 +528,47 @@ def _build_reverse_user_prompt(case: ReverseCase) -> str:
     return "\n".join(parts)
 
 
+def _http_error_type(status: int) -> str:
+    """Map an HTTP status to the shared error taxonomy."""
+    if status in (401, 403):
+        return "AUTH"
+    if status == 429:
+        return "RATE_LIMITED"
+    if status in (400, 404, 422):
+        return "BAD_OUTPUT"
+    return "NETWORK"
+
+
+def _reverse_error(
+    case_id: str,
+    source_fields: dict,
+    error_type: str,
+    message: str,
+) -> ReverseJudgmentResult:
+    return ReverseJudgmentResult(
+        case_id=case_id,
+        coverage_status="error",
+        analysis=f"[{error_type}] {message}",
+        confidence=0.0,
+        error_type=error_type,
+        **source_fields,
+    )
+
+
 def _call_reverse_judge_api(
     llm,
     system_prompt: str,
     user_prompt: str,
     case: ReverseCase,
-    max_retries: int = 2,
+    *,
+    budget: Deadline | None = None,
+    json_max_retries: int = 1,
 ) -> ReverseJudgmentResult:
-    """Call LLM and parse JSON response for reverse judgment.
+    """Call the LLM and parse JSON for one reverse judgment.
+
+    Transport retries and truncation growth live in ``chat_with_retry``. This
+    layer only retries when a complete response was not valid JSON; terminal
+    transport failures return an error result carrying ``error_type``.
 
     Populates source data (hlr_id, hlr_content, matched_profiles) on the result
     so the report is self-contained and traceable.
@@ -548,49 +589,78 @@ def _call_reverse_judge_api(
         {"role": "user", "content": user_prompt},
     ]
 
-    for attempt in range(max_retries + 1):
+    for attempt in range(json_max_retries + 1):
         try:
-            response = llm.chat(messages=messages, temperature=0.1, max_tokens=8192)
+            response = llm.chat(
+                messages=messages,
+                temperature=0.1,
+                max_tokens=8192,
+                deadline=budget,
+            )
+        except StreamHTTPError as exc:
+            return _reverse_error(
+                case_id,
+                source_fields,
+                _http_error_type(exc.status_code),
+                str(exc),
+            )
+        except StreamAborted as exc:
+            return _reverse_error(
+                case_id, source_fields, "STREAM_ABORTED", str(exc)
+            )
+        except StreamInterrupted as exc:
+            return _reverse_error(
+                case_id, source_fields, exc.error_type, str(exc)
+            )
+        except requests.Timeout as exc:
+            return _reverse_error(case_id, source_fields, "TIMEOUT", str(exc))
+        except requests.RequestException as exc:
+            return _reverse_error(case_id, source_fields, "NETWORK", str(exc))
+        except Exception as exc:  # noqa: BLE001 — contract: never raise here
+            return _reverse_error(case_id, source_fields, "UNKNOWN", str(exc))
+
+        try:
             content = _extract_json(response["content"])
             data = json.loads(content)
-            return ReverseJudgmentResult(
-                case_id=case_id,
-                coverage_status=data.get("coverage_status", "needs_review"),
-                difference_type=data.get("difference_type", "需确认"),
-                missing_points=data.get("missing_points", []),
-                inconsistent_points=data.get("inconsistent_points", []),
-                analysis=data.get("analysis", ""),
-                suggested_action=data.get("suggested_action", ""),
-                confidence=float(data.get("confidence", 0.5)),
-                **source_fields,
-            )
-        except (json.JSONDecodeError, KeyError, IndexError) as e:
-            if attempt < max_retries:
+        except (
+            json.JSONDecodeError,
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            if response.get("finish_reason") == "length":
+                return _reverse_error(
+                    case_id,
+                    source_fields,
+                    "TRUNCATED",
+                    f"finish_reason=length: {exc}",
+                )
+            if attempt < json_max_retries and (
+                budget is None or not budget.hard_expired()
+            ):
                 time.sleep(1.0)
                 continue
-            return ReverseJudgmentResult(
-                case_id=case_id,
-                coverage_status="error",
-                analysis=f"JSON parse error after retries: {e}",
-                confidence=0.0,
-                **source_fields,
-            )
-        except Exception as e:
-            if attempt < max_retries:
-                time.sleep(2.0)
-                continue
-            return ReverseJudgmentResult(
-                case_id=case_id,
-                coverage_status="error",
-                analysis=f"API error: {e}",
-                confidence=0.0,
-                **source_fields,
+            return _reverse_error(
+                case_id,
+                source_fields,
+                "BAD_OUTPUT",
+                f"JSON parse error: {exc}",
             )
 
-    return ReverseJudgmentResult(
-        case_id=case_id,
-        coverage_status="error",
-        analysis="Max retries exceeded",
-        confidence=0.0,
-        **source_fields,
+        return ReverseJudgmentResult(
+            case_id=case_id,
+            coverage_status=data.get("coverage_status", "needs_review"),
+            difference_type=data.get("difference_type", "需确认"),
+            missing_points=data.get("missing_points", []),
+            inconsistent_points=data.get("inconsistent_points", []),
+            analysis=data.get("analysis", ""),
+            suggested_action=data.get("suggested_action", ""),
+            confidence=float(data.get("confidence", 0.5)),
+            error_type="",
+            **source_fields,
+        )
+
+    return _reverse_error(
+        case_id, source_fields, "UNKNOWN", "Max retries exceeded"
     )

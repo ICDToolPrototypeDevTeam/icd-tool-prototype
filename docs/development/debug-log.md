@@ -3667,3 +3667,200 @@ fixed（本地请求体探针 + 正向自测通过；真实内网网关行为尚
 2. 生产 minimax / deepseek 两个槽位实际都指向同一网关上的 `DeepSeek-V4-Flash-0731-INT8`，自建 DeepSeek 的开关字段可能是 `chat_template_kwargs: {"thinking": false}`，本次未改，需单独评估；
 3. DashScope 上的 `MiniMax-M2.5` 明确禁止 `enable_thinking=false`，若本地 / 某部署仍以该模型作 MiniMax 槽位，关闭思考会 400；需决定是忽略该配置错误、前端提示，还是按模型能力裁剪字段；
 4. 需重建后端镜像才在服务器生效。
+
+## BUG-20261126-001：流式请求体缺少 `stream: true`，真实调用拿不到任何 SSE 内容
+
+#### 状态
+
+已修复（本机公网实测通过；改动未提交）。
+
+#### 发现日期
+
+2026-11-26。
+
+#### 关联 Issue / PR
+
+无独立 Issue；属于分支 `issue-xxx-timeout-mechanism-fixed` 的流式改造（`LLM_STREAM=1` 启用后暴露）。
+
+#### 问题现象
+
+本地 `.env` 设 `LLM_STREAM=1` 后，经应用调用链（`factory.get_llm` → `chat_with_retry` → `_stream`）请求 qwen / deepseek / minimax，全部返回 `streamed=True`，但 `content`、`reasoning_content`、`usage` 均为空、`finish_reason` 为空串，且不抛异常；耗时与模型生成时长相当（1.6s~24s）。
+
+#### 复现方式
+
+1. `cd backend && python tests/live_streaming_smoke.py`（真实 key、公网 DashScope / DeepSeek）→ 修复前 3 项 FAIL，均为 `streamed=True finish='' content=0ch reasoning=0ch usage=False`。
+2. `python tests/debug_stream_raw.py qwen` 抓请求 / 响应：首个请求带 `stream_options` 返回 **HTTP 400**；`_stream` 去参重试后返回 **HTTP 200 且 `Content-Type: application/json`**（不是 `text/event-stream`）。
+
+#### 影响范围
+
+所有 `LLM_STREAM=1` 的真实调用；本地假服务器测试（`verify_streaming_e2e` 等）全部通过，因为假服务器不看请求体、恒返回 SSE，缺陷未被覆盖。
+
+#### 原因分析
+
+`chat_completion` 只把 `stream` 用作 `requests.post(stream=True)` 的传输层开关，**未在 JSON 请求体写入 `"stream": true`**。OpenAI 兼容网关按请求体字段决定是否返回 SSE，于是返回普通 JSON；`_stream` 把整段 JSON 当作非 `data:` 行丢弃，返回空的 `ChatResponse`，不报错也不触发重试。
+
+#### 修复方案
+
+1. `chat_completion` 流式分支在 body 中显式设置 `body["stream"] = True`（`stream_options` 逻辑不变）。
+2. `verify_client_streaming.py` 增加第 8 组断言：流式请求体必须含 `stream=True`、`stream_options={"include_usage": True}`，且 SSE 行能解析出 content / finish_reason。
+
+#### 修改文件
+
+1. `backend/app/v4/llm/streaming.py`
+2. `backend/tests/verify_client_streaming.py`
+
+#### 验证方式
+
+1. 先 RED：`python tests/verify_client_streaming.py` → `[FAIL] stream body flag: got=None want=True`。
+2. 修复后 GREEN：同命令 → `ALL PASS`。
+3. 全量回归：`backend/tests/` 下 11 个验证脚本逐个执行。
+4. 公网真实链路：`python tests/live_streaming_smoke.py`（qwen / deepseek / minimax，thinking 开与关）。
+5. 网关流式探针：`python tests/probe_streaming_live.py --providers qwen,minimax,deepseek`。
+
+#### 验证结果
+
+1. 单测 RED → GREEN（修复前 `stream body flag` 失败，修复后 `ALL PASS`）。
+2. 11 个脚本全部 OK（2026-11-26）。
+3. 真实链路 smoke 4/4 PASS（2026-11-26，公网 DashScope / DeepSeek）：
+   - qwen（thinking on）：`streamed=True`，content 7 字符 / reasoning 680 字符 / usage 完整，15.9s；
+   - deepseek（thinking on）：`streamed=True`，1.0s；
+   - minimax = qwen3.8-flash（thinking on，短问答）：`streamed=True`，12.7s；
+   - minimax（thinking off）：`streamed=True`，39.0s。
+4. 探针：qwen、deepseek（thinking off）、minimax（thinking off）均 `STREAMING_OK`（增量多 chunk、usage 完整）；minimax 长 prompt + thinking on 曾出现 180s 无任何 SSE 数据（服务端沉默，与本缺陷无关）。
+
+#### 遗留问题
+
+1. 改动未提交（按用户要求不擅自 commit）。
+2. 内网网关（`dtagtcore.jz.ai`）的流式探测仍未执行，本机无内网连接条件；`LLM_STREAM` 是否允许在内网开启仍需该探测结论。
+3. qwen3.8-flash 在长 prompt + thinking on 时首包可能超过 60s 读超时；若线上继续使用该模型，需评估关闭思考或调大 `LLM_STREAM_READ_TIMEOUT`。
+4. 本地假服务器测试不会校验请求体 `stream` 字段，后续改流式传输层时需保留第 8 组单测断言。
+
+## BUG-20261126-002：网关忽略 `stream: true` 时静默返回空结果
+
+#### 状态
+
+已修复（本机模拟 + 公网实测通过；改动未提交）。
+
+#### 发现日期
+
+2026-11-26。
+
+#### 关联 Issue / PR
+
+无独立 Issue；由用户对「内网关闭思考未实际生效」的同类担忧触发专项检查。
+
+#### 问题现象
+
+若 OpenAI 兼容网关忽略请求体 `stream: true`、以 HTTP 200 + `Content-Type: application/json` 返回普通 completion，`_stream` 只按 SSE 解析（`data:` 行），整段 JSON 被丢弃，返回 `streamed=true` 但 content / reasoning / finish_reason / usage 全空的 `ChatResponse`；不报错、不重试、不熔断。
+
+#### 复现方式
+
+`cd backend && python tests/check_stream_ignored.py`（本地 HTTP 服务模拟「忽略 stream 的网关」）→ 修复前输出 `SILENT_EMPTY=True`、`content=''`。
+
+#### 影响范围
+
+所有启用 `LLM_STREAM=1` 且部署到非标准 / 自建网关的环境；公网 DashScope / DeepSeek 不受影响。与 BUG-20261126-001 同属「字段未生效但静默成功」类缺陷。
+
+#### 原因分析
+
+`_stream` 假定 200 响应必为 SSE，未检查 `Content-Type`，也未处理普通 completion JSON。
+
+#### 修复方案
+
+1. `_stream` 在状态码与预算检查后检查响应 `Content-Type`：存在且不含 `text/event-stream` 时，读取 body → `json.loads` → 复用新增的 `_completion_from_json` 解析，返回 `streamed=False`，并向 stderr 打印 `[provider] WARNING: gateway ignored stream=true ... falling back to non-stream parse`。
+2. 非 JSON body → `StreamInterrupted(..., "BAD_OUTPUT")`，不再静默。
+3. `_non_stream` 改用同一 `_completion_from_json`，避免两份解析逻辑漂移。
+
+#### 修改文件
+
+1. `backend/app/v4/llm/streaming.py`
+2. `backend/tests/verify_client_streaming.py`（新增第 9 组，先 RED 后 GREEN）
+
+#### 验证方式
+
+1. `python tests/verify_client_streaming.py`
+2. `python tests/check_stream_ignored.py`
+3. `backend/tests/` 下 11 个验证脚本全量复跑
+4. `python tests/live_streaming_smoke.py`（公网真实链路）
+
+#### 验证结果
+
+1. 第 9 组 RED（6 项失败：content 空、streamed=True、无 WARNING）→ 修复后 GREEN。
+2. `check_stream_ignored.py`：`streamed=False`、`content='normal completion'`、`SILENT_EMPTY=False`，并打印 WARNING。
+3. 11 个脚本全部 OK（2026-11-26）。
+4. 公网 smoke 4/4 PASS：qwen 13.5s、deepseek 1.2s、minimax（thinking on）11.3s、minimax（thinking off）10.9s，均 `streamed=True`。
+
+#### 遗留问题
+
+1. 内网网关是否真的忽略 `stream` 仍需 `probe_streaming_live.py` 实测；若 `verdict=STREAMING_OK`，回退路径不会触发。
+2. 回退只覆盖「200 + 非 SSE JSON」；若网关返回空 body 或其他格式，将以 `BAD_OUTPUT` 失败（可见，不再静默）。
+3. 改动未提交。
+
+## BUG-20261126-003：`LLM_STREAM_READ_TIMEOUT` 未接线，流式实际读超时仍是 `LLM_TIMEOUT`
+
+#### 状态
+
+已修复（本地验证通过；改动未提交）。
+
+#### 发现日期
+
+2026-11-26。
+
+#### 关联 Issue / PR
+
+无独立 Issue；由用户要求核查「stream 配置是否也会像 thinking 开关一样静默不生效」时发现。
+
+#### 问题现象
+
+`backend/.env` 配置 `LLM_STREAM_READ_TIMEOUT=60`，但流式请求实际传给 `requests.post` 的 read timeout 是 `LLM_TIMEOUT`（当前 120s）。`LLM_STREAM_READ_TIMEOUT`、`factory.llm_stream_read_timeout_seconds()` 与 `DegradationConfig.stream_read_timeout` 均只被读取、无任何消费点，修改该 env 不产生任何行为变化。
+
+#### 复现方式
+
+`cd backend && python tests/check_stream_timeout_wiring.py`（monkeypatch `requests.post` 抓取 timeout 参数）→ 修复前：
+
+```text
+stream=True  timeout(connect,read)=(5.0, 120.0)
+stream=False timeout(connect,read)=(5.0, 120.0)
+env LLM_TIMEOUT='120'
+env LLM_STREAM_READ_TIMEOUT='60'
+```
+
+#### 影响范围
+
+所有 `LLM_STREAM=1` 的部署；非流式不受影响。慢模型首包 / 块间静默需等 120s 才判 `TIMEOUT`（配置预期 60s），单次慢响应对 case 预算的占用翻倍；`tests/live_streaming_smoke.py` 中设置的 `LLM_STREAM_READ_TIMEOUT=15` 同样未生效。
+
+#### 原因分析
+
+`chat_with_retry` 把调用方传入的 `timeout`（客户端默认取 `llm_timeout_seconds()`，即 `LLM_TIMEOUT`）同时赋给流式与非流式的 `read_timeout`；流式专属配置 helper 没有被调用。
+
+#### 修复方案
+
+1. `chat_with_retry` 流式分支改用 `llm_stream_read_timeout_seconds()`（默认 60s）作为基准读超时；非流式继续使用调用方 `timeout`。
+2. 流式截断重试保持该超时不变；非流式放大逻辑不变。
+3. `verify_client_streaming.py` 新增第 10 组断言：流式读超时来自 env、流式截断保持 env 值、非流式不受该 env 影响、非法值回落 60。
+
+#### 修改文件
+
+1. `backend/app/v4/llm/streaming.py`
+2. `backend/tests/verify_client_streaming.py`
+
+#### 验证方式
+
+1. 先 RED：`python tests/verify_client_streaming.py` → 第 10 组 3 项失败（got=120 want=45/60）。
+2. 修复后 GREEN：同命令 → `ALL PASS`。
+3. 非流式回归：`python tests/verify_llm_timeout_env.py` → `ALL PASS`。
+4. 接线证明：`python tests/check_stream_timeout_wiring.py` → `stream=True (5.0, 60.0)`、`stream=False (5.0, 120.0)`。
+5. 相关脚本回归：`check_stream_ignored.py`、`verify_thinking_payload.py` → OK。
+
+#### 验证结果
+
+1. RED → GREEN（2026-11-26，本地）。
+2. `verify_llm_timeout_env.py` 全 PASS，非流式仍为 120 / 240 及截断翻倍。
+3. 接线输出：流式 60s、非流式 120s，与 `.env` 一致。
+4. `check_stream_ignored.py` 仍 `SILENT_EMPTY=False`；`verify_thinking_payload.py` 仍 OK。
+
+#### 遗留问题
+
+1. `DegradationConfig.stream_read_timeout` 仍无消费点（配置对象中的冗余字段），后续可评估删除或接入。
+2. 内网网关实测仍未执行；本次仅证明配置值已到达 HTTP 边界。
+3. 改动未提交。

@@ -231,6 +231,7 @@ class ReverseJudgmentResult(BaseModel):
     analysis: str = ""
     suggested_action: str = ""
     confidence: float = 0.0
+    error_type: str = ""               # "" on success; TIMEOUT/NETWORK/... on failure
 
 
 class ReverseJudgmentOutput(BaseModel):

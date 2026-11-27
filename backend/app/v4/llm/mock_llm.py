@@ -35,6 +35,9 @@ class MockLLMClient:
         return ChatResponse(
             content=json.dumps(data, ensure_ascii=False),
             usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            finish_reason="stop",
+            reasoning_content="",
+            streamed=False,
         )
 
 

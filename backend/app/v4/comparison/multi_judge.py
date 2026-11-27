@@ -11,6 +11,7 @@ from app.v4.comparison.semantic_judge import (
 )
 from app.v4.degradation.fallback import classify_exception, make_error_judgment
 from app.v4.llm import get_llm
+from app.v4.llm.deadline import Deadline
 from app.v4.models import ReverseCase
 
 
@@ -18,6 +19,7 @@ async def _judge_with_provider(
     case: ReverseCase,
     provider: str,
     system_prompt: str,
+    budget: Deadline | None = None,
 ) -> dict:
     """Single provider judging one case asynchronously. Returns judgment dict on success,
     or error dict on failure (never raises)."""
@@ -30,6 +32,7 @@ async def _judge_with_provider(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             case=case,
+            budget=budget,
         )
         return {
             "agent_name": provider,
@@ -41,25 +44,21 @@ async def _judge_with_provider(
             "suggested_action": result.suggested_action,
             "confidence": result.confidence,
             "raw_response": "",
+            "error_type": result.error_type,
         }
     except Exception as e:
-        return {
-            "agent_name": provider,
-            "coverage_status": "error",
-            "difference_type": "",
-            "missing_points": [],
-            "inconsistent_points": [],
-            "analysis": f"调用失败: {str(e)}",
-            "suggested_action": "",
-            "confidence": 0.0,
-            "raw_response": "",
-        }
+        return make_error_judgment(
+            provider,
+            f"调用失败: {e}",
+            classify_exception(e) if e else "UNKNOWN",
+        )
 
 
 def _judge_with_provider_sync(
     case: ReverseCase,
     provider: str,
     system_prompt: str,
+    budget: Deadline | None = None,
 ) -> dict:
     """Synchronous twin of _judge_with_provider, used by the drain executor.
 
@@ -74,6 +73,7 @@ def _judge_with_provider_sync(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             case=case,
+            budget=budget,
         )
         return {
             "agent_name": provider,
@@ -85,6 +85,7 @@ def _judge_with_provider_sync(
             "suggested_action": result.suggested_action,
             "confidence": result.confidence,
             "raw_response": "",
+            "error_type": result.error_type,
         }
     except Exception as e:
         return make_error_judgment(provider, str(e), classify_exception(e) if e else "UNKNOWN")
